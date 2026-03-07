@@ -183,12 +183,17 @@ struct ContextApp {
     embedding_sync_interval: Duration,
     // Settings
     grammar_completion: bool,
+    quality: u8, // 0=fast, 1=balanced, 2=full
+    // Debounce: wait before running completion
+    last_prefix_change: Instant,
+    debounce_ms: u64,
+    pending_completion: bool,
     // Status
     load_errors: Vec<String>,
 }
 
 impl ContextApp {
-    fn new(grammar_completion: bool, use_swipl: bool) -> Self {
+    fn new(grammar_completion: bool, use_swipl: bool, quality: u8) -> Self {
         #[cfg(target_os = "windows")]
         unsafe {
             use windows::Win32::System::Com::*;
@@ -279,6 +284,10 @@ impl ContextApp {
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
+            quality,
+            last_prefix_change: Instant::now(),
+            debounce_ms: if quality == 0 { 100 } else { 150 },
+            pending_completion: false,
             load_errors,
         }
     }
@@ -434,12 +443,12 @@ impl ContextApp {
                     sentence_ctx.to_string()
                 };
 
-                // Grammar mode: 10 candidates, 1 BPE step (grammar filter adds suggestions)
-                // Normal mode: 5 candidates, 3 BPE steps
-                let (top_n, max_steps) = if self.grammar_completion && self.checker.is_some() {
-                    (10, 1)
-                } else {
-                    (5, 3)
+                // Quality controls BPE extension depth and candidate count
+                // 0: single-token only (~200ms), 1: 1 step (~800ms), 2: full (~2s)
+                let (top_n, max_steps) = match self.quality {
+                    0 => (5, 0),
+                    1 => (5, 1),
+                    _ => (5, 3),
                 };
 
                 let t_bert = Instant::now();
@@ -570,13 +579,27 @@ impl eframe::App for ContextApp {
 
             let mid = is_mid_word(&self.context.word);
             if mid {
-                // Mid-word: run completer
-                self.run_completion();
+                // Mid-word: mark prefix change for debouncing
+                let prefix = extract_prefix(&self.context.word);
+                if prefix != self.last_completed_prefix {
+                    self.last_prefix_change = Instant::now();
+                    self.pending_completion = true;
+                }
             } else {
                 // Word boundary: run grammar check
                 self.completions.clear();
                 self.last_completed_prefix.clear();
                 self.run_grammar_check();
+            }
+        }
+
+        // Debounce: run completion after user stops typing
+        if self.pending_completion {
+            if self.last_prefix_change.elapsed() >= Duration::from_millis(self.debounce_ms) {
+                self.pending_completion = false;
+                self.run_completion();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(self.debounce_ms));
             }
         }
 
@@ -763,12 +786,21 @@ fn main() -> eframe::Result {
 
     let grammar_completion = std::env::args().any(|a| a == "--grammar-completion");
     let use_swipl = std::env::args().any(|a| a == "--swipl");
+    let quality: u8 = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .position(|a| a == "--quality")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if grammar_completion { 0 } else { 2 })
+    };
     if grammar_completion {
         eprintln!("Grammar completion: ON");
     }
     if use_swipl {
         eprintln!("SWI-Prolog engine: ON");
     }
+    eprintln!("Quality: {} (0=fast ~200ms, 1=balanced ~800ms, 2=full ~2s)", quality);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -782,6 +814,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "NorskTale",
         options,
-        Box::new(move |_cc| Ok(Box::new(ContextApp::new(grammar_completion, use_swipl)))),
+        Box::new(move |_cc| Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality)))),
     )
 }
