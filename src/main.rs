@@ -197,6 +197,8 @@ struct ContextApp {
     word_hwnd: Option<isize>,
     // Status
     load_errors: Vec<String>,
+    // Tab navigation
+    selected_tab: usize, // 0=Innhold, 1=Grammatikk, 2=Innstillinger, 3=Debug
 }
 
 impl ContextApp {
@@ -300,6 +302,7 @@ impl ContextApp {
             selection_mode: false,
             word_hwnd: None,
             load_errors,
+            selected_tab: 0,
         }
     }
 
@@ -806,6 +809,7 @@ impl eframe::App for ContextApp {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
+
         if self.follow_cursor {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIN_W, win_h)));
             if let Some((x, y)) = self.last_caret_pos {
@@ -826,200 +830,259 @@ impl eframe::App for ContextApp {
         ctx.request_repaint_after(Duration::from_millis(100));
 
         // Style
+        // Clear the default background so transparency works
+        // Determine tab indicators
+        let has_completions = !self.completions.is_empty() || !self.open_completions.is_empty();
+        let has_grammar = !self.grammar_errors.is_empty();
+
         let panel_frame = egui::Frame::new()
             .fill(egui::Color32::from_rgb(255, 255, 235))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 170, 140)))
             .inner_margin(8.0);
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            // Top row: checkbox + drag area + bridge name
+            // Tab bar with painted dot indicators
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.follow_cursor,
-                    egui::RichText::new("Følg cursor").size(12.0)
-                        .color(egui::Color32::from_rgb(60, 60, 55))
-                );
+                let tab_labels = ["Innhold", "Grammatikk", "Innstillinger", "Debug"];
+                for (i, name) in tab_labels.iter().enumerate() {
+                    // Draw colored dot for tabs 0 and 1
+                    if i == 0 || i == 1 {
+                        let dot_color = if i == 0 {
+                            if has_completions { egui::Color32::from_rgb(0, 180, 60) }
+                            else { egui::Color32::from_rgb(180, 180, 180) }
+                        } else {
+                            if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
+                            else { egui::Color32::from_rgb(0, 180, 60) }
+                        };
+                        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+                        let center = egui::pos2(dot_rect.min.x + 5.0, dot_rect.center().y);
+                        ui.painter().circle_filled(center, 4.0, dot_color);
+                    }
 
+                    let is_selected = self.selected_tab == i;
+                    let text = egui::RichText::new(*name).size(12.0);
+                    let text = if is_selected {
+                        text.strong().color(egui::Color32::from_rgb(0, 70, 160))
+                    } else {
+                        text.color(egui::Color32::from_rgb(100, 100, 100))
+                    };
+                    if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
+                        self.selected_tab = i;
+                    }
+                    if i < tab_labels.len() - 1 {
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new("|").size(12.0).color(egui::Color32::from_rgb(180, 170, 140)));
+                        ui.add_space(2.0);
+                    }
+                }
+
+                // Drag area for remaining space
                 let remaining = ui.available_rect_before_wrap();
                 let drag_resp = ui.allocate_rect(remaining, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(self.manager.active_bridge_name())
-                            .size(10.0)
-                            .color(egui::Color32::from_rgb(160, 155, 140)),
-                    );
-                });
             });
 
             ui.separator();
 
-            // Current word
-            if !self.context.word.is_empty() {
-                ui.label(
-                    egui::RichText::new(&self.context.word)
-                        .strong()
-                        .size(15.0)
-                        .color(egui::Color32::from_rgb(0, 70, 160)),
-                );
-                ui.add_space(2.0);
-            }
-
-            // Sentence
-            if !self.context.sentence.is_empty() {
-                ui.label(
-                    egui::RichText::new(&self.context.sentence)
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(50, 50, 50)),
-                );
-            }
-
-            // Word completions (mid-word mode)
-            if !self.completions.is_empty() || !self.open_completions.is_empty() {
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(2.0);
-                let header = if self.selection_mode {
-                    "Forslag: (↑↓ velg, Enter godta, Esc avbryt)"
-                } else {
-                    "Forslag: (Ctrl+Space for å velge)"
-                };
-                ui.label(
-                    egui::RichText::new(header)
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(100, 100, 100)),
-                );
-
-                let sel = self.selected_completion;
-                let mut clicked_word: Option<String> = None;
-                let has_dual = !self.open_completions.is_empty() && !self.completions.is_empty();
-
-                // Helper closure to render a completion row
-                let render_row = |ui: &mut egui::Ui, comp: &Completion, idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
-                    let marker = if is_selected { "▸ " } else { "  " };
-                    let text = format!("{}{}", marker, comp.word);
-                    let row_h = if is_top || is_selected { 18.0 } else { 16.0 };
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(col_width, row_h),
-                        egui::Sense::click() | egui::Sense::hover(),
+            // === Tab: Innhold (0) ===
+            if self.selected_tab == 0 {
+                if !self.completions.is_empty() || !self.open_completions.is_empty() {
+                    let header = if self.selection_mode {
+                        "Forslag: (↑↓ velg, Enter godta, Esc avbryt)"
+                    } else {
+                        "Forslag: (Ctrl+Space for å velge)"
+                    };
+                    ui.label(
+                        egui::RichText::new(header)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(100, 100, 100)),
                     );
-                    let hovered = resp.hovered();
-                    if is_selected {
-                        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0, 100, 180));
-                    } else if hovered {
-                        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
-                    }
-                    let fg = if is_selected { egui::Color32::WHITE }
-                        else if hovered { egui::Color32::from_rgb(0, 80, 140) }
-                        else if is_top { egui::Color32::from_rgb(0, 120, 60) }
-                        else { egui::Color32::from_rgb(60, 60, 60) };
-                    let font_size = if is_top || is_selected || hovered { 13.0 } else { 12.0 };
-                    ui.painter().text(rect.min + egui::vec2(0.0, 1.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(font_size), fg);
-                    if hovered { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
-                    (resp.clicked(), false)
-                };
+                    ui.add_space(2.0);
 
-                if has_dual {
-                    // Two-column layout: left = first-letter, right = open
-                    let avail_w = ui.available_width();
-                    let col_w = (avail_w - 10.0) / 2.0;
-                    let max_rows = self.completions.len().max(self.open_completions.len());
-                    for row in 0..max_rows {
-                        ui.horizontal(|ui| {
-                            // Left column (first-letter matches)
-                            if row < self.completions.len() {
-                                let comp = &self.completions[row];
-                                let is_sel = sel == Some(row);
-                                let is_top = row == 0 && sel.is_none();
-                                let (clicked, _) = render_row(ui, comp, row, is_sel, is_top, col_w);
-                                if clicked { clicked_word = Some(comp.word.clone()); }
-                            } else {
-                                ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
-                            }
-                            ui.add_space(10.0);
-                            // Right column (open suggestions)
-                            if row < self.open_completions.len() {
-                                let comp = &self.open_completions[row];
-                                let (clicked, _) = render_row(ui, comp, row + 100, false, false, col_w);
-                                if clicked { clicked_word = Some(comp.word.clone()); }
-                            }
-                        });
+                    let sel = self.selected_completion;
+                    let mut clicked_word: Option<String> = None;
+                    let has_dual = !self.open_completions.is_empty() && !self.completions.is_empty();
+
+                    let render_row = |ui: &mut egui::Ui, comp: &Completion, _idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
+                        let marker = if is_selected { "▸ " } else { "  " };
+                        let text = format!("{}{}", marker, comp.word);
+                        let row_h = if is_top || is_selected { 18.0 } else { 16.0 };
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(col_width, row_h),
+                            egui::Sense::click() | egui::Sense::hover(),
+                        );
+                        let hovered = resp.hovered();
+                        if is_selected {
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0, 100, 180));
+                        } else if hovered {
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
+                        }
+                        let fg = if is_selected { egui::Color32::WHITE }
+                            else if hovered { egui::Color32::from_rgb(0, 80, 140) }
+                            else if is_top { egui::Color32::from_rgb(0, 120, 60) }
+                            else { egui::Color32::from_rgb(60, 60, 60) };
+                        let font_size = if is_top || is_selected || hovered { 13.0 } else { 12.0 };
+                        ui.painter().text(rect.min + egui::vec2(0.0, 1.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(font_size), fg);
+                        if hovered { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                        (resp.clicked(), false)
+                    };
+
+                    if has_dual {
+                        let avail_w = ui.available_width();
+                        let col_w = (avail_w - 10.0) / 2.0;
+                        let max_rows = self.completions.len().max(self.open_completions.len());
+                        for row in 0..max_rows {
+                            ui.horizontal(|ui| {
+                                if row < self.completions.len() {
+                                    let comp = &self.completions[row];
+                                    let is_sel = sel == Some(row);
+                                    let is_top = row == 0 && sel.is_none();
+                                    let (clicked, _) = render_row(ui, comp, row, is_sel, is_top, col_w);
+                                    if clicked { clicked_word = Some(comp.word.clone()); }
+                                } else {
+                                    ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
+                                }
+                                ui.add_space(10.0);
+                                if row < self.open_completions.len() {
+                                    let comp = &self.open_completions[row];
+                                    let (clicked, _) = render_row(ui, comp, row + 100, false, false, col_w);
+                                    if clicked { clicked_word = Some(comp.word.clone()); }
+                                }
+                            });
+                        }
+                    } else {
+                        let avail_w = ui.available_width();
+                        for (i, comp) in self.completions.iter().enumerate() {
+                            let is_sel = sel == Some(i);
+                            let is_top = i == 0 && sel.is_none();
+                            let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
+                            if clicked { clicked_word = Some(comp.word.clone()); }
+                        }
+                    }
+
+                    if let Some(word) = clicked_word {
+                        self.manager.replace_word(&word);
+                        self.completions.clear();
+                        self.open_completions.clear();
+                        self.selected_completion = None;
+                        self.selection_mode = false;
+                        self.last_completed_prefix.clear();
+                        self.last_poll = Instant::now() - self.poll_interval;
+                        self.return_focus_to_word();
                     }
                 } else {
-                    // Single column (normal typing mode)
-                    let avail_w = ui.available_width();
-                    for (i, comp) in self.completions.iter().enumerate() {
-                        let is_sel = sel == Some(i);
-                        let is_top = i == 0 && sel.is_none();
-                        let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
-                        if clicked { clicked_word = Some(comp.word.clone()); }
-                    }
-                }
-
-                if let Some(word) = clicked_word {
-                    self.manager.replace_word(&word);
-                    self.completions.clear();
-                    self.open_completions.clear();
-                    self.selected_completion = None;
-                    self.selection_mode = false;
-                    self.last_completed_prefix.clear();
-                    self.last_poll = Instant::now() - self.poll_interval;
-                    self.return_focus_to_word();
+                    ui.label(
+                        egui::RichText::new("Flytt cursoren for å se forslag...")
+                            .italics()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(150, 150, 140)),
+                    );
                 }
             }
 
-            // Grammar errors (word boundary mode)
-            if !self.grammar_errors.is_empty() {
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(2.0);
-
-                for error in &self.grammar_errors {
-                    let color = rule_color(&error.rule_name);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&error.word)
-                                .strong()
-                                .color(color),
-                        );
-                        ui.label(
-                            egui::RichText::new(&error.explanation)
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(80, 80, 80)),
-                        );
-                    });
-                    if !error.suggestion.is_empty() {
+            // === Tab: Grammatikk (1) ===
+            if self.selected_tab == 1 {
+                if self.grammar_errors.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Ingen grammatikkfeil funnet.")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(0, 140, 60)),
+                    );
+                } else {
+                    for error in &self.grammar_errors {
+                        let color = rule_color(&error.rule_name);
                         ui.horizontal(|ui| {
-                            ui.add_space(10.0);
                             ui.label(
-                                egui::RichText::new(format!("→ {}", error.suggestion))
-                                    .size(11.0)
+                                egui::RichText::new(&error.word)
                                     .strong()
                                     .color(color),
                             );
+                            ui.label(
+                                egui::RichText::new(&error.explanation)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(80, 80, 80)),
+                            );
                         });
+                        if !error.suggestion.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                ui.label(
+                                    egui::RichText::new(format!("→ {}", error.suggestion))
+                                        .size(11.0)
+                                        .strong()
+                                        .color(color),
+                                );
+                            });
+                        }
                     }
                 }
             }
 
-            // Load errors
-            for err in &self.load_errors {
-                ui.label(
-                    egui::RichText::new(err)
-                        .size(10.0)
-                        .color(egui::Color32::from_rgb(200, 50, 50)),
+            // === Tab: Innstillinger (2) ===
+            if self.selected_tab == 2 {
+                ui.checkbox(&mut self.follow_cursor,
+                    egui::RichText::new("Følg cursor").size(13.0)
+                        .color(egui::Color32::from_rgb(60, 60, 55))
                 );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("Bro: {}", self.manager.active_bridge_name()))
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Kvalitet: {} (0=rask, 1=balansert, 2=full)", self.quality))
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                );
+                if self.grammar_completion {
+                    ui.label(
+                        egui::RichText::new("Grammatikkfilter: PÅ")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                    );
+                }
+                // Load errors
+                for err in &self.load_errors {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(200, 50, 50)),
+                    );
+                }
             }
 
-            if self.context.word.is_empty() && self.context.sentence.is_empty() {
+            // === Tab: Debug (3) ===
+            if self.selected_tab == 3 {
+                ui.label(egui::RichText::new("Ord:").size(11.0).strong().color(egui::Color32::from_rgb(100, 100, 100)));
                 ui.label(
-                    egui::RichText::new("Flytt cursoren for å se kontekst...")
-                        .italics()
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(150, 150, 140)),
+                    egui::RichText::new(if self.context.word.is_empty() { "(tomt)" } else { &self.context.word })
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(0, 70, 160)),
                 );
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Setning:").size(11.0).strong().color(egui::Color32::from_rgb(100, 100, 100)));
+                ui.label(
+                    egui::RichText::new(if self.context.sentence.is_empty() { "(tom)" } else { &self.context.sentence })
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(50, 50, 50)),
+                );
+                if let Some(masked) = &self.context.masked_sentence {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Maskert:").size(11.0).strong().color(egui::Color32::from_rgb(100, 100, 100)));
+                    let display = if masked.len() > 200 {
+                        format!("{}...", &masked[..200])
+                    } else {
+                        masked.clone()
+                    };
+                    ui.label(
+                        egui::RichText::new(display)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(80, 80, 80)),
+                    );
+                }
             }
         });
     }
@@ -1064,7 +1127,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 250.0])
             .with_always_on_top()
-            .with_decorations(true)
+            .with_decorations(false)
             .with_title("NorskTale"),
         ..Default::default()
     };
