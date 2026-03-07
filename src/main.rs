@@ -689,12 +689,26 @@ impl ContextApp {
                         let ctx_before = mask_parts[0].trim_end();
                         let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
 
-                        // Iterative extension: up to 3 steps
+                        // Iterative extension: up to 3 steps with early stopping
+                        // Only extend candidates within 15 points of the best score
                         for _step in 0..3 {
-                            let to_extend: Vec<usize> = candidates.iter().enumerate()
-                                .filter(|(_, c)| !c.done)
+                            let best_score = candidates.iter()
+                                .filter(|c| !c.done)
+                                .map(|c| c.score)
+                                .fold(f32::NEG_INFINITY, f32::max);
+                            let threshold = best_score - 15.0;
+                            let mut to_extend: Vec<usize> = candidates.iter().enumerate()
+                                .filter(|(_, c)| !c.done && c.score >= threshold)
                                 .map(|(i, _)| i)
                                 .collect();
+                            // Mark low-scoring candidates as done
+                            for c in candidates.iter_mut() {
+                                if !c.done && c.score < threshold {
+                                    c.done = true;
+                                }
+                            }
+                            // Cap at 10 per batch to limit ONNX cost
+                            to_extend.truncate(10);
                             if to_extend.is_empty() { break; }
 
                             // Build batch: "{ctx} {accumulated}<mask> {after}"
