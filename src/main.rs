@@ -1533,7 +1533,7 @@ fn main() -> eframe::Result {
         }
     }
 
-    let grammar_completion = std::env::args().any(|a| a == "--grammar-completion");
+    let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
     let use_swipl = std::env::args().any(|a| a == "--swipl");
     let quality: u8 = {
         let args: Vec<String> = std::env::args().collect();
@@ -1541,7 +1541,7 @@ fn main() -> eframe::Result {
             .position(|a| a == "--quality")
             .and_then(|i| args.get(i + 1))
             .and_then(|v| v.parse().ok())
-            .unwrap_or(if grammar_completion { 0 } else { 2 })
+            .unwrap_or(2)
     };
     if grammar_completion {
         eprintln!("Grammar completion: ON");

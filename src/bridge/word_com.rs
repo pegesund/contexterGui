@@ -308,7 +308,7 @@ impl WordComBridge {
             }
         };
         let has_context_before = cursor_pos > 1;
-        let use_masked = is_mid_word || has_text_after || (word.is_empty() && has_context_before);
+        let use_masked = is_mid_word || has_text_after || has_context_before;
         let masked_sentence = if use_masked {
             let half_ctx = 2000;
             // For typing: back up past the partial word so <mask> replaces it
