@@ -177,6 +177,8 @@ struct ContextApp {
     wordfreq: Option<HashMap<String, u64>>,
     embedding_store: Option<EmbeddingStore>,
     completions: Vec<Completion>,
+    /// Open suggestions (any word) for fill-in-the-blank mode
+    open_completions: Vec<Completion>,
     last_completed_prefix: String,
     // Embedding sync
     last_embedding_sync: Instant,
@@ -285,6 +287,7 @@ impl ContextApp {
             wordfreq: wf,
             embedding_store,
             completions: Vec::new(),
+            open_completions: Vec::new(),
             last_completed_prefix: String::new(),
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
@@ -420,6 +423,7 @@ impl ContextApp {
         let prefix = extract_prefix(&self.context.word);
         if prefix.is_empty() {
             self.completions.clear();
+            self.open_completions.clear();
             return;
         }
 
@@ -430,44 +434,86 @@ impl ContextApp {
         let t_total = Instant::now();
 
         // Mid-word click: fill-in-the-blank using full sentence context
+        // Two lists: left = first-letter matches, right = open (any word)
         if let Some(masked) = &self.context.masked_sentence.clone() {
             if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
                 let t_bert = Instant::now();
                 let prefix_lower = prefix.to_lowercase();
                 match model.single_forward(masked) {
                     Ok((logits, _ms)) => {
-                        let matches: Vec<(u32, String)> = if let Some(entries) = pi.get(&prefix_lower) {
-                            entries.clone()
-                        } else {
-                            Vec::new()
+                        let checker_ref = self.checker.as_ref();
+                        let wf_ref = self.wordfreq.as_ref();
+                        let is_valid = |w: &str| -> bool {
+                            let key = w.to_lowercase();
+                            if let Some(c) = checker_ref { c.has_word(&key) }
+                            else { wf_ref.map_or(true, |wf| wf.contains_key(&key)) }
                         };
+
+                        // Left list: first-letter matches
+                        let matches: Vec<(u32, String)> = pi.get(&prefix_lower)
+                            .cloned().unwrap_or_default();
                         let mut scored: Vec<(String, f32)> = matches.iter()
                             .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
                             .collect();
                         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        // Dictionary filter
-                        let checker_ref = self.checker.as_ref();
-                        let wf_ref = self.wordfreq.as_ref();
-                        let results: Vec<nostos_cognio::complete::Completion> = scored.iter()
-                            .filter(|(w, _)| {
-                                let key = w.to_lowercase();
-                                if let Some(c) = checker_ref {
-                                    c.has_word(&key)
-                                } else {
-                                    wf_ref.map_or(true, |wf| wf.contains_key(&key))
-                                }
-                            })
-                            .take(5)
-                            .map(|(w, s)| nostos_cognio::complete::Completion {
-                                word: w.clone(), score: *s, elapsed_ms: 0.0,
-                            })
+                        let left: Vec<Completion> = scored.iter()
+                            .filter(|(w, _)| is_valid(w))
+                            .take(10)
+                            .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
                             .collect();
+
+                        // Right list: open (any word starting with Ġ = word-initial tokens)
+                        let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
+                            .enumerate()
+                            .filter(|(_, tok)| tok.starts_with('Ġ'))
+                            .map(|(i, _)| {
+                                let decoded = model.tokenizer
+                                    .decode(&[i as u32], false)
+                                    .unwrap_or_default().trim().to_string();
+                                (decoded, logits[i])
+                            })
+                            .filter(|(w, _)| !w.is_empty() && w.len() > 1)
+                            .collect();
+                        all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        let right: Vec<Completion> = all_scored.iter()
+                            .filter(|(w, _)| is_valid(w))
+                            .take(10)
+                            .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
+                            .collect();
+
                         let bert_ms = t_bert.elapsed().as_millis();
+
+                        // Grammar filter both lists
+                        if self.grammar_completion {
+                            if let Some(checker) = &mut self.checker {
+                                // Build context without mask for grammar checking
+                                let ctx_for_grammar = masked.replace("<mask>", "").trim().to_string();
+                                let mut check_fn = |sentence: &str| -> GrammarCheckResult {
+                                    let errors = checker.check_sentence(sentence);
+                                    GrammarCheckResult {
+                                        ok: errors.is_empty(),
+                                        suggestions: errors.iter()
+                                            .filter(|e| !e.suggestion.is_empty())
+                                            .map(|e| e.suggestion.clone())
+                                            .collect(),
+                                    }
+                                };
+                                self.completions = grammar_filter(&left, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                                self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
+                            } else {
+                                self.completions = left.into_iter().take(5).collect();
+                                self.open_completions = right.into_iter().take(5).collect();
+                            }
+                        } else {
+                            self.completions = left.into_iter().take(5).collect();
+                            self.open_completions = right.into_iter().take(5).collect();
+                        }
+
                         let total_ms = t_total.elapsed().as_millis();
-                        eprintln!("fill-blank '{}' bert={}ms total={}ms -> {}",
-                            masked, bert_ms, total_ms,
-                            results.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                        self.completions = results;
+                        eprintln!("fill-blank bert={}ms total={}ms left=[{}] right=[{}]",
+                            bert_ms, total_ms,
+                            self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
+                            self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                     }
                     Err(e) => eprintln!("Fill-blank error: {}", e),
                 }
@@ -528,6 +574,7 @@ impl ContextApp {
                     Err(e) => {
                         eprintln!("Completion error: {}", e);
                         self.completions.clear();
+            self.open_completions.clear();
                         None
                     }
                 }
@@ -655,6 +702,7 @@ impl eframe::App for ContextApp {
             } else {
                 // Word boundary: run grammar check
                 self.completions.clear();
+            self.open_completions.clear();
                 self.last_completed_prefix.clear();
                 self.run_grammar_check();
             }
@@ -719,6 +767,7 @@ impl eframe::App for ContextApp {
                         self.return_focus_to_word();
                         self.manager.replace_word(&word);
                         self.completions.clear();
+            self.open_completions.clear();
                         self.last_completed_prefix.clear();
                         // Force immediate context refresh after replace
                         self.last_poll = Instant::now() - self.poll_interval;
@@ -828,7 +877,7 @@ impl eframe::App for ContextApp {
             }
 
             // Word completions (mid-word mode)
-            if !self.completions.is_empty() {
+            if !self.completions.is_empty() || !self.open_completions.is_empty() {
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(2.0);
@@ -842,53 +891,77 @@ impl eframe::App for ContextApp {
                         .size(11.0)
                         .color(egui::Color32::from_rgb(100, 100, 100)),
                 );
+
                 let sel = self.selected_completion;
                 let mut clicked_word: Option<String> = None;
-                for (i, comp) in self.completions.iter().enumerate() {
-                    let is_selected = sel == Some(i);
-                    let is_top = i == 0 && sel.is_none();
-                    let marker = if is_selected { "▸ " } else { "  " };
-                    let text = format!("{}{} ({:.1})", marker, comp.word, comp.score);
+                let has_dual = !self.open_completions.is_empty() && !self.completions.is_empty();
 
-                    // First pass: invisible label to get rect and hover state
+                // Helper closure to render a completion row
+                let render_row = |ui: &mut egui::Ui, comp: &Completion, idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
+                    let marker = if is_selected { "▸ " } else { "  " };
+                    let text = format!("{}{}", marker, comp.word);
+                    let row_h = if is_top || is_selected { 18.0 } else { 16.0 };
                     let (rect, resp) = ui.allocate_exact_size(
-                        ui.available_size_before_wrap() * egui::vec2(1.0, 0.0) + egui::vec2(0.0, if is_top || is_selected { 18.0 } else { 16.0 }),
+                        egui::vec2(col_width, row_h),
                         egui::Sense::click() | egui::Sense::hover(),
                     );
                     let hovered = resp.hovered();
-
-                    // Background
                     if is_selected {
                         ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0, 100, 180));
                     } else if hovered {
                         ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
                     }
-
-                    // Text color
-                    let fg = if is_selected {
-                        egui::Color32::WHITE
-                    } else if hovered {
-                        egui::Color32::from_rgb(0, 80, 140)
-                    } else if is_top {
-                        egui::Color32::from_rgb(0, 120, 60)
-                    } else {
-                        egui::Color32::from_rgb(60, 60, 60)
-                    };
-
+                    let fg = if is_selected { egui::Color32::WHITE }
+                        else if hovered { egui::Color32::from_rgb(0, 80, 140) }
+                        else if is_top { egui::Color32::from_rgb(0, 120, 60) }
+                        else { egui::Color32::from_rgb(60, 60, 60) };
                     let font_size = if is_top || is_selected || hovered { 13.0 } else { 12.0 };
-                    let font = egui::FontId::proportional(font_size);
-                    ui.painter().text(rect.min + egui::vec2(0.0, 1.0), egui::Align2::LEFT_TOP, text, font, fg);
+                    ui.painter().text(rect.min + egui::vec2(0.0, 1.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(font_size), fg);
+                    if hovered { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                    (resp.clicked(), false)
+                };
 
-                    if hovered {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if has_dual {
+                    // Two-column layout: left = first-letter, right = open
+                    let avail_w = ui.available_width();
+                    let col_w = (avail_w - 10.0) / 2.0;
+                    let max_rows = self.completions.len().max(self.open_completions.len());
+                    for row in 0..max_rows {
+                        ui.horizontal(|ui| {
+                            // Left column (first-letter matches)
+                            if row < self.completions.len() {
+                                let comp = &self.completions[row];
+                                let is_sel = sel == Some(row);
+                                let is_top = row == 0 && sel.is_none();
+                                let (clicked, _) = render_row(ui, comp, row, is_sel, is_top, col_w);
+                                if clicked { clicked_word = Some(comp.word.clone()); }
+                            } else {
+                                ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
+                            }
+                            ui.add_space(10.0);
+                            // Right column (open suggestions)
+                            if row < self.open_completions.len() {
+                                let comp = &self.open_completions[row];
+                                let (clicked, _) = render_row(ui, comp, row + 100, false, false, col_w);
+                                if clicked { clicked_word = Some(comp.word.clone()); }
+                            }
+                        });
                     }
-                    if resp.clicked() {
-                        clicked_word = Some(comp.word.clone());
+                } else {
+                    // Single column (normal typing mode)
+                    let avail_w = ui.available_width();
+                    for (i, comp) in self.completions.iter().enumerate() {
+                        let is_sel = sel == Some(i);
+                        let is_top = i == 0 && sel.is_none();
+                        let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
+                        if clicked { clicked_word = Some(comp.word.clone()); }
                     }
                 }
+
                 if let Some(word) = clicked_word {
                     self.manager.replace_word(&word);
                     self.completions.clear();
+                    self.open_completions.clear();
                     self.selected_completion = None;
                     self.selection_mode = false;
                     self.last_completed_prefix.clear();

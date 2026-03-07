@@ -263,35 +263,23 @@ impl WordComBridge {
 
         let doc = app.get_dispatch("ActiveDocument")?;
 
-        // Build masked sentence for mid-word clicks (BERT fill-in-the-blank)
+        // Build masked context for mid-word clicks (BERT fill-in-the-blank)
+        // Keep ~800 chars each side of mask (BERT 512 tokens ≈ 1600 chars total)
         let masked_sentence = if is_mid_word {
             let content = doc.get_dispatch("Content")?;
             let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
-            // Read text around the word: up to 300 chars before and after
-            let ctx_start = (word_start - 300).max(0);
-            let ctx_end = (word_end + 300).min(doc_end);
+            let half_ctx = 2000;
+            let ctx_start = (word_start - half_ctx).max(0);
+            let ctx_end = (word_end + half_ctx).min(doc_end);
             let before_v = doc.call("Range", &[make_i4(ctx_start), make_i4(word_start)])?;
             let before_range = unsafe { extract_dispatch(&before_v) }?;
-            let before = before_range.get_string("Text").unwrap_or_default();
+            let before = before_range.get_string("Text").unwrap_or_default()
+                .replace('\r', " ").replace('\n', " ");
             let after_v = doc.call("Range", &[make_i4(word_end), make_i4(ctx_end)])?;
             let after_range = unsafe { extract_dispatch(&after_v) }?;
-            let after = after_range.get_string("Text").unwrap_or_default();
-            // Normalize paragraph marks to spaces
-            let before = before.replace('\r', " ").replace('\n', " ");
-            let after = after.replace('\r', " ").replace('\n', " ");
-            // Find last sentence boundary before the word
-            let before_sent = if let Some(pos) = before.rfind(|c: char| c == '.' || c == '!' || c == '?') {
-                &before[pos + 1..]
-            } else {
-                &before
-            };
-            // Find first sentence boundary after the word
-            let after_sent = if let Some(pos) = after.find(|c: char| c == '.' || c == '!' || c == '?') {
-                &after[..=pos]
-            } else {
-                &after
-            };
-            let masked = format!("{} <mask> {}", before_sent.trim(), after_sent.trim());
+            let after = after_range.get_string("Text").unwrap_or_default()
+                .replace('\r', " ").replace('\n', " ");
+            let masked = format!("{} <mask> {}", before.trim(), after.trim());
             Some(masked)
         } else {
             None
