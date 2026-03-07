@@ -843,14 +843,14 @@ impl ContextApp {
                                             })
                                             .collect();
                                         all_cands.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                                        all_cands.truncate(20);
+                                        all_cands.truncate(10);
 
                                         let cands: Vec<(String, Vec<u32>)> = all_cands.iter()
                                             .map(|(w, ids, _)| (w.clone(), ids.clone())).collect();
                                         let mut scores: Vec<f32> = all_cands.iter().map(|(_, _, s)| *s).collect();
 
                                         // Phase 2: multi-token batch scoring with dedup
-                                        let max_tokens = cands.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
+                                        let max_tokens = cands.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1).min(3);
                                         for t in 1..max_tokens {
                                             let to_score: Vec<usize> = cands.iter().enumerate()
                                                 .filter(|(_, (_, ids))| ids.len() > t)
