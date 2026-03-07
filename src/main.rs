@@ -775,8 +775,11 @@ impl ContextApp {
                         // Grammar filter both lists
                         if self.grammar_completion {
                             if let Some(checker) = &mut self.checker {
-                                // Build context without mask for grammar checking
-                                let ctx_for_grammar = masked.replace("<mask>", "").trim().to_string();
+                                // Build context: sentence fragment before <mask>
+                                let before_mask = masked.split("<mask>").next().unwrap_or("");
+                                let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
+                                    .map(|i| i + 1).unwrap_or(0);
+                                let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
                                 let mut check_fn = |sentence: &str| -> GrammarCheckResult {
                                     let errors = checker.check_sentence(sentence);
                                     GrammarCheckResult {
