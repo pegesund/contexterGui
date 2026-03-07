@@ -697,6 +697,128 @@ impl ContextApp {
         scored
     }
 
+    /// Score a sentence using BERT pseudo-log-likelihood.
+    /// For each word position, mask it and check how well BERT predicts the actual word.
+    fn bert_sentence_score(&mut self, sentence: &str) -> f32 {
+        let words: Vec<&str> = sentence.split_whitespace().collect();
+        if words.is_empty() { return f32::NEG_INFINITY; }
+
+        let model = match &mut self.model {
+            Some(m) => m,
+            None => return 0.0,
+        };
+
+        let mut total_score: f32 = 0.0;
+        for i in 0..words.len() {
+            // Build masked sentence
+            let masked: String = words.iter().enumerate()
+                .map(|(j, w)| if j == i { "<mask>" } else { *w })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if let Ok((logits, _)) = model.single_forward(&masked) {
+                // Look up the actual word's token and get its logit
+                let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
+                // Try with Ġ prefix (word-initial BPE token)
+                let token_with_g = format!("Ġ{}", word_clean.to_lowercase());
+                let token_id = model.tokenizer.token_to_id(&token_with_g)
+                    .or_else(|| model.tokenizer.token_to_id(&word_clean.to_lowercase()));
+                if let Some(tid) = token_id {
+                    total_score += logits[tid as usize];
+                }
+            }
+        }
+        // Normalize by word count to avoid bias toward longer sentences
+        total_score / words.len() as f32
+    }
+
+    /// Generate candidate corrections for a sentence with grammar errors,
+    /// score each with BERT, and return the top candidates (up to 3).
+    fn best_sentence_corrections(&mut self, sentence: &str, errors: &[GrammarError]) -> Vec<(String, String, f32)> {
+        let mut candidates: Vec<(String, String)> = Vec::new(); // (corrected_sentence, explanation)
+
+        // 1. Apply each individual grammar suggestion
+        for e in errors {
+            if !e.suggestion.is_empty() {
+                let fixed = replace_word_at_position(sentence, &e.word, &e.suggestion);
+                let expl = format!("«{}» → «{}»: {}", e.word, e.suggestion, e.explanation);
+                candidates.push((fixed, expl));
+            }
+        }
+
+        // 2. Try removing each error word
+        for e in errors {
+            let removed = remove_word_from_sentence(sentence, &e.word);
+            if removed != sentence {
+                let expl = format!("Fjernet «{}».", e.word);
+                candidates.push((removed, expl));
+            }
+        }
+
+        // 3. Apply all suggestions together
+        if errors.len() > 1 {
+            let mut all_fixed = sentence.to_string();
+            let mut all_expl = Vec::new();
+            for e in errors {
+                if !e.suggestion.is_empty() {
+                    all_fixed = replace_word_at_position(&all_fixed, &e.word, &e.suggestion);
+                    all_expl.push(format!("«{}» → «{}»", e.word, e.suggestion));
+                }
+            }
+            if all_fixed != sentence {
+                candidates.push((all_fixed, all_expl.join(", ")));
+            }
+        }
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Grammar-check each candidate: discard ones that still have errors
+        let valid_candidates: Vec<(String, String)> = if let Some(checker) = &mut self.checker {
+            candidates.into_iter()
+                .filter(|(c, _)| {
+                    let errs = checker.check_sentence(c);
+                    let ok = errs.is_empty();
+                    if !ok {
+                        eprintln!("    REJECTED (grammar): '{}' — {} errors", c, errs.len());
+                    }
+                    ok
+                })
+                .collect()
+        } else {
+            candidates
+        };
+
+        if valid_candidates.is_empty() {
+            eprintln!("  No grammatically valid candidates found");
+            return Vec::new();
+        }
+
+        // Score valid candidates with BERT
+        eprintln!("  Scoring {} valid candidates with BERT...", valid_candidates.len());
+        let mut scored: Vec<(String, String, f32)> = valid_candidates.into_iter()
+            .map(|(c, e)| {
+                let score = self.bert_sentence_score(&c);
+                eprintln!("    {:.1}: '{}'", score, c);
+                (c, e, score)
+            })
+            .collect();
+
+        // Sort: substitutions first (by BERT score), then removals (by BERT score)
+        scored.sort_by(|a, b| {
+            let a_removal = a.1.starts_with("Fjernet");
+            let b_removal = b.1.starts_with("Fjernet");
+            match (a_removal, b_removal) {
+                (false, true) => std::cmp::Ordering::Less,   // substitution before removal
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal),
+            }
+        });
+        scored.truncate(3);
+        scored
+    }
+
     fn trigrams(word: &str) -> Vec<String> {
         let chars: Vec<char> = word.chars().collect();
         if chars.len() < 3 {
@@ -712,24 +834,36 @@ impl ContextApp {
         // Get full document text to check all sentences
         let doc_text = self.manager.read_document_context()
             .unwrap_or_default().to_lowercase();
-        let before = self.writing_errors.len();
+        let mut resolved_contexts: Vec<String> = Vec::new();
         self.writing_errors.retain(|e| {
             if e.ignored {
                 return false;
             }
-            // Check if the error word still exists in the document
-            let word_lower = e.word.to_lowercase();
-            let still_present = doc_text
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|w| w == word_lower);
+            let still_present = match e.category {
+                ErrorCategory::Grammar => {
+                    // For sentence-level corrections, check if the original sentence is still in the doc
+                    doc_text.contains(&e.sentence_context.to_lowercase())
+                }
+                ErrorCategory::Spelling => {
+                    let word_lower = e.word.to_lowercase();
+                    doc_text.split(|c: char| !c.is_alphanumeric())
+                        .any(|w| w == word_lower)
+                }
+            };
             if !still_present {
                 eprintln!("Error resolved: '{}' no longer in document", e.word);
+                resolved_contexts.push(e.sentence_context.clone());
             }
             still_present
         });
-        // If errors were pruned, clear sentence hashes so edited sentences get re-checked
-        if self.writing_errors.len() < before {
-            self.checked_sentences.clear();
+        // Only clear hashes for resolved sentences so they get re-checked if edited
+        if !resolved_contexts.is_empty() {
+            use std::hash::{Hash, Hasher};
+            for ctx in &resolved_contexts {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                ctx.trim().hash(&mut hasher);
+                self.checked_sentences.remove(&hasher.finish());
+            }
         }
     }
 
@@ -770,25 +904,34 @@ impl ContextApp {
             };
 
             let errors = checker.check_sentence(trimmed);
+            if errors.is_empty() { continue; }
+
+            // Don't add duplicate grammar errors for this sentence
+            if self.writing_errors.iter().any(|e| {
+                matches!(e.category, ErrorCategory::Grammar)
+                    && e.sentence_context == trimmed
+                    && !e.ignored
+            }) {
+                continue;
+            }
+
             for ge in &errors {
-                // Don't add duplicate grammar errors
-                if self.writing_errors.iter().any(|e| {
-                    matches!(e.category, ErrorCategory::Grammar)
-                        && e.word == ge.word
-                        && e.rule_name == ge.rule_name
-                        && e.sentence_context == trimmed
-                }) {
-                    continue;
-                }
                 eprintln!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
+            }
+
+            // Generate candidate corrections and score with BERT
+            let corrections = self.best_sentence_corrections(trimmed, &errors);
+
+            for (i, (corrected, explanation, score)) in corrections.iter().enumerate() {
+                eprintln!("  Correction #{}: ({:.1}) '{}' → '{}'", i+1, score, trimmed, corrected);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
-                    word: ge.word.clone(),
-                    suggestion: ge.suggestion.clone(),
-                    explanation: ge.explanation.clone(),
-                    rule_name: ge.rule_name.clone(),
+                    word: trimmed.to_string(),
+                    suggestion: corrected.clone(),
+                    explanation: explanation.clone(),
+                    rule_name: "sentence_correction".to_string(),
                     sentence_context: trimmed.to_string(),
-                    position: ge.position,
+                    position: i,
                     ignored: false,
                 });
             }
@@ -1515,6 +1658,42 @@ impl ContextApp {
 }
 
 /// Split text into sentences for embedding.
+/// Replace first occurrence of a word (whole word match) in a sentence.
+fn replace_word_at_position(sentence: &str, word: &str, replacement: &str) -> String {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    let mut result = Vec::new();
+    let mut replaced = false;
+    for w in &words {
+        let clean = w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»');
+        if !replaced && clean.eq_ignore_ascii_case(word) {
+            // Preserve trailing punctuation
+            let suffix: String = w.chars().rev().take_while(|c| c.is_ascii_punctuation()).collect::<String>().chars().rev().collect();
+            result.push(format!("{}{}", replacement, suffix));
+            replaced = true;
+        } else {
+            result.push(w.to_string());
+        }
+    }
+    result.join(" ")
+}
+
+/// Remove first occurrence of a word from a sentence.
+fn remove_word_from_sentence(sentence: &str, word: &str) -> String {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    let mut result = Vec::new();
+    let mut removed = false;
+    for w in &words {
+        let clean = w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»');
+        if !removed && clean.eq_ignore_ascii_case(word) {
+            removed = true;
+        } else {
+            result.push(w.to_string());
+        }
+    }
+    result.join(" ")
+}
+
+
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
@@ -2187,8 +2366,19 @@ impl eframe::App for ContextApp {
 
                     let mut action: Option<(usize, &str)> = None;
 
+                    // Group grammar errors by sentence_context
+                    let mut shown_contexts: std::collections::HashSet<String> = std::collections::HashSet::new();
+
                     for &idx in &active_errors {
                         let error = &self.writing_errors[idx];
+
+                        // For grammar errors with position > 0, skip — they're shown as alternatives
+                        if matches!(error.category, ErrorCategory::Grammar) && error.position > 0 {
+                            if shown_contexts.contains(&error.sentence_context) {
+                                continue;
+                            }
+                        }
+
                         let (icon, color) = match error.category {
                             ErrorCategory::Spelling => (
                                 "🔴",
@@ -2201,54 +2391,118 @@ impl eframe::App for ContextApp {
                         };
 
                         ui.group(|ui| {
-                            // Header: icon + word + suggestion
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(icon).size(12.0));
-                                ui.label(
-                                    egui::RichText::new(format!("«{}»", error.word))
-                                        .strong()
-                                        .size(12.0)
-                                        .color(color),
-                                );
-                                if !error.suggestion.is_empty() {
+                            if matches!(error.category, ErrorCategory::Grammar) {
+                                shown_contexts.insert(error.sentence_context.clone());
+                                // Sentence-level grammar correction
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(icon).size(12.0));
                                     ui.label(
-                                        egui::RichText::new(format!("→ {}", error.suggestion))
-                                            .size(12.0)
+                                        egui::RichText::new("Grammatikkfeil")
                                             .strong()
-                                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                                            .size(12.0)
+                                            .color(color),
+                                    );
+                                });
+                                // Show original with strikethrough
+                                ui.label(
+                                    egui::RichText::new(&error.word)
+                                        .size(11.0)
+                                        .strikethrough()
+                                        .color(egui::Color32::from_rgb(150, 80, 80)),
+                                );
+                                // Show all alternatives for this sentence
+                                let ctx = error.sentence_context.clone();
+                                let alternatives: Vec<usize> = active_errors.iter()
+                                    .filter(|&&i| {
+                                        let e = &self.writing_errors[i];
+                                        matches!(e.category, ErrorCategory::Grammar)
+                                            && e.sentence_context == ctx
+                                            && !e.suggestion.is_empty()
+                                    })
+                                    .copied()
+                                    .collect();
+
+                                for (alt_num, &alt_idx) in alternatives.iter().enumerate() {
+                                    let alt = &self.writing_errors[alt_idx];
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{}.", alt_num + 1))
+                                                .size(11.0)
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(60, 60, 60)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(&alt.suggestion)
+                                                .size(11.0)
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(0, 120, 60)),
+                                        );
+                                        if ui.small_button("Rett opp").clicked() {
+                                            action = Some((alt_idx, "fix"));
+                                        }
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(&alt.explanation)
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(100, 100, 100)),
                                     );
                                 }
-                            });
 
-                            // Explanation
-                            ui.label(
-                                egui::RichText::new(&error.explanation)
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(80, 80, 80)),
-                            );
-
-                            // Action buttons
-                            ui.horizontal(|ui| {
-                                if !error.suggestion.is_empty() {
+                                // Ignore button for the whole group
+                                ui.horizontal(|ui| {
                                     if ui.button(
-                                        egui::RichText::new("Rett opp").size(11.0)
+                                        egui::RichText::new("Ignorer").size(11.0)
                                     ).clicked() {
-                                        action = Some((idx, "fix"));
+                                        // Ignore all alternatives for this sentence
+                                        action = Some((idx, "ignore_group"));
                                     }
-                                }
-                                if matches!(error.category, ErrorCategory::Spelling) {
+                                });
+                            } else {
+                                // Spelling error: word-level display
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(icon).size(12.0));
+                                    ui.label(
+                                        egui::RichText::new(format!("«{}»", error.word))
+                                            .strong()
+                                            .size(12.0)
+                                            .color(color),
+                                    );
+                                    if !error.suggestion.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(format!("→ {}", error.suggestion))
+                                                .size(12.0)
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(0, 120, 60)),
+                                        );
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(&error.explanation)
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(80, 80, 80)),
+                                );
+
+                                // Action buttons for spelling
+                                ui.horizontal(|ui| {
+                                    if !error.suggestion.is_empty() {
+                                        if ui.button(
+                                            egui::RichText::new("Rett opp").size(11.0)
+                                        ).clicked() {
+                                            action = Some((idx, "fix"));
+                                        }
+                                    }
                                     if ui.button(
                                         egui::RichText::new("Forslag").size(11.0)
                                     ).clicked() {
                                         action = Some((idx, "suggest"));
                                     }
-                                }
-                                if ui.button(
-                                    egui::RichText::new("Ignorer").size(11.0)
-                                ).clicked() {
-                                    action = Some((idx, "ignore"));
-                                }
-                            });
+                                    if ui.button(
+                                        egui::RichText::new("Ignorer").size(11.0)
+                                    ).clicked() {
+                                        action = Some((idx, "ignore"));
+                                    }
+                                });
+                            }
                         });
                         ui.add_space(2.0);
                     }
@@ -2262,7 +2516,13 @@ impl eframe::App for ContextApp {
                                 let word = error.word.clone();
                                 let context = error.sentence_context.clone();
                                 self.pending_fix = Some((word, suggestion, context));
-                                self.writing_errors[idx].ignored = true;
+                                // Mark all alternatives for this sentence as ignored
+                                let ctx = self.writing_errors[idx].sentence_context.clone();
+                                for e in &mut self.writing_errors {
+                                    if e.sentence_context == ctx && matches!(e.category, ErrorCategory::Grammar) {
+                                        e.ignored = true;
+                                    }
+                                }
                             }
                             "suggest" => {
                                 let word = self.writing_errors[idx].word.clone();
@@ -2276,6 +2536,14 @@ impl eframe::App for ContextApp {
                                     self.ignored_words.insert(error.word.clone());
                                 }
                                 self.writing_errors[idx].ignored = true;
+                            }
+                            "ignore_group" => {
+                                let ctx = self.writing_errors[idx].sentence_context.clone();
+                                for e in &mut self.writing_errors {
+                                    if e.sentence_context == ctx && matches!(e.category, ErrorCategory::Grammar) {
+                                        e.ignored = true;
+                                    }
+                                }
                             }
                             _ => {}
                         }
