@@ -190,6 +190,8 @@ struct ContextApp {
     last_completed_prefix: String,
     /// Cache: (masked_sentence, logits) from single_forward — reused when only prefix changes
     cached_forward: Option<(String, Vec<f32>)>,
+    /// Cache: (masked_sentence, right_column) — right column only depends on logits, not prefix
+    cached_right_column: Option<(String, Vec<(String, f32)>)>,
     // Embedding sync
     last_embedding_sync: Instant,
     embedding_sync_interval: Duration,
@@ -306,6 +308,7 @@ impl ContextApp {
             open_completions: Vec::new(),
             last_completed_prefix: String::new(),
             cached_forward: None,
+            cached_right_column: None,
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
@@ -432,6 +435,7 @@ impl ContextApp {
                         // New embeddings available — force re-completion so topic boost applies
                         self.last_completed_prefix.clear();
                         self.cached_forward = None;
+                        self.cached_right_column = None;
                     }
                     Err(e) => eprintln!("Embedding sync error: {}", e),
                     _ => {}
@@ -787,22 +791,47 @@ impl ContextApp {
                             .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
                             .collect();
 
-                        // Right list: open (any word starting with Ġ = word-initial tokens)
-                        let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
-                            .enumerate()
-                            .filter(|(_, tok)| tok.starts_with('Ġ'))
-                            .map(|(i, _)| {
-                                let decoded = model.tokenizer
-                                    .decode(&[i as u32], false)
-                                    .unwrap_or_default().trim().to_string();
-                                (decoded, logits[i])
-                            })
-                            .filter(|(w, _)| !w.is_empty() && w.len() > 1)
-                            .collect();
-                        all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        // Right list: cached since it only depends on masked sentence, not prefix
+                        let right_scored = if let Some((ref cached_m, ref cached_right)) = self.cached_right_column {
+                            if cached_m == masked {
+                                cached_right.clone()
+                            } else {
+                                let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
+                                    .enumerate()
+                                    .filter(|(_, tok)| tok.starts_with('Ġ'))
+                                    .map(|(i, _)| {
+                                        let decoded = model.tokenizer
+                                            .decode(&[i as u32], false)
+                                            .unwrap_or_default().trim().to_string();
+                                        (decoded, logits[i])
+                                    })
+                                    .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
+                                    .collect();
+                                all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                all_scored.truncate(20);
+                                self.cached_right_column = Some((masked.clone(), all_scored.clone()));
+                                all_scored
+                            }
+                        } else {
+                            let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
+                                .enumerate()
+                                .filter(|(_, tok)| tok.starts_with('Ġ'))
+                                .map(|(i, _)| {
+                                    let decoded = model.tokenizer
+                                        .decode(&[i as u32], false)
+                                        .unwrap_or_default().trim().to_string();
+                                    (decoded, logits[i])
+                                })
+                                .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
+                                .collect();
+                            all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                            all_scored.truncate(20);
+                            self.cached_right_column = Some((masked.clone(), all_scored.clone()));
+                            all_scored
+                        };
                         let left_words: std::collections::HashSet<&str> = left.iter().map(|c| c.word.as_str()).collect();
-                        let right: Vec<Completion> = all_scored.iter()
-                            .filter(|(w, _)| is_valid(w) && !left_words.contains(w.as_str()))
+                        let right: Vec<Completion> = right_scored.iter()
+                            .filter(|(w, _)| !left_words.contains(w.as_str()))
                             .take(10)
                             .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
                             .collect();
