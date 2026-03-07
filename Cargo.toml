@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.31"
-egui = "0.31"
+eframe = "0.33"
+egui = "0.33"
+anyhow = "1"
+nostos-cognio = { path = "../../contexter-repo/nostos-cognio" }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
@@ -19,3 +21,11 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
 ]
+
+[[bin]]
+name = "test-gui"
+path = "src/test_gui.rs"
+
+[[bin]]
+name = "test-complete"
+path = "src/test_complete.rs"

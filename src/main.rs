@@ -1,7 +1,68 @@
 mod bridge;
 
 use bridge::{CursorContext, TextBridge};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+use nostos_cognio::baseline::{compute_baseline, Baselines};
+use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
+use nostos_cognio::embeddings::EmbeddingStore;
+use nostos_cognio::grammar::GrammarChecker;
+use nostos_cognio::grammar::swipl_checker::SwiGrammarChecker;
+use nostos_cognio::grammar::types::GrammarError;
+use nostos_cognio::model::Model;
+use nostos_cognio::prefix_index::{self, PrefixIndex};
+use nostos_cognio::wordfreq;
+
+// --- Grammar checker abstraction ---
+
+enum AnyChecker {
+    Neo(GrammarChecker),
+    Swi(SwiGrammarChecker),
+}
+
+impl AnyChecker {
+    fn has_word(&self, word: &str) -> bool {
+        match self {
+            AnyChecker::Neo(c) => c.has_word(word),
+            AnyChecker::Swi(c) => c.has_word(word),
+        }
+    }
+
+    fn check_sentence(&mut self, text: &str) -> Vec<GrammarError> {
+        match self {
+            AnyChecker::Neo(c) => c.check_sentence(text),
+            AnyChecker::Swi(c) => c.check_sentence(text),
+        }
+    }
+}
+
+// --- Data paths ---
+
+fn data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contexter-repo/training-data")
+}
+
+fn dict_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rustSpell/mtag-rs/data/fullform_bm.mfst")
+}
+
+fn compound_data_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/compound_data.pl")
+}
+
+fn grammar_rules_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/grammar_rules.pl")
+}
+
+fn syntaxer_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer")
+}
+
+fn swipl_dll_path() -> &'static str {
+    "C:/Program Files/swipl/bin/libswipl.dll"
+}
 
 // --- Bridge manager: picks the best available bridge ---
 
@@ -70,6 +131,30 @@ impl BridgeManager {
         }
         false
     }
+
+    fn read_document_context(&self) -> Option<String> {
+        for bridge in &self.bridges {
+            if bridge.is_available() {
+                return bridge.read_document_context();
+            }
+        }
+        None
+    }
+}
+
+// --- Detect if cursor is mid-word or at a word boundary ---
+
+fn is_mid_word(word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let last = word.chars().last().unwrap();
+    last.is_alphanumeric() || last == '-' || last == '\''
+}
+
+/// Extract the prefix being typed (partial word for completion).
+fn extract_prefix(word: &str) -> &str {
+    word.trim()
 }
 
 // --- egui app ---
@@ -81,15 +166,98 @@ struct ContextApp {
     poll_interval: Duration,
     follow_cursor: bool,
     last_caret_pos: Option<(i32, i32)>,
+    // Grammar checker
+    checker: Option<AnyChecker>,
+    grammar_errors: Vec<GrammarError>,
+    last_checked_sentence: String,
+    // Word completer
+    model: Option<Model>,
+    prefix_index: Option<PrefixIndex>,
+    baselines: Option<Baselines>,
+    wordfreq: Option<HashMap<String, u64>>,
+    embedding_store: Option<EmbeddingStore>,
+    completions: Vec<Completion>,
+    last_completed_prefix: String,
+    // Embedding sync
+    last_embedding_sync: Instant,
+    embedding_sync_interval: Duration,
+    // Settings
+    grammar_completion: bool,
+    // Status
+    load_errors: Vec<String>,
 }
 
 impl ContextApp {
-    fn new() -> Self {
+    fn new(grammar_completion: bool, use_swipl: bool) -> Self {
         #[cfg(target_os = "windows")]
         unsafe {
             use windows::Win32::System::Com::*;
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
         }
+
+        let mut load_errors = Vec::new();
+
+        // Load grammar checker
+        let checker: Option<AnyChecker> = if use_swipl {
+            match Self::load_swipl_checker() {
+                Ok(c) => {
+                    eprintln!("SWI-Prolog grammar checker loaded");
+                    Some(AnyChecker::Swi(c))
+                }
+                Err(e) => {
+                    let msg = format!("SWI-Prolog: {}", e);
+                    eprintln!("{}", msg);
+                    load_errors.push(msg);
+                    // Fallback to neorusticus
+                    match Self::load_checker() {
+                        Ok(c) => {
+                            eprintln!("Fallback: neorusticus loaded ({} clauses)", c.clause_count());
+                            Some(AnyChecker::Neo(c))
+                        }
+                        Err(e2) => {
+                            load_errors.push(format!("Grammar: {}", e2));
+                            None
+                        }
+                    }
+                }
+            }
+        } else {
+            match Self::load_checker() {
+                Ok(c) => {
+                    eprintln!("GrammarChecker loaded ({} clauses)", c.clause_count());
+                    Some(AnyChecker::Neo(c))
+                }
+                Err(e) => {
+                    let msg = format!("Grammar: {}", e);
+                    eprintln!("{}", msg);
+                    load_errors.push(msg);
+                    None
+                }
+            }
+        };
+
+        // Load NorBERT4 model + completer infrastructure
+        let data = data_dir();
+        let onnx_path = data.join("onnx/norbert4_base_int8.onnx");
+        let tokenizer_path = data.join("onnx/tokenizer.json");
+        let wordfreq_path = data.join("wordfreq.tsv");
+        let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
+        let minilm_tok = data.join("minilm-onnx/tokenizer.json");
+        let embed_cache = data.join("word_embeddings.bin");
+
+        let (model, prefix_index, baselines, wf, embedding_store) =
+            match Self::load_completer(
+                &onnx_path, &tokenizer_path, &wordfreq_path,
+                &minilm_onnx, &minilm_tok, &embed_cache,
+            ) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    let msg = format!("Completer: {}", e);
+                    eprintln!("{}", msg);
+                    load_errors.push(msg);
+                    (None, None, None, None, None)
+                }
+            };
 
         ContextApp {
             manager: BridgeManager::new(),
@@ -98,8 +266,269 @@ impl ContextApp {
             poll_interval: Duration::from_millis(300),
             follow_cursor: true,
             last_caret_pos: None,
+            checker,
+            grammar_errors: Vec::new(),
+            last_checked_sentence: String::new(),
+            model,
+            prefix_index,
+            baselines,
+            wordfreq: wf,
+            embedding_store,
+            completions: Vec::new(),
+            last_completed_prefix: String::new(),
+            last_embedding_sync: Instant::now(),
+            embedding_sync_interval: Duration::from_secs(3),
+            grammar_completion,
+            load_errors,
         }
     }
+
+    fn load_checker() -> Result<GrammarChecker, Box<dyn std::error::Error>> {
+        let compound_data = std::fs::read_to_string(compound_data_path())
+            .unwrap_or_else(|_| {
+                eprintln!("compound_data.pl not found, using empty");
+                String::new()
+            });
+        GrammarChecker::new(dict_path().to_str().unwrap(), &compound_data)
+    }
+
+    fn load_swipl_checker() -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
+        SwiGrammarChecker::new(
+            swipl_dll_path(),
+            dict_path().to_str().unwrap(),
+            grammar_rules_path().to_str().unwrap(),
+            syntaxer_dir().to_str().unwrap(),
+        )
+    }
+
+    fn load_completer(
+        onnx_path: &PathBuf, tokenizer_path: &PathBuf, wordfreq_path: &PathBuf,
+        minilm_onnx: &PathBuf, minilm_tok: &PathBuf, embed_cache: &PathBuf,
+    ) -> anyhow::Result<(
+        Option<Model>,
+        Option<PrefixIndex>,
+        Option<Baselines>,
+        Option<HashMap<String, u64>>,
+        Option<EmbeddingStore>,
+    )> {
+        eprintln!("Loading NorBERT4 from {}...", onnx_path.display());
+        let mut model = Model::load(
+            onnx_path.to_str().unwrap(),
+            tokenizer_path.to_str().unwrap(),
+        )?;
+        eprintln!("NorBERT4 loaded. Vocab: {}", model.vocab_size());
+
+        eprintln!("Building prefix index...");
+        let pi = prefix_index::build_prefix_index(&model.tokenizer);
+        eprintln!("Prefix index: {} prefixes", pi.len());
+
+        eprintln!("Computing baselines...");
+        let baselines = compute_baseline(&mut model)?;
+
+        let wf = wordfreq::load_wordfreq(wordfreq_path.as_path(), 10);
+        eprintln!("WordFreq: {} words", wf.len());
+
+        // Load MiniLM + embedding store
+        let embedding_store = if minilm_onnx.exists() && minilm_tok.exists() {
+            eprintln!("Loading MiniLM...");
+            match nostos_cognio::embeddings::Embedder::load(
+                minilm_onnx.to_str().unwrap(),
+                minilm_tok.to_str().unwrap(),
+            ) {
+                Ok(embedder) => {
+                    let store = EmbeddingStore::new(
+                        embedder,
+                        &wf,
+                        if embed_cache.exists() { Some(embed_cache.as_path()) } else { None },
+                    )?;
+                    eprintln!("Embedding store ready.");
+                    Some(store)
+                }
+                Err(e) => {
+                    eprintln!("MiniLM load error: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok((Some(model), Some(pi), Some(baselines), Some(wf), embedding_store))
+    }
+
+    fn run_grammar_check(&mut self) {
+        let sentence = self.context.sentence.trim().to_string();
+        if sentence.is_empty() || sentence == self.last_checked_sentence {
+            return;
+        }
+        self.last_checked_sentence = sentence.clone();
+
+        if let Some(checker) = &mut self.checker {
+            let t = Instant::now();
+            self.grammar_errors = checker.check_sentence(&sentence);
+            if !self.grammar_errors.is_empty() {
+                eprintln!("Grammar: {} errors in {:.0}ms", self.grammar_errors.len(), t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
+
+    fn sync_embeddings(&mut self) {
+        if self.last_embedding_sync.elapsed() < self.embedding_sync_interval {
+            return;
+        }
+        self.last_embedding_sync = Instant::now();
+
+        if let Some(store) = &mut self.embedding_store {
+            if let Some(doc_text) = self.manager.read_document_context() {
+                // split_sentences only returns complete sentences (ending .!?)
+                // so partial/in-progress sentences are never embedded.
+                let sentences = split_sentences(&doc_text);
+                match store.sync_sentences(&sentences) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("Embedded {} new sentences ({} total):", n, sentences.len());
+                        for s in &sentences {
+                            eprintln!("  '{}'", s);
+                        }
+                        // New embeddings available — force re-completion so topic boost applies
+                        self.last_completed_prefix.clear();
+                    }
+                    Err(e) => eprintln!("Embedding sync error: {}", e),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn run_completion(&mut self) {
+        let prefix = extract_prefix(&self.context.word);
+        if prefix.is_empty() {
+            self.completions.clear();
+            return;
+        }
+
+        if prefix == self.last_completed_prefix {
+            return;
+        }
+        self.last_completed_prefix = prefix.to_string();
+        let t_total = Instant::now();
+
+        // Build context and run completion (borrows checker immutably for has_word)
+        let raw_results = {
+            let fallback_fn: Option<Box<dyn Fn(&str) -> bool + '_>> = self.checker.as_ref().map(|c| {
+                Box::new(move |word: &str| c.has_word(word)) as Box<dyn Fn(&str) -> bool>
+            });
+            let fallback_ref: Option<&dyn Fn(&str) -> bool> = fallback_fn.as_ref().map(|b| b.as_ref());
+
+            if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
+                let sentence = &self.context.sentence;
+                let sentence_ctx = sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end();
+
+                let ctx = if let Some(doc_text) = self.manager.read_document_context() {
+                    let doc_trimmed = doc_text.trim_end();
+                    doc_trimmed
+                        .strip_suffix(prefix)
+                        .unwrap_or(doc_trimmed)
+                        .trim_end()
+                        .to_string()
+                } else {
+                    sentence_ctx.to_string()
+                };
+
+                // Grammar mode: 10 candidates, 1 BPE step (grammar filter adds suggestions)
+                // Normal mode: 5 candidates, 3 BPE steps
+                let (top_n, max_steps) = if self.grammar_completion && self.checker.is_some() {
+                    (10, 1)
+                } else {
+                    (5, 3)
+                };
+
+                let t_bert = Instant::now();
+                match complete_word(
+                    model,
+                    ctx.as_str(),
+                    prefix,
+                    pi,
+                    self.baselines.as_ref(),
+                    self.wordfreq.as_ref(),
+                    fallback_ref,
+                    self.embedding_store.as_ref(),
+                    1.0,   // pmi_weight
+                    10.0,  // topic_boost
+                    top_n,
+                    max_steps,
+                ) {
+                    Ok(results) => {
+                        let bert_ms = t_bert.elapsed().as_millis();
+                        Some((results, ctx, bert_ms))
+                    }
+                    Err(e) => {
+                        eprintln!("Completion error: {}", e);
+                        self.completions.clear();
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
+        // Grammar filter (borrows checker mutably) — only when grammar_completion enabled
+        if let Some((results, ctx, bert_ms)) = raw_results {
+            if self.grammar_completion {
+                if let Some(checker) = &mut self.checker {
+                    let t_gram = Instant::now();
+                    let mut check_fn = |sentence: &str| -> GrammarCheckResult {
+                        let errors = checker.check_sentence(sentence);
+                        GrammarCheckResult {
+                            ok: errors.is_empty(),
+                            suggestions: errors.iter()
+                                .filter(|e| !e.suggestion.is_empty())
+                                .map(|e| e.suggestion.clone())
+                                .collect(),
+                        }
+                    };
+                    let filtered = grammar_filter(
+                        &results, &ctx, prefix,
+                        &mut check_fn,
+                        5,
+                    );
+                    let gram_ms = t_gram.elapsed().as_millis();
+                    let total_ms = t_total.elapsed().as_millis();
+                    eprintln!("complete '...{}' bert={}ms gram={}ms total={}ms -> {}",
+                        prefix, bert_ms, gram_ms, total_ms,
+                        filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                    self.completions = filtered;
+                } else {
+                    self.completions = results.into_iter().take(5).collect();
+                }
+            } else {
+                let total_ms = t_total.elapsed().as_millis();
+                eprintln!("complete '...{}' bert={}ms total={}ms -> {}",
+                    prefix, bert_ms, total_ms,
+                    results.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                self.completions = results.into_iter().take(5).collect();
+            }
+        }
+    }
+}
+
+/// Split text into sentences for embedding.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        current.push(c);
+        if c == '.' || c == '!' || c == '?' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() && trimmed.len() > 5 {
+                sentences.push(trimmed);
+            }
+            current.clear();
+        }
+    }
+    // Don't embed the trailing incomplete sentence — only complete sentences
+    // ending with .!? produce stable embeddings across sync cycles.
+    sentences
 }
 
 fn get_screen_size() -> (f32, f32) {
@@ -114,6 +543,16 @@ fn get_screen_size() -> (f32, f32) {
     (1920.0, 1080.0)
 }
 
+fn rule_color(rule_name: &str) -> egui::Color32 {
+    match rule_name {
+        "saerskrivingsfeil" => egui::Color32::from_rgb(220, 50, 50),
+        name if name.starts_with("modalverb") => egui::Color32::from_rgb(200, 120, 0),
+        name if name.starts_with("dobbelbestemmelse") => egui::Color32::from_rgb(0, 140, 180),
+        name if name.contains("samsvar") => egui::Color32::from_rgb(140, 80, 200),
+        _ => egui::Color32::from_rgb(180, 130, 0),
+    }
+}
+
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll for new context
@@ -125,21 +564,35 @@ impl eframe::App for ContextApp {
                 }
                 self.context = new_ctx;
             }
+
+            // Sync document sentences for topic-aware completion
+            self.sync_embeddings();
+
+            let mid = is_mid_word(&self.context.word);
+            if mid {
+                // Mid-word: run completer
+                self.run_completion();
+            } else {
+                // Word boundary: run grammar check
+                self.completions.clear();
+                self.last_completed_prefix.clear();
+                self.run_grammar_check();
+            }
         }
 
-        // Follow cursor: move window + hide title bar
+        // Window sizing
+        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty();
+        let win_h = if has_content { 250.0 } else { 110.0 };
         const WIN_W: f32 = 420.0;
-        const WIN_H: f32 = 110.0;
 
-        // Always borderless — our header row is the drag handle
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
         if self.follow_cursor {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIN_W, WIN_H)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIN_W, win_h)));
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size();
-                let pos_y = if (y as f32 + WIN_H) > screen_h {
-                    y as f32 - WIN_H - 30.0
+                let pos_y = if (y as f32 + win_h) > screen_h {
+                    y as f32 - win_h - 30.0
                 } else {
                     y as f32
                 };
@@ -160,6 +613,11 @@ impl eframe::App for ContextApp {
             .inner_margin(8.0);
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
+            // Debug: always show something
+            ui.label(format!("word='{}' sentence='{}' compl={} err={}",
+                self.context.word, self.context.sentence,
+                self.completions.len(), self.grammar_errors.len()));
+
             // Top row: checkbox + drag area + bridge name
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.follow_cursor,
@@ -167,7 +625,6 @@ impl eframe::App for ContextApp {
                         .color(egui::Color32::from_rgb(60, 60, 55))
                 );
 
-                // Drag handle area (empty space between checkbox and bridge name)
                 let remaining = ui.available_rect_before_wrap();
                 let drag_resp = ui.allocate_rect(remaining, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
@@ -185,7 +642,7 @@ impl eframe::App for ContextApp {
 
             ui.separator();
 
-            // Word
+            // Current word
             if !self.context.word.is_empty() {
                 ui.label(
                     egui::RichText::new(&self.context.word)
@@ -205,9 +662,79 @@ impl eframe::App for ContextApp {
                 );
             }
 
+            // Word completions (mid-word mode)
+            if !self.completions.is_empty() {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new("Forslag:")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                );
+                for (i, comp) in self.completions.iter().enumerate() {
+                    let color = if i == 0 {
+                        egui::Color32::from_rgb(0, 120, 60)
+                    } else {
+                        egui::Color32::from_rgb(60, 60, 60)
+                    };
+                    let weight = if i == 0 {
+                        egui::RichText::new(format!("  {} ({:.1})", comp.word, comp.score))
+                            .strong().size(13.0).color(color)
+                    } else {
+                        egui::RichText::new(format!("  {} ({:.1})", comp.word, comp.score))
+                            .size(12.0).color(color)
+                    };
+                    ui.label(weight);
+                }
+            }
+
+            // Grammar errors (word boundary mode)
+            if !self.grammar_errors.is_empty() {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(2.0);
+
+                for error in &self.grammar_errors {
+                    let color = rule_color(&error.rule_name);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&error.word)
+                                .strong()
+                                .color(color),
+                        );
+                        ui.label(
+                            egui::RichText::new(&error.explanation)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(80, 80, 80)),
+                        );
+                    });
+                    if !error.suggestion.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            ui.label(
+                                egui::RichText::new(format!("→ {}", error.suggestion))
+                                    .size(11.0)
+                                    .strong()
+                                    .color(color),
+                            );
+                        });
+                    }
+                }
+            }
+
+            // Load errors
+            for err in &self.load_errors {
+                ui.label(
+                    egui::RichText::new(err)
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(200, 50, 50)),
+                );
+            }
+
             if self.context.word.is_empty() && self.context.sentence.is_empty() {
                 ui.label(
-                    egui::RichText::new("Flytt cursoren for aa se kontekst...")
+                    egui::RichText::new("Flytt cursoren for å se kontekst...")
                         .italics()
                         .size(11.0)
                         .color(egui::Color32::from_rgb(150, 150, 140)),
@@ -218,9 +745,34 @@ impl eframe::App for ContextApp {
 }
 
 fn main() -> eframe::Result {
+    // Set ORT_DYLIB_PATH if not already set
+    if std::env::var("ORT_DYLIB_PATH").is_err() {
+        // Try System32 first, then other known locations
+        let candidates = [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll"),
+            "C:\\Windows\\System32\\onnxruntime.dll",
+        ];
+        for path in &candidates {
+            if std::path::Path::new(path).exists() {
+                unsafe { std::env::set_var("ORT_DYLIB_PATH", path); }
+                eprintln!("ORT_DYLIB_PATH={}", path);
+                break;
+            }
+        }
+    }
+
+    let grammar_completion = std::env::args().any(|a| a == "--grammar-completion");
+    let use_swipl = std::env::args().any(|a| a == "--swipl");
+    if grammar_completion {
+        eprintln!("Grammar completion: ON");
+    }
+    if use_swipl {
+        eprintln!("SWI-Prolog engine: ON");
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 100.0])
+            .with_inner_size([420.0, 250.0])
             .with_always_on_top()
             .with_decorations(true)
             .with_title("NorskTale"),
@@ -230,6 +782,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "NorskTale",
         options,
-        Box::new(|_cc| Ok(Box::new(ContextApp::new()))),
+        Box::new(move |_cc| Ok(Box::new(ContextApp::new(grammar_completion, use_swipl)))),
     )
 }

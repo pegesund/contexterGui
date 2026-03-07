@@ -25,6 +25,10 @@ pub trait TextBridge {
 
     /// Replace the current word at the cursor with new text.
     fn replace_word(&self, new_text: &str) -> bool;
+
+    /// Read a larger text window for context (e.g. 5000 chars before cursor).
+    /// Used for sentence embeddings / topic extraction.
+    fn read_document_context(&self) -> Option<String> { None }
 }
 
 #[cfg(target_os = "windows")]

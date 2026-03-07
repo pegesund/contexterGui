@@ -193,8 +193,8 @@ fn find_wwg_recursive(parent: HWND) -> HWND {
 // --- WordComBridge ---
 
 pub struct WordComBridge {
-    app: Dispatch,
     word_hwnd: HWND,
+    wwg_hwnd: HWND,
 }
 
 impl WordComBridge {
@@ -208,33 +208,36 @@ impl WordComBridge {
             let wwg = find_wwg_recursive(hwnd);
             let target = if wwg != HWND::default() { wwg } else { hwnd };
 
+            // Test that we can get the Application dispatch
             let mut result: *mut std::ffi::c_void = std::ptr::null_mut();
             AccessibleObjectFromWindow(target, OBJID_NATIVEOM, &IDispatch::IID, &mut result)
                 .ok()?;
-
             let disp = IDispatch::from_raw(result);
             let window = Dispatch(disp);
-            let app = window.get_dispatch("Application").ok()?;
+            let _app = window.get_dispatch("Application").ok()?;
 
-            Some(WordComBridge { app, word_hwnd: hwnd })
+            Some(WordComBridge { word_hwnd: hwnd, wwg_hwnd: target })
         }
     }
 
-    fn read_word(&self) -> Result<String> {
-        let selection = self.app.get_dispatch("Selection")?;
-        let range = selection.get_dispatch("Range")?;
-        let dup_v = range.get("Duplicate")?;
-        let word_range = unsafe { extract_dispatch(&dup_v) }?;
-        word_range.call("Expand", &[make_i4(WD_WORD)])?;
-        word_range.get_string("Text")
+    fn get_app(&self) -> Option<Dispatch> {
+        unsafe {
+            let mut result: *mut std::ffi::c_void = std::ptr::null_mut();
+            AccessibleObjectFromWindow(self.wwg_hwnd, OBJID_NATIVEOM, &IDispatch::IID, &mut result)
+                .ok()?;
+            let disp = IDispatch::from_raw(result);
+            let window = Dispatch(disp);
+            window.get_dispatch("Application").ok()
+        }
     }
 
-    fn read_sentence(&self) -> Result<String> {
-        let selection = self.app.get_dispatch("Selection")?;
+    fn read_context_data(&self) -> Result<(String, String)> {
+        let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+        let selection = app.get_dispatch("Selection")?;
         let sel_range = selection.get_dispatch("Range")?;
         let cursor_pos = unsafe { extract_i32(&sel_range.get("Start")?) }?;
 
-        let doc = self.app.get_dispatch("ActiveDocument")?;
+        let doc = app.get_dispatch("ActiveDocument")?;
         let content = doc.get_dispatch("Content")?;
         let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
 
@@ -245,8 +248,10 @@ impl WordComBridge {
         let context_range = unsafe { extract_dispatch(&context_v) }?;
         let context_text = context_range.get_string("Text")?;
 
-        let offset = (cursor_pos - range_start) as usize;
-        Ok(find_sentence_at_offset(&context_text, offset))
+        let char_offset = (cursor_pos - range_start) as usize;
+        let sentence = find_sentence_at_offset(&context_text, char_offset);
+        let word = find_word_at_offset(&context_text, char_offset);
+        Ok((word, sentence))
     }
 
     fn caret_pos(&self) -> Option<(i32, i32)> {
@@ -289,12 +294,16 @@ impl TextBridge for WordComBridge {
     }
 
     fn is_available(&self) -> bool {
-        self.is_foreground()
+        // COM calls work even when Word isn't foreground,
+        // so always return true if we have a connection
+        true
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        let word = self.read_word().ok()?;
-        let sentence = self.read_sentence().ok()?;
+        let (word, sentence) = match self.read_context_data() {
+            Ok(data) => data,
+            Err(_) => (String::new(), String::new()),
+        };
         let caret_pos = self.caret_pos();
         Some(CursorContext {
             word: word.trim().to_string(),
@@ -303,9 +312,23 @@ impl TextBridge for WordComBridge {
         })
     }
 
+    fn read_document_context(&self) -> Option<String> {
+        let app = self.get_app()?;
+        let selection = app.get_dispatch("Selection").ok()?;
+        let sel_range = selection.get_dispatch("Range").ok()?;
+        let cursor_pos = unsafe { extract_i32(&sel_range.get("Start").ok()?).ok()? };
+
+        let range_start = (cursor_pos - 5000).max(0);
+        let doc = app.get_dispatch("ActiveDocument").ok()?;
+        let context_v = doc.call("Range", &[make_i4(range_start), make_i4(cursor_pos)]).ok()?;
+        let context_range = unsafe { extract_dispatch(&context_v).ok()? };
+        context_range.get_string("Text").ok()
+    }
+
     fn replace_word(&self, new_text: &str) -> bool {
         (|| -> Result<()> {
-            let selection = self.app.get_dispatch("Selection")?;
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let selection = app.get_dispatch("Selection")?;
             let range = selection.get_dispatch("Range")?;
             let dup_v = range.get("Duplicate")?;
             let word_range = unsafe { extract_dispatch(&dup_v) }?;
@@ -318,6 +341,36 @@ impl TextBridge for WordComBridge {
 }
 
 // --- Sentence detection ---
+
+fn find_word_at_offset(text: &str, char_offset: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let pos = char_offset.min(chars.len());
+
+    // Cursor is BETWEEN characters. Check the char just before the cursor.
+    // If it's alphanumeric, we're at the end of a word (typing).
+    // If it's space/punct, we're at a word boundary.
+    if pos == 0 {
+        return String::new();
+    }
+
+    let prev = chars[pos - 1];
+    if !prev.is_alphanumeric() {
+        // At a word boundary (just typed space or punct)
+        return String::new();
+    }
+
+    // Scan backwards from pos-1 to find word start
+    let mut start = pos - 1;
+    while start > 0 && chars[start - 1].is_alphanumeric() {
+        start -= 1;
+    }
+
+    // The word ends at pos (cursor position) — don't scan forward
+    chars[start..pos].iter().collect::<String>().trim().to_string()
+}
 
 fn find_sentence_at_offset(text: &str, char_offset: usize) -> String {
     let byte_offset = text.char_indices()
