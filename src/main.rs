@@ -832,16 +832,26 @@ impl ContextApp {
                                     }
 
                                     if !mtag_set.is_empty() {
-                                        // Phase 1: first-token filter (free from cache)
+                                        // Phase 1: first-token score + frequency boost
                                         let mut all_cands: Vec<(String, Vec<u32>, f32)> = mtag_set.into_iter()
                                             .filter_map(|w| {
                                                 let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
                                                 let ids: Vec<u32> = enc.get_ids().to_vec();
                                                 if ids.is_empty() { return None; }
-                                                let first_score = logits[ids[0] as usize];
-                                                Some((w, ids, first_score))
+                                                let mut score = logits[ids[0] as usize];
+                                                // Frequency boost: common words get +2, unknown get -2
+                                                if let Some(wf) = wf_ref {
+                                                    if wf.contains_key(&w) {
+                                                        score += 2.0;
+                                                    } else {
+                                                        score -= 2.0;
+                                                    }
+                                                }
+                                                Some((w, ids, score))
                                             })
                                             .collect();
+
+
                                         all_cands.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
                                         all_cands.truncate(10);
 
