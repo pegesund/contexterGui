@@ -192,6 +192,8 @@ struct ContextApp {
     cached_forward: Option<(String, Vec<f32>)>,
     /// Cache: (masked_sentence, right_column) — right column only depends on logits, not prefix
     cached_right_column: Option<(String, Vec<(String, f32)>)>,
+    /// Cache: (masked_sentence, scored_words) — mtag supplement BERT-ranked results
+    cached_mtag_supplement: Option<(String, Vec<(String, f32)>)>,
     // Embedding sync
     last_embedding_sync: Instant,
     embedding_sync_interval: Duration,
@@ -309,6 +311,7 @@ impl ContextApp {
             last_completed_prefix: String::new(),
             cached_forward: None,
             cached_right_column: None,
+            cached_mtag_supplement: None,
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
@@ -436,6 +439,7 @@ impl ContextApp {
                         self.last_completed_prefix.clear();
                         self.cached_forward = None;
                         self.cached_right_column = None;
+                        self.cached_mtag_supplement = None;
                     }
                     Err(e) => eprintln!("Embedding sync error: {}", e),
                     _ => {}
@@ -712,11 +716,9 @@ impl ContextApp {
 
                         // Adaptive max_steps: longer prefixes need fewer BPE extensions
                         // since BPE tokens already cover most of the word.
-                        // 1 char → 1, 2 chars → 1, 3+ → 0
-                        let max_steps = match prefix_lower.len() {
-                            0..=2 => 1,
-                            _ => 0,
-                        };
+                        // 1-3 chars → 1 step (needed for compounds like for→forut→forutsi)
+                        // 4+ → 0 steps
+                        let max_steps = if prefix_lower.len() <= 3 { 1 } else { 0 };
                         for _step in 0..max_steps {
                             let best_score = candidates.iter()
                                 .filter(|c| !c.done)
@@ -784,6 +786,134 @@ impl ContextApp {
                         eprintln!("BPE candidates: [{}]",
                             candidates.iter().take(10).map(|c| format!("{}({:.1},done={})", c.word, c.score, c.done))
                             .collect::<Vec<_>>().join(", "));
+
+                        // Supplement BPE with mtag prefix search + BERT batch scoring.
+                        // Cached per masked_sentence — subsequent keystrokes just filter by prefix.
+                        if !prefix.is_empty() && prefix_lower.len() >= 3 {
+                            let same_masked = self.cached_mtag_supplement.as_ref()
+                                .map_or(false, |(m, _)| m == masked);
+
+                            // Collect new words not already in cache
+                            let already_cached: std::collections::HashSet<String> = if same_masked {
+                                self.cached_mtag_supplement.as_ref()
+                                    .map_or_else(std::collections::HashSet::new, |(_, v)| v.iter().map(|(w, _)| w.clone()).collect())
+                            } else {
+                                std::collections::HashSet::new()
+                            };
+
+                            {
+                                if let Some(checker) = &self.checker {
+                                    let mut mtag_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                    // Search from extended BPE words and sub-prefixes
+                                    for c in &candidates {
+                                        let key = c.word.to_lowercase();
+                                        if key.len() > prefix_lower.len() {
+                                            for w in checker.prefix_lookup(&key, 10) {
+                                                if !already_cached.contains(&w) {
+                                                    mtag_set.insert(w);
+                                                }
+                                            }
+                                            let chars: Vec<char> = key.chars().collect();
+                                            let plen = prefix_lower.chars().count();
+                                            for end in (plen + 1)..chars.len() {
+                                                let sub: String = chars[..end].iter().collect();
+                                                for w in checker.prefix_lookup(&sub, 5) {
+                                                    if !already_cached.contains(&w) {
+                                                        mtag_set.insert(w);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    for w in checker.prefix_lookup(&prefix_lower, 10) {
+                                        if !already_cached.contains(&w) {
+                                            mtag_set.insert(w);
+                                        }
+                                    }
+
+                                    if !mtag_set.is_empty() {
+                                        // Phase 1: first-token filter (free from cache)
+                                        let mut all_cands: Vec<(String, Vec<u32>, f32)> = mtag_set.into_iter()
+                                            .filter_map(|w| {
+                                                let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
+                                                let ids: Vec<u32> = enc.get_ids().to_vec();
+                                                if ids.is_empty() { return None; }
+                                                let first_score = logits[ids[0] as usize];
+                                                Some((w, ids, first_score))
+                                            })
+                                            .collect();
+                                        all_cands.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                                        all_cands.truncate(20);
+
+                                        let cands: Vec<(String, Vec<u32>)> = all_cands.iter()
+                                            .map(|(w, ids, _)| (w.clone(), ids.clone())).collect();
+                                        let mut scores: Vec<f32> = all_cands.iter().map(|(_, _, s)| *s).collect();
+
+                                        // Phase 2: multi-token batch scoring with dedup
+                                        let max_tokens = cands.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
+                                        for t in 1..max_tokens {
+                                            let to_score: Vec<usize> = cands.iter().enumerate()
+                                                .filter(|(_, (_, ids))| ids.len() > t)
+                                                .map(|(i, _)| i).collect();
+                                            if to_score.is_empty() { break; }
+
+                                            let mut unique_prefixes: Vec<Vec<u32>> = Vec::new();
+                                            let mut prefix_map: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+                                            let mut cand_to_prefix: Vec<usize> = Vec::new();
+                                            for &i in &to_score {
+                                                let tp = cands[i].1[..t].to_vec();
+                                                let pidx = *prefix_map.entry(tp.clone()).or_insert_with(|| {
+                                                    let idx = unique_prefixes.len();
+                                                    unique_prefixes.push(tp);
+                                                    idx
+                                                });
+                                                cand_to_prefix.push(pidx);
+                                            }
+
+                                            let batch_texts: Vec<String> = unique_prefixes.iter()
+                                                .map(|ids| {
+                                                    let partial = model.tokenizer.decode(ids, false).unwrap_or_default();
+                                                    format!("{} {}<mask> {}", ctx_before, partial.trim(), ctx_after)
+                                                }).collect();
+
+                                            if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
+                                                for (k, &i) in to_score.iter().enumerate() {
+                                                    let pidx = cand_to_prefix[k];
+                                                    scores[i] += batch_logits[pidx][cands[i].1[t] as usize];
+                                                }
+                                            }
+                                        }
+
+                                        let mtag_scored: Vec<(String, f32)> = cands.iter().enumerate()
+                                            .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
+                                            .collect();
+                                        // Accumulate into cache
+                                        if same_masked {
+                                            if let Some((_, ref mut existing)) = self.cached_mtag_supplement {
+                                                eprintln!("mtag supplement: +{} new (total {})", mtag_scored.len(), existing.len() + mtag_scored.len());
+                                                existing.extend(mtag_scored);
+                                            }
+                                        } else {
+                                            eprintln!("mtag supplement (BERT-ranked, {} cands): computed and cached", mtag_scored.len());
+                                            self.cached_mtag_supplement = Some((masked.clone(), mtag_scored));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Merge cached results filtered by current prefix
+                            if let Some((_, ref scored)) = self.cached_mtag_supplement {
+                                let filtered: Vec<(String, f32)> = scored.iter()
+                                    .filter(|(w, _)| w.starts_with(&prefix_lower) && !seen_words.contains(w.as_str()))
+                                    .take(10)
+                                    .cloned()
+                                    .collect();
+                                for (w, score) in filtered {
+                                    seen_words.insert(w.clone());
+                                    left_scored.push((w, score));
+                                }
+                            }
+                        }
 
                         left_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                         let left: Vec<Completion> = left_scored.iter()
