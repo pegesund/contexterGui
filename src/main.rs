@@ -267,6 +267,8 @@ struct ContextApp {
     last_error_checked_sentence: String,
     /// Deferred find-and-replace (word, replacement) — executed next frame
     pending_fix: Option<(String, String)>,
+    /// Suggestion window: (misspelled_word, candidates)
+    suggestion_window: Option<(String, Vec<(String, f32)>)>,
 }
 
 impl ContextApp {
@@ -381,6 +383,7 @@ impl ContextApp {
             last_spell_checked_word: String::new(),
             last_error_checked_sentence: String::new(),
             pending_fix: None,
+            suggestion_window: None,
         }
     }
 
@@ -512,12 +515,7 @@ impl ContextApp {
 
         // Word not found — get fuzzy suggestions
         let fuzzy = checker.fuzzy_lookup(&clean, 2);
-        if fuzzy.is_empty() {
-            // No suggestions found — might be a name or very unusual word, skip
-            return;
-        }
 
-        // Take top candidates by Levenshtein distance, then sort by wordfreq
         let mut candidates: Vec<(String, u32)> = fuzzy.into_iter()
             .filter(|(w, _)| w != &clean) // exclude exact match
             .take(10)
@@ -555,6 +553,149 @@ impl ContextApp {
         self.writing_errors.push(error);
         eprintln!("Spelling: '{}' not found, suggesting '{}'",
             clean, self.writing_errors.last().unwrap().suggestion);
+    }
+
+    /// Find suggestion candidates using BERT semantic predictions + trigram ranking.
+    /// Uses complete_word with empty prefix to get BPE-extended candidates (e.g. "håndball"),
+    /// then re-ranks by trigram similarity to the misspelled word.
+    fn trigram_suggestions(&mut self, word: &str, sentence_ctx: &str) -> Vec<(String, f32)> {
+        let word_lower = word.to_lowercase();
+        let word_trigrams = Self::trigrams(&word_lower);
+        let word_first = word_lower.chars().next().unwrap_or(' ');
+
+        // Step 1: Get semantic candidates via complete_word (handles BPE extension)
+        let mut semantic_words: Vec<(String, f32)> = Vec::new();
+
+        // Build masked context: everything before the misspelled word + <mask>
+        let sentence_lower = sentence_ctx.to_lowercase();
+        let masked_context = if let Some(pos) = sentence_lower.find(&word_lower) {
+            let before = &sentence_ctx[..pos];
+            format!("{}<mask>", before.trim_end())
+        } else {
+            // Fallback: use full sentence as context
+            format!("{} <mask>", sentence_ctx)
+        };
+        eprintln!("Forslag: masked context = '{}'", masked_context);
+
+        if let (Some(model), Some(pi), Some(bl)) = (&mut self.model, &self.prefix_index, &self.baselines) {
+            // Use empty prefix to get all BERT predictions with BPE extension
+            if let Ok(completions) = complete_word(
+                model,
+                &masked_context,
+                "",  // empty prefix — get all candidates
+                pi,
+                Some(bl),
+                self.wordfreq.as_ref(),
+                None, // no dict filter on prefix — we want all words
+                None,
+                None, // no embedding re-ranking
+                0.0, 0.0,
+                50,  // get 50 candidates
+                10,  // max BPE steps
+            ) {
+                for c in &completions {
+                    let w = c.word.to_lowercase();
+                    if w.len() < 2 || w == word_lower { continue; }
+                    semantic_words.push((w, c.score));
+                }
+                eprintln!("Forslag: got {} BERT candidates", semantic_words.len());
+            }
+        }
+
+        // Build BERT score lookup for semantic tiebreaking
+        let bert_scores: HashMap<String, f32> = semantic_words.iter()
+            .cloned()
+            .collect();
+
+        // Step 2: Score semantic candidates by trigram similarity to misspelled word
+        // Only keep candidates with at least 1 common trigram (semantic + orthographic match)
+        let mut scored: Vec<(String, f32)> = semantic_words.into_iter()
+            .filter_map(|(w, bert_score)| {
+                let w_trigrams = Self::trigrams(&w);
+                let common = word_trigrams.iter()
+                    .filter(|t| w_trigrams.contains(t))
+                    .count();
+                if common == 0 { return None; } // no orthographic overlap → skip
+                let max_trigrams = word_trigrams.len().max(w_trigrams.len()).max(1);
+                let trigram_score = common as f32 / max_trigrams as f32;
+                // Combine: trigram similarity (0-1) * 2 + first letter bonus + BERT context bonus
+                let mut score = trigram_score * 2.0;
+                if w.chars().next().unwrap_or(' ') == word_first {
+                    score += 0.5;
+                }
+                // BERT bonus: contextually relevant words get a boost
+                score += (bert_score / 50.0).min(0.5);
+                Some((w, score))
+            })
+            .collect();
+
+        // Step 3: Also add fuzzy Levenshtein matches (distance 4) that share trigrams
+        // Use BERT score as semantic tiebreaker for same-distance matches
+        if let Some(checker) = &self.checker {
+            let fuzzy = checker.fuzzy_lookup(&word_lower, 4);
+            eprintln!("Forslag: fuzzy(4) returned {} matches", fuzzy.len());
+            for (w, dist) in fuzzy {
+                if w == word_lower { continue; }
+                let w_trigrams = Self::trigrams(&w);
+                let common = word_trigrams.iter()
+                    .filter(|t| w_trigrams.contains(t))
+                    .count();
+                if common == 0 { continue; }
+                if scored.iter().any(|(s, _)| s == &w) { continue; }
+                let mut score = 1.0 - (dist as f32 * 0.15);
+                if w.chars().next().unwrap_or(' ') == word_first {
+                    score += 0.3;
+                }
+                // Semantic tiebreaker: if BERT also predicted this word, boost it
+                if let Some(&bs) = bert_scores.get(&w) {
+                    score += (bs / 50.0).min(0.5);
+                }
+                scored.push((w, score));
+            }
+        }
+
+        // Step 4: Wordfreq trigram search — finds loanwords like "volleyball"
+        // that may be missing from mtag but exist in common word lists
+        if let Some(wf) = &self.wordfreq {
+            for (w, _freq) in wf.iter() {
+                let wl = w.to_lowercase();
+                if wl == word_lower { continue; }
+                if scored.iter().any(|(s, _)| *s == wl) { continue; }
+                // Quick filter: must share first letter
+                if wl.chars().next().unwrap_or(' ') != word_first { continue; }
+                let w_trigrams = Self::trigrams(&wl);
+                let common = word_trigrams.iter()
+                    .filter(|t| w_trigrams.contains(t))
+                    .count();
+                if common < 2 { continue; }
+                let max_trigrams = word_trigrams.len().max(w_trigrams.len()).max(1);
+                let trigram_score = common as f32 / max_trigrams as f32;
+                let mut score = trigram_score * 2.0;
+                score += 0.3; // first letter always matches (filtered above)
+                if let Some(&bs) = bert_scores.get(&wl) {
+                    score += (bs / 50.0).min(0.5);
+                }
+                scored.push((wl, score));
+            }
+        }
+
+        eprintln!("Forslag: top results for '{}': {:?}", word_lower,
+            scored.iter().take(10).collect::<Vec<_>>());
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.dedup_by(|a, b| a.0 == b.0);
+        scored.truncate(10);
+        scored
+    }
+
+    fn trigrams(word: &str) -> Vec<String> {
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() < 3 {
+            return vec![word.to_string()];
+        }
+        (0..chars.len() - 2)
+            .map(|i| chars[i..i+3].iter().collect())
+            .collect()
     }
 
     /// Remove errors that are no longer present in the current document text.
@@ -2058,6 +2199,13 @@ impl eframe::App for ContextApp {
                                         action = Some((idx, "fix"));
                                     }
                                 }
+                                if matches!(error.category, ErrorCategory::Spelling) {
+                                    if ui.button(
+                                        egui::RichText::new("Forslag").size(11.0)
+                                    ).clicked() {
+                                        action = Some((idx, "suggest"));
+                                    }
+                                }
                                 if ui.button(
                                     egui::RichText::new("Ignorer").size(11.0)
                                 ).clicked() {
@@ -2078,6 +2226,12 @@ impl eframe::App for ContextApp {
                                 self.pending_fix = Some((word, suggestion));
                                 self.writing_errors[idx].ignored = true;
                             }
+                            "suggest" => {
+                                let word = self.writing_errors[idx].word.clone();
+                                let sentence_ctx = self.writing_errors[idx].sentence_context.clone();
+                                let suggestions = self.trigram_suggestions(&word, &sentence_ctx);
+                                self.suggestion_window = Some((word, suggestions));
+                            }
                             "ignore" => {
                                 let error = &self.writing_errors[idx];
                                 if matches!(error.category, ErrorCategory::Spelling) {
@@ -2088,6 +2242,56 @@ impl eframe::App for ContextApp {
                             _ => {}
                         }
                     }
+                }
+            }
+
+            // === Suggestion window ===
+            if self.suggestion_window.is_some() {
+                let mut selected: Option<String> = None;
+                let mut open = true;
+                let (word, candidates) = self.suggestion_window.as_ref().unwrap();
+                let word_clone = word.clone();
+                let candidates_clone: Vec<(String, f32)> = candidates.clone();
+
+                egui::Window::new(format!("Forslag for «{}»", word_clone))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(250.0)
+                    .show(ctx, |ui| {
+                        if candidates_clone.is_empty() {
+                            ui.label("Ingen forslag funnet.");
+                        } else {
+                            for (candidate, _score) in candidates_clone.iter().take(10) {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("🔊").clicked() {
+                                        tts::speak_word(candidate);
+                                    }
+                                    if ui.button(
+                                        egui::RichText::new(candidate).size(12.0).strong()
+                                    ).clicked() {
+                                        selected = Some(candidate.clone());
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+                if let Some(replacement) = selected {
+                    // Replace in document and mark error as fixed
+                    self.pending_fix = Some((word_clone.clone(), replacement.clone()));
+                    // Update the error's suggestion and mark ignored
+                    for e in &mut self.writing_errors {
+                        if e.word == word_clone && !e.ignored {
+                            e.suggestion = replacement;
+                            e.ignored = true;
+                            break;
+                        }
+                    }
+                    self.suggestion_window = None;
+                }
+                if !open {
+                    self.suggestion_window = None;
                 }
             }
 
