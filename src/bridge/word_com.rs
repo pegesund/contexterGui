@@ -458,6 +458,13 @@ impl TextBridge for WordComBridge {
         context_range.get_string("Text").ok()
     }
 
+    fn read_full_document(&self) -> Option<String> {
+        let app = self.get_app()?;
+        let doc = app.get_dispatch("ActiveDocument").ok()?;
+        let content = doc.get_dispatch("Content").ok()?;
+        content.get_string("Text").ok()
+    }
+
     fn replace_word(&self, new_text: &str) -> bool {
         (|| -> Result<()> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;

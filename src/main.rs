@@ -197,6 +197,15 @@ impl BridgeManager {
         }
         None
     }
+
+    fn read_full_document(&self) -> Option<String> {
+        for bridge in &self.bridges {
+            if bridge.is_available() {
+                return bridge.read_full_document();
+            }
+        }
+        None
+    }
 }
 
 // --- Detect if cursor is mid-word or at a word boundary ---
@@ -272,8 +281,10 @@ struct ContextApp {
     ignored_words: std::collections::HashSet<String>,
     /// Last word that was spell-checked (to avoid re-checking)
     last_spell_checked_word: String,
-    /// Sentences already grammar-checked (by content hash) — avoids re-checking
-    checked_sentences: std::collections::HashSet<u64>,
+    /// Previous document text — used to detect changes and skip re-checking unchanged sentences
+    last_doc_text: String,
+    /// Sentences from last doc text (for diffing against current)
+    last_doc_sentences: Vec<String>,
     /// Deferred find-and-replace (word, replacement, optional sentence context) — executed next frame
     pending_fix: Option<(String, String, String)>,
     /// Suggestion window: (misspelled_word, candidates)
@@ -390,7 +401,8 @@ impl ContextApp {
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
-            checked_sentences: std::collections::HashSet::new(),
+            last_doc_text: String::new(),
+            last_doc_sentences: Vec::new(),
             pending_fix: None,
             suggestion_window: None,
         }
@@ -746,12 +758,30 @@ impl ContextApp {
             }
         }
 
-        // 2. Try removing each error word
-        for e in errors {
-            let removed = remove_word_from_sentence(sentence, &e.word);
-            if removed != sentence {
-                let expl = format!("Fjernet «{}».", e.word);
-                candidates.push((removed, expl));
+        // 2. Try removing each error word — only if no substitution suggestion exists
+        let has_substitution = errors.iter().any(|e| !e.suggestion.is_empty());
+        if !has_substitution {
+            for e in errors {
+                // Try removing the error word itself
+                let removed = remove_word_from_sentence(sentence, &e.word);
+                if removed != sentence {
+                    candidates.push((removed, format!("Fjernet «{}».", e.word)));
+                }
+                // For "å + noun" errors: try removing "å" before the word instead
+                let words: Vec<&str> = sentence.split_whitespace().collect();
+                if let Some(pos) = words.iter().position(|w| {
+                    w.trim_matches(|c: char| c.is_ascii_punctuation()).eq_ignore_ascii_case(&e.word)
+                }) {
+                    if pos > 0 {
+                        let prev = words[pos - 1].trim_matches(|c: char| c.is_ascii_punctuation());
+                        if prev == "å" {
+                            let removed_aa = remove_word_from_sentence(sentence, "å");
+                            if removed_aa != sentence {
+                                candidates.push((removed_aa, format!("Fjernet «å» foran «{}».", e.word)));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -768,6 +798,14 @@ impl ContextApp {
             if all_fixed != sentence {
                 candidates.push((all_fixed, all_expl.join(", ")));
             }
+        }
+
+        // Deduplicate by corrected sentence
+        candidates.dedup_by(|a, b| a.0 == b.0);
+        // Also remove any remaining duplicates (not just adjacent)
+        {
+            let mut seen = std::collections::HashSet::new();
+            candidates.retain(|(c, _)| seen.insert(c.clone()));
         }
 
         if candidates.is_empty() {
@@ -832,16 +870,14 @@ impl ContextApp {
     /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
         // Get full document text to check all sentences
-        let doc_text = self.manager.read_document_context()
+        let doc_text = self.manager.read_full_document()
             .unwrap_or_default().to_lowercase();
-        let mut resolved_contexts: Vec<String> = Vec::new();
         self.writing_errors.retain(|e| {
             if e.ignored {
                 return false;
             }
             let still_present = match e.category {
                 ErrorCategory::Grammar => {
-                    // For sentence-level corrections, check if the original sentence is still in the doc
                     doc_text.contains(&e.sentence_context.to_lowercase())
                 }
                 ErrorCategory::Spelling => {
@@ -852,26 +888,16 @@ impl ContextApp {
             };
             if !still_present {
                 eprintln!("Error resolved: '{}' no longer in document", e.word);
-                resolved_contexts.push(e.sentence_context.clone());
             }
             still_present
         });
-        // Only clear hashes for resolved sentences so they get re-checked if edited
-        if !resolved_contexts.is_empty() {
-            use std::hash::{Hash, Hasher};
-            for ctx in &resolved_contexts {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                ctx.trim().hash(&mut hasher);
-                self.checked_sentences.remove(&hasher.finish());
-            }
-        }
     }
 
     /// Update the error list with grammar errors from the current sentence.
     /// Called when a sentence boundary is detected.
     fn update_grammar_errors(&mut self) {
         // Read document text and check all complete sentences
-        let doc_text = match self.manager.read_document_context() {
+        let doc_text = match self.manager.read_full_document() {
             Some(t) => t,
             None => return,
         };
@@ -881,21 +907,28 @@ impl ContextApp {
             return;
         }
 
-        use std::hash::{Hash, Hasher};
+        // Build set of current trimmed sentences
+        let current: Vec<String> = sentences.iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-        for sentence in &sentences {
-            let trimmed = sentence.trim();
-            if trimmed.is_empty() { continue; }
+        // Find sentences that are NEW (not in previous doc)
+        let prev_set: std::collections::HashSet<&str> = self.last_doc_sentences.iter()
+            .map(|s| s.as_str()).collect();
+        let new_sentences: Vec<String> = current.iter()
+            .filter(|s| !prev_set.contains(s.as_str()))
+            .cloned()
+            .collect();
 
-            // Hash the sentence to skip already-checked ones
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            trimmed.hash(&mut hasher);
-            let hash = hasher.finish();
+        // Update stored sentences for next poll
+        self.last_doc_sentences = current;
 
-            if !self.checked_sentences.insert(hash) {
-                continue; // already checked this exact sentence
-            }
+        if new_sentences.is_empty() {
+            return;
+        }
 
+        for trimmed in &new_sentences {
             eprintln!("Grammar check: '{}'", trimmed);
 
             let checker = match &mut self.checker {
@@ -909,7 +942,7 @@ impl ContextApp {
             // Don't add duplicate grammar errors for this sentence
             if self.writing_errors.iter().any(|e| {
                 matches!(e.category, ErrorCategory::Grammar)
-                    && e.sentence_context == trimmed
+                    && e.sentence_context == *trimmed
                     && !e.ignored
             }) {
                 continue;
@@ -919,7 +952,7 @@ impl ContextApp {
                 eprintln!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
             }
 
-            // Generate candidate corrections and score with BERT
+            // Score candidates with BERT (only runs when Prolog found errors)
             let corrections = self.best_sentence_corrections(trimmed, &errors);
 
             for (i, (corrected, explanation, score)) in corrections.iter().enumerate() {
@@ -1760,6 +1793,9 @@ impl eframe::App for ContextApp {
             // Sync document sentences for topic-aware completion
             self.sync_embeddings();
 
+            // Always run grammar check (not just at word boundaries)
+            self.update_grammar_errors();
+
             let mid = is_mid_word(&self.context.word);
             if mid {
                 // Mid-word: mark prefix change for debouncing
@@ -1789,8 +1825,7 @@ impl eframe::App for ContextApp {
                         self.check_spelling(w);
                     }
                 }
-                // Sentence boundary: update grammar error list
-                self.update_grammar_errors();
+                // Sentence boundary: run grammar check
                 self.run_grammar_check();
             } else {
                 // No word, no context: clear and run grammar
@@ -1805,7 +1840,6 @@ impl eframe::App for ContextApp {
                         self.check_spelling(w);
                     }
                 }
-                self.update_grammar_errors();
                 self.run_grammar_check();
             }
 

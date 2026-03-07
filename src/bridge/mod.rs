@@ -38,6 +38,9 @@ pub trait TextBridge {
     /// Read a larger text window for context (e.g. 5000 chars before cursor).
     /// Used for sentence embeddings / topic extraction.
     fn read_document_context(&self) -> Option<String> { None }
+
+    /// Read the full document text (for grammar checking all sentences).
+    fn read_full_document(&self) -> Option<String> { None }
 }
 
 #[cfg(target_os = "windows")]
