@@ -527,7 +527,8 @@ impl ContextApp {
                                         .map(|(_, ids)| logits[ids[0] as usize])
                                         .collect();
 
-                                    // Batched extension: one forward pass per token position
+                                    // Batched extension with dedup: candidates sharing the same
+                                    // token prefix produce identical masked texts — run once, reuse logits
                                     let max_tokens = candidates_with_tokens.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
                                     for t in 1..max_tokens {
                                         let to_score: Vec<usize> = candidates_with_tokens.iter().enumerate()
@@ -536,18 +537,36 @@ impl ContextApp {
                                             .collect();
                                         if to_score.is_empty() { break; }
 
-                                        let batch_texts: Vec<String> = to_score.iter()
-                                            .map(|&i| {
-                                                let partial = model.tokenizer
-                                                    .decode(&candidates_with_tokens[i].1[..t], false)
-                                                    .unwrap_or_default();
+                                        // Group by token prefix (ids[..t]) to deduplicate
+                                        let mut unique_prefixes: Vec<Vec<u32>> = Vec::new();
+                                        let mut prefix_to_idx: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+                                        let mut candidate_to_prefix: Vec<usize> = Vec::new(); // maps to_score index → unique prefix index
+
+                                        for &i in &to_score {
+                                            let token_prefix = candidates_with_tokens[i].1[..t].to_vec();
+                                            let pidx = if let Some(&existing) = prefix_to_idx.get(&token_prefix) {
+                                                existing
+                                            } else {
+                                                let idx = unique_prefixes.len();
+                                                prefix_to_idx.insert(token_prefix.clone(), idx);
+                                                unique_prefixes.push(token_prefix);
+                                                idx
+                                            };
+                                            candidate_to_prefix.push(pidx);
+                                        }
+
+                                        // One forward pass per unique prefix
+                                        let batch_texts: Vec<String> = unique_prefixes.iter()
+                                            .map(|ids| {
+                                                let partial = model.tokenizer.decode(ids, false).unwrap_or_default();
                                                 format!("{} {}<mask> {}", ctx_before_m, partial.trim(), ctx_after_m)
                                             })
                                             .collect();
 
                                         if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
                                             for (k, &i) in to_score.iter().enumerate() {
-                                                scores[i] += batch_logits[k][candidates_with_tokens[i].1[t] as usize];
+                                                let pidx = candidate_to_prefix[k];
+                                                scores[i] += batch_logits[pidx][candidates_with_tokens[i].1[t] as usize];
                                             }
                                         }
                                     }
