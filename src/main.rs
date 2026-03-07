@@ -478,8 +478,9 @@ impl ContextApp {
                             .filter(|(w, _)| !w.is_empty() && w.len() > 1)
                             .collect();
                         all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        let left_words: std::collections::HashSet<&str> = left.iter().map(|c| c.word.as_str()).collect();
                         let right: Vec<Completion> = all_scored.iter()
-                            .filter(|(w, _)| is_valid(w))
+                            .filter(|(w, _)| is_valid(w) && !left_words.contains(w.as_str()))
                             .take(10)
                             .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
                             .collect();
@@ -1082,6 +1083,14 @@ impl eframe::App for ContextApp {
                             .size(10.0)
                             .color(egui::Color32::from_rgb(80, 80, 80)),
                     );
+                }
+                ui.add_space(6.0);
+                if ui.small_button("Kopier til utklippstavle").clicked() {
+                    let mut text = format!("Ord: {}\nSetning: {}", self.context.word, self.context.sentence);
+                    if let Some(masked) = &self.context.masked_sentence {
+                        text.push_str(&format!("\nMaskert: {}", masked));
+                    }
+                    ctx.copy_text(text);
                 }
             }
         });
