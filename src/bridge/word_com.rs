@@ -563,6 +563,56 @@ impl TextBridge for WordComBridge {
         })()
         .unwrap_or(false)
     }
+
+    /// Replace a word only within the context of a specific sentence.
+    /// First finds the sentence in the document, then finds the word within that sentence range.
+    fn find_and_replace_in_context(&self, find_text: &str, replace_text: &str, sentence_context: &str) -> bool {
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let content = doc.get_dispatch("Content")?;
+            let doc_text = content.get_string("Text")?;
+
+            let doc_lower = doc_text.to_lowercase();
+            let ctx_lower = sentence_context.to_lowercase();
+
+            // Find the sentence in the document
+            let ctx_start = match doc_lower.find(&ctx_lower) {
+                Some(pos) => pos,
+                None => {
+                    eprintln!("Find&Replace: sentence context not found in document");
+                    return Ok(false);
+                }
+            };
+            let ctx_end = ctx_start + sentence_context.len();
+
+            // Find the word within the sentence range
+            let find_lower = find_text.to_lowercase();
+            let chars: Vec<char> = doc_text.chars().collect();
+            let find_chars: Vec<char> = find_lower.chars().collect();
+            let find_len = find_chars.len();
+
+            // Convert byte offsets to char offsets for the sentence range
+            let ctx_char_start = doc_text[..ctx_start].chars().count();
+            let ctx_char_end = ctx_char_start + doc_text[ctx_start..ctx_end].chars().count();
+
+            for i in ctx_char_start..ctx_char_end.saturating_sub(find_len - 1) {
+                if i > 0 && chars[i - 1].is_alphanumeric() { continue; }
+                let end = i + find_len;
+                if end < chars.len() && chars[end].is_alphanumeric() { continue; }
+                let candidate: String = chars[i..end].iter().collect();
+                if candidate.to_lowercase() != find_lower { continue; }
+                let range_v = doc.call("Range", &[make_i4(i as i32), make_i4(end as i32)])?;
+                let range = unsafe { extract_dispatch(&range_v) }?;
+                range.put("Text", make_bstr(replace_text))?;
+                eprintln!("Find&Replace: '{}' → '{}' at position {} (in context)", find_text, replace_text, i);
+                return Ok(true);
+            }
+            eprintln!("Find&Replace: '{}' not found in sentence context", find_text);
+            Ok(false)
+        })()
+        .unwrap_or(false)
+    }
 }
 
 // --- Sentence detection ---

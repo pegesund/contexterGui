@@ -180,6 +180,15 @@ impl BridgeManager {
         false
     }
 
+    fn find_and_replace_in_context(&self, find: &str, replace: &str, context: &str) -> bool {
+        for bridge in &self.bridges {
+            if bridge.is_available() {
+                return bridge.find_and_replace_in_context(find, replace, context);
+            }
+        }
+        false
+    }
+
     fn read_document_context(&self) -> Option<String> {
         for bridge in &self.bridges {
             if bridge.is_available() {
@@ -263,10 +272,10 @@ struct ContextApp {
     ignored_words: std::collections::HashSet<String>,
     /// Last word that was spell-checked (to avoid re-checking)
     last_spell_checked_word: String,
-    /// Last sentence that was grammar-checked for the error list
-    last_error_checked_sentence: String,
-    /// Deferred find-and-replace (word, replacement) — executed next frame
-    pending_fix: Option<(String, String)>,
+    /// Sentences already grammar-checked (by content hash) — avoids re-checking
+    checked_sentences: std::collections::HashSet<u64>,
+    /// Deferred find-and-replace (word, replacement, optional sentence context) — executed next frame
+    pending_fix: Option<(String, String, String)>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
 }
@@ -381,7 +390,7 @@ impl ContextApp {
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
-            last_error_checked_sentence: String::new(),
+            checked_sentences: std::collections::HashSet::new(),
             pending_fix: None,
             suggestion_window: None,
         }
@@ -698,67 +707,91 @@ impl ContextApp {
             .collect()
     }
 
-    /// Remove errors that are no longer present in the current document text.
+    /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
-        let sentence = &self.context.sentence;
+        // Get full document text to check all sentences
+        let doc_text = self.manager.read_document_context()
+            .unwrap_or_default().to_lowercase();
+        let before = self.writing_errors.len();
         self.writing_errors.retain(|e| {
             if e.ignored {
-                return false; // drop ignored errors
+                return false;
             }
-            // Check if the error word still appears in the current sentence context
+            // Check if the error word still exists in the document
             let word_lower = e.word.to_lowercase();
-            let still_present = sentence.to_lowercase()
+            let still_present = doc_text
                 .split(|c: char| !c.is_alphanumeric())
                 .any(|w| w == word_lower);
             if !still_present {
-                eprintln!("Error resolved: '{}' no longer in text", e.word);
+                eprintln!("Error resolved: '{}' no longer in document", e.word);
             }
             still_present
         });
+        // If errors were pruned, clear sentence hashes so edited sentences get re-checked
+        if self.writing_errors.len() < before {
+            self.checked_sentences.clear();
+        }
     }
 
     /// Update the error list with grammar errors from the current sentence.
     /// Called when a sentence boundary is detected.
     fn update_grammar_errors(&mut self) {
-        let sentence = self.context.sentence.trim().to_string();
-        if sentence.is_empty() || sentence == self.last_error_checked_sentence {
-            return;
-        }
-
-        // Only check complete sentences (ending with . ? !)
-        let last_char = sentence.chars().last().unwrap_or(' ');
-        if last_char != '.' && last_char != '?' && last_char != '!' {
-            return;
-        }
-
-        self.last_error_checked_sentence = sentence.clone();
-
-        let checker = match &mut self.checker {
-            Some(c) => c,
+        // Read document text and check all complete sentences
+        let doc_text = match self.manager.read_document_context() {
+            Some(t) => t,
             None => return,
         };
 
-        let errors = checker.check_sentence(&sentence);
-        for ge in &errors {
-            // Don't add duplicate grammar errors
-            if self.writing_errors.iter().any(|e| {
-                matches!(e.category, ErrorCategory::Grammar)
-                    && e.rule_name == ge.rule_name
-                    && e.sentence_context == sentence
-            }) {
-                continue;
+        let sentences = split_sentences(&doc_text);
+        if sentences.is_empty() {
+            return;
+        }
+
+        use std::hash::{Hash, Hasher};
+
+        for sentence in &sentences {
+            let trimmed = sentence.trim();
+            if trimmed.is_empty() { continue; }
+
+            // Hash the sentence to skip already-checked ones
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            trimmed.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            if !self.checked_sentences.insert(hash) {
+                continue; // already checked this exact sentence
             }
 
-            self.writing_errors.push(WritingError {
-                category: ErrorCategory::Grammar,
-                word: ge.word.clone(),
-                suggestion: ge.suggestion.clone(),
-                explanation: ge.explanation.clone(),
-                rule_name: ge.rule_name.clone(),
-                sentence_context: sentence.clone(),
-                position: ge.position,
-                ignored: false,
-            });
+            eprintln!("Grammar check: '{}'", trimmed);
+
+            let checker = match &mut self.checker {
+                Some(c) => c,
+                None => return,
+            };
+
+            let errors = checker.check_sentence(trimmed);
+            for ge in &errors {
+                // Don't add duplicate grammar errors
+                if self.writing_errors.iter().any(|e| {
+                    matches!(e.category, ErrorCategory::Grammar)
+                        && e.word == ge.word
+                        && e.rule_name == ge.rule_name
+                        && e.sentence_context == trimmed
+                }) {
+                    continue;
+                }
+                eprintln!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Grammar,
+                    word: ge.word.clone(),
+                    suggestion: ge.suggestion.clone(),
+                    explanation: ge.explanation.clone(),
+                    rule_name: ge.rule_name.clone(),
+                    sentence_context: trimmed.to_string(),
+                    position: ge.position,
+                    ignored: false,
+                });
+            }
         }
     }
 
@@ -1525,8 +1558,12 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Execute deferred find-and-replace
-        if let Some((find, replace)) = self.pending_fix.take() {
-            self.manager.find_and_replace(&find, &replace);
+        if let Some((find, replace, context)) = self.pending_fix.take() {
+            if context.is_empty() {
+                self.manager.find_and_replace(&find, &replace);
+            } else {
+                self.manager.find_and_replace_in_context(&find, &replace, &context);
+            }
         }
 
         // Poll for new context
@@ -2223,7 +2260,8 @@ impl eframe::App for ContextApp {
                                 let error = &self.writing_errors[idx];
                                 let suggestion = error.suggestion.clone();
                                 let word = error.word.clone();
-                                self.pending_fix = Some((word, suggestion));
+                                let context = error.sentence_context.clone();
+                                self.pending_fix = Some((word, suggestion, context));
                                 self.writing_errors[idx].ignored = true;
                             }
                             "suggest" => {
@@ -2279,7 +2317,11 @@ impl eframe::App for ContextApp {
 
                 if let Some(replacement) = selected {
                     // Replace in document and mark error as fixed
-                    self.pending_fix = Some((word_clone.clone(), replacement.clone()));
+                    let ctx = self.writing_errors.iter()
+                        .find(|e| e.word == word_clone && !e.ignored)
+                        .map(|e| e.sentence_context.clone())
+                        .unwrap_or_default();
+                    self.pending_fix = Some((word_clone.clone(), replacement.clone(), ctx));
                     // Update the error's suggestion and mark ignored
                     for e in &mut self.writing_errors {
                         if e.word == word_clone && !e.ignored {
