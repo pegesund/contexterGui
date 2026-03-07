@@ -44,6 +44,37 @@ impl AnyChecker {
             AnyChecker::Swi(c) => c.check_sentence(text),
         }
     }
+
+    fn fuzzy_lookup(&self, word: &str, max_distance: u32) -> Vec<(String, u32)> {
+        match self {
+            AnyChecker::Neo(c) => c.fuzzy_lookup(word, max_distance),
+            AnyChecker::Swi(c) => c.fuzzy_lookup(word, max_distance),
+        }
+    }
+
+}
+
+// --- Error list for spelling and grammar ---
+
+#[derive(Clone, Debug)]
+enum ErrorCategory {
+    Spelling,
+    Grammar,
+}
+
+#[derive(Clone, Debug)]
+struct WritingError {
+    category: ErrorCategory,
+    word: String,
+    suggestion: String,
+    explanation: String,
+    rule_name: String,
+    /// Approximate character offset in the sentence where the error occurred
+    sentence_context: String,
+    /// Position within the sentence (token index or char offset)
+    position: usize,
+    /// true if user clicked "Ignorer"
+    ignored: bool,
 }
 
 // --- Data paths ---
@@ -140,6 +171,15 @@ impl BridgeManager {
         false
     }
 
+    fn find_and_replace(&self, find: &str, replace: &str) -> bool {
+        for bridge in &self.bridges {
+            if bridge.is_available() {
+                return bridge.find_and_replace(find, replace);
+            }
+        }
+        false
+    }
+
     fn read_document_context(&self) -> Option<String> {
         for bridge in &self.bridges {
             if bridge.is_available() {
@@ -217,6 +257,16 @@ struct ContextApp {
     load_errors: Vec<String>,
     // Tab navigation
     selected_tab: usize, // 0=Innhold, 1=Grammatikk, 2=Innstillinger, 3=Debug
+    // Error list (spelling + grammar)
+    writing_errors: Vec<WritingError>,
+    /// Words the user has chosen to ignore (spelling)
+    ignored_words: std::collections::HashSet<String>,
+    /// Last word that was spell-checked (to avoid re-checking)
+    last_spell_checked_word: String,
+    /// Last sentence that was grammar-checked for the error list
+    last_error_checked_sentence: String,
+    /// Deferred find-and-replace (word, replacement) — executed next frame
+    pending_fix: Option<(String, String)>,
 }
 
 impl ContextApp {
@@ -326,6 +376,11 @@ impl ContextApp {
             selected_column: 0,
             load_errors,
             selected_tab: 0,
+            writing_errors: Vec::new(),
+            ignored_words: std::collections::HashSet::new(),
+            last_spell_checked_word: String::new(),
+            last_error_checked_sentence: String::new(),
+            pending_fix: None,
         }
     }
 
@@ -415,6 +470,135 @@ impl ContextApp {
             if !self.grammar_errors.is_empty() {
                 eprintln!("Grammar: {} errors in {:.0}ms", self.grammar_errors.len(), t.elapsed().as_secs_f64() * 1000.0);
             }
+        }
+    }
+
+    /// Check spelling of the just-finished word. Called when user types space/punctuation.
+    fn check_spelling(&mut self, word: &str) {
+        let clean = word.trim().to_lowercase();
+        if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
+            return;
+        }
+        self.last_spell_checked_word = clean.clone();
+        eprintln!("spell-check: '{}'", clean);
+
+        // Skip if word is in ignore list
+        if self.ignored_words.contains(&clean) {
+            return;
+        }
+
+        // Skip punctuation-only or numbers
+        if clean.chars().all(|c| c.is_ascii_punctuation() || c.is_ascii_digit()) {
+            return;
+        }
+
+        let checker = match &self.checker {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Check if word exists in dictionary (with normert reading)
+        let found = checker.has_word(&clean);
+        eprintln!("  has_word('{}') = {}", clean, found);
+        if found {
+            return;
+        }
+
+        // Also check the original case (proper nouns)
+        let original = word.trim();
+        if checker.has_word(original) {
+            return;
+        }
+
+        // Word not found — get fuzzy suggestions
+        let fuzzy = checker.fuzzy_lookup(&clean, 2);
+        if fuzzy.is_empty() {
+            // No suggestions found — might be a name or very unusual word, skip
+            return;
+        }
+
+        // Take top candidates by Levenshtein distance, then sort by wordfreq
+        let mut candidates: Vec<(String, u32)> = fuzzy.into_iter()
+            .filter(|(w, _)| w != &clean) // exclude exact match
+            .take(10)
+            .collect();
+
+        // Boost by word frequency
+        if let Some(wf) = &self.wordfreq {
+            candidates.sort_by(|a, b| {
+                let freq_a = wf.get(&a.0).copied().unwrap_or(0);
+                let freq_b = wf.get(&b.0).copied().unwrap_or(0);
+                // Primary: distance ascending, secondary: frequency descending
+                a.1.cmp(&b.1).then(freq_b.cmp(&freq_a))
+            });
+        }
+
+        let best = candidates.first().map(|(w, _)| w.clone()).unwrap_or_default();
+
+        // Don't add duplicate errors for the same word
+        if self.writing_errors.iter().any(|e| {
+            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+        }) {
+            return;
+        }
+
+        let error = WritingError {
+            category: ErrorCategory::Spelling,
+            word: clean.clone(),
+            suggestion: best,
+            explanation: format!("«{}» finnes ikke i ordboken.", clean),
+            rule_name: "stavefeil".to_string(),
+            sentence_context: self.context.sentence.clone(),
+            position: 0,
+            ignored: false,
+        };
+        self.writing_errors.push(error);
+        eprintln!("Spelling: '{}' not found, suggesting '{}'",
+            clean, self.writing_errors.last().unwrap().suggestion);
+    }
+
+    /// Update the error list with grammar errors from the current sentence.
+    /// Called when a sentence boundary is detected.
+    fn update_grammar_errors(&mut self) {
+        let sentence = self.context.sentence.trim().to_string();
+        if sentence.is_empty() || sentence == self.last_error_checked_sentence {
+            return;
+        }
+
+        // Only check complete sentences (ending with . ? !)
+        let last_char = sentence.chars().last().unwrap_or(' ');
+        if last_char != '.' && last_char != '?' && last_char != '!' {
+            return;
+        }
+
+        self.last_error_checked_sentence = sentence.clone();
+
+        let checker = match &mut self.checker {
+            Some(c) => c,
+            None => return,
+        };
+
+        let errors = checker.check_sentence(&sentence);
+        for ge in &errors {
+            // Don't add duplicate grammar errors
+            if self.writing_errors.iter().any(|e| {
+                matches!(e.category, ErrorCategory::Grammar)
+                    && e.rule_name == ge.rule_name
+                    && e.sentence_context == sentence
+            }) {
+                continue;
+            }
+
+            self.writing_errors.push(WritingError {
+                category: ErrorCategory::Grammar,
+                word: ge.word.clone(),
+                suggestion: ge.suggestion.clone(),
+                explanation: ge.explanation.clone(),
+                rule_name: ge.rule_name.clone(),
+                sentence_context: sentence.clone(),
+                position: ge.position,
+                ignored: false,
+            });
         }
     }
 
@@ -1180,6 +1364,11 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Execute deferred find-and-replace
+        if let Some((find, replace)) = self.pending_fix.take() {
+            self.manager.find_and_replace(&find, &replace);
+        }
+
         // Poll for new context
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
@@ -1214,12 +1403,31 @@ impl eframe::App for ContextApp {
                         self.selected_completion = None;
                     }
                 }
+                // Word boundary: check spelling of the last finished word
+                let spell_word = self.context.sentence.split_whitespace().last()
+                    .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
+                if let Some(ref w) = spell_word {
+                    if !w.is_empty() {
+                        self.check_spelling(w);
+                    }
+                }
+                // Sentence boundary: update grammar error list
+                self.update_grammar_errors();
                 self.run_grammar_check();
             } else {
                 // No word, no context: clear and run grammar
                 self.completions.clear();
                 self.open_completions.clear();
                 self.last_completed_prefix.clear();
+                // Check spelling + grammar on the last word/sentence
+                let spell_word = self.context.sentence.split_whitespace().last()
+                    .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
+                if let Some(ref w) = spell_word {
+                    if !w.is_empty() {
+                        self.check_spelling(w);
+                    }
+                }
+                self.update_grammar_errors();
                 self.run_grammar_check();
             }
 
@@ -1234,8 +1442,109 @@ impl eframe::App for ContextApp {
                     if let Some(model) = &mut self.model {
                         let t = Instant::now();
                         if let Ok((logits, _)) = model.single_forward(masked) {
-                            eprintln!("pre-warmed forward cache in {:?}", t.elapsed());
-                            self.cached_forward = Some((masked.clone(), logits));
+                            let fwd_ms = t.elapsed().as_millis();
+                            self.cached_forward = Some((masked.clone(), logits.clone()));
+
+                            // Pre-warm mtag supplement: use top word-initial tokens as stems
+                            // to discover and score dictionary words before user types
+                            if let Some(checker) = &self.checker {
+                                let t2 = Instant::now();
+                                // Get top 15 word-initial tokens as stems
+                                let mut stems: Vec<(String, f32)> = model.id_to_token.iter()
+                                    .enumerate()
+                                    .filter(|(_, tok)| tok.starts_with('Ġ'))
+                                    .map(|(i, _)| {
+                                        let decoded = model.tokenizer
+                                            .decode(&[i as u32], false)
+                                            .unwrap_or_default().trim().to_string();
+                                        (decoded, logits[i])
+                                    })
+                                    .filter(|(w, _)| w.len() >= 3)
+                                    .collect();
+                                stems.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                stems.truncate(15);
+
+                                // Find mtag words from these stems + sub-prefixes
+                                let mut mtag_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                for (stem, _) in &stems {
+                                    let lower = stem.to_lowercase();
+                                    for w in checker.prefix_lookup(&lower, 5) {
+                                        mtag_set.insert(w);
+                                    }
+                                    // Sub-prefixes for compound discovery
+                                    let chars: Vec<char> = lower.chars().collect();
+                                    for end in 2..chars.len() {
+                                        let sub: String = chars[..end].iter().collect();
+                                        for w in checker.prefix_lookup(&sub, 3) {
+                                            mtag_set.insert(w);
+                                        }
+                                    }
+                                }
+
+                                if !mtag_set.is_empty() {
+                                    // Tokenize + first-token filter + frequency boost
+                                    let wf = self.wordfreq.as_ref();
+                                    let mut all_cands: Vec<(String, Vec<u32>, f32)> = mtag_set.into_iter()
+                                        .filter_map(|w| {
+                                            let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
+                                            let ids: Vec<u32> = enc.get_ids().to_vec();
+                                            if ids.is_empty() { return None; }
+                                            let mut score = logits[ids[0] as usize];
+                                            if let Some(wf) = wf {
+                                                if wf.contains_key(&w) { score += 2.0; } else { score -= 2.0; }
+                                            }
+                                            Some((w, ids, score))
+                                        })
+                                        .collect();
+                                    all_cands.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                                    all_cands.truncate(10);
+
+                                    let cands: Vec<(String, Vec<u32>)> = all_cands.iter()
+                                        .map(|(w, ids, _)| (w.clone(), ids.clone())).collect();
+                                    let mut scores: Vec<f32> = all_cands.iter().map(|(_, _, s)| *s).collect();
+
+                                    // Multi-token scoring (max 2 rounds)
+                                    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+                                    let ctx_b = mask_parts[0].trim_end();
+                                    let ctx_a = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
+                                    let max_t = cands.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1).min(3);
+                                    for t in 1..max_t {
+                                        let to_score: Vec<usize> = cands.iter().enumerate()
+                                            .filter(|(_, (_, ids))| ids.len() > t)
+                                            .map(|(i, _)| i).collect();
+                                        if to_score.is_empty() { break; }
+                                        let mut unique_pfx: Vec<Vec<u32>> = Vec::new();
+                                        let mut pfx_map: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+                                        let mut c2p: Vec<usize> = Vec::new();
+                                        for &i in &to_score {
+                                            let tp = cands[i].1[..t].to_vec();
+                                            let pidx = *pfx_map.entry(tp.clone()).or_insert_with(|| {
+                                                let idx = unique_pfx.len(); unique_pfx.push(tp); idx
+                                            });
+                                            c2p.push(pidx);
+                                        }
+                                        let texts: Vec<String> = unique_pfx.iter()
+                                            .map(|ids| {
+                                                let p = model.tokenizer.decode(ids, false).unwrap_or_default();
+                                                format!("{} {}<mask> {}", ctx_b, p.trim(), ctx_a)
+                                            }).collect();
+                                        if let Ok((bl, _)) = model.batched_forward(&texts) {
+                                            for (k, &i) in to_score.iter().enumerate() {
+                                                scores[i] += bl[c2p[k]][cands[i].1[t] as usize];
+                                            }
+                                        }
+                                    }
+
+                                    let mtag_scored: Vec<(String, f32)> = cands.iter().enumerate()
+                                        .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
+                                        .collect();
+                                    self.cached_mtag_supplement = Some((masked.clone(), mtag_scored));
+                                    self.cached_right_column = None; // will be recomputed on first keystroke
+                                }
+                                eprintln!("pre-warmed forward+mtag in {}ms+{}ms", fwd_ms, t2.elapsed().as_millis());
+                            } else {
+                                eprintln!("pre-warmed forward cache in {}ms", fwd_ms);
+                            }
                         }
                     }
                 }
@@ -1429,7 +1738,8 @@ impl eframe::App for ContextApp {
         // Clear the default background so transparency works
         // Determine tab indicators
         let has_completions = !self.completions.is_empty() || !self.open_completions.is_empty();
-        let has_grammar = !self.grammar_errors.is_empty();
+        let has_grammar = !self.grammar_errors.is_empty()
+            || self.writing_errors.iter().any(|e| !e.ignored);
 
         let panel_frame = egui::Frame::new()
             .fill(egui::Color32::from_rgb(255, 255, 235))
@@ -1499,7 +1809,7 @@ impl eframe::App for ContextApp {
                 let stroke = egui::Stroke::new(1.5, color);
                 ui.painter().line_segment([center + egui::vec2(-s, -s), center + egui::vec2(s, s)], stroke);
                 ui.painter().line_segment([center + egui::vec2(s, -s), center + egui::vec2(-s, s)], stroke);
-                if close_resp.clicked() {
+                if close_resp.double_clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
@@ -1655,37 +1965,106 @@ impl eframe::App for ContextApp {
 
             // === Tab: Grammatikk (1) ===
             if self.selected_tab == 1 {
-                if self.grammar_errors.is_empty() {
+                let active_errors: Vec<usize> = self.writing_errors.iter()
+                    .enumerate()
+                    .filter(|(_, e)| !e.ignored)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                if active_errors.is_empty() {
                     ui.label(
-                        egui::RichText::new("Ingen grammatikkfeil funnet.")
+                        egui::RichText::new("Ingen feil funnet.")
                             .size(12.0)
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
                 } else {
-                    for error in &self.grammar_errors {
-                        let color = rule_color(&error.rule_name);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(&error.word)
-                                    .strong()
-                                    .color(color),
-                            );
+                    ui.label(
+                        egui::RichText::new(format!("Feil funnet ({})", active_errors.len()))
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(80, 80, 80)),
+                    );
+                    ui.add_space(4.0);
+
+                    let mut action: Option<(usize, &str)> = None;
+
+                    for &idx in &active_errors {
+                        let error = &self.writing_errors[idx];
+                        let (icon, color) = match error.category {
+                            ErrorCategory::Spelling => (
+                                "🔴",
+                                egui::Color32::from_rgb(200, 40, 40),
+                            ),
+                            ErrorCategory::Grammar => (
+                                "🟢",
+                                rule_color(&error.rule_name),
+                            ),
+                        };
+
+                        ui.group(|ui| {
+                            // Header: icon + word + suggestion
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(icon).size(12.0));
+                                ui.label(
+                                    egui::RichText::new(format!("«{}»", error.word))
+                                        .strong()
+                                        .size(12.0)
+                                        .color(color),
+                                );
+                                if !error.suggestion.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(format!("→ {}", error.suggestion))
+                                            .size(12.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                                    );
+                                }
+                            });
+
+                            // Explanation
                             ui.label(
                                 egui::RichText::new(&error.explanation)
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(80, 80, 80)),
                             );
-                        });
-                        if !error.suggestion.is_empty() {
+
+                            // Action buttons
                             ui.horizontal(|ui| {
-                                ui.add_space(10.0);
-                                ui.label(
-                                    egui::RichText::new(format!("→ {}", error.suggestion))
-                                        .size(11.0)
-                                        .strong()
-                                        .color(color),
-                                );
+                                if !error.suggestion.is_empty() {
+                                    if ui.button(
+                                        egui::RichText::new("Rett opp").size(11.0)
+                                    ).clicked() {
+                                        action = Some((idx, "fix"));
+                                    }
+                                }
+                                if ui.button(
+                                    egui::RichText::new("Ignorer").size(11.0)
+                                ).clicked() {
+                                    action = Some((idx, "ignore"));
+                                }
                             });
+                        });
+                        ui.add_space(2.0);
+                    }
+
+                    // Handle actions after rendering
+                    if let Some((idx, act)) = action {
+                        match act {
+                            "fix" => {
+                                let error = &self.writing_errors[idx];
+                                let suggestion = error.suggestion.clone();
+                                let word = error.word.clone();
+                                self.pending_fix = Some((word, suggestion));
+                                self.writing_errors[idx].ignored = true;
+                            }
+                            "ignore" => {
+                                let error = &self.writing_errors[idx];
+                                if matches!(error.category, ErrorCategory::Spelling) {
+                                    self.ignored_words.insert(error.word.clone());
+                                }
+                                self.writing_errors[idx].ignored = true;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1819,7 +2198,8 @@ fn main() -> eframe::Result {
             .with_inner_size([420.0, 250.0])
             .with_always_on_top()
             .with_decorations(false)
-            .with_title("NorskTale"),
+            .with_title("NorskTale")
+            .with_close_button(false),  // prevent Alt+F4 and system close
         ..Default::default()
     };
 

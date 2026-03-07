@@ -34,6 +34,31 @@ fn make_i4(val: i32) -> VARIANT {
     }
 }
 
+fn make_bool(val: bool) -> VARIANT {
+    unsafe {
+        let mut v = VARIANT::default();
+        let p = &mut v as *mut VARIANT as *mut u8;
+        *(p as *mut u16) = VT_BOOL.0;
+        *(p.add(8) as *mut i16) = if val { -1 } else { 0 }; // VARIANT_TRUE=-1, VARIANT_FALSE=0
+        v
+    }
+}
+
+unsafe fn extract_bool(v: &VARIANT) -> Result<bool> {
+    unsafe {
+        let vt = var_vt(v);
+        if vt == VT_BOOL.0 {
+            let val = *(var_val_ptr(v) as *const i16);
+            Ok(val != 0)
+        } else if vt == VT_I4.0 {
+            let val = *(var_val_ptr(v) as *const i32);
+            Ok(val != 0)
+        } else {
+            Err(Error::from_hresult(E_FAIL))
+        }
+    }
+}
+
 fn make_bstr(s: &str) -> VARIANT {
     unsafe {
         let bstr = BSTR::from(s);
@@ -151,10 +176,25 @@ impl Dispatch {
     fn call(&self, name: &str, args: &[VARIANT]) -> Result<VARIANT> {
         let id = self.get_dispid(name)?;
         let mut result = VARIANT::default();
-        let mut reversed: Vec<VARIANT> = args.iter().rev().cloned().collect();
+        // COM expects args in reverse order.
+        // Use MaybeUninit<VARIANT> for proper alignment, then forget to prevent Drop
+        // (avoids BSTR double-free — originals in caller's stack get dropped once).
+        let n = args.len();
+        let mut reversed: Vec<std::mem::MaybeUninit<VARIANT>> = Vec::with_capacity(n);
+        for arg in args.iter().rev() {
+            let mut slot = std::mem::MaybeUninit::<VARIANT>::uninit();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    arg as *const VARIANT,
+                    slot.as_mut_ptr(),
+                    1,
+                );
+            }
+            reversed.push(slot);
+        }
         let params = DISPPARAMS {
-            rgvarg: if reversed.is_empty() { std::ptr::null_mut() } else { reversed.as_mut_ptr() },
-            cArgs: reversed.len() as u32,
+            rgvarg: if n == 0 { std::ptr::null_mut() } else { reversed.as_mut_ptr() as *mut VARIANT },
+            cArgs: n as u32,
             ..Default::default()
         };
         unsafe {
@@ -163,6 +203,7 @@ impl Dispatch {
                 &params, Some(&mut result), None, None,
             )?;
         }
+        // MaybeUninit doesn't run Drop — no double-free
         Ok(result)
     }
 }
@@ -478,6 +519,49 @@ impl TextBridge for WordComBridge {
             Ok(())
         })()
         .is_ok()
+    }
+
+    fn find_and_replace(&self, find_text: &str, replace_text: &str) -> bool {
+        // Use Range-based search instead of Find.Execute to avoid VARIANT/BSTR issues.
+        // Scan document text for the word and replace via Range.Text property.
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let content = doc.get_dispatch("Content")?;
+            let doc_text = content.get_string("Text")?;
+
+            // Find the word (case-insensitive, whole word)
+            let find_lower = find_text.to_lowercase();
+            let chars: Vec<char> = doc_text.chars().collect();
+            let find_chars: Vec<char> = find_lower.chars().collect();
+            let find_len = find_chars.len();
+
+            for i in 0..chars.len().saturating_sub(find_len - 1) {
+                // Check word boundary before
+                if i > 0 && chars[i - 1].is_alphanumeric() {
+                    continue;
+                }
+                // Check word boundary after
+                let end = i + find_len;
+                if end < chars.len() && chars[end].is_alphanumeric() {
+                    continue;
+                }
+                // Check match (case-insensitive)
+                let candidate: String = chars[i..end].iter().collect();
+                if candidate.to_lowercase() != find_lower {
+                    continue;
+                }
+                // Found! Replace via Range.Text
+                let range_v = doc.call("Range", &[make_i4(i as i32), make_i4(end as i32)])?;
+                let range = unsafe { extract_dispatch(&range_v) }?;
+                range.put("Text", make_bstr(replace_text))?;
+                eprintln!("Find&Replace: '{}' → '{}' at position {}", find_text, replace_text, i);
+                return Ok(true);
+            }
+            eprintln!("Find&Replace: '{}' not found in document", find_text);
+            Ok(false)
+        })()
+        .unwrap_or(false)
     }
 }
 

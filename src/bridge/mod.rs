@@ -29,6 +29,9 @@ pub trait TextBridge {
     /// Replace the current word at the cursor with new text.
     fn replace_word(&self, new_text: &str) -> bool;
 
+    /// Find a word in the document and replace it. Returns true if replaced.
+    fn find_and_replace(&self, _find: &str, _replace: &str) -> bool { false }
+
     /// Read a larger text window for context (e.g. 5000 chars before cursor).
     /// Used for sentence embeddings / topic extraction.
     fn read_document_context(&self) -> Option<String> { None }
