@@ -1262,11 +1262,35 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // Drag area for remaining space
+                // Drag area for remaining space (leave room for close button)
                 let remaining = ui.available_rect_before_wrap();
-                let drag_resp = ui.allocate_rect(remaining, egui::Sense::drag());
+                let close_w = 20.0;
+                let drag_rect = egui::Rect::from_min_max(
+                    remaining.min,
+                    egui::pos2(remaining.max.x - close_w, remaining.max.y),
+                );
+                let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Close button
+                let close_resp = ui.allocate_rect(
+                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(18.0, 18.0)),
+                    egui::Sense::click() | egui::Sense::hover(),
+                );
+                let color = if close_resp.hovered() {
+                    egui::Color32::from_rgb(220, 50, 50)
+                } else {
+                    egui::Color32::from_rgb(120, 120, 120)
+                };
+                let center = close_resp.rect.center();
+                let s = 4.5;
+                let stroke = egui::Stroke::new(1.5, color);
+                ui.painter().line_segment([center + egui::vec2(-s, -s), center + egui::vec2(s, s)], stroke);
+                ui.painter().line_segment([center + egui::vec2(s, -s), center + egui::vec2(-s, s)], stroke);
+                if close_resp.clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
 
