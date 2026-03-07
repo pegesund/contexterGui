@@ -3,6 +3,9 @@
 pub struct CursorContext {
     pub word: String,
     pub sentence: String,
+    /// When clicking mid-word: full sentence with the word replaced by <mask>
+    /// Used for BERT fill-in-the-blank prediction
+    pub masked_sentence: Option<String>,
     /// Screen coordinates of the caret (x, y below the caret)
     pub caret_pos: Option<(i32, i32)>,
 }

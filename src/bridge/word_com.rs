@@ -231,27 +231,84 @@ impl WordComBridge {
         }
     }
 
-    fn read_context_data(&self) -> Result<(String, String)> {
+    fn read_context_data(&self) -> Result<(String, String, Option<String>)> {
         let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
         let selection = app.get_dispatch("Selection")?;
         let sel_range = selection.get_dispatch("Range")?;
         let cursor_pos = unsafe { extract_i32(&sel_range.get("Start")?) }?;
 
+        // Use Word's own word detection via a duplicated range
+        let dup_v = sel_range.get("Duplicate")?;
+        let word_range = unsafe { extract_dispatch(&dup_v) }?;
+        word_range.call("Expand", &[make_i4(WD_WORD)])?;
+        let full_word_text = word_range.get_string("Text").unwrap_or_default();
+        let word_start = unsafe { extract_i32(&word_range.get("Start")?) }?;
+
+        // Word's Expand(wdWord) may include trailing space — trim it
+        let full_word = full_word_text.trim().to_string();
+        let word_end = word_start + full_word.chars().count() as i32;
+        let is_mid_word = cursor_pos > word_start && cursor_pos < word_end
+            && full_word.chars().all(|c| c.is_alphanumeric());
+
+        // If cursor is at word start (e.g. after space/punct), return empty = word boundary
+        let word = if cursor_pos == word_start || !full_word.chars().all(|c| c.is_alphanumeric()) {
+            String::new()
+        } else if is_mid_word {
+            // Cursor is mid-word (clicked on existing word) — use first letter only
+            full_word.chars().next().map(|c| c.to_string()).unwrap_or_default()
+        } else {
+            // Cursor at end of word (typing) — use full word
+            full_word.clone()
+        };
+
         let doc = app.get_dispatch("ActiveDocument")?;
+
+        // Build masked sentence for mid-word clicks (BERT fill-in-the-blank)
+        let masked_sentence = if is_mid_word {
+            let content = doc.get_dispatch("Content")?;
+            let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
+            // Read text around the word: up to 300 chars before and after
+            let ctx_start = (word_start - 300).max(0);
+            let ctx_end = (word_end + 300).min(doc_end);
+            let before_v = doc.call("Range", &[make_i4(ctx_start), make_i4(word_start)])?;
+            let before_range = unsafe { extract_dispatch(&before_v) }?;
+            let before = before_range.get_string("Text").unwrap_or_default();
+            let after_v = doc.call("Range", &[make_i4(word_end), make_i4(ctx_end)])?;
+            let after_range = unsafe { extract_dispatch(&after_v) }?;
+            let after = after_range.get_string("Text").unwrap_or_default();
+            // Normalize paragraph marks to spaces
+            let before = before.replace('\r', " ").replace('\n', " ");
+            let after = after.replace('\r', " ").replace('\n', " ");
+            // Find last sentence boundary before the word
+            let before_sent = if let Some(pos) = before.rfind(|c: char| c == '.' || c == '!' || c == '?') {
+                &before[pos + 1..]
+            } else {
+                &before
+            };
+            // Find first sentence boundary after the word
+            let after_sent = if let Some(pos) = after.find(|c: char| c == '.' || c == '!' || c == '?') {
+                &after[..=pos]
+            } else {
+                &after
+            };
+            let masked = format!("{} <mask> {}", before_sent.trim(), after_sent.trim());
+            Some(masked)
+        } else {
+            None
+        };
+
+        // Sentence: read text around cursor (before + after for full sentence display)
         let content = doc.get_dispatch("Content")?;
-        let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
+        let doc_end_val = unsafe { extract_i32(&content.get("End")?) }?;
+        let sent_start = (cursor_pos - 500).max(0);
+        let sent_end = (cursor_pos + 200).min(doc_end_val);
+        let ctx_v = doc.call("Range", &[make_i4(sent_start), make_i4(sent_end)])?;
+        let ctx_range = unsafe { extract_dispatch(&ctx_v) }?;
+        let around_text = ctx_range.get_string("Text")?.replace('\r', " ").replace('\n', " ");
+        let char_offset = (cursor_pos - sent_start) as usize;
+        let sentence = find_sentence_at_offset(&around_text, char_offset);
 
-        let range_start = (cursor_pos - 500).max(0);
-        let range_end = (cursor_pos + 500).min(doc_end);
-
-        let context_v = doc.call("Range", &[make_i4(range_start), make_i4(range_end)])?;
-        let context_range = unsafe { extract_dispatch(&context_v) }?;
-        let context_text = context_range.get_string("Text")?;
-
-        let char_offset = (cursor_pos - range_start) as usize;
-        let sentence = find_sentence_at_offset(&context_text, char_offset);
-        let word = find_word_at_offset(&context_text, char_offset);
-        Ok((word, sentence))
+        Ok((word, sentence, masked_sentence))
     }
 
     fn caret_pos(&self) -> Option<(i32, i32)> {
@@ -300,14 +357,15 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        let (word, sentence) = match self.read_context_data() {
+        let (word, sentence, masked_sentence) = match self.read_context_data() {
             Ok(data) => data,
-            Err(_) => (String::new(), String::new()),
+            Err(_) => (String::new(), String::new(), None),
         };
         let caret_pos = self.caret_pos();
         Some(CursorContext {
             word: word.trim().to_string(),
             sentence,
+            masked_sentence,
             caret_pos,
         })
     }
@@ -329,10 +387,46 @@ impl TextBridge for WordComBridge {
         (|| -> Result<()> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
             let selection = app.get_dispatch("Selection")?;
-            let range = selection.get_dispatch("Range")?;
-            let dup_v = range.get("Duplicate")?;
-            let word_range = unsafe { extract_dispatch(&dup_v) }?;
-            word_range.call("Expand", &[make_i4(WD_WORD)])?;
+            let sel_range = selection.get_dispatch("Range")?;
+            let cursor_pos = unsafe { extract_i32(&sel_range.get("Start")?) }?;
+
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let content = doc.get_dispatch("Content")?;
+            let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
+
+            // Read text around cursor to find full word boundaries
+            let look_back = 50.min(cursor_pos);
+            let look_ahead = 50.min(doc_end - cursor_pos);
+            let range_start = cursor_pos - look_back;
+            let range_end = cursor_pos + look_ahead;
+            let ctx_v = doc.call("Range", &[make_i4(range_start), make_i4(range_end)])?;
+            let ctx_range = unsafe { extract_dispatch(&ctx_v) }?;
+            let around_text = ctx_range.get_string("Text")?;
+
+            let chars: Vec<char> = around_text.chars().collect();
+            let cursor_offset = look_back as usize;
+
+            // Scan backwards from cursor to find word start
+            let mut word_start_off = cursor_offset;
+            while word_start_off > 0 && chars[word_start_off - 1].is_alphanumeric() {
+                word_start_off -= 1;
+            }
+
+            // Scan forwards from cursor to find word end
+            let mut word_end_off = cursor_offset;
+            while word_end_off < chars.len() && chars[word_end_off].is_alphanumeric() {
+                word_end_off += 1;
+            }
+
+            if word_start_off == word_end_off {
+                return Ok(()); // No word at cursor
+            }
+
+            // Create range covering the full word
+            let word_start = range_start + word_start_off as i32;
+            let word_end = range_start + word_end_off as i32;
+            let word_range_v = doc.call("Range", &[make_i4(word_start), make_i4(word_end)])?;
+            let word_range = unsafe { extract_dispatch(&word_range_v) }?;
             word_range.put("Text", make_bstr(new_text))?;
             Ok(())
         })()

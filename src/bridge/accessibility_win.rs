@@ -105,11 +105,13 @@ impl TextBridge for AccessibilityBridge {
             Some((word, sentence)) if !word.is_empty() => Some(CursorContext {
                 word,
                 sentence,
+                masked_sentence: None,
                 caret_pos,
             }),
             _ => Some(CursorContext {
                 word: String::new(),
                 sentence: String::new(),
+                masked_sentence: None,
                 caret_pos,
             }),
         }

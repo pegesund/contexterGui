@@ -188,6 +188,11 @@ struct ContextApp {
     last_prefix_change: Instant,
     debounce_ms: u64,
     pending_completion: bool,
+    // Completion selection mode (Ctrl+Space to enter, arrows to navigate, Enter to accept)
+    selected_completion: Option<usize>,
+    selection_mode: bool,
+    /// Word's HWND to return focus to
+    word_hwnd: Option<isize>,
     // Status
     load_errors: Vec<String>,
 }
@@ -288,6 +293,9 @@ impl ContextApp {
             last_prefix_change: Instant::now(),
             debounce_ms: if quality == 0 { 100 } else { 150 },
             pending_completion: false,
+            selected_completion: None,
+            selection_mode: false,
+            word_hwnd: None,
             load_errors,
         }
     }
@@ -421,6 +429,52 @@ impl ContextApp {
         self.last_completed_prefix = prefix.to_string();
         let t_total = Instant::now();
 
+        // Mid-word click: fill-in-the-blank using full sentence context
+        if let Some(masked) = &self.context.masked_sentence.clone() {
+            if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
+                let t_bert = Instant::now();
+                let prefix_lower = prefix.to_lowercase();
+                match model.single_forward(masked) {
+                    Ok((logits, _ms)) => {
+                        let matches: Vec<(u32, String)> = if let Some(entries) = pi.get(&prefix_lower) {
+                            entries.clone()
+                        } else {
+                            Vec::new()
+                        };
+                        let mut scored: Vec<(String, f32)> = matches.iter()
+                            .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
+                            .collect();
+                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        // Dictionary filter
+                        let checker_ref = self.checker.as_ref();
+                        let wf_ref = self.wordfreq.as_ref();
+                        let results: Vec<nostos_cognio::complete::Completion> = scored.iter()
+                            .filter(|(w, _)| {
+                                let key = w.to_lowercase();
+                                if let Some(c) = checker_ref {
+                                    c.has_word(&key)
+                                } else {
+                                    wf_ref.map_or(true, |wf| wf.contains_key(&key))
+                                }
+                            })
+                            .take(5)
+                            .map(|(w, s)| nostos_cognio::complete::Completion {
+                                word: w.clone(), score: *s, elapsed_ms: 0.0,
+                            })
+                            .collect();
+                        let bert_ms = t_bert.elapsed().as_millis();
+                        let total_ms = t_total.elapsed().as_millis();
+                        eprintln!("fill-blank '{}' bert={}ms total={}ms -> {}",
+                            masked, bert_ms, total_ms,
+                            results.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                        self.completions = results;
+                    }
+                    Err(e) => eprintln!("Fill-blank error: {}", e),
+                }
+            }
+            return;
+        }
+
         // Build context and run completion (borrows checker immutably for has_word)
         let raw_results = {
             let fallback_fn: Option<Box<dyn Fn(&str) -> bool + '_>> = self.checker.as_ref().map(|c| {
@@ -429,18 +483,19 @@ impl ContextApp {
             let fallback_ref: Option<&dyn Fn(&str) -> bool> = fallback_fn.as_ref().map(|b| b.as_ref());
 
             if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
-                let sentence = &self.context.sentence;
-                let sentence_ctx = sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end();
-
-                let ctx = if let Some(doc_text) = self.manager.read_document_context() {
-                    let doc_trimmed = doc_text.trim_end();
-                    doc_trimmed
-                        .strip_suffix(prefix)
-                        .unwrap_or(doc_trimmed)
-                        .trim_end()
-                        .to_string()
-                } else {
-                    sentence_ctx.to_string()
+                let ctx = {
+                    let sentence = &self.context.sentence;
+                    let sentence_ctx = sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end();
+                    if let Some(doc_text) = self.manager.read_document_context() {
+                        let doc_trimmed = doc_text.trim_end();
+                        doc_trimmed
+                            .strip_suffix(prefix)
+                            .unwrap_or(doc_trimmed)
+                            .trim_end()
+                            .to_string()
+                    } else {
+                        sentence_ctx.to_string()
+                    }
                 };
 
                 // Quality controls BPE extension depth and candidate count
@@ -519,6 +574,17 @@ impl ContextApp {
             }
         }
     }
+
+    fn return_focus_to_word(&self) {
+        if let Some(hwnd_val) = self.word_hwnd {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+            unsafe {
+                let hwnd = HWND(hwnd_val as *mut _);
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+    }
 }
 
 /// Split text into sentences for embedding.
@@ -584,6 +650,7 @@ impl eframe::App for ContextApp {
                 if prefix != self.last_completed_prefix {
                     self.last_prefix_change = Instant::now();
                     self.pending_completion = true;
+                    self.selected_completion = None;
                 }
             } else {
                 // Word boundary: run grammar check
@@ -591,6 +658,86 @@ impl eframe::App for ContextApp {
                 self.last_completed_prefix.clear();
                 self.run_grammar_check();
             }
+        }
+
+        // Phase 1: Ctrl+Space while Word has focus → enter selection mode
+        if !self.completions.is_empty() && !self.selection_mode {
+            use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+            let ctrl_down = unsafe { GetAsyncKeyState(0x11) } < 0; // VK_CONTROL held
+            let space_pressed = unsafe { GetAsyncKeyState(0x20) } & 1 != 0; // VK_SPACE just pressed
+            if ctrl_down && space_pressed {
+                // Save Word's window handle before stealing focus
+                use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                let hwnd = unsafe { GetForegroundWindow() };
+                self.word_hwnd = Some(hwnd.0 as isize);
+                self.selected_completion = Some(0);
+                self.selection_mode = true;
+                // Steal focus to our window
+                if let Some(viewport_id) = ctx.input(|i| i.viewport().native_pixels_per_point.map(|_| ())) {
+                    let _ = viewport_id;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+
+        // Phase 2: Our window has focus → egui key events for navigation
+        if self.selection_mode {
+            let mut accept = false;
+            let mut cancel = false;
+            ctx.input(|i| {
+                for event in &i.events {
+                    match event {
+                        egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
+                            let max = self.completions.len();
+                            self.selected_completion = Some(match self.selected_completion {
+                                None => 0,
+                                Some(idx) => (idx + 1).min(max - 1),
+                            });
+                        }
+                        egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
+                            self.selected_completion = Some(match self.selected_completion {
+                                None | Some(0) => 0,
+                                Some(idx) => idx - 1,
+                            });
+                        }
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. }
+                        | egui::Event::Key { key: egui::Key::Space, pressed: true, .. } => {
+                            accept = true;
+                        }
+                        egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                            cancel = true;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            if accept {
+                if let Some(idx) = self.selected_completion {
+                    if let Some(comp) = self.completions.get(idx) {
+                        let word = comp.word.clone();
+                        self.return_focus_to_word();
+                        self.manager.replace_word(&word);
+                        self.completions.clear();
+                        self.last_completed_prefix.clear();
+                        // Force immediate context refresh after replace
+                        self.last_poll = Instant::now() - self.poll_interval;
+                    }
+                }
+                self.selection_mode = false;
+                self.selected_completion = None;
+            }
+            if cancel {
+                self.return_focus_to_word();
+                self.selection_mode = false;
+                self.selected_completion = None;
+            }
+        }
+
+        // Reset selection when completions disappear
+        if self.completions.is_empty() {
+            self.selected_completion = None;
+            self.selection_mode = false;
         }
 
         // Debounce: run completion after user stops typing
@@ -636,11 +783,6 @@ impl eframe::App for ContextApp {
             .inner_margin(8.0);
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            // Debug: always show something
-            ui.label(format!("word='{}' sentence='{}' compl={} err={}",
-                self.context.word, self.context.sentence,
-                self.completions.len(), self.grammar_errors.len()));
-
             // Top row: checkbox + drag area + bridge name
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.follow_cursor,
@@ -690,25 +832,68 @@ impl eframe::App for ContextApp {
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(2.0);
+                let header = if self.selection_mode {
+                    "Forslag: (↑↓ velg, Enter godta, Esc avbryt)"
+                } else {
+                    "Forslag: (Ctrl+Space for å velge)"
+                };
                 ui.label(
-                    egui::RichText::new("Forslag:")
+                    egui::RichText::new(header)
                         .size(11.0)
                         .color(egui::Color32::from_rgb(100, 100, 100)),
                 );
+                let sel = self.selected_completion;
+                let mut clicked_word: Option<String> = None;
                 for (i, comp) in self.completions.iter().enumerate() {
-                    let color = if i == 0 {
+                    let is_selected = sel == Some(i);
+                    let is_top = i == 0 && sel.is_none();
+                    let marker = if is_selected { "▸ " } else { "  " };
+                    let text = format!("{}{} ({:.1})", marker, comp.word, comp.score);
+
+                    // First pass: invisible label to get rect and hover state
+                    let (rect, resp) = ui.allocate_exact_size(
+                        ui.available_size_before_wrap() * egui::vec2(1.0, 0.0) + egui::vec2(0.0, if is_top || is_selected { 18.0 } else { 16.0 }),
+                        egui::Sense::click() | egui::Sense::hover(),
+                    );
+                    let hovered = resp.hovered();
+
+                    // Background
+                    if is_selected {
+                        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0, 100, 180));
+                    } else if hovered {
+                        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
+                    }
+
+                    // Text color
+                    let fg = if is_selected {
+                        egui::Color32::WHITE
+                    } else if hovered {
+                        egui::Color32::from_rgb(0, 80, 140)
+                    } else if is_top {
                         egui::Color32::from_rgb(0, 120, 60)
                     } else {
                         egui::Color32::from_rgb(60, 60, 60)
                     };
-                    let weight = if i == 0 {
-                        egui::RichText::new(format!("  {} ({:.1})", comp.word, comp.score))
-                            .strong().size(13.0).color(color)
-                    } else {
-                        egui::RichText::new(format!("  {} ({:.1})", comp.word, comp.score))
-                            .size(12.0).color(color)
-                    };
-                    ui.label(weight);
+
+                    let font_size = if is_top || is_selected || hovered { 13.0 } else { 12.0 };
+                    let font = egui::FontId::proportional(font_size);
+                    ui.painter().text(rect.min + egui::vec2(0.0, 1.0), egui::Align2::LEFT_TOP, text, font, fg);
+
+                    if hovered {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        clicked_word = Some(comp.word.clone());
+                    }
+                }
+                if let Some(word) = clicked_word {
+                    self.manager.replace_word(&word);
+                    self.completions.clear();
+                    self.selected_completion = None;
+                    self.selection_mode = false;
+                    self.last_completed_prefix.clear();
+                    self.last_poll = Instant::now() - self.poll_interval;
+                    self.return_focus_to_word();
                 }
             }
 
@@ -814,6 +999,23 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "NorskTale",
         options,
-        Box::new(move |_cc| Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality)))),
+        Box::new(move |cc| {
+            // Load Open Sans for dyslexia-friendly UI (recommended by British Dyslexia Association)
+            let font_path = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/OpenSans-Regular.ttf");
+            if let Ok(font_data) = std::fs::read(font_path) {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "OpenSans".to_owned(),
+                    egui::FontData::from_owned(font_data).into(),
+                );
+                fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+                    .insert(0, "OpenSans".to_owned());
+                cc.egui_ctx.set_fonts(fonts);
+                eprintln!("Loaded Open Sans font");
+            } else {
+                eprintln!("Warning: Open Sans font not found at {}", font_path);
+            }
+            Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality)))
+        }),
     )
 }
