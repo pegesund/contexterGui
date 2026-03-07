@@ -576,8 +576,8 @@ impl ContextApp {
                                         .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
                                         .collect();
                                     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                    self.completions = scored.into_iter()
-                                        .take(10)
+                                    let left: Vec<Completion> = scored.into_iter()
+                                        .take(25)
                                         .map(|(w, s)| Completion {
                                             word: if capitalize { cap(&w) } else { w },
                                             score: s,
@@ -598,13 +598,38 @@ impl ContextApp {
                                         .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
                                         .collect();
                                     all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                    self.open_completions = all_scored.iter()
+                                    let right: Vec<Completion> = all_scored.iter()
                                         .take(10)
                                         .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
                                         .collect();
                                     eprintln!("mtag fallback (BERT-ranked): left=[{}] bert={}ms",
-                                        self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
+                                        left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
                                         bert_ms);
+
+                                    // Grammar filter
+                                    if self.grammar_completion {
+                                        if let Some(checker) = &mut self.checker {
+                                            let ctx_for_grammar = masked.replace("<mask>", "").trim().to_string();
+                                            let mut check_fn = |sentence: &str| -> GrammarCheckResult {
+                                                let errors = checker.check_sentence(sentence);
+                                                GrammarCheckResult {
+                                                    ok: errors.is_empty(),
+                                                    suggestions: errors.iter()
+                                                        .filter(|e| !e.suggestion.is_empty())
+                                                        .map(|e| e.suggestion.clone())
+                                                        .collect(),
+                                                }
+                                            };
+                                            self.completions = grammar_filter(&left, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                                            self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
+                                        } else {
+                                            self.completions = left.into_iter().take(5).collect();
+                                            self.open_completions = right.into_iter().take(5).collect();
+                                        }
+                                    } else {
+                                        self.completions = left.into_iter().take(5).collect();
+                                        self.open_completions = right.into_iter().take(5).collect();
+                                    }
                                     return;
                                 }
                             }
