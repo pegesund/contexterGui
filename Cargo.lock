@@ -25,6 +25,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "egui",
+ "libloading 0.8.9",
  "nostos-cognio",
  "windows 0.61.3",
 ]

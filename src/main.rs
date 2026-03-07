@@ -1,4 +1,5 @@
 mod bridge;
+mod tts;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
@@ -902,6 +903,14 @@ impl eframe::App for ContextApp {
                         egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
                             cancel = true;
                         }
+                        egui::Event::Key { key: egui::Key::P, pressed: true, .. } => {
+                            if let Some(idx) = self.selected_completion {
+                                let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                                if let Some(comp) = active.get(idx) {
+                                    tts::speak_word(&comp.word);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1051,10 +1060,14 @@ impl eframe::App for ContextApp {
                     let has_dual = !self.open_completions.is_empty() && !self.completions.is_empty();
                     let has_right_only = !self.open_completions.is_empty() && self.completions.is_empty();
 
+                    let has_tts = tts::tts_available();
+                    let icon_w: f32 = if has_tts { 16.0 } else { 0.0 };
                     let render_row = |ui: &mut egui::Ui, comp: &Completion, _idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
                         let marker = if is_selected { "▸ " } else { "  " };
                         let text = format!("{}{}", marker, comp.word);
                         let row_h = if is_top || is_selected { 18.0 } else { 16.0 };
+
+                        // Single allocation for the whole row
                         let (rect, resp) = ui.allocate_exact_size(
                             egui::vec2(col_width, row_h),
                             egui::Sense::click() | egui::Sense::hover(),
@@ -1065,14 +1078,35 @@ impl eframe::App for ContextApp {
                         } else if hovered {
                             ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
                         }
+
+                        // Speaker icon at the left edge
+                        let mut spoke = false;
+                        if has_tts {
+                            let icon_fg = if is_selected { egui::Color32::from_rgba_premultiplied(200, 200, 200, 255) }
+                                else { egui::Color32::from_rgb(150, 150, 150) };
+                            let icon_center = egui::pos2(rect.min.x + icon_w * 0.5, rect.center().y);
+                            ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(9.0), icon_fg);
+
+                            // Check if click was in the icon area
+                            if resp.clicked() {
+                                if let Some(pos) = resp.interact_pointer_pos() {
+                                    if pos.x < rect.min.x + icon_w {
+                                        tts::speak_word(&comp.word);
+                                        spoke = true;
+                                    }
+                                }
+                            }
+                        }
+
                         let fg = if is_selected { egui::Color32::WHITE }
                             else if hovered { egui::Color32::from_rgb(0, 80, 140) }
                             else if is_top { egui::Color32::from_rgb(0, 120, 60) }
                             else { egui::Color32::from_rgb(60, 60, 60) };
                         let font_size = if is_top || is_selected || hovered { 13.0 } else { 12.0 };
-                        ui.painter().text(rect.min + egui::vec2(0.0, 1.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(font_size), fg);
+                        let text_x = rect.min.x + icon_w;
+                        ui.painter().text(egui::pos2(text_x, rect.min.y + 1.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(font_size), fg);
                         if hovered { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
-                        (resp.clicked(), false)
+                        (resp.clicked() && !spoke, spoke)
                     };
 
                     if has_dual {
@@ -1300,6 +1334,18 @@ fn main() -> eframe::Result {
         eprintln!("SWI-Prolog engine: ON");
     }
     eprintln!("Quality: {} (0=fast ~200ms, 1=balanced ~800ms, 2=full ~2s)", quality);
+
+    // Initialize Acapela TTS
+    // Initialize Acapela TTS - look for SDK in user's Downloads
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let sdk_dir = std::path::Path::new(&home)
+            .join("Downloads/Sdk-Amul-Cogni-TTS-WIN_14-000_AIO");
+        if sdk_dir.exists() {
+            tts::init_tts(sdk_dir.to_str().unwrap(), "Kari22k_NV");
+        } else {
+            eprintln!("Acapela SDK not found at {:?}", sdk_dir);
+        }
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
