@@ -29,3 +29,7 @@ path = "src/test_gui.rs"
 [[bin]]
 name = "test-complete"
 path = "src/test_complete.rs"
+
+[[bin]]
+name = "test-mennesker"
+path = "src/test_mennesker.rs"

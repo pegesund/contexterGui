@@ -250,9 +250,23 @@ impl WordComBridge {
         let is_mid_word = cursor_pos > word_start && cursor_pos < word_end
             && full_word.chars().all(|c| c.is_alphanumeric());
 
+        let doc = app.get_dispatch("ActiveDocument")?;
+
         // If cursor is at word start (e.g. after space/punct), return empty = word boundary
         let word = if cursor_pos == word_start || !full_word.chars().all(|c| c.is_alphanumeric()) {
-            String::new()
+            // Expand(wdWord) failed to find a word — fallback: scan backwards from cursor
+            let look_back = 50.min(cursor_pos);
+            if look_back > 0 {
+                let fb_v = doc.call("Range", &[make_i4(cursor_pos - look_back), make_i4(cursor_pos)])?;
+                let fb_range = unsafe { extract_dispatch(&fb_v) }?;
+                let fb_text = fb_range.get_string("Text").unwrap_or_default();
+                let fallback_word: String = fb_text.chars().rev()
+                    .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+                    .collect::<Vec<_>>().into_iter().rev().collect();
+                if fallback_word.is_empty() { String::new() } else { fallback_word }
+            } else {
+                String::new()
+            }
         } else if is_mid_word {
             // Cursor is mid-word (clicked on existing word) — use first letter only
             full_word.chars().next().map(|c| c.to_string()).unwrap_or_default()
@@ -261,25 +275,43 @@ impl WordComBridge {
             full_word.clone()
         };
 
-        let doc = app.get_dispatch("ActiveDocument")?;
-
-        // Build masked context for mid-word clicks (BERT fill-in-the-blank)
-        // Keep ~800 chars each side of mask (BERT 512 tokens ≈ 1600 chars total)
-        let masked_sentence = if is_mid_word {
-            let content = doc.get_dispatch("Content")?;
-            let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
+        // Build masked context for fill-in-the-blank (BERT with both sides of context)
+        // Used for: mid-word clicks AND typing in the middle of existing text
+        let content_for_mask = doc.get_dispatch("Content")?;
+        let doc_end_for_mask = unsafe { extract_i32(&content_for_mask.get("End")?) }?;
+        let has_text_after = {
+            let peek_end = (cursor_pos + 20).min(doc_end_for_mask);
+            if peek_end > cursor_pos {
+                let peek_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(peek_end)]);
+                peek_v.ok().and_then(|v| {
+                    let r = unsafe { extract_dispatch(&v) }.ok()?;
+                    let t = r.get_string("Text").ok()?;
+                    let trimmed = t.trim();
+                    // Has meaningful text after cursor (not just whitespace/empty)
+                    Some(trimmed.len() > 2)
+                }).unwrap_or(false)
+            } else {
+                false
+            }
+        };
+        let use_masked = is_mid_word || has_text_after;
+        let masked_sentence = if use_masked {
             let half_ctx = 2000;
-            let ctx_start = (word_start - half_ctx).max(0);
-            let ctx_end = (word_end + half_ctx).min(doc_end);
-            let before_v = doc.call("Range", &[make_i4(ctx_start), make_i4(word_start)])?;
+            // For typing: back up past the partial word so <mask> replaces it
+            let typed_len = word.chars().count() as i32;
+            let mask_start = if is_mid_word { word_start } else { (cursor_pos - typed_len).max(0) };
+            let mask_end = if is_mid_word { word_end } else { cursor_pos };
+            let ctx_start = (mask_start - half_ctx).max(0);
+            let ctx_end = (mask_end + half_ctx).min(doc_end_for_mask);
+            let before_v = doc.call("Range", &[make_i4(ctx_start), make_i4(mask_start)])?;
             let before_range = unsafe { extract_dispatch(&before_v) }?;
             let before = before_range.get_string("Text").unwrap_or_default()
                 .replace('\r', " ").replace('\n', " ");
-            let after_v = doc.call("Range", &[make_i4(word_end), make_i4(ctx_end)])?;
+            let after_v = doc.call("Range", &[make_i4(mask_end), make_i4(ctx_end)])?;
             let after_range = unsafe { extract_dispatch(&after_v) }?;
             let after = after_range.get_string("Text").unwrap_or_default()
                 .replace('\r', " ").replace('\n', " ");
-            let masked = format!("{} <mask> {}", before.trim(), after.trim());
+            let masked = format!("{}<mask> {}", before.trim(), after.trim());
             Some(masked)
         } else {
             None
@@ -288,8 +320,8 @@ impl WordComBridge {
         // Sentence: read text around cursor (before + after for full sentence display)
         let content = doc.get_dispatch("Content")?;
         let doc_end_val = unsafe { extract_i32(&content.get("End")?) }?;
-        let sent_start = (cursor_pos - 500).max(0);
-        let sent_end = (cursor_pos + 200).min(doc_end_val);
+        let sent_start = (cursor_pos - 2000).max(0);
+        let sent_end = (cursor_pos + 1000).min(doc_end_val);
         let ctx_v = doc.call("Range", &[make_i4(sent_start), make_i4(sent_end)])?;
         let ctx_range = unsafe { extract_dispatch(&ctx_v) }?;
         let around_text = ctx_range.get_string("Text")?.replace('\r', " ").replace('\n', " ");

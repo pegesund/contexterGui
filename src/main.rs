@@ -442,26 +442,144 @@ impl ContextApp {
             if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
                 let t_bert = Instant::now();
                 let prefix_lower = prefix.to_lowercase();
+                // Collect nearby words before <mask> to filter repetition
+                let nearby_words: std::collections::HashSet<String> = {
+                    let before_mask = masked.split("<mask>").next().unwrap_or("");
+                    before_mask.split_whitespace()
+                        .rev().take(5)
+                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+                        .filter(|w| w.len() > 1)
+                        .collect()
+                };
+
                 match model.single_forward(masked) {
                     Ok((logits, _ms)) => {
                         let checker_ref = self.checker.as_ref();
                         let wf_ref = self.wordfreq.as_ref();
                         let is_valid = |w: &str| -> bool {
                             let key = w.to_lowercase();
+                            if nearby_words.contains(&key) { return false; }
                             if let Some(c) = checker_ref { c.has_word(&key) }
                             else { wf_ref.map_or(true, |wf| wf.contains_key(&key)) }
                         };
 
-                        // Left list: first-letter matches
+                        // Left list: first-letter matches, expanded via BPE extension
+                        // 1. Get ALL BPE tokens starting with prefix, scored by logit
                         let matches: Vec<(u32, String)> = pi.get(&prefix_lower)
                             .cloned().unwrap_or_default();
-                        let mut scored: Vec<(String, f32)> = matches.iter()
+                        let mut token_scored: Vec<(String, f32)> = matches.iter()
                             .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
                             .collect();
-                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        let left: Vec<Completion> = scored.iter()
-                            .filter(|(w, _)| is_valid(w))
-                            .take(10)
+                        token_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                        // Iterative BPE extension (like Python cognio_demo)
+                        // Diverse candidates: top 20 by logit + top 20 long tokens (≥5 chars)
+                        // Short tokens dominate logits but long tokens carry semantic meaning
+                        let mut left_scored: Vec<(String, f32)> = Vec::new();
+                        let mut seen_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        struct Candidate {
+                            token_ids: Vec<u32>,
+                            word: String,
+                            score: f32,
+                            done: bool,
+                        }
+                        let mut candidate_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        let mut candidates: Vec<Candidate> = Vec::new();
+
+                        // Top 20 by logit
+                        for (tok_word, tok_score) in token_scored.iter().take(20) {
+                            if candidate_set.insert(tok_word.clone()) {
+                                if let Some((tid, _)) = matches.iter().find(|(_, w)| w == tok_word) {
+                                    candidates.push(Candidate {
+                                        token_ids: vec![*tid],
+                                        word: tok_word.clone(),
+                                        score: *tok_score,
+                                        done: false,
+                                    });
+                                }
+                            }
+                        }
+                        // Top 20 long tokens (≥5 chars) — these are word stems like "menneske"
+                        let mut long_tokens: Vec<&(String, f32)> = token_scored.iter()
+                            .filter(|(w, s)| w.len() >= 5 && *s > 0.0)
+                            .collect();
+                        long_tokens.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        for (tok_word, tok_score) in long_tokens.iter().take(20) {
+                            if candidate_set.insert(tok_word.clone()) {
+                                if let Some((tid, _)) = matches.iter().find(|(_, w)| w == tok_word) {
+                                    candidates.push(Candidate {
+                                        token_ids: vec![*tid],
+                                        word: tok_word.clone(),
+                                        score: *tok_score,
+                                        done: false,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Extract context parts from masked sentence
+                        let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+                        let ctx_before = mask_parts[0].trim_end();
+                        let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
+
+                        // Iterative extension: up to 3 steps
+                        for _step in 0..3 {
+                            let to_extend: Vec<usize> = candidates.iter().enumerate()
+                                .filter(|(_, c)| !c.done)
+                                .map(|(i, _)| i)
+                                .collect();
+                            if to_extend.is_empty() { break; }
+
+                            // Build batch: "{ctx} {accumulated}<mask> {after}"
+                            // NO space before <mask> → forces continuation token prediction
+                            let batch_texts: Vec<String> = to_extend.iter()
+                                .map(|&i| {
+                                    let accumulated = model.tokenizer
+                                        .decode(&candidates[i].token_ids, false)
+                                        .unwrap_or_default();
+                                    let accumulated = accumulated.trim();
+                                    format!("{} {}<mask> {}", ctx_before, accumulated, ctx_after)
+                                })
+                                .collect();
+
+                            match model.batched_forward_argmax(&batch_texts) {
+                                Ok((argmaxes, _)) => {
+                                    for (k, &i) in to_extend.iter().enumerate() {
+                                        let best_id = argmaxes[k];
+                                        let best_token = &model.id_to_token[best_id as usize];
+
+                                        // Continuation token = no Ġ prefix and not punctuation
+                                        let is_continuation = !best_token.starts_with('Ġ')
+                                            && !matches!(best_token.as_str(), "." | "," | "!" | "?" | ";" | ":");
+
+                                        if is_continuation {
+                                            candidates[i].token_ids.push(best_id);
+                                            candidates[i].word = model.tokenizer
+                                                .decode(&candidates[i].token_ids, false)
+                                                .unwrap_or_default().trim().to_string();
+                                        } else {
+                                            candidates[i].done = true;
+                                        }
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        // Collect extended words into left_scored
+                        for c in &candidates {
+                            let key = c.word.to_lowercase();
+                            if is_valid(&key) && seen_words.insert(key.clone()) {
+                                left_scored.push((key, c.score));
+                            }
+                        }
+                        eprintln!("BPE candidates: [{}]",
+                            candidates.iter().take(10).map(|c| format!("{}({:.1},done={})", c.word, c.score, c.done))
+                            .collect::<Vec<_>>().join(", "));
+
+                        left_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        let left: Vec<Completion> = left_scored.iter()
+                            .take(25)
                             .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
                             .collect();
 
@@ -961,6 +1079,21 @@ impl eframe::App for ContextApp {
                             let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
                             if clicked { clicked_word = Some(comp.word.clone()); }
                         }
+                    }
+
+                    // Copy button
+                    ui.add_space(4.0);
+                    if ui.small_button("Kopier").clicked() {
+                        let mut text = String::new();
+                        text.push_str(&format!("Ord: {}\n", self.context.word));
+                        text.push_str("Venstre: ");
+                        text.push_str(&self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                        text.push_str("\nHøyre: ");
+                        text.push_str(&self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                        if let Some(masked) = &self.context.masked_sentence {
+                            text.push_str(&format!("\nMaskert: {}", masked));
+                        }
+                        ctx.copy_text(text);
                     }
 
                     if let Some(word) = clicked_word {
