@@ -196,6 +196,8 @@ struct ContextApp {
     selection_mode: bool,
     /// Word's HWND to return focus to
     word_hwnd: Option<isize>,
+    /// Track Ctrl+Space held to prevent repeated activation
+    ctrl_space_held: bool,
     // Status
     load_errors: Vec<String>,
     // Tab navigation
@@ -302,6 +304,7 @@ impl ContextApp {
             selected_completion: None,
             selection_mode: false,
             word_hwnd: None,
+            ctrl_space_held: false,
             load_errors,
             selected_tab: 0,
         }
@@ -856,11 +859,16 @@ impl eframe::App for ContextApp {
         }
 
         // Phase 1: Ctrl+Space while Word has focus → enter selection mode
-        if (!self.completions.is_empty() || !self.open_completions.is_empty()) && !self.selection_mode {
+        {
             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-            let ctrl_down = unsafe { GetAsyncKeyState(0x11) } < 0; // VK_CONTROL held
-            let space_pressed = unsafe { GetAsyncKeyState(0x20) } & 1 != 0; // VK_SPACE just pressed
-            if ctrl_down && space_pressed {
+            let ctrl_down = unsafe { GetAsyncKeyState(0x11) } < 0;
+            let space_down = unsafe { GetAsyncKeyState(0x20) } < 0;
+            let both_held = ctrl_down && space_down;
+
+            if both_held && !self.ctrl_space_held && !self.selection_mode
+                && (!self.completions.is_empty() || !self.open_completions.is_empty())
+            {
+                self.ctrl_space_held = true;
                 // Save Word's window handle before stealing focus
                 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
                 let hwnd = unsafe { GetForegroundWindow() };
@@ -872,6 +880,9 @@ impl eframe::App for ContextApp {
                     let _ = viewport_id;
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            if !both_held {
+                self.ctrl_space_held = false;
             }
         }
 
@@ -909,6 +920,26 @@ impl eframe::App for ContextApp {
                                 if let Some(comp) = active.get(idx) {
                                     tts::speak_word(&comp.word);
                                 }
+                            }
+                        }
+                        egui::Event::Key { key: egui::Key::S, pressed: true, .. } => {
+                            let before_cursor = self.manager.read_document_context().unwrap_or_default();
+                            let before_text = before_cursor.replace('\r', " ").replace('\n', " ");
+                            let sentence_start = before_text.rfind(|c: char| c == '.' || c == '!' || c == '?')
+                                .map(|i| i + 1)
+                                .unwrap_or(0);
+                            let mut sentence = before_text[sentence_start..].trim().to_string();
+                            if let Some(idx) = self.selected_completion {
+                                let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                                if let Some(comp) = active.get(idx) {
+                                    if !sentence.is_empty() {
+                                        sentence.push(' ');
+                                    }
+                                    sentence.push_str(&comp.word);
+                                }
+                            }
+                            if !sentence.is_empty() {
+                                tts::speak_word(&sentence);
                             }
                         }
                         _ => {}
@@ -957,7 +988,7 @@ impl eframe::App for ContextApp {
         }
 
         // Window sizing
-        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty();
+        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !self.open_completions.is_empty();
         let win_h = if has_content { 250.0 } else { 110.0 };
         const WIN_W: f32 = 420.0;
 
