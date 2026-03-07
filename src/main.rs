@@ -708,10 +708,9 @@ impl ContextApp {
 
                         // Adaptive max_steps: longer prefixes need fewer BPE extensions
                         // since BPE tokens already cover most of the word.
-                        // 1 char → 2, 2 chars → 1, 3 chars → 1, 4+ → 0
+                        // 1 char → 1, 2 chars → 1, 3+ → 0
                         let max_steps = match prefix_lower.len() {
-                            0..=1 => 2,
-                            2..=3 => 1,
+                            0..=2 => 1,
                             _ => 0,
                         };
                         for _step in 0..max_steps {
@@ -730,8 +729,9 @@ impl ContextApp {
                                     c.done = true;
                                 }
                             }
-                            // Cap at 10 per batch to limit ONNX cost
-                            to_extend.truncate(10);
+                            // Cap batch size: 5 for short prefixes (speed), 10 otherwise
+                            let batch_cap = if prefix_lower.len() <= 2 { 5 } else { 10 };
+                            to_extend.truncate(batch_cap);
                             if to_extend.is_empty() { break; }
 
                             // Build batch: "{ctx} {accumulated}<mask> {after}"
