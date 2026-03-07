@@ -188,6 +188,8 @@ struct ContextApp {
     /// Open suggestions (any word) for fill-in-the-blank mode
     open_completions: Vec<Completion>,
     last_completed_prefix: String,
+    /// Cache: (masked_sentence, logits) from single_forward — reused when only prefix changes
+    cached_forward: Option<(String, Vec<f32>)>,
     // Embedding sync
     last_embedding_sync: Instant,
     embedding_sync_interval: Duration,
@@ -303,6 +305,7 @@ impl ContextApp {
             completions: Vec::new(),
             open_completions: Vec::new(),
             last_completed_prefix: String::new(),
+            cached_forward: None,
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
@@ -428,6 +431,7 @@ impl ContextApp {
                         }
                         // New embeddings available — force re-completion so topic boost applies
                         self.last_completed_prefix.clear();
+                        self.cached_forward = None;
                     }
                     Err(e) => eprintln!("Embedding sync error: {}", e),
                     _ => {}
@@ -474,8 +478,21 @@ impl ContextApp {
                         .collect()
                 };
 
-                match model.single_forward(masked) {
+                // Cache the initial forward pass: masked sentence is identical across keystrokes
+                // (only the prefix changes), so we reuse logits when masked text hasn't changed.
+                let forward_result = if let Some((ref cached_masked, ref cached_logits)) = self.cached_forward {
+                    if cached_masked == masked {
+                        eprintln!("fill-blank: reusing cached forward pass");
+                        Ok((cached_logits.clone(), 0.0))
+                    } else {
+                        model.single_forward(masked)
+                    }
+                } else {
+                    model.single_forward(masked)
+                };
+                match forward_result {
                     Ok((logits, _ms)) => {
+                        self.cached_forward = Some((masked.clone(), logits.clone()));
                         let checker_ref = self.checker.as_ref();
                         let wf_ref = self.wordfreq.as_ref();
                         let is_valid = |w: &str| -> bool {
@@ -689,9 +706,15 @@ impl ContextApp {
                         let ctx_before = mask_parts[0].trim_end();
                         let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
 
-                        // Iterative extension: up to 3 steps with early stopping
-                        // Only extend candidates within 15 points of the best score
-                        for _step in 0..3 {
+                        // Adaptive max_steps: longer prefixes need fewer BPE extensions
+                        // since BPE tokens already cover most of the word.
+                        // 1 char → 2, 2 chars → 1, 3 chars → 1, 4+ → 0
+                        let max_steps = match prefix_lower.len() {
+                            0..=1 => 2,
+                            2..=3 => 1,
+                            _ => 0,
+                        };
+                        for _step in 0..max_steps {
                             let best_score = candidates.iter()
                                 .filter(|c| !c.done)
                                 .map(|c| c.score)
@@ -1029,6 +1052,24 @@ impl eframe::App for ContextApp {
                 self.open_completions.clear();
                 self.last_completed_prefix.clear();
                 self.run_grammar_check();
+            }
+
+            // Pre-warm forward cache: when masked_sentence changes, run single_forward
+            // eagerly so the first keystroke hits the cache instead of waiting ~150ms.
+            if let Some(masked) = &self.context.masked_sentence {
+                let needs_warmup = match &self.cached_forward {
+                    Some((cached_masked, _)) => cached_masked != masked,
+                    None => true,
+                };
+                if needs_warmup {
+                    if let Some(model) = &mut self.model {
+                        let t = Instant::now();
+                        if let Ok((logits, _)) = model.single_forward(masked) {
+                            eprintln!("pre-warmed forward cache in {:?}", t.elapsed());
+                            self.cached_forward = Some((masked.clone(), logits));
+                        }
+                    }
+                }
             }
         }
 
