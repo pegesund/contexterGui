@@ -2092,7 +2092,6 @@ dependencies = [
 [[package]]
 name = "mtag-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/pegesund/rustSpell.git#3f7b6c2e2eca3d459b2dbd631d64b63560396945"
 dependencies = [
  "bincode",
  "fst",

@@ -31,6 +31,13 @@ impl AnyChecker {
         }
     }
 
+    fn prefix_lookup(&self, prefix: &str, limit: usize) -> Vec<String> {
+        match self {
+            AnyChecker::Neo(c) => c.prefix_lookup(prefix, limit),
+            AnyChecker::Swi(c) => c.prefix_lookup(prefix, limit),
+        }
+    }
+
     fn check_sentence(&mut self, text: &str) -> Vec<GrammarError> {
         match self {
             AnyChecker::Neo(c) => c.check_sentence(text),
@@ -198,6 +205,8 @@ struct ContextApp {
     word_hwnd: Option<isize>,
     /// Track Ctrl+Space held to prevent repeated activation
     ctrl_space_held: bool,
+    /// Which column is selected: 0=left (completions), 1=right (open_completions)
+    selected_column: u8,
     // Status
     load_errors: Vec<String>,
     // Tab navigation
@@ -305,6 +314,7 @@ impl ContextApp {
             selection_mode: false,
             word_hwnd: None,
             ctrl_space_held: false,
+            selected_column: 0,
             load_errors,
             selected_tab: 0,
         }
@@ -482,6 +492,104 @@ impl ContextApp {
                         } else {
                             pi.get(&prefix_lower).cloned().unwrap_or_default()
                         };
+
+                        // If BPE has no matches, try mtag dictionary prefix search
+                        // Score candidates using BERT logits for contextual ranking
+                        if matches.is_empty() && !prefix.is_empty() {
+                            if let Some(checker) = &self.checker {
+                                let mtag_hits = checker.prefix_lookup(&prefix_lower, 50);
+                                if !mtag_hits.is_empty() {
+                                    let capitalize = prefix.chars().next().map_or(false, |c| c.is_uppercase());
+                                    let cap = |s: &str| -> String {
+                                        let mut c = s.chars();
+                                        match c.next() {
+                                            None => String::new(),
+                                            Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                                        }
+                                    };
+                                    // Score candidates using BERT batched forward
+                                    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+                                    let ctx_before_m = mask_parts[0].trim_end();
+                                    let ctx_after_m = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
+
+                                    // Tokenize all candidates
+                                    let candidates_with_tokens: Vec<(String, Vec<u32>)> = mtag_hits.into_iter()
+                                        .filter_map(|w| {
+                                            let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
+                                            let ids: Vec<u32> = enc.get_ids().to_vec();
+                                            if ids.is_empty() { return None; }
+                                            Some((w, ids))
+                                        })
+                                        .collect();
+
+                                    // First-token score from existing mask logits
+                                    let mut scores: Vec<f32> = candidates_with_tokens.iter()
+                                        .map(|(_, ids)| logits[ids[0] as usize])
+                                        .collect();
+
+                                    // Batched extension: one forward pass per token position
+                                    let max_tokens = candidates_with_tokens.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
+                                    for t in 1..max_tokens {
+                                        let to_score: Vec<usize> = candidates_with_tokens.iter().enumerate()
+                                            .filter(|(_, (_, ids))| ids.len() > t)
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        if to_score.is_empty() { break; }
+
+                                        let batch_texts: Vec<String> = to_score.iter()
+                                            .map(|&i| {
+                                                let partial = model.tokenizer
+                                                    .decode(&candidates_with_tokens[i].1[..t], false)
+                                                    .unwrap_or_default();
+                                                format!("{} {}<mask> {}", ctx_before_m, partial.trim(), ctx_after_m)
+                                            })
+                                            .collect();
+
+                                        if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
+                                            for (k, &i) in to_score.iter().enumerate() {
+                                                scores[i] += batch_logits[k][candidates_with_tokens[i].1[t] as usize];
+                                            }
+                                        }
+                                    }
+
+                                    // Average per token so long words aren't penalized
+                                    let mut scored: Vec<(String, f32)> = candidates_with_tokens.iter().enumerate()
+                                        .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
+                                        .collect();
+                                    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                    self.completions = scored.into_iter()
+                                        .take(10)
+                                        .map(|(w, s)| Completion {
+                                            word: if capitalize { cap(&w) } else { w },
+                                            score: s,
+                                            elapsed_ms: 0.0,
+                                        })
+                                        .collect();
+                                    let bert_ms = t_bert.elapsed().as_millis();
+                                    // Right list
+                                    let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
+                                        .enumerate()
+                                        .filter(|(_, tok)| tok.starts_with('Ġ'))
+                                        .map(|(i, _)| {
+                                            let decoded = model.tokenizer
+                                                .decode(&[i as u32], false)
+                                                .unwrap_or_default().trim().to_string();
+                                            (decoded, logits[i])
+                                        })
+                                        .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
+                                        .collect();
+                                    all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                    self.open_completions = all_scored.iter()
+                                        .take(10)
+                                        .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
+                                        .collect();
+                                    eprintln!("mtag fallback (BERT-ranked): left=[{}] bert={}ms",
+                                        self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
+                                        bert_ms);
+                                    return;
+                                }
+                            }
+                        }
                         let mut token_scored: Vec<(String, f32)> = matches.iter()
                             .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
                             .collect();
@@ -664,6 +772,10 @@ impl ContextApp {
                 Box::new(move |word: &str| c.has_word(word)) as Box<dyn Fn(&str) -> bool>
             });
             let fallback_ref: Option<&dyn Fn(&str) -> bool> = fallback_fn.as_ref().map(|b| b.as_ref());
+            let prefix_fn: Option<Box<dyn Fn(&str, usize) -> Vec<String> + '_>> = self.checker.as_ref().map(|c| {
+                Box::new(move |p: &str, limit: usize| c.prefix_lookup(p, limit)) as Box<dyn Fn(&str, usize) -> Vec<String>>
+            });
+            let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
 
             if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
                 let ctx = {
@@ -698,6 +810,7 @@ impl ContextApp {
                     self.baselines.as_ref(),
                     self.wordfreq.as_ref(),
                     fallback_ref,
+                    prefix_ref,
                     self.embedding_store.as_ref(),
                     1.0,   // pmi_weight
                     10.0,  // topic_boost
@@ -875,6 +988,7 @@ impl eframe::App for ContextApp {
                 self.word_hwnd = Some(hwnd.0 as isize);
                 self.selected_completion = Some(0);
                 self.selection_mode = true;
+                self.selected_column = 0;
                 // Steal focus to our window
                 if let Some(viewport_id) = ctx.input(|i| i.viewport().native_pixels_per_point.map(|_| ())) {
                     let _ = viewport_id;
@@ -894,7 +1008,9 @@ impl eframe::App for ContextApp {
                 for event in &i.events {
                     match event {
                         egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
-                            let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                            let active = if self.selected_column == 1 && !self.open_completions.is_empty() {
+                                &self.open_completions
+                            } else if self.completions.is_empty() { &self.open_completions } else { &self.completions };
                             let max = active.len();
                             self.selected_completion = Some(match self.selected_completion {
                                 None => 0,
@@ -907,6 +1023,24 @@ impl eframe::App for ContextApp {
                                 Some(idx) => idx - 1,
                             });
                         }
+                        egui::Event::Key { key: egui::Key::ArrowRight, pressed: true, .. } => {
+                            if !self.open_completions.is_empty() && self.selected_column == 0 {
+                                self.selected_column = 1;
+                                let max = self.open_completions.len();
+                                if let Some(idx) = self.selected_completion {
+                                    if idx >= max { self.selected_completion = Some(max.saturating_sub(1)); }
+                                }
+                            }
+                        }
+                        egui::Event::Key { key: egui::Key::ArrowLeft, pressed: true, .. } => {
+                            if !self.completions.is_empty() && self.selected_column == 1 {
+                                self.selected_column = 0;
+                                let max = self.completions.len();
+                                if let Some(idx) = self.selected_completion {
+                                    if idx >= max { self.selected_completion = Some(max.saturating_sub(1)); }
+                                }
+                            }
+                        }
                         egui::Event::Key { key: egui::Key::Enter, pressed: true, .. }
                         | egui::Event::Key { key: egui::Key::Space, pressed: true, .. } => {
                             accept = true;
@@ -916,7 +1050,9 @@ impl eframe::App for ContextApp {
                         }
                         egui::Event::Key { key: egui::Key::P, pressed: true, .. } => {
                             if let Some(idx) = self.selected_completion {
-                                let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                                let active = if self.selected_column == 1 && !self.open_completions.is_empty() {
+                                    &self.open_completions
+                                } else if self.completions.is_empty() { &self.open_completions } else { &self.completions };
                                 if let Some(comp) = active.get(idx) {
                                     tts::speak_word(&comp.word);
                                 }
@@ -930,7 +1066,9 @@ impl eframe::App for ContextApp {
                                 .unwrap_or(0);
                             let mut sentence = before_text[sentence_start..].trim().to_string();
                             if let Some(idx) = self.selected_completion {
-                                let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                                let active = if self.selected_column == 1 && !self.open_completions.is_empty() {
+                                    &self.open_completions
+                                } else if self.completions.is_empty() { &self.open_completions } else { &self.completions };
                                 if let Some(comp) = active.get(idx) {
                                     if !sentence.is_empty() {
                                         sentence.push(' ');
@@ -949,7 +1087,9 @@ impl eframe::App for ContextApp {
 
             if accept {
                 if let Some(idx) = self.selected_completion {
-                    let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                    let active = if self.selected_column == 1 && !self.open_completions.is_empty() {
+                        &self.open_completions
+                    } else if self.completions.is_empty() { &self.open_completions } else { &self.completions };
                     if let Some(comp) = active.get(idx) {
                         let word = comp.word.clone();
                         self.return_focus_to_word();
@@ -1148,7 +1288,7 @@ impl eframe::App for ContextApp {
                             ui.horizontal(|ui| {
                                 if row < self.completions.len() {
                                     let comp = &self.completions[row];
-                                    let is_sel = sel == Some(row);
+                                    let is_sel = self.selected_column == 0 && sel == Some(row);
                                     let is_top = row == 0 && sel.is_none();
                                     let (clicked, _) = render_row(ui, comp, row, is_sel, is_top, col_w);
                                     if clicked { clicked_word = Some(comp.word.clone()); }
@@ -1158,7 +1298,8 @@ impl eframe::App for ContextApp {
                                 ui.add_space(10.0);
                                 if row < self.open_completions.len() {
                                     let comp = &self.open_completions[row];
-                                    let (clicked, _) = render_row(ui, comp, row + 100, false, false, col_w);
+                                    let is_sel = self.selected_column == 1 && sel == Some(row);
+                                    let (clicked, _) = render_row(ui, comp, row + 100, is_sel, false, col_w);
                                     if clicked { clicked_word = Some(comp.word.clone()); }
                                 }
                             });

@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     println!("Context: 'Om ferien går jeg ofte til '  prefix: 'v'");
     let results = nostos_cognio::complete::complete_word(
         &mut model, "Om ferien går jeg ofte til", "v",
-        &pi, Some(&baselines), Some(&wf), None, None,
+        &pi, Some(&baselines), Some(&wf), None, None, None,
         1.0, 10.0, 5, 3,
     )?;
     for c in &results {
@@ -62,7 +62,7 @@ fn main() -> anyhow::Result<()> {
     println!("\nContext: 'Om ferien går jeg ofte til '  prefix: 'v'");
     let results = nostos_cognio::complete::complete_word(
         &mut model, "Om ferien går jeg ofte til", "v",
-        &pi, Some(&baselines), Some(&wf), None, Some(&store),
+        &pi, Some(&baselines), Some(&wf), None, None, Some(&store),
         1.0, 10.0, 5, 3,
     )?;
     for c in &results {
@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
     println!("\nContext: 'I fritiden liker jeg å fiske og bade. Om ferien går jeg ofte til '  prefix: 'v'");
     let results = nostos_cognio::complete::complete_word(
         &mut model, "I fritiden liker jeg å fiske og bade. Om ferien går jeg ofte til", "v",
-        &pi, Some(&baselines), Some(&wf), None, Some(&store),
+        &pi, Some(&baselines), Some(&wf), None, None, Some(&store),
         1.0, 10.0, 5, 3,
     )?;
     for c in &results {
@@ -95,7 +95,7 @@ fn main() -> anyhow::Result<()> {
     println!("Context: 'I fritiden liker jeg å fiske og bade. '  prefix: 'V'");
     let results = nostos_cognio::complete::complete_word(
         &mut model, "I fritiden liker jeg å fiske og bade.", "V",
-        &pi, Some(&baselines), Some(&wf), None, Some(&store),
+        &pi, Some(&baselines), Some(&wf), None, None, Some(&store),
         1.0, 10.0, 5, 3,
     )?;
     for c in &results {
