@@ -557,6 +557,25 @@ impl ContextApp {
             clean, self.writing_errors.last().unwrap().suggestion);
     }
 
+    /// Remove errors that are no longer present in the current document text.
+    fn prune_resolved_errors(&mut self) {
+        let sentence = &self.context.sentence;
+        self.writing_errors.retain(|e| {
+            if e.ignored {
+                return false; // drop ignored errors
+            }
+            // Check if the error word still appears in the current sentence context
+            let word_lower = e.word.to_lowercase();
+            let still_present = sentence.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w == word_lower);
+            if !still_present {
+                eprintln!("Error resolved: '{}' no longer in text", e.word);
+            }
+            still_present
+        });
+    }
+
     /// Update the error list with grammar errors from the current sentence.
     /// Called when a sentence boundary is detected.
     fn update_grammar_errors(&mut self) {
@@ -1377,6 +1396,8 @@ impl eframe::App for ContextApp {
                     self.last_caret_pos = new_ctx.caret_pos;
                 }
                 self.context = new_ctx;
+                // Remove errors for words that have been manually corrected
+                self.prune_resolved_errors();
             }
 
             // Sync document sentences for topic-aware completion
