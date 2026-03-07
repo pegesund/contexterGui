@@ -252,8 +252,21 @@ impl WordComBridge {
 
         let doc = app.get_dispatch("ActiveDocument")?;
 
-        // If cursor is at word start (e.g. after space/punct), return empty = word boundary
-        let word = if cursor_pos == word_start || !full_word.chars().all(|c| c.is_alphanumeric()) {
+        // Check if cursor is past the word (e.g. after pressing space)
+        // Word's Expand(wdWord) includes trailing space, so cursor_pos may be at word_end
+        // but the actual cursor is in the space after the word
+        let cursor_past_word = cursor_pos >= word_end && {
+            // Check if char at cursor_pos is space/punct (not alphanumeric)
+            let peek_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(cursor_pos + 1)]);
+            peek_v.ok().and_then(|v| {
+                let r = unsafe { extract_dispatch(&v) }.ok()?;
+                let t = r.get_string("Text").ok()?;
+                t.chars().next().map(|c| !c.is_alphanumeric())
+            }).unwrap_or(true) // at end of doc = past word
+        };
+
+        // If cursor is at word start, past word, or non-alphanumeric word → empty
+        let word = if cursor_pos == word_start || cursor_past_word || !full_word.chars().all(|c| c.is_alphanumeric()) {
             // Expand(wdWord) failed to find a word — fallback: scan backwards from cursor
             let look_back = 50.min(cursor_pos);
             if look_back > 0 {
@@ -294,7 +307,8 @@ impl WordComBridge {
                 false
             }
         };
-        let use_masked = is_mid_word || has_text_after;
+        let has_context_before = cursor_pos > 1;
+        let use_masked = is_mid_word || has_text_after || (word.is_empty() && has_context_before);
         let masked_sentence = if use_masked {
             let half_ctx = 2000;
             // For typing: back up past the partial word so <mask> replaces it
@@ -439,7 +453,15 @@ impl TextBridge for WordComBridge {
             }
 
             if word_start_off == word_end_off {
-                return Ok(()); // No word at cursor
+                // No word at cursor — insert the word at cursor position
+                let insert_range_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(cursor_pos)])?;
+                let insert_range = unsafe { extract_dispatch(&insert_range_v) }?;
+                insert_range.put("Text", make_bstr(&format!("{} ", new_text)))?;
+                let new_end = cursor_pos + new_text.chars().count() as i32 + 1;
+                let cursor_v = doc.call("Range", &[make_i4(new_end), make_i4(new_end)])?;
+                let cursor_range = unsafe { extract_dispatch(&cursor_v) }?;
+                cursor_range.call("Select", &[])?;
+                return Ok(());
             }
 
             // Create range covering the full word
@@ -448,6 +470,11 @@ impl TextBridge for WordComBridge {
             let word_range_v = doc.call("Range", &[make_i4(word_start), make_i4(word_end)])?;
             let word_range = unsafe { extract_dispatch(&word_range_v) }?;
             word_range.put("Text", make_bstr(new_text))?;
+            // Move cursor to end of inserted word
+            let new_end = word_start + new_text.chars().count() as i32;
+            let cursor_v = doc.call("Range", &[make_i4(new_end), make_i4(new_end)])?;
+            let cursor_range = unsafe { extract_dispatch(&cursor_v) }?;
+            cursor_range.call("Select", &[])?;
             Ok(())
         })()
         .is_ok()

@@ -424,20 +424,28 @@ impl ContextApp {
 
     fn run_completion(&mut self) {
         let prefix = extract_prefix(&self.context.word);
-        if prefix.is_empty() {
+
+        // No prefix and no masked context → nothing to do
+        if prefix.is_empty() && self.context.masked_sentence.is_none() {
             self.completions.clear();
             self.open_completions.clear();
             return;
         }
 
-        if prefix == self.last_completed_prefix {
+        // Build a cache key from prefix + masked sentence
+        let cache_key = if prefix.is_empty() {
+            format!("__noprefix__{}", self.context.masked_sentence.as_deref().unwrap_or(""))
+        } else {
+            prefix.to_string()
+        };
+        if cache_key == self.last_completed_prefix {
             return;
         }
-        self.last_completed_prefix = prefix.to_string();
+        self.last_completed_prefix = cache_key;
         let t_total = Instant::now();
 
-        // Mid-word click: fill-in-the-blank using full sentence context
-        // Two lists: left = first-letter matches, right = open (any word)
+        // Fill-in-the-blank using full sentence context
+        // Works with prefix (typed letters) or without (just pressed space)
         if let Some(masked) = &self.context.masked_sentence.clone() {
             if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
                 let t_bert = Instant::now();
@@ -464,9 +472,12 @@ impl ContextApp {
                         };
 
                         // Left list: first-letter matches, expanded via BPE extension
-                        // 1. Get ALL BPE tokens starting with prefix, scored by logit
-                        let matches: Vec<(u32, String)> = pi.get(&prefix_lower)
-                            .cloned().unwrap_or_default();
+                        // Skip when no prefix (space-only trigger shows right column only)
+                        let matches: Vec<(u32, String)> = if prefix.is_empty() {
+                            Vec::new()
+                        } else {
+                            pi.get(&prefix_lower).cloned().unwrap_or_default()
+                        };
                         let mut token_scored: Vec<(String, f32)> = matches.iter()
                             .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
                             .collect();
@@ -819,19 +830,32 @@ impl eframe::App for ContextApp {
                 if prefix != self.last_completed_prefix {
                     self.last_prefix_change = Instant::now();
                     self.pending_completion = true;
-                    self.selected_completion = None;
+                    if !self.selection_mode {
+                        self.selected_completion = None;
+                    }
                 }
+            } else if self.context.masked_sentence.is_some() {
+                // No prefix but have context (e.g. after space): suggest next word
+                let cache_key = format!("__noprefix__{}", self.context.masked_sentence.as_deref().unwrap_or(""));
+                if cache_key != self.last_completed_prefix {
+                    self.last_prefix_change = Instant::now();
+                    self.pending_completion = true;
+                    if !self.selection_mode {
+                        self.selected_completion = None;
+                    }
+                }
+                self.run_grammar_check();
             } else {
-                // Word boundary: run grammar check
+                // No word, no context: clear and run grammar
                 self.completions.clear();
-            self.open_completions.clear();
+                self.open_completions.clear();
                 self.last_completed_prefix.clear();
                 self.run_grammar_check();
             }
         }
 
         // Phase 1: Ctrl+Space while Word has focus → enter selection mode
-        if !self.completions.is_empty() && !self.selection_mode {
+        if (!self.completions.is_empty() || !self.open_completions.is_empty()) && !self.selection_mode {
             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
             let ctrl_down = unsafe { GetAsyncKeyState(0x11) } < 0; // VK_CONTROL held
             let space_pressed = unsafe { GetAsyncKeyState(0x20) } & 1 != 0; // VK_SPACE just pressed
@@ -858,10 +882,11 @@ impl eframe::App for ContextApp {
                 for event in &i.events {
                     match event {
                         egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
-                            let max = self.completions.len();
+                            let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                            let max = active.len();
                             self.selected_completion = Some(match self.selected_completion {
                                 None => 0,
-                                Some(idx) => (idx + 1).min(max - 1),
+                                Some(idx) => (idx + 1).min(max.saturating_sub(1)),
                             });
                         }
                         egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
@@ -884,7 +909,8 @@ impl eframe::App for ContextApp {
 
             if accept {
                 if let Some(idx) = self.selected_completion {
-                    if let Some(comp) = self.completions.get(idx) {
+                    let active = if self.completions.is_empty() { &self.open_completions } else { &self.completions };
+                    if let Some(comp) = active.get(idx) {
                         let word = comp.word.clone();
                         self.return_focus_to_word();
                         self.manager.replace_word(&word);
@@ -905,8 +931,8 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Reset selection when completions disappear
-        if self.completions.is_empty() {
+        // Reset selection when both completion lists are empty
+        if self.completions.is_empty() && self.open_completions.is_empty() {
             self.selected_completion = None;
             self.selection_mode = false;
         }
@@ -1023,6 +1049,7 @@ impl eframe::App for ContextApp {
                     let sel = self.selected_completion;
                     let mut clicked_word: Option<String> = None;
                     let has_dual = !self.open_completions.is_empty() && !self.completions.is_empty();
+                    let has_right_only = !self.open_completions.is_empty() && self.completions.is_empty();
 
                     let render_row = |ui: &mut egui::Ui, comp: &Completion, _idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
                         let marker = if is_selected { "▸ " } else { "  " };
@@ -1070,6 +1097,15 @@ impl eframe::App for ContextApp {
                                     if clicked { clicked_word = Some(comp.word.clone()); }
                                 }
                             });
+                        }
+                    } else if has_right_only {
+                        // No prefix typed — show right column (next-word predictions) as single list
+                        let avail_w = ui.available_width();
+                        for (i, comp) in self.open_completions.iter().enumerate() {
+                            let is_sel = sel == Some(i);
+                            let is_top = i == 0 && sel.is_none();
+                            let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
+                            if clicked { clicked_word = Some(comp.word.clone()); }
                         }
                     } else {
                         let avail_w = ui.available_width();
