@@ -742,11 +742,15 @@ impl ContextApp {
         let mut candidates: Vec<(String, String)> = Vec::new(); // (corrected_sentence, explanation)
 
         // 1. Apply each individual grammar suggestion
+        //    If suggestion contains '|' (multiple alternatives), try each one separately
         for e in errors {
             if !e.suggestion.is_empty() {
-                let fixed = replace_word_at_position(sentence, &e.word, &e.suggestion);
-                let expl = format!("«{}» → «{}»: {}", e.word, e.suggestion, e.explanation);
-                candidates.push((fixed, expl));
+                let alternatives: Vec<&str> = e.suggestion.split('|').collect();
+                for alt in &alternatives {
+                    let fixed = replace_word_at_position(sentence, &e.word, alt);
+                    let expl = format!("«{}» → «{}»: {}", e.word, alt, e.explanation);
+                    candidates.push((fixed, expl));
+                }
             }
         }
 
@@ -780,14 +784,15 @@ impl ContextApp {
             }
         }
 
-        // 3. Apply all suggestions together
+        // 3. Apply all suggestions together (use first alternative for each)
         if errors.len() > 1 {
             let mut all_fixed = sentence.to_string();
             let mut all_expl = Vec::new();
             for e in errors {
                 if !e.suggestion.is_empty() {
-                    all_fixed = replace_word_at_position(&all_fixed, &e.word, &e.suggestion);
-                    all_expl.push(format!("«{}» → «{}»", e.word, e.suggestion));
+                    let first_alt = e.suggestion.split('|').next().unwrap_or(&e.suggestion);
+                    all_fixed = replace_word_at_position(&all_fixed, &e.word, first_alt);
+                    all_expl.push(format!("«{}» → «{}»", e.word, first_alt));
                 }
             }
             if all_fixed != sentence {
@@ -840,7 +845,7 @@ impl ContextApp {
 
         // Sort by BERT score — best correction wins regardless of type
         scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(3);
+        scored.truncate(1);
         scored
     }
 
@@ -856,8 +861,14 @@ impl ContextApp {
 
     /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
-        // Use cached document text — don't re-read (may fail when our window is focused)
-        let doc_text = self.last_doc_text.to_lowercase();
+        // Only prune with a FRESH document read — stale cache causes false pruning
+        let doc_text = match self.manager.read_full_document() {
+            Some(t) => {
+                self.last_doc_text = t.clone();
+                t.to_lowercase()
+            }
+            None => return, // Can't read doc (our window focused) — skip pruning
+        };
         self.writing_errors.retain(|e| {
             if e.ignored {
                 return false;
@@ -2475,7 +2486,7 @@ impl eframe::App for ContextApp {
                     );
                 } else {
                     ui.label(
-                        egui::RichText::new(format!("Feil funnet ({})", active_errors.len()))
+                        egui::RichText::new(format!("Mulige feil? ({})", active_errors.len()))
                             .size(12.0)
                             .strong()
                             .color(egui::Color32::from_rgb(80, 80, 80)),
@@ -2487,6 +2498,7 @@ impl eframe::App for ContextApp {
                     // Group grammar errors by sentence_context
                     let mut shown_contexts: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+                    egui::ScrollArea::vertical().max_height(ui.available_height() - 4.0).show(ui, |ui| {
                     for &idx in &active_errors {
                         let error = &self.writing_errors[idx];
 
@@ -2497,37 +2509,9 @@ impl eframe::App for ContextApp {
                             }
                         }
 
-                        let (icon, color) = match error.category {
-                            ErrorCategory::Spelling => (
-                                "🔴",
-                                egui::Color32::from_rgb(200, 40, 40),
-                            ),
-                            ErrorCategory::Grammar => (
-                                "🟢",
-                                rule_color(&error.rule_name),
-                            ),
-                        };
-
                         ui.group(|ui| {
                             if matches!(error.category, ErrorCategory::Grammar) {
                                 shown_contexts.insert(error.sentence_context.clone());
-                                // Sentence-level grammar correction
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(icon).size(12.0));
-                                    ui.label(
-                                        egui::RichText::new("Grammatikkfeil")
-                                            .strong()
-                                            .size(12.0)
-                                            .color(color),
-                                    );
-                                });
-                                // Show original with strikethrough
-                                ui.label(
-                                    egui::RichText::new(&error.word)
-                                        .size(11.0)
-                                        .strikethrough()
-                                        .color(egui::Color32::from_rgb(150, 80, 80)),
-                                );
                                 // Show all alternatives for this sentence
                                 let ctx = error.sentence_context.clone();
                                 let alternatives: Vec<usize> = active_errors.iter()
@@ -2540,90 +2524,91 @@ impl eframe::App for ContextApp {
                                     .copied()
                                     .collect();
 
-                                for (alt_num, &alt_idx) in alternatives.iter().enumerate() {
-                                    let alt = &self.writing_errors[alt_idx];
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("{}.", alt_num + 1))
-                                                .size(11.0)
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(60, 60, 60)),
-                                        );
-                                        ui.label(
-                                            egui::RichText::new(&alt.suggestion)
-                                                .size(11.0)
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(0, 120, 60)),
-                                        );
-                                        if ui.small_button("Rett opp").clicked() {
+                                // Buttons on top line
+                                let first_alt = alternatives.first().copied();
+                                let first_suggestion = first_alt.map(|i| self.writing_errors[i].suggestion.clone()).unwrap_or_default();
+                                ui.horizontal(|ui| {
+                                    if let Some(alt_idx) = first_alt {
+                                        if ui.small_button("👍").on_hover_text("Rett opp").clicked() {
                                             action = Some((alt_idx, "fix"));
                                         }
-                                    });
+                                    }
+                                    if ui.small_button("👎").on_hover_text("Ignorer").clicked() {
+                                        action = Some((idx, "ignore_group"));
+                                    }
+                                    if ui.small_button("🔊").on_hover_text("Les opp").clicked() {
+                                        tts::speak_word(&first_suggestion);
+                                    }
+                                });
+                                // Original (red, strikethrough) then suggestion (green) — stacked
+                                ui.label(
+                                    egui::RichText::new(&error.word)
+                                        .size(11.0)
+                                        .strikethrough()
+                                        .color(egui::Color32::from_rgb(180, 60, 60)),
+                                );
+                                for &alt_idx in &alternatives {
+                                    let alt = &self.writing_errors[alt_idx];
                                     ui.label(
-                                        egui::RichText::new(&alt.explanation)
+                                        egui::RichText::new(&alt.suggestion)
+                                            .size(11.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                                    );
+                                }
+                                // Explanation
+                                if let Some(alt_idx) = first_alt {
+                                    ui.label(
+                                        egui::RichText::new(&self.writing_errors[alt_idx].explanation)
                                             .size(10.0)
                                             .color(egui::Color32::from_rgb(100, 100, 100)),
                                     );
                                 }
-
-                                // Ignore button for the whole group
-                                ui.horizontal(|ui| {
-                                    if ui.button(
-                                        egui::RichText::new("Ignorer").size(11.0)
-                                    ).clicked() {
-                                        // Ignore all alternatives for this sentence
-                                        action = Some((idx, "ignore_group"));
-                                    }
-                                });
                             } else {
-                                // Spelling error: word-level display
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(icon).size(12.0));
-                                    ui.label(
-                                        egui::RichText::new(format!("«{}»", error.word))
-                                            .strong()
-                                            .size(12.0)
-                                            .color(color),
-                                    );
-                                    if !error.suggestion.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(format!("→ {}", error.suggestion))
-                                                .size(12.0)
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(0, 120, 60)),
-                                        );
-                                    }
-                                });
-                                ui.label(
-                                    egui::RichText::new(&error.explanation)
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(80, 80, 80)),
-                                );
-
-                                // Action buttons for spelling
+                                // Spelling error — buttons on top, then word/suggestion stacked
+                                let err_suggestion = error.suggestion.clone();
+                                let err_word = error.word.clone();
                                 ui.horizontal(|ui| {
                                     if !error.suggestion.is_empty() {
-                                        if ui.button(
-                                            egui::RichText::new("Rett opp").size(11.0)
-                                        ).clicked() {
+                                        if ui.small_button("👍").on_hover_text("Rett opp").clicked() {
                                             action = Some((idx, "fix"));
                                         }
                                     }
-                                    if ui.button(
-                                        egui::RichText::new("Forslag").size(11.0)
-                                    ).clicked() {
-                                        action = Some((idx, "suggest"));
-                                    }
-                                    if ui.button(
-                                        egui::RichText::new("Ignorer").size(11.0)
-                                    ).clicked() {
+                                    if ui.small_button("👎").on_hover_text("Ignorer").clicked() {
                                         action = Some((idx, "ignore"));
                                     }
+                                    if ui.small_button("🔊").on_hover_text("Les opp").clicked() {
+                                        let speak = if !err_suggestion.is_empty() { &err_suggestion } else { &err_word };
+                                        tts::speak_word(speak);
+                                    }
+                                    if ui.small_button("?").on_hover_text("Flere forslag").clicked() {
+                                        action = Some((idx, "suggest"));
+                                    }
                                 });
+                                ui.label(
+                                    egui::RichText::new(&error.word)
+                                        .size(12.0)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(200, 40, 40)),
+                                );
+                                if !error.suggestion.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&error.suggestion)
+                                            .size(12.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                                    );
+                                }
+                                ui.label(
+                                    egui::RichText::new(&error.explanation)
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(80, 80, 80)),
+                                );
                             }
                         });
                         ui.add_space(2.0);
                     }
+                    }); // end ScrollArea
 
                     // Handle actions after rendering
                     if let Some((idx, act)) = action {
@@ -2680,24 +2665,27 @@ impl eframe::App for ContextApp {
                 egui::Window::new(format!("Forslag for «{}»", word_clone))
                     .open(&mut open)
                     .collapsible(false)
-                    .resizable(false)
+                    .resizable(true)
                     .default_width(250.0)
+                    .max_height(300.0)
                     .show(ctx, |ui| {
                         if candidates_clone.is_empty() {
                             ui.label("Ingen forslag funnet.");
                         } else {
-                            for (candidate, _score) in candidates_clone.iter().take(10) {
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("🔊").clicked() {
-                                        tts::speak_word(candidate);
-                                    }
-                                    if ui.button(
-                                        egui::RichText::new(candidate).size(12.0).strong()
-                                    ).clicked() {
-                                        selected = Some(candidate.clone());
-                                    }
-                                });
-                            }
+                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                                for (candidate, _score) in &candidates_clone {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("🔊").on_hover_text("Les opp").clicked() {
+                                            tts::speak_word(candidate);
+                                        }
+                                        if ui.button(
+                                            egui::RichText::new(candidate).size(12.0).strong()
+                                        ).clicked() {
+                                            selected = Some(candidate.clone());
+                                        }
+                                    });
+                                }
+                            });
                         }
                     });
 
@@ -2912,6 +2900,15 @@ fn main() -> eframe::Result {
                 );
                 fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
                     .insert(0, "OpenSans".to_owned());
+                // Add Segoe UI Emoji as fallback for emoji glyphs (👍👎🔊 etc.)
+                if let Ok(emoji_data) = std::fs::read("C:/Windows/Fonts/seguiemj.ttf") {
+                    fonts.font_data.insert(
+                        "SegoeEmoji".to_owned(),
+                        egui::FontData::from_owned(emoji_data).into(),
+                    );
+                    fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+                        .push("SegoeEmoji".to_owned());
+                }
                 cc.egui_ctx.set_fonts(fonts);
                 eprintln!("Loaded Open Sans font");
             } else {
