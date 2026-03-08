@@ -2203,7 +2203,7 @@ impl eframe::App for ContextApp {
                 let stroke = egui::Stroke::new(1.5, color);
                 ui.painter().line_segment([center + egui::vec2(-s, -s), center + egui::vec2(s, s)], stroke);
                 ui.painter().line_segment([center + egui::vec2(s, -s), center + egui::vec2(-s, s)], stroke);
-                if close_resp.double_clicked() {
+                if close_resp.clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
