@@ -474,8 +474,8 @@ impl ContextApp {
         }
     }
 
-    /// Check spelling of the just-finished word. Called when user types space/punctuation.
-    fn check_spelling(&mut self, word: &str) {
+    /// Check spelling of a word. `sentence_ctx` is the sentence it appears in.
+    fn check_spelling(&mut self, word: &str, sentence_ctx: &str) {
         let clean = word.trim().to_lowercase();
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
             return;
@@ -544,13 +544,40 @@ impl ContextApp {
             suggestion: best,
             explanation: format!("«{}» finnes ikke i ordboken.", clean),
             rule_name: "stavefeil".to_string(),
-            sentence_context: self.context.sentence.clone(),
+            sentence_context: sentence_ctx.to_string(),
             position: 0,
             ignored: false,
         };
         self.writing_errors.push(error);
         eprintln!("Spelling: '{}' not found, suggesting '{}'",
             clean, self.writing_errors.last().unwrap().suggestion);
+    }
+
+    /// Upgrade spelling error suggestions using BERT context.
+    /// Called after update_grammar_errors() to replace fuzzy-only suggestions
+    /// with contextually appropriate ones (e.g. "bossller" → "boller" not "fossiler").
+    fn upgrade_spelling_suggestions(&mut self) {
+        // Collect indices + data for spelling errors that need upgrading
+        let to_upgrade: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
+            .filter(|(_, e)| {
+                matches!(e.category, ErrorCategory::Spelling)
+                    && !e.ignored
+                    && e.rule_name == "stavefeil" // not yet upgraded
+                    && !e.sentence_context.is_empty()
+            })
+            .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
+            .collect();
+
+        for (idx, word, sentence_ctx) in to_upgrade {
+            let suggestions = self.trigram_suggestions(&word, &sentence_ctx);
+            if let Some((best, _score)) = suggestions.first() {
+                eprintln!("Spelling upgrade: '{}' → '{}' (was '{}')",
+                    word, best, self.writing_errors[idx].suggestion);
+                self.writing_errors[idx].suggestion = best.clone();
+            }
+            // Mark as processed regardless so we don't retry
+            self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
+        }
     }
 
     /// Find suggestion candidates using BERT semantic predictions + trigram ranking.
@@ -564,102 +591,91 @@ impl ContextApp {
         // Step 1: Get semantic candidates via complete_word (handles BPE extension)
         let mut semantic_words: Vec<(String, f32)> = Vec::new();
 
-        // Build masked context: everything before the misspelled word + <mask>
+        // Build masked context: replace the misspelled word with <mask>, keep surrounding text
         let sentence_lower = sentence_ctx.to_lowercase();
         let masked_context = if let Some(pos) = sentence_lower.find(&word_lower) {
             let before = &sentence_ctx[..pos];
-            format!("{}<mask>", before.trim_end())
+            let after = &sentence_ctx[pos + word_lower.len()..];
+            format!("{}<mask>{}", before.trim_end(), after)
         } else {
             // Fallback: use full sentence as context
             format!("{} <mask>", sentence_ctx)
         };
-        eprintln!("Forslag: masked context = '{}'", masked_context);
+        eprintln!("Forslag: word='{}' masked context = '{}'", word_lower, masked_context);
 
-        if let (Some(model), Some(pi), Some(bl)) = (&mut self.model, &self.prefix_index, &self.baselines) {
-            // Use empty prefix to get all BERT predictions with BPE extension
-            if let Ok(completions) = complete_word(
-                model,
-                &masked_context,
-                "",  // empty prefix — get all candidates
-                pi,
-                Some(bl),
-                self.wordfreq.as_ref(),
-                None, // no dict filter on prefix — we want all words
-                None,
-                None, // no embedding re-ranking
-                0.0, 0.0,
-                50,  // get 50 candidates
-                10,  // max BPE steps
-            ) {
-                for c in &completions {
-                    let w = c.word.to_lowercase();
-                    if w.len() < 2 || w == word_lower { continue; }
-                    semantic_words.push((w, c.score));
+        // Step 1: Get BERT logits via single_forward, then extract top token-words
+        let mut bert_words: Vec<(String, f32)> = Vec::new();
+        if let Some(model) = &mut self.model {
+            if let Ok((logits, _ms)) = model.single_forward(&masked_context) {
+                // Get top-200 tokens by logit score
+                let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
+                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+                for &(token_id, score) in indexed.iter().take(200) {
+                    if let Some(token) = model.tokenizer.id_to_token(token_id as u32) {
+                        // Strip BPE prefix (Ġ = word-initial space)
+                        let clean = token.replace('Ġ', "").to_lowercase();
+                        if clean.len() < 2 || clean == word_lower { continue; }
+                        // Skip tokens with special chars
+                        if clean.chars().any(|c| !c.is_alphanumeric() && c != '-') { continue; }
+                        if !bert_words.iter().any(|(w, _)| *w == clean) {
+                            bert_words.push((clean, score));
+                        }
+                    }
                 }
-                eprintln!("Forslag: got {} BERT candidates", semantic_words.len());
+                eprintln!("Forslag: got {} BERT token-words", bert_words.len());
             }
         }
 
-        // Build BERT score lookup for semantic tiebreaking
-        let bert_scores: HashMap<String, f32> = semantic_words.iter()
-            .cloned()
-            .collect();
+        // Build BERT score lookup
+        let bert_scores: HashMap<String, f32> = bert_words.iter().cloned().collect();
 
-        // Step 2: Score semantic candidates by trigram similarity to misspelled word
-        // Only keep candidates with at least 1 common trigram (semantic + orthographic match)
-        let mut scored: Vec<(String, f32)> = semantic_words.into_iter()
+        // Step 2: Score BERT words by trigram similarity to misspelled word
+        let mut scored: Vec<(String, f32)> = bert_words.into_iter()
             .filter_map(|(w, bert_score)| {
                 let w_trigrams = Self::trigrams(&w);
                 let common = word_trigrams.iter()
                     .filter(|t| w_trigrams.contains(t))
                     .count();
-                if common == 0 { return None; } // no orthographic overlap → skip
+                if common == 0 && w.chars().next().unwrap_or(' ') != word_first {
+                    return None; // need either trigram overlap or same first letter
+                }
                 let max_trigrams = word_trigrams.len().max(w_trigrams.len()).max(1);
                 let trigram_score = common as f32 / max_trigrams as f32;
-                // Combine: trigram similarity (0-1) * 2 + first letter bonus + BERT context bonus
-                let mut score = trigram_score * 2.0;
+                // BERT is primary (scores 15-25), trigram is tiebreaker (0-1)
+                let mut score = bert_score / 10.0;
+                score += trigram_score;
                 if w.chars().next().unwrap_or(' ') == word_first {
-                    score += 0.5;
+                    score += 0.3;
                 }
-                // BERT bonus: contextually relevant words get a boost
-                score += (bert_score / 50.0).min(0.5);
                 Some((w, score))
             })
             .collect();
 
-        // Step 3: Also add fuzzy Levenshtein matches (distance 4) that share trigrams
-        // Use BERT score as semantic tiebreaker for same-distance matches
+        // Step 3: Add fuzzy Levenshtein matches (distance 2) scored with BERT
         if let Some(checker) = &self.checker {
-            let fuzzy = checker.fuzzy_lookup(&word_lower, 4);
-            eprintln!("Forslag: fuzzy(4) returned {} matches", fuzzy.len());
+            let fuzzy = checker.fuzzy_lookup(&word_lower, 2);
+            eprintln!("Forslag: fuzzy(2) returned {} matches", fuzzy.len());
             for (w, dist) in fuzzy {
                 if w == word_lower { continue; }
-                let w_trigrams = Self::trigrams(&w);
-                let common = word_trigrams.iter()
-                    .filter(|t| w_trigrams.contains(t))
-                    .count();
-                if common == 0 { continue; }
                 if scored.iter().any(|(s, _)| s == &w) { continue; }
-                let mut score = 1.0 - (dist as f32 * 0.15);
+                let mut score = 1.0 - (dist as f32 * 0.2);
                 if w.chars().next().unwrap_or(' ') == word_first {
                     score += 0.3;
                 }
-                // Semantic tiebreaker: if BERT also predicted this word, boost it
                 if let Some(&bs) = bert_scores.get(&w) {
-                    score += (bs / 50.0).min(0.5);
+                    score += bs / 10.0;
                 }
                 scored.push((w, score));
             }
         }
 
-        // Step 4: Wordfreq trigram search — finds loanwords like "volleyball"
-        // that may be missing from mtag but exist in common word lists
+        // Step 4: Wordfreq trigram search — finds common words with orthographic overlap
         if let Some(wf) = &self.wordfreq {
             for (w, _freq) in wf.iter() {
                 let wl = w.to_lowercase();
                 if wl == word_lower { continue; }
                 if scored.iter().any(|(s, _)| *s == wl) { continue; }
-                // Quick filter: must share first letter
                 if wl.chars().next().unwrap_or(' ') != word_first { continue; }
                 let w_trigrams = Self::trigrams(&wl);
                 let common = word_trigrams.iter()
@@ -668,10 +684,9 @@ impl ContextApp {
                 if common < 2 { continue; }
                 let max_trigrams = word_trigrams.len().max(w_trigrams.len()).max(1);
                 let trigram_score = common as f32 / max_trigrams as f32;
-                let mut score = trigram_score * 2.0;
-                score += 0.3; // first letter always matches (filtered above)
+                let mut score = trigram_score + 0.3;
                 if let Some(&bs) = bert_scores.get(&wl) {
-                    score += (bs / 50.0).min(0.5);
+                    score += bs / 10.0;
                 }
                 scored.push((wl, score));
             }
@@ -911,7 +926,7 @@ impl ContextApp {
             for word in trimmed.split_whitespace() {
                 let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»');
                 if !clean.is_empty() {
-                    self.check_spelling(clean);
+                    self.check_spelling(clean, trimmed);
                 }
             }
 
@@ -1843,6 +1858,7 @@ impl eframe::App for ContextApp {
 
             // Always run grammar check (not just at word boundaries)
             self.update_grammar_errors();
+            self.upgrade_spelling_suggestions();
 
             let mid = is_mid_word(&self.context.word);
             if mid {
@@ -1866,11 +1882,12 @@ impl eframe::App for ContextApp {
                     }
                 }
                 // Word boundary: check spelling of the last finished word
-                let spell_word = self.context.sentence.split_whitespace().last()
+                let sentence = self.context.sentence.clone();
+                let spell_word = sentence.split_whitespace().last()
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        self.check_spelling(w);
+                        self.check_spelling(w, &sentence);
                     }
                 }
                 // Sentence boundary: run grammar check
@@ -1881,11 +1898,12 @@ impl eframe::App for ContextApp {
                 self.open_completions.clear();
                 self.last_completed_prefix.clear();
                 // Check spelling + grammar on the last word/sentence
-                let spell_word = self.context.sentence.split_whitespace().last()
+                let sentence = self.context.sentence.clone();
+                let spell_word = sentence.split_whitespace().last()
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        self.check_spelling(w);
+                        self.check_spelling(w, &sentence);
                     }
                 }
                 self.run_grammar_check();
