@@ -453,30 +453,9 @@ impl ContextApp {
         let wf = wordfreq::load_wordfreq(wordfreq_path.as_path(), 10);
         eprintln!("WordFreq: {} words", wf.len());
 
-        // Load MiniLM + embedding store
-        let embedding_store = if minilm_onnx.exists() && minilm_tok.exists() {
-            eprintln!("Loading MiniLM...");
-            match nostos_cognio::embeddings::Embedder::load(
-                minilm_onnx.to_str().unwrap(),
-                minilm_tok.to_str().unwrap(),
-            ) {
-                Ok(embedder) => {
-                    let store = EmbeddingStore::new(
-                        embedder,
-                        &wf,
-                        if embed_cache.exists() { Some(embed_cache.as_path()) } else { None },
-                    )?;
-                    eprintln!("Embedding store ready.");
-                    Some(store)
-                }
-                Err(e) => {
-                    eprintln!("MiniLM load error: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // MiniLM embedding store disabled — saves ~500 MB RAM.
+        // PMI topic words (via NorBERT4 baselines) still active.
+        let embedding_store: Option<EmbeddingStore> = None;
 
         Ok((Some(model), Some(pi), Some(baselines), Some(wf), embedding_store))
     }
