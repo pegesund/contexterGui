@@ -276,6 +276,8 @@ struct ContextApp {
     pending_fix: Option<(String, String, String)>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
+    /// Rule info popup: (rule_name, explanation, sentence_context, fix_idx, suggestion)
+    rule_info_window: Option<(String, String, String, usize, String)>,
     // OCR clipboard monitoring
     ocr: Option<ocr::OcrClipboard>,
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
@@ -397,6 +399,7 @@ impl ContextApp {
             last_doc_sentences: Vec::new(),
             pending_fix: None,
             suggestion_window: None,
+            rule_info_window: None,
             ocr: match ocr::OcrClipboard::new() {
                 Ok(o) => { eprintln!("OCR clipboard monitor ready"); Some(o) }
                 Err(e) => { eprintln!("OCR not available: {}", e); None }
@@ -738,8 +741,8 @@ impl ContextApp {
 
     /// Generate candidate corrections for a sentence with grammar errors,
     /// score each with BERT, and return the top candidates (up to 3).
-    fn best_sentence_corrections(&mut self, sentence: &str, errors: &[GrammarError]) -> Vec<(String, String, f32)> {
-        let mut candidates: Vec<(String, String)> = Vec::new(); // (corrected_sentence, explanation)
+    fn best_sentence_corrections(&mut self, sentence: &str, errors: &[GrammarError]) -> Vec<(String, String, String, f32)> {
+        let mut candidates: Vec<(String, String, String)> = Vec::new(); // (corrected_sentence, explanation, rule_name)
 
         // 1. Apply each individual grammar suggestion
         //    If suggestion contains '|' (multiple alternatives), try each one separately
@@ -748,8 +751,8 @@ impl ContextApp {
                 let alternatives: Vec<&str> = e.suggestion.split('|').collect();
                 for alt in &alternatives {
                     let fixed = replace_word_at_position(sentence, &e.word, alt);
-                    let expl = format!("«{}» → «{}»: {}", e.word, alt, e.explanation);
-                    candidates.push((fixed, expl));
+                    let expl = format!("«{}» -> «{}»: {}", e.word, alt, e.explanation);
+                    candidates.push((fixed, expl, e.rule_name.clone()));
                 }
             }
         }
@@ -766,7 +769,7 @@ impl ContextApp {
                     if prev == "å" {
                         let removed_aa = remove_word_from_sentence(sentence, "å");
                         if removed_aa != sentence {
-                            candidates.push((removed_aa, format!("Fjernet «å» foran «{}».", e.word)));
+                            candidates.push((removed_aa, format!("Fjernet «å» foran «{}».", e.word), e.rule_name.clone()));
                         }
                     }
                 }
@@ -779,7 +782,7 @@ impl ContextApp {
             for e in errors {
                 let removed = remove_word_from_sentence(sentence, &e.word);
                 if removed != sentence {
-                    candidates.push((removed, format!("Fjernet «{}».", e.word)));
+                    candidates.push((removed, format!("Fjernet «{}».", e.word), e.rule_name.clone()));
                 }
             }
         }
@@ -788,24 +791,25 @@ impl ContextApp {
         if errors.len() > 1 {
             let mut all_fixed = sentence.to_string();
             let mut all_expl = Vec::new();
+            let mut all_rules = Vec::new();
             for e in errors {
                 if !e.suggestion.is_empty() {
                     let first_alt = e.suggestion.split('|').next().unwrap_or(&e.suggestion);
                     all_fixed = replace_word_at_position(&all_fixed, &e.word, first_alt);
-                    all_expl.push(format!("«{}» → «{}»", e.word, first_alt));
+                    all_expl.push(format!("«{}» -> «{}»", e.word, first_alt));
+                    all_rules.push(e.rule_name.clone());
                 }
             }
             if all_fixed != sentence {
-                candidates.push((all_fixed, all_expl.join(", ")));
+                candidates.push((all_fixed, all_expl.join(", "), all_rules.join(",")));
             }
         }
 
         // Deduplicate by corrected sentence
         candidates.dedup_by(|a, b| a.0 == b.0);
-        // Also remove any remaining duplicates (not just adjacent)
         {
             let mut seen = std::collections::HashSet::new();
-            candidates.retain(|(c, _)| seen.insert(c.clone()));
+            candidates.retain(|(c, _, _)| seen.insert(c.clone()));
         }
 
         if candidates.is_empty() {
@@ -813,9 +817,9 @@ impl ContextApp {
         }
 
         // Grammar-check each candidate: discard ones that still have errors
-        let valid_candidates: Vec<(String, String)> = if let Some(checker) = &mut self.checker {
+        let valid_candidates: Vec<(String, String, String)> = if let Some(checker) = &mut self.checker {
             candidates.into_iter()
-                .filter(|(c, _)| {
+                .filter(|(c, _, _)| {
                     let errs = checker.check_sentence(c);
                     let ok = errs.is_empty();
                     if !ok {
@@ -835,16 +839,16 @@ impl ContextApp {
 
         // Score valid candidates with BERT
         eprintln!("  Scoring {} valid candidates with BERT...", valid_candidates.len());
-        let mut scored: Vec<(String, String, f32)> = valid_candidates.into_iter()
-            .map(|(c, e)| {
+        let mut scored: Vec<(String, String, String, f32)> = valid_candidates.into_iter()
+            .map(|(c, e, r)| {
                 let score = self.bert_sentence_score(&c);
                 eprintln!("    {:.1}: '{}'", score, c);
-                (c, e, score)
+                (c, e, r, score)
             })
             .collect();
 
         // Sort by BERT score — best correction wins regardless of type
-        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(1);
         scored
     }
@@ -965,14 +969,14 @@ impl ContextApp {
             // Score candidates with BERT (only runs when Prolog found errors)
             let corrections = self.best_sentence_corrections(trimmed, &errors);
 
-            for (i, (corrected, explanation, score)) in corrections.iter().enumerate() {
-                eprintln!("  Correction #{}: ({:.1}) '{}' → '{}'", i+1, score, trimmed, corrected);
+            for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
+                eprintln!("  Correction #{}: ({:.1}) '{}' -> '{}' [{}]", i+1, score, trimmed, corrected, rule_name);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
                     word: trimmed.to_string(),
                     suggestion: corrected.clone(),
                     explanation: explanation.clone(),
-                    rule_name: "sentence_correction".to_string(),
+                    rule_name: rule_name.clone(),
                     sentence_context: trimmed.to_string(),
                     position: i,
                     ignored: false,
@@ -1769,6 +1773,91 @@ fn get_screen_size() -> (f32, f32) {
     (1920.0, 1080.0)
 }
 
+fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
+    let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
+        .fill(egui::Color32::WHITE)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(160, 160, 160)));
+    ui.add(btn).on_hover_text(hover).clicked()
+}
+
+/// Returns (category, description, examples_wrong, examples_right) for a grammar rule.
+fn rule_info(rule_name: &str) -> (&'static str, &'static str, &'static [&'static str], &'static [&'static str]) {
+    match rule_name {
+        r if r.starts_with("modalverb") => (
+            "Modalverb + verbform",
+            "Etter modalverb (kan, vil, skal, må, bør) skal verbet stå i infinitiv, ikke i presens eller preteritum.",
+            &["Jeg kan spiser.", "Hun vil gikk.", "Vi skal kommer."],
+            &["Jeg kan spise.", "Hun vil gå.", "Vi skal komme."],
+        ),
+        r if r.starts_with("har_") || r == "har_substantiv_som_verb" => (
+            "Har/hadde + verbform",
+            "Etter «har» eller «hadde» skal verbet stå i perfektum partisipp (har spist, har gått), ikke i presens, preteritum eller infinitiv.",
+            &["Jeg har spiser.", "Vi har gikk.", "De har kom.", "Jeg hadde spilet."],
+            &["Jeg har spist.", "Vi har gått.", "De har kommet.", "Jeg hadde spilt."],
+        ),
+        r if r.starts_with("infinitivsmerke") || r == "aa_ikke_verb" => (
+            "Infinitivsmerke + verbform",
+            "Etter «å» skal verbet stå i infinitiv. Presens eller preteritum etter «å» er feil.",
+            &["Jeg liker å spiser.", "Hun prøvde å gikk."],
+            &["Jeg liker å spise.", "Hun prøvde å gå."],
+        ),
+        "og_skal_vaere_aa" => (
+            "«og» skal være «å»",
+            "Infinitivsmerket «å» forveksles ofte med konjunksjonen «og». Foran et verb i infinitiv skal det stå «å».",
+            &["Jeg prøver og spise.", "Hun liker og lese."],
+            &["Jeg prøver å spise.", "Hun liker å lese."],
+        ),
+        "aa_skal_vaere_og" => (
+            "«å» skal være «og»",
+            "Konjunksjonen «og» forveksles ofte med infinitivsmerket «å». Mellom to sideordnede ledd skal det stå «og».",
+            &["Jeg å du.", "Brød å smør."],
+            &["Jeg og du.", "Brød og smør."],
+        ),
+        r if r.starts_with("ubestemt_artikkel") => (
+            "Ubestemt artikkel + bestemt substantiv",
+            "Etter ubestemt artikkel (en, ei, et) skal substantivet stå i ubestemt form.",
+            &["en bilen", "et huset"],
+            &["en bil", "et hus"],
+        ),
+        r if r.starts_with("artikkel_kjoenn") => (
+            "Feil kjønn på artikkel",
+            "Artikkelen må ha samme kjønn som substantivet. Hankjønn: en, hunkjønn: ei/en, intetkjønn: et.",
+            &["en hus", "et bil"],
+            &["et hus", "en bil"],
+        ),
+        r if r.starts_with("dem_som_subjekt") => (
+            "«dem» brukt som subjekt",
+            "«Dem» er objektsform. Som subjekt skal man bruke «de».",
+            &["Dem spiser.", "Dem er fine."],
+            &["De spiser.", "De er fine."],
+        ),
+        r if r.starts_with("dobbel_bestemthet") => (
+            "Dobbel bestemthet",
+            "I bokmål bruker man vanligvis dobbel bestemthet: bestemt artikkel + bestemt substantiv. Men noen dialekter dropper den ene.",
+            &["den bil", "det hus"],
+            &["den bilen", "det huset"],
+        ),
+        r if r.contains("samsvar") => (
+            "Samsvarsbøyning",
+            "Adjektivet må bøyes i samsvar med substantivet i kjønn og tall.",
+            &["en stor hus", "et rød bil"],
+            &["et stort hus", "en rød bil"],
+        ),
+        r if r.starts_with("eiendomsord") => (
+            "Feil kjønn på eiendomsord",
+            "Eiendomsordet (min, din, sin, etc.) må bøyes i samsvar med substantivets kjønn.",
+            &["min hus", "mitt bil"],
+            &["mitt hus", "min bil"],
+        ),
+        _ => (
+            "Grammatikkregel",
+            "Setningen har en grammatisk feil som ble oppdaget av grammatikksjekken.",
+            &[],
+            &[],
+        ),
+    }
+}
+
 fn rule_color(rule_name: &str) -> egui::Color32 {
     match rule_name {
         "saerskrivingsfeil" => egui::Color32::from_rgb(220, 50, 50),
@@ -2509,7 +2598,8 @@ impl eframe::App for ContextApp {
                             }
                         }
 
-                        ui.group(|ui| {
+                        ui.separator();
+                        ui.scope(|ui| {
                             if matches!(error.category, ErrorCategory::Grammar) {
                                 shown_contexts.insert(error.sentence_context.clone());
                                 // Show all alternatives for this sentence
@@ -2527,17 +2617,24 @@ impl eframe::App for ContextApp {
                                 // Buttons on top line
                                 let first_alt = alternatives.first().copied();
                                 let first_suggestion = first_alt.map(|i| self.writing_errors[i].suggestion.clone()).unwrap_or_default();
+                                let err_rule = error.rule_name.clone();
+                                let err_expl = error.explanation.clone();
+                                let err_ctx = error.sentence_context.clone();
                                 ui.horizontal(|ui| {
                                     if let Some(alt_idx) = first_alt {
-                                        if ui.small_button("👍").on_hover_text("Rett opp").clicked() {
+                                        if icon_button(ui, "👍", "Rett opp") {
                                             action = Some((alt_idx, "fix"));
                                         }
                                     }
-                                    if ui.small_button("👎").on_hover_text("Ignorer").clicked() {
+                                    if icon_button(ui, "👎", "Ignorer") {
                                         action = Some((idx, "ignore_group"));
                                     }
-                                    if ui.small_button("🔊").on_hover_text("Les opp").clicked() {
+                                    if icon_button(ui, "🔊", "Les opp") {
                                         tts::speak_word(&first_suggestion);
+                                    }
+                                    if icon_button(ui, "💡", "Vis regelinfo") {
+                                        let fix_idx = first_alt.unwrap_or(idx);
+                                        self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                     }
                                 });
                                 // Original (red, strikethrough) then suggestion (green) — stacked
@@ -2570,18 +2667,18 @@ impl eframe::App for ContextApp {
                                 let err_word = error.word.clone();
                                 ui.horizontal(|ui| {
                                     if !error.suggestion.is_empty() {
-                                        if ui.small_button("👍").on_hover_text("Rett opp").clicked() {
+                                        if icon_button(ui, "👍", "Rett opp") {
                                             action = Some((idx, "fix"));
                                         }
                                     }
-                                    if ui.small_button("👎").on_hover_text("Ignorer").clicked() {
+                                    if icon_button(ui, "👎", "Ignorer") {
                                         action = Some((idx, "ignore"));
                                     }
-                                    if ui.small_button("🔊").on_hover_text("Les opp").clicked() {
+                                    if icon_button(ui, "🔊", "Les opp") {
                                         let speak = if !err_suggestion.is_empty() { &err_suggestion } else { &err_word };
                                         tts::speak_word(speak);
                                     }
-                                    if ui.small_button("?").on_hover_text("Flere forslag").clicked() {
+                                    if icon_button(ui, "?", "Flere forslag") {
                                         action = Some((idx, "suggest"));
                                     }
                                 });
@@ -2606,7 +2703,6 @@ impl eframe::App for ContextApp {
                                 );
                             }
                         });
-                        ui.add_space(2.0);
                     }
                     }); // end ScrollArea
 
@@ -2675,7 +2771,7 @@ impl eframe::App for ContextApp {
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                                 for (candidate, _score) in &candidates_clone {
                                     ui.horizontal(|ui| {
-                                        if ui.small_button("🔊").on_hover_text("Les opp").clicked() {
+                                        if icon_button(ui, "🔊", "Les opp") {
                                             tts::speak_word(candidate);
                                         }
                                         if ui.button(
@@ -2708,6 +2804,211 @@ impl eframe::App for ContextApp {
                 }
                 if !open {
                     self.suggestion_window = None;
+                }
+            }
+
+            // === Rule info window — separate OS window ===
+            if self.rule_info_window.is_some() {
+                let mut do_fix = false;
+                let mut do_ignore = false;
+                let mut do_close = false;
+                let (rule_name, explanation, sentence, fix_idx, suggestion) = self.rule_info_window.as_ref().unwrap();
+                let rule_name = rule_name.clone();
+                let explanation = explanation.clone();
+                let sentence = sentence.clone();
+                let fix_idx = *fix_idx;
+                let suggestion = suggestion.clone();
+                let error_word = self.writing_errors[fix_idx].word.clone();
+                let corrected_sentence = if !suggestion.is_empty() {
+                    sentence.replacen(&error_word, &suggestion, 1)
+                } else {
+                    String::new()
+                };
+                let (category, description, wrong, right) = rule_info(&rule_name);
+
+                // Center on screen using actual monitor size
+                let win_w = 560.0_f32;
+                let win_h = 520.0_f32;
+                let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
+                let screen_center = egui::pos2(
+                    (monitor.x - win_w) / 2.0,
+                    (monitor.y - win_h) / 2.0,
+                );
+
+                ctx.show_viewport_immediate(
+                    egui::ViewportId::from_hash_of("rule_info_viewport"),
+                    egui::ViewportBuilder::default()
+                        .with_title("Regelinfo")
+                        .with_inner_size([win_w, win_h])
+                        .with_position(screen_center)
+                        .with_always_on_top()
+                        .with_decorations(true),
+                    |vp_ctx, _class| {
+                        // Switch to light visuals for this viewport
+                        vp_ctx.set_visuals(egui::Visuals::light());
+
+                        egui::CentralPanel::default()
+                            .frame(
+                                egui::Frame::new()
+                                    .fill(egui::Color32::WHITE)
+                                    .inner_margin(24.0),
+                            )
+                            .show(vp_ctx, |ui| {
+                                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+
+                                // Wrap text for long sentences
+                                let max_w = ui.available_width();
+                                ui.set_max_width(max_w);
+
+                                // Scrollable content area (everything except buttons)
+                                let scroll_height = ui.available_height() - 50.0;
+                                egui::ScrollArea::vertical().max_height(scroll_height).show(ui, |ui| {
+                                    ui.set_max_width(max_w - 16.0);
+
+                                    // Category header
+                                    ui.label(
+                                        egui::RichText::new(category)
+                                            .size(22.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(30, 70, 150)),
+                                    );
+                                    ui.add_space(10.0);
+
+                                    // Description
+                                    ui.label(
+                                        egui::RichText::new(description)
+                                            .size(15.0)
+                                            .color(egui::Color32::from_rgb(30, 30, 30)),
+                                    );
+                                    ui.add_space(14.0);
+
+                                    // Original sentence (red) and corrected (green)
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_rgb(255, 245, 245))
+                                        .inner_margin(10.0)
+                                        .corner_radius(6.0)
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 180, 180)))
+                                        .show(ui, |ui| {
+                                            ui.set_max_width(max_w - 40.0);
+                                            ui.label(
+                                                egui::RichText::new(&sentence)
+                                                    .size(15.0)
+                                                    .strikethrough()
+                                                    .color(egui::Color32::from_rgb(180, 50, 50)),
+                                            );
+                                        });
+                                    ui.add_space(4.0);
+                                    if !corrected_sentence.is_empty() {
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(240, 255, 245))
+                                            .inner_margin(10.0)
+                                            .corner_radius(6.0)
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 220, 190)))
+                                            .show(ui, |ui| {
+                                                ui.set_max_width(max_w - 40.0);
+                                                ui.label(
+                                                    egui::RichText::new(&corrected_sentence)
+                                                        .size(15.0)
+                                                        .color(egui::Color32::from_rgb(0, 120, 50)),
+                                                );
+                                            });
+                                    }
+                                    ui.add_space(12.0);
+
+                                    // Explanation
+                                    ui.label(
+                                        egui::RichText::new("Forklaring:")
+                                            .size(14.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(50, 50, 50)),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(&explanation)
+                                            .size(14.0)
+                                            .color(egui::Color32::from_rgb(30, 30, 30)),
+                                    );
+
+                                    // Examples
+                                    if !wrong.is_empty() {
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            egui::RichText::new("Eksempler")
+                                                .size(18.0)
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(30, 70, 150)),
+                                        );
+                                        ui.add_space(8.0);
+
+                                        for (w, r) in wrong.iter().zip(right.iter()) {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("X").size(15.0).strong().color(egui::Color32::from_rgb(200, 40, 40)));
+                                                ui.label(egui::RichText::new(*w).size(15.0).strikethrough().color(egui::Color32::from_rgb(160, 70, 70)));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("V").size(15.0).strong().color(egui::Color32::from_rgb(0, 140, 60)));
+                                                ui.label(egui::RichText::new(*r).size(15.0).color(egui::Color32::from_rgb(0, 100, 40)));
+                                            });
+                                            ui.add_space(5.0);
+                                        }
+                                    }
+                                });
+
+                                // Action buttons — always visible at bottom
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    if !suggestion.is_empty() {
+                                        if ui.button(egui::RichText::new("Rett opp").size(14.0).strong().color(egui::Color32::from_rgb(0, 120, 60))).clicked() {
+                                            do_fix = true;
+                                        }
+                                        ui.add_space(8.0);
+                                    }
+                                    if ui.button(egui::RichText::new("Ignorer").size(14.0).color(egui::Color32::from_rgb(150, 60, 60))).clicked() {
+                                        do_ignore = true;
+                                    }
+                                    ui.add_space(8.0);
+                                    if ui.button(egui::RichText::new("Lukk").size(14.0).color(egui::Color32::from_rgb(80, 80, 80))).clicked() {
+                                        do_close = true;
+                                    }
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(egui::RichText::new(format!("Regel: {}", rule_name)).size(11.0).color(egui::Color32::from_rgb(160, 160, 160)));
+                                    });
+                                });
+                            });
+
+                        // Close viewport when user clicks X on title bar
+                        if vp_ctx.input(|i| i.viewport().close_requested()) {
+                            do_close = true;
+                        }
+                    },
+                );
+
+                if do_fix {
+                    let error = &self.writing_errors[fix_idx];
+                    let s = error.suggestion.clone();
+                    let w = error.word.clone();
+                    let c = error.sentence_context.clone();
+                    self.pending_fix = Some((w, s, c));
+                    let sctx = self.writing_errors[fix_idx].sentence_context.clone();
+                    for e in &mut self.writing_errors {
+                        if e.sentence_context == sctx && matches!(e.category, ErrorCategory::Grammar) {
+                            e.ignored = true;
+                        }
+                    }
+                    self.rule_info_window = None;
+                } else if do_ignore {
+                    let sctx = self.writing_errors[fix_idx].sentence_context.clone();
+                    for e in &mut self.writing_errors {
+                        if e.sentence_context == sctx && matches!(e.category, ErrorCategory::Grammar) {
+                            e.ignored = true;
+                        }
+                    }
+                    self.rule_info_window = None;
+                } else if do_close {
+                    self.rule_info_window = None;
                 }
             }
 
