@@ -266,7 +266,7 @@ struct ContextApp {
     // Completion selection mode (Ctrl+Space to enter, arrows to navigate, Enter to accept)
     selected_completion: Option<usize>,
     selection_mode: bool,
-    /// Word's HWND to return focus to
+    /// Target app's HWND to return focus to (Word, Notepad, etc.)
     word_hwnd: Option<isize>,
     /// Track Ctrl+Space held to prevent repeated activation
     ctrl_space_held: bool,
@@ -1663,13 +1663,15 @@ impl ContextApp {
         }
     }
 
-    fn return_focus_to_word(&self) {
+    fn return_focus_to_app(&self) {
         if let Some(hwnd_val) = self.word_hwnd {
             use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
             unsafe {
                 let hwnd = HWND(hwnd_val as *mut _);
                 let _ = SetForegroundWindow(hwnd);
+                // Give the OS time to switch focus
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
     }
@@ -1796,7 +1798,24 @@ impl eframe::App for ContextApp {
         // Poll for new context
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
+
             if let Some(new_ctx) = self.manager.read_context() {
+                // Save the foreground window only when we got useful context from it
+                if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() {
+                    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                    let fg = unsafe { GetForegroundWindow() };
+                    if fg.0 as isize != 0 {
+                        let our_title = "NorskTale";
+                        let mut buf = [0u16; 64];
+                        let len = unsafe {
+                            windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(fg, &mut buf)
+                        };
+                        let title = String::from_utf16_lossy(&buf[..len as usize]);
+                        if !title.contains(our_title) {
+                            self.word_hwnd = Some(fg.0 as isize);
+                        }
+                    }
+                }
                 if new_ctx.caret_pos.is_some() {
                     self.last_caret_pos = new_ctx.caret_pos;
                 }
@@ -2099,7 +2118,7 @@ impl eframe::App for ContextApp {
                     } else if self.completions.is_empty() { &self.open_completions } else { &self.completions };
                     if let Some(comp) = active.get(idx) {
                         let word = comp.word.clone();
-                        self.return_focus_to_word();
+                        self.return_focus_to_app();
                         self.manager.replace_word(&word);
                         self.completions.clear();
             self.open_completions.clear();
@@ -2112,7 +2131,7 @@ impl eframe::App for ContextApp {
                 self.selected_completion = None;
             }
             if cancel {
-                self.return_focus_to_word();
+                self.return_focus_to_app();
                 self.selection_mode = false;
                 self.selected_completion = None;
             }
@@ -2387,6 +2406,7 @@ impl eframe::App for ContextApp {
                     }
 
                     if let Some(word) = clicked_word {
+                        self.return_focus_to_app();
                         self.manager.replace_word(&word);
                         self.completions.clear();
                         self.open_completions.clear();
@@ -2394,7 +2414,6 @@ impl eframe::App for ContextApp {
                         self.selection_mode = false;
                         self.last_completed_prefix.clear();
                         self.last_poll = Instant::now() - self.poll_interval;
-                        self.return_focus_to_word();
                     }
                 } else {
                     ui.label(

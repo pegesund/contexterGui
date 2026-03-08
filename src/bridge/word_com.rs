@@ -426,9 +426,7 @@ impl TextBridge for WordComBridge {
     }
 
     fn is_available(&self) -> bool {
-        // COM calls work even when Word isn't foreground,
-        // so always return true if we have a connection
-        true
+        self.is_foreground()
     }
 
     fn read_context(&self) -> Option<CursorContext> {
