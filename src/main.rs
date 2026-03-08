@@ -109,6 +109,8 @@ fn swipl_dll_path() -> &'static str {
 struct BridgeManager {
     bridges: Vec<Box<dyn TextBridge>>,
     last_check: Instant,
+    /// Index of the bridge that last successfully read context
+    active_idx: usize,
 }
 
 impl BridgeManager {
@@ -127,6 +129,7 @@ impl BridgeManager {
         BridgeManager {
             bridges,
             last_check: Instant::now(),
+            active_idx: 0,
         }
     }
 
@@ -143,9 +146,10 @@ impl BridgeManager {
             }
         }
 
-        for bridge in &self.bridges {
+        for (i, bridge) in self.bridges.iter().enumerate() {
             if bridge.is_available() {
                 if let Some(ctx) = bridge.read_context() {
+                    self.active_idx = i;
                     return Some(ctx);
                 }
             }
@@ -153,59 +157,39 @@ impl BridgeManager {
         None
     }
 
+    fn active_bridge(&self) -> Option<&dyn TextBridge> {
+        self.bridges.get(self.active_idx).map(|b| b.as_ref())
+    }
+
     fn active_bridge_name(&self) -> &str {
-        for bridge in &self.bridges {
-            if bridge.is_available() {
-                return bridge.name();
-            }
-        }
-        "none"
+        self.active_bridge().map(|b| b.name()).unwrap_or("none")
     }
 
     #[allow(dead_code)]
     fn replace_word(&self, new_text: &str) -> bool {
-        for bridge in &self.bridges {
-            if bridge.is_available() {
-                return bridge.replace_word(new_text);
-            }
-        }
-        false
+        self.active_bridge().map(|b| b.replace_word(new_text)).unwrap_or(false)
     }
 
     fn find_and_replace(&self, find: &str, replace: &str) -> bool {
-        for bridge in &self.bridges {
-            if bridge.is_available() {
-                return bridge.find_and_replace(find, replace);
-            }
-        }
-        false
+        self.active_bridge().map(|b| b.find_and_replace(find, replace)).unwrap_or(false)
     }
 
     fn find_and_replace_in_context(&self, find: &str, replace: &str, context: &str) -> bool {
-        for bridge in &self.bridges {
-            if bridge.is_available() {
-                return bridge.find_and_replace_in_context(find, replace, context);
-            }
-        }
-        false
+        self.active_bridge().map(|b| b.find_and_replace_in_context(find, replace, context)).unwrap_or(false)
     }
 
     fn read_document_context(&self) -> Option<String> {
-        for bridge in &self.bridges {
-            if bridge.is_available() {
-                return bridge.read_document_context();
-            }
-        }
-        None
+        self.active_bridge().and_then(|b| b.read_document_context())
     }
 
     fn read_full_document(&self) -> Option<String> {
+        self.active_bridge().and_then(|b| b.read_full_document())
+    }
+
+    fn set_target_hwnd(&self, hwnd: isize) {
         for bridge in &self.bridges {
-            if bridge.is_available() {
-                return bridge.read_full_document();
-            }
+            bridge.set_target_hwnd(hwnd);
         }
-        None
     }
 }
 
@@ -247,6 +231,8 @@ struct ContextApp {
     /// Open suggestions (any word) for fill-in-the-blank mode
     open_completions: Vec<Completion>,
     last_completed_prefix: String,
+    /// Keep window large briefly after replacement so it doesn't shrink instantly
+    last_replace_time: Instant,
     /// Cache: (masked_sentence, logits) from single_forward — reused when only prefix changes
     cached_forward: Option<(String, Vec<f32>)>,
     /// Cache: (masked_sentence, right_column) — right column only depends on logits, not prefix
@@ -386,6 +372,7 @@ impl ContextApp {
             completions: Vec::new(),
             open_completions: Vec::new(),
             last_completed_prefix: String::new(),
+            last_replace_time: Instant::now() - Duration::from_secs(10),
             cached_forward: None,
             cached_right_column: None,
             cached_mtag_supplement: None,
@@ -854,9 +841,8 @@ impl ContextApp {
 
     /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
-        // Get full document text to check all sentences
-        let doc_text = self.manager.read_full_document()
-            .unwrap_or_default().to_lowercase();
+        // Use cached document text — don't re-read (may fail when our window is focused)
+        let doc_text = self.last_doc_text.to_lowercase();
         self.writing_errors.retain(|e| {
             if e.ignored {
                 return false;
@@ -883,12 +869,17 @@ impl ContextApp {
     fn update_grammar_errors(&mut self) {
         // Read document text and check all complete sentences
         let doc_text = match self.manager.read_full_document() {
-            Some(t) => t,
-            None => return,
+            Some(t) => { self.last_doc_text = t.clone(); t }
+            None => {
+                // Can't read (our window focused?) — use cached text
+                if self.last_doc_text.is_empty() { return; }
+                self.last_doc_text.clone()
+            }
         };
 
         let sentences = split_sentences(&doc_text);
         if sentences.is_empty() {
+            eprintln!("Grammar: doc_text len={} but no sentences", doc_text.len());
             return;
         }
 
@@ -915,6 +906,14 @@ impl ContextApp {
 
         for trimmed in &new_sentences {
             eprintln!("Grammar check: '{}'", trimmed);
+
+            // Check spelling of each word in new sentences
+            for word in trimmed.split_whitespace() {
+                let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»');
+                if !clean.is_empty() {
+                    self.check_spelling(clean);
+                }
+            }
 
             let checker = match &mut self.checker {
                 Some(c) => c,
@@ -1758,10 +1757,13 @@ impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Execute deferred find-and-replace
         if let Some((find, replace, context)) = self.pending_fix.take() {
+            eprintln!("pending_fix: find='{}' replace='{}' ctx='{}'", find, replace, context);
             if context.is_empty() {
-                self.manager.find_and_replace(&find, &replace);
+                let ok = self.manager.find_and_replace(&find, &replace);
+                eprintln!("  find_and_replace result: {}", ok);
             } else {
-                self.manager.find_and_replace_in_context(&find, &replace, &context);
+                let ok = self.manager.find_and_replace_in_context(&find, &replace, &context);
+                eprintln!("  find_and_replace_in_context result: {}", ok);
             }
         }
 
@@ -1813,13 +1815,25 @@ impl eframe::App for ContextApp {
                         let title = String::from_utf16_lossy(&buf[..len as usize]);
                         if !title.contains(our_title) {
                             self.word_hwnd = Some(fg.0 as isize);
+                            self.manager.set_target_hwnd(fg.0 as isize);
                         }
                     }
                 }
                 if new_ctx.caret_pos.is_some() {
                     self.last_caret_pos = new_ctx.caret_pos;
                 }
-                self.context = new_ctx;
+                // Only update context if we got something useful — don't overwrite
+                // good context with empty when our own window is focused
+                if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
+                    // Update doc text cache from masked sentence (strip <mask> to get real text)
+                    if let Some(ref masked) = new_ctx.masked_sentence {
+                        let doc_approx = masked.replace("<mask>", &new_ctx.word);
+                        if doc_approx.len() > self.last_doc_text.len() / 2 {
+                            self.last_doc_text = doc_approx;
+                        }
+                    }
+                    self.context = new_ctx;
+                }
                 // Remove errors for words that have been manually corrected
                 self.prune_resolved_errors();
             }
@@ -2121,8 +2135,9 @@ impl eframe::App for ContextApp {
                         self.return_focus_to_app();
                         self.manager.replace_word(&word);
                         self.completions.clear();
-            self.open_completions.clear();
+                        self.open_completions.clear();
                         self.last_completed_prefix.clear();
+                        self.last_replace_time = Instant::now();
                         // Force immediate context refresh after replace
                         self.last_poll = Instant::now() - self.poll_interval;
                     }
@@ -2155,7 +2170,8 @@ impl eframe::App for ContextApp {
 
         // Window sizing
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !self.open_completions.is_empty();
-        let win_h = if has_content { 250.0 } else { 110.0 };
+        let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
+        let win_h = if has_content || recently_replaced || self.selected_tab >= 1 { 250.0 } else { 110.0 };
         const WIN_W: f32 = 420.0;
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
@@ -2764,36 +2780,39 @@ impl eframe::App for ContextApp {
 
             // === Tab: Debug (3) ===
             if self.selected_tab == 3 {
-                ui.label(egui::RichText::new("Ord:").size(11.0).strong().color(egui::Color32::from_rgb(100, 100, 100)));
-                ui.label(
-                    egui::RichText::new(if self.context.word.is_empty() { "(tomt)" } else { &self.context.word })
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(0, 70, 160)),
-                );
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Setning:").size(11.0).strong().color(egui::Color32::from_rgb(100, 100, 100)));
+                let grey = egui::Color32::from_rgb(100, 100, 100);
+                let dark = egui::Color32::from_rgb(50, 50, 50);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Bro:").size(11.0).strong().color(grey));
+                    ui.label(egui::RichText::new(self.manager.active_bridge_name()).size(11.0).color(dark));
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Ord:").size(11.0).strong().color(grey));
+                    ui.label(
+                        egui::RichText::new(if self.context.word.is_empty() { "(tomt)" } else { &self.context.word })
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(0, 70, 160)),
+                    );
+                });
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("Setning:").size(11.0).strong().color(grey));
                 ui.label(
                     egui::RichText::new(if self.context.sentence.is_empty() { "(tom)" } else { &self.context.sentence })
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(50, 50, 50)),
+                        .size(11.0)
+                        .color(dark),
                 );
-                if let Some(masked) = &self.context.masked_sentence {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Maskert:").size(11.0).strong().color(egui::Color32::from_rgb(100, 100, 100)));
-                    let display = if masked.len() > 200 {
-                        format!("{}...", &masked[..200])
-                    } else {
-                        masked.clone()
-                    };
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("Maskert:").size(11.0).strong().color(grey));
+                let masked_text = self.context.masked_sentence.clone().unwrap_or_else(|| "(ingen)".to_string());
+                egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(display)
+                        egui::RichText::new(&masked_text)
                             .size(10.0)
                             .color(egui::Color32::from_rgb(80, 80, 80)),
                     );
-                }
-                ui.add_space(6.0);
+                });
+                ui.add_space(4.0);
                 if ui.small_button("Kopier til utklippstavle").clicked() {
-                    let mut text = format!("Ord: {}\nSetning: {}", self.context.word, self.context.sentence);
+                    let mut text = format!("Bro: {}\nOrd: {}\nSetning: {}", self.manager.active_bridge_name(), self.context.word, self.context.sentence);
                     if let Some(masked) = &self.context.masked_sentence {
                         text.push_str(&format!("\nMaskert: {}", masked));
                     }
