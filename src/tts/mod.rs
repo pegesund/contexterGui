@@ -21,11 +21,13 @@ type FnBabTtsReadBuffer = unsafe extern "system" fn(LpBabTts, *mut u8, u32, *mut
 // PlaySoundW from winmm.dll
 type PlaySoundFn = unsafe extern "system" fn(*const u8, usize, u32) -> i32;
 const SND_MEMORY: u32 = 0x0004;
-const SND_SYNC: u32 = 0x0000;
+const SND_ASYNC: u32 = 0x0001;
 const SND_NODEFAULT: u32 = 0x0002;
 
 static TTS_SENDER: std::sync::OnceLock<mpsc::Sender<String>> = std::sync::OnceLock::new();
 static TTS_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static TTS_SPEAKING: AtomicBool = AtomicBool::new(false);
+static TTS_STOP: AtomicBool = AtomicBool::new(false);
 
 /// Build a WAV file in memory from 16-bit PCM samples at 22050 Hz mono.
 /// Prepends ~150ms of silence so the audio device wakes up before the word starts.
@@ -129,6 +131,8 @@ pub fn init_tts(sdk_dir: &str, voice_name: &str) {
             let mut pcm_buf = [0u8; 4096];
 
             while let Ok(word) = rx.recv() {
+                TTS_STOP.store(false, Ordering::Relaxed);
+
                 let text_c = match CString::new(word.as_str()) {
                     Ok(c) => c,
                     Err(_) => continue,
@@ -157,9 +161,23 @@ pub fn init_tts(sdk_dir: &str, voice_name: &str) {
                     }
                 }
 
-                if !all_samples.is_empty() {
+                if !all_samples.is_empty() && !TTS_STOP.load(Ordering::Relaxed) {
                     let wav = build_wav(&all_samples);
-                    play_sound(wav.as_ptr(), 0, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
+                    TTS_SPEAKING.store(true, Ordering::Relaxed);
+                    // Play async so we can poll the stop flag on this thread
+                    play_sound(wav.as_ptr(), 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+                    // Wait for playback, checking stop flag every 50ms
+                    let duration_ms = (all_samples.len() as u64 * 1000) / (22050 * 2) + 300;
+                    let start = std::time::Instant::now();
+                    while start.elapsed().as_millis() < duration_ms as u128 {
+                        if TTS_STOP.load(Ordering::Relaxed) {
+                            // Stop on same thread — this actually works
+                            play_sound(std::ptr::null(), 0, 0);
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    TTS_SPEAKING.store(false, Ordering::Relaxed);
                 }
             }
 
@@ -185,4 +203,14 @@ pub fn speak_word(word: &str) {
 /// Check if TTS is available.
 pub fn tts_available() -> bool {
     TTS_AVAILABLE.load(Ordering::Relaxed)
+}
+
+/// Check if TTS is currently speaking.
+pub fn is_speaking() -> bool {
+    TTS_SPEAKING.load(Ordering::Relaxed)
+}
+
+/// Stop current TTS playback.
+pub fn stop_speaking() {
+    TTS_STOP.store(true, Ordering::Release);
 }

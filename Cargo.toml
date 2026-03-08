@@ -21,6 +21,12 @@ features = [
     "Win32_UI_Accessibility",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Globalization",
+    "Storage_Streams",
 ]
 
 [[bin]]

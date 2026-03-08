@@ -1,4 +1,5 @@
 mod bridge;
+mod ocr;
 mod tts;
 
 use bridge::{CursorContext, TextBridge};
@@ -289,6 +290,10 @@ struct ContextApp {
     pending_fix: Option<(String, String, String)>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
+    // OCR clipboard monitoring
+    ocr: Option<ocr::OcrClipboard>,
+    ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    ocr_text: Option<String>,
 }
 
 impl ContextApp {
@@ -405,6 +410,12 @@ impl ContextApp {
             last_doc_sentences: Vec::new(),
             pending_fix: None,
             suggestion_window: None,
+            ocr: match ocr::OcrClipboard::new() {
+                Ok(o) => { eprintln!("OCR clipboard monitor ready"); Some(o) }
+                Err(e) => { eprintln!("OCR not available: {}", e); None }
+            },
+            ocr_receiver: None,
+            ocr_text: None,
         }
     }
 
@@ -825,16 +836,8 @@ impl ContextApp {
             })
             .collect();
 
-        // Sort: substitutions first (by BERT score), then removals (by BERT score)
-        scored.sort_by(|a, b| {
-            let a_removal = a.1.starts_with("Fjernet");
-            let b_removal = b.1.starts_with("Fjernet");
-            match (a_removal, b_removal) {
-                (false, true) => std::cmp::Ordering::Less,   // substitution before removal
-                (true, false) => std::cmp::Ordering::Greater,
-                _ => b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal),
-            }
-        });
+        // Sort by BERT score — best correction wins regardless of type
+        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(3);
         scored
     }
@@ -1760,6 +1763,36 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // OCR: poll clipboard for new screenshots
+        if let Some(ocr) = &mut self.ocr {
+            let was_pending = ocr.has_pending_image();
+            ocr.poll();
+            // Grab focus when a new screenshot is detected
+            if !was_pending && ocr.has_pending_image() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+
+        // OCR: check if background OCR finished
+        if let Some(rx) = &self.ocr_receiver {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(text) => {
+                        eprintln!("OCR complete: {} chars", text.len());
+                        if !text.is_empty() {
+                            tts::speak_word(&text);
+                        }
+                        self.ocr_text = Some(text);
+                    }
+                    Err(e) => {
+                        eprintln!("OCR error: {}", e);
+                        self.ocr_text = None;
+                    }
+                }
+                self.ocr_receiver = None;
+            }
+        }
+
         // Poll for new context
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
@@ -2142,8 +2175,10 @@ impl eframe::App for ContextApp {
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // Tab bar with painted dot indicators
+            let tts_speaking = tts::is_speaking();
+            let ocr_is_busy = self.ocr_receiver.is_some();
             ui.horizontal(|ui| {
-                let tab_labels = ["Innhold", "Grammatikk", "Innstillinger", "Debug"];
+                let tab_labels = ["Innhold", "Grammatikk", "Innst.", "Debug"];
                 for (i, name) in tab_labels.iter().enumerate() {
                     // Draw colored dot for tabs 0 and 1
                     if i == 0 || i == 1 {
@@ -2173,6 +2208,20 @@ impl eframe::App for ContextApp {
                         ui.add_space(2.0);
                         ui.label(egui::RichText::new("|").size(12.0).color(egui::Color32::from_rgb(180, 170, 140)));
                         ui.add_space(2.0);
+                    }
+                }
+
+                // TTS reading indicator + stop button
+                if tts_speaking || ocr_is_busy {
+                    ui.add_space(4.0);
+                    ui.spinner();
+                    if ui.add(egui::Button::new(
+                        egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(200, 40, 40))
+                     .min_size(egui::vec2(18.0, 16.0))
+                    ).clicked() {
+                        tts::stop_speaking();
+                        self.ocr_text = None;
                     }
                 }
 
@@ -2618,6 +2667,45 @@ impl eframe::App for ContextApp {
                 }
                 if !open {
                     self.suggestion_window = None;
+                }
+            }
+
+            // === OCR: screenshot detected prompt ===
+            let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
+            if ocr_has_pending && !ocr_is_busy {
+                let mut do_ocr = false;
+                let mut do_dismiss = false;
+                egui::Window::new("Skjermbilde oppdaget")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(300.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new("Vil du lese teksten fra skjermbildet?")
+                                .size(14.0)
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("Ja, les teksten").size(13.0)).clicked() {
+                                do_ocr = true;
+                            }
+                            if ui.button(egui::RichText::new("Nei").size(13.0)).clicked() {
+                                do_dismiss = true;
+                            }
+                        });
+                    });
+                if do_ocr {
+                    if let Some(ocr) = &mut self.ocr {
+                        if let Some(rx) = ocr.start_ocr() {
+                            self.ocr_receiver = Some(rx);
+                        }
+                    }
+                }
+                if do_dismiss {
+                    if let Some(ocr) = &mut self.ocr {
+                        ocr.dismiss();
+                    }
                 }
             }
 
