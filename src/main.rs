@@ -737,29 +737,32 @@ impl ContextApp {
             }
         }
 
-        // 2. Try removing each error word — only if no substitution suggestion exists
+        // 2a. Always try removing "å" before the error word as an alternative
+        // "I går å gikk" → removing "å" gives "I går gikk" (correct), BERT picks best
+        for e in errors {
+            let words: Vec<&str> = sentence.split_whitespace().collect();
+            if let Some(pos) = words.iter().position(|w| {
+                w.trim_matches(|c: char| c.is_ascii_punctuation()).eq_ignore_ascii_case(&e.word)
+            }) {
+                if pos > 0 {
+                    let prev = words[pos - 1].trim_matches(|c: char| c.is_ascii_punctuation());
+                    if prev == "å" {
+                        let removed_aa = remove_word_from_sentence(sentence, "å");
+                        if removed_aa != sentence {
+                            candidates.push((removed_aa, format!("Fjernet «å» foran «{}».", e.word)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2b. Try removing each error word — only if no substitution suggestion exists
         let has_substitution = errors.iter().any(|e| !e.suggestion.is_empty());
         if !has_substitution {
             for e in errors {
-                // Try removing the error word itself
                 let removed = remove_word_from_sentence(sentence, &e.word);
                 if removed != sentence {
                     candidates.push((removed, format!("Fjernet «{}».", e.word)));
-                }
-                // For "å + noun" errors: try removing "å" before the word instead
-                let words: Vec<&str> = sentence.split_whitespace().collect();
-                if let Some(pos) = words.iter().position(|w| {
-                    w.trim_matches(|c: char| c.is_ascii_punctuation()).eq_ignore_ascii_case(&e.word)
-                }) {
-                    if pos > 0 {
-                        let prev = words[pos - 1].trim_matches(|c: char| c.is_ascii_punctuation());
-                        if prev == "å" {
-                            let removed_aa = remove_word_from_sentence(sentence, "å");
-                            if removed_aa != sentence {
-                                candidates.push((removed_aa, format!("Fjernet «å» foran «{}».", e.word)));
-                            }
-                        }
-                    }
                 }
             }
         }
