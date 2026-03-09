@@ -76,6 +76,13 @@ impl AnyChecker {
         }
     }
 
+    fn suggest_compound(&self, word: &str) -> Option<String> {
+        match self {
+            AnyChecker::Swi(c) => c.suggest_compound(word),
+            AnyChecker::Neo(_) => None,
+        }
+    }
+
     /// Split unpunctuated text into sentences using Prolog sentence boundary detection.
     /// Returns None if not using SWI checker or no boundaries found.
     /// Validates that each resulting sub-sentence has at least one likely verb —
@@ -571,7 +578,28 @@ impl ContextApp {
             return;
         }
 
-        // Word not found — get fuzzy suggestions
+        // Try compound suggestion via Prolog (e.g. "blåsjell" → "blåskjell")
+        if let Some(compound) = checker.suggest_compound(&clean) {
+            log!("  Compound suggestion: '{}' → '{}'", clean, compound);
+            if self.writing_errors.iter().any(|e| {
+                matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+            }) {
+                return;
+            }
+            self.writing_errors.push(WritingError {
+                category: ErrorCategory::Spelling,
+                word: clean.clone(),
+                suggestion: compound.clone(),
+                explanation: format!("«{}» → «{}» (sammensatt ord)", clean, compound),
+                rule_name: "stavefeil".to_string(),
+                sentence_context: sentence_ctx.to_string(),
+                position: 0,
+                ignored: false,
+            });
+            return;
+        }
+
+        // Word not found — get fuzzy suggestions from FST
         let fuzzy = checker.fuzzy_lookup(&clean, 2);
 
         let mut candidates: Vec<(String, u32)> = fuzzy.into_iter()
@@ -629,10 +657,31 @@ impl ContextApp {
             .collect();
 
         for (idx, word, sentence_ctx) in to_upgrade {
-            let suggestions = self.trigram_suggestions(&word, &sentence_ctx);
-            if let Some((best, _score)) = suggestions.first() {
-                eprintln!("Spelling upgrade: '{}' → '{}' (was '{}')",
-                    word, best, self.writing_errors[idx].suggestion);
+            let existing = self.writing_errors[idx].suggestion.clone();
+            let mut suggestions = self.trigram_suggestions(&word, &sentence_ctx);
+            // Boost existing suggestion (e.g. from compound lookup) — it's dictionary-confirmed
+            if !existing.is_empty() {
+                let et = Self::trigrams(&existing.to_lowercase());
+                let wt = Self::trigrams(&word.to_lowercase());
+                let common = wt.iter().filter(|t| et.contains(t)).count();
+                let total = wt.len().max(et.len()).max(1);
+                let sim = common as f32 / total as f32;
+                let score = 2.0 + sim;
+                // Replace score if already present, or add new
+                if let Some(pos) = suggestions.iter().position(|(w, _)| w == &existing) {
+                    suggestions[pos].1 = suggestions[pos].1.max(score);
+                } else {
+                    suggestions.push((existing.clone(), score));
+                }
+                suggestions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            if let Some((best, score)) = suggestions.first() {
+                log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
+                    word, best, score, existing, suggestions.len());
+                // Log top 5 for debugging
+                for (i, (w, s)) in suggestions.iter().take(5).enumerate() {
+                    log!("  #{}: '{}' score={:.2}", i+1, w, s);
+                }
                 self.writing_errors[idx].suggestion = best.clone();
             }
             // Mark as processed regardless so we don't retry
