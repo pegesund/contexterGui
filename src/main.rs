@@ -4,8 +4,31 @@ mod tts;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
+    let path = std::env::temp_dir().join("acatts-rust.log");
+    eprintln!("Logging to: {}", path.display());
+    let f = std::fs::OpenOptions::new()
+        .create(true).write(true).truncate(true)
+        .open(&path).expect("failed to open log file");
+    Mutex::new(f)
+});
+
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        eprintln!("{}", msg);
+        if let Ok(mut f) = LOG_FILE.lock() {
+            let _ = writeln!(f, "{}", msg);
+            let _ = f.flush();
+        }
+    }};
+}
 
 use nostos_cognio::baseline::{compute_baseline, Baselines};
 use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
@@ -53,6 +76,33 @@ impl AnyChecker {
         }
     }
 
+    /// Split unpunctuated text into sentences using Prolog sentence boundary detection.
+    /// Returns None if not using SWI checker or no boundaries found.
+    /// Validates that each resulting sub-sentence has at least one likely verb —
+    /// rejects splits that produce verbless fragments like "I huset." or "Kaker og brus."
+    fn split_by_prolog(&mut self, text: &str) -> Option<Vec<String>> {
+        match self {
+            AnyChecker::Swi(c) => {
+                let sentences = nostos_cognio::punctuation::split_by_prolog(c, text);
+                if sentences.len() <= 1 {
+                    return None;
+                }
+                // Validate: every sub-sentence must have at least one likely verb.
+                // Checks for unambiguous verb OR pronoun+verb pair.
+                let analyzer = c.analyzer().clone();
+                for sent in &sentences {
+                    let stripped = sent.trim_end_matches(|ch: char| ch == '.' || ch == '!' || ch == '?').trim();
+                    if !nostos_cognio::punctuation::has_likely_verb_in_sentence(&analyzer, stripped) {
+                        eprintln!("Grammar: rejecting Prolog split — '{}' has no likely verb", stripped);
+                        return None;
+                    }
+                }
+                Some(sentences)
+            }
+            _ => None,
+        }
+    }
+
 }
 
 // --- Error list for spelling and grammar ---
@@ -61,6 +111,7 @@ impl AnyChecker {
 enum ErrorCategory {
     Spelling,
     Grammar,
+    SentenceBoundary,
 }
 
 #[derive(Clone, Debug)]
@@ -270,8 +321,12 @@ struct ContextApp {
     last_spell_checked_word: String,
     /// Previous document text — used to detect changes and skip re-checking unchanged sentences
     last_doc_text: String,
-    /// Sentences from last doc text (for diffing against current)
-    last_doc_sentences: Vec<String>,
+    /// Hash of last document text — skip entire update if doc unchanged
+    last_doc_hash: u64,
+    /// Hashes of sentences already checked for Prolog sub-splitting (expensive, persists across doc changes)
+    prolog_checked_hashes: std::collections::HashSet<u64>,
+    /// Hashes of sentences grammar-checked and found clean (no errors) — avoid re-checking
+    clean_sentence_hashes: std::collections::HashSet<u64>,
     /// Deferred find-and-replace (word, replacement, optional sentence context) — executed next frame
     pending_fix: Option<(String, String, String)>,
     /// Suggestion window: (misspelled_word, candidates)
@@ -396,7 +451,9 @@ impl ContextApp {
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
             last_doc_text: String::new(),
-            last_doc_sentences: Vec::new(),
+            last_doc_hash: 0,
+            prolog_checked_hashes: std::collections::HashSet::new(),
+            clean_sentence_hashes: std::collections::HashSet::new(),
             pending_fix: None,
             suggestion_window: None,
             rule_info_window: None,
@@ -875,6 +932,7 @@ impl ContextApp {
         };
         self.writing_errors.retain(|e| {
             if e.ignored {
+                log!("Pruning ignored: {:?} '{}'", e.category, &e.word[..e.word.len().min(40)]);
                 return false;
             }
             let still_present = match e.category {
@@ -886,9 +944,14 @@ impl ContextApp {
                     doc_text.split(|c: char| !c.is_alphanumeric())
                         .any(|w| w == word_lower)
                 }
+                ErrorCategory::SentenceBoundary => {
+                    // Resolved when the original unpunctuated text no longer matches
+                    // (user accepted the fix or changed the text)
+                    doc_text.contains(&e.word.to_lowercase())
+                }
             };
             if !still_present {
-                eprintln!("Error resolved: '{}' no longer in document", e.word);
+                log!("Error resolved: {:?} '{}' no longer in document", e.category, &e.word[..e.word.len().min(40)]);
             }
             still_present
         });
@@ -896,6 +959,11 @@ impl ContextApp {
 
     /// Update the error list with grammar errors from the current sentence.
     /// Called when a sentence boundary is detected.
+    ///
+    /// Pipeline: 1) Read document text
+    ///           2) Split on punctuation (or Prolog for unpunctuated text)
+    ///           3) If Prolog split found boundaries → add SentenceBoundary suggestions
+    ///           4) Grammar-check each split sentence individually
     fn update_grammar_errors(&mut self) {
         // Read document text and check all complete sentences
         let doc_text = match self.manager.read_full_document() {
@@ -907,39 +975,151 @@ impl ContextApp {
             }
         };
 
-        let sentences = split_sentences(&doc_text);
+        // Quick check: if document hasn't changed at all, skip everything
+        let doc_hash = hash_str(&doc_text);
+        if doc_hash == self.last_doc_hash {
+            return;
+        }
+        self.last_doc_hash = doc_hash;
+
+        let mut sentences = split_sentences(&doc_text);
+        // Track which original sentences were sub-split by Prolog
+        // (original_text → split_sentences) for boundary suggestions
+        let mut prolog_splits: Vec<(String, Vec<String>)> = Vec::new();
+
+        // If no punctuated sentences but text exists, try Prolog sentence splitting
+        if sentences.is_empty() && nostos_cognio::punctuation::needs_punctuation_check(&doc_text) {
+            let doc_h = hash_str(&doc_text);
+            if !self.prolog_checked_hashes.contains(&doc_h) {
+                if let Some(checker) = &mut self.checker {
+                    if let Some(prolog_sentences) = checker.split_by_prolog(&doc_text) {
+                        eprintln!("Grammar: Prolog split {} sentences from fully unpunctuated text", prolog_sentences.len());
+                        prolog_splits.push((doc_text.clone(), prolog_sentences.clone()));
+                        sentences = prolog_sentences;
+                    }
+                }
+
+                // Fallback to BERT if Prolog found nothing
+                if sentences.is_empty() {
+                    if let Some(model) = &mut self.model {
+                        let verb_fn: Option<Box<dyn Fn(&str) -> bool>> = match &self.checker {
+                            Some(AnyChecker::Swi(c)) => {
+                                let analyzer = c.analyzer().clone();
+                                Some(Box::new(move |word: &str| -> bool {
+                                    nostos_cognio::punctuation::is_finite_verb_mtag(&analyzer, word)
+                                }))
+                            }
+                            _ => None,
+                        };
+
+                        let verb_ref: Option<&dyn Fn(&str) -> bool> = verb_fn.as_deref();
+                        match nostos_cognio::punctuation::split_into_sentences_with_verbs(model, &doc_text, 10.0, verb_ref) {
+                            Ok(predicted) => {
+                                sentences = predicted;
+                            }
+                            Err(e) => {
+                                eprintln!("Grammar: BERT punctuation prediction failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                self.prolog_checked_hashes.insert(doc_h);
+            }
+        }
+
+        // Also check each punctuated sentence for internal boundaries
+        // e.g. "Jeg spiller fotball jeg går tur." — has final period but missing internal one
+        if let Some(checker) = &mut self.checker {
+            let mut expanded: Vec<String> = Vec::new();
+            for sent in &sentences {
+                let sent_h = hash_str(sent);
+                if self.prolog_checked_hashes.contains(&sent_h) {
+                    // Already checked for sub-splitting — just pass through
+                    expanded.push(sent.clone());
+                    continue;
+                }
+                // Strip trailing punctuation for Prolog analysis
+                let stripped = sent.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
+                if stripped.split_whitespace().count() >= 4 {
+                    if let Some(sub_sentences) = checker.split_by_prolog(stripped) {
+                        eprintln!("Grammar: Prolog sub-split '{}' into {} sentences",
+                            &stripped[..stripped.len().min(50)], sub_sentences.len());
+                        prolog_splits.push((sent.clone(), sub_sentences.clone()));
+                        self.prolog_checked_hashes.insert(sent_h);
+                        expanded.extend(sub_sentences);
+                        continue;
+                    }
+                }
+                self.prolog_checked_hashes.insert(sent_h);
+                expanded.push(sent.clone());
+            }
+            sentences = expanded;
+        }
+
         if sentences.is_empty() {
-            eprintln!("Grammar: doc_text len={} but no sentences", doc_text.len());
             return;
         }
 
-        // Build set of current trimmed sentences
-        let current: Vec<String> = sentences.iter()
+        // All sentences in the current document — duplicates are filtered by existing errors below
+        let new_sentences: Vec<String> = sentences.iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
 
-        // Find sentences that are NEW (not in previous doc)
-        let prev_set: std::collections::HashSet<&str> = self.last_doc_sentences.iter()
-            .map(|s| s.as_str()).collect();
-        let new_sentences: Vec<String> = current.iter()
-            .filter(|s| !prev_set.contains(s.as_str()))
-            .cloned()
-            .collect();
+        // --- Step 1: Sentence boundary suggestions (shown first, highest priority) ---
+        for (original_text, split_sents) in &prolog_splits {
+            // Only suggest if we haven't already suggested for this exact text
+            if self.writing_errors.iter().any(|e| {
+                matches!(e.category, ErrorCategory::SentenceBoundary)
+                    && e.word == *original_text
+                    && !e.ignored
+            }) {
+                continue;
+            }
+            // Build the punctuated version from the split sentences
+            let punctuated = split_sents.join(" ");
+            // Skip if suggestion is same as original
+            if punctuated.trim() == original_text.trim() {
+                continue;
+            }
+            eprintln!("Sentence boundary suggestion: '{}' -> '{}'",
+                &original_text[..original_text.len().min(60)],
+                &punctuated[..punctuated.len().min(60)]);
 
-        // Update stored sentences for next poll
-        self.last_doc_sentences = current;
-
-        if new_sentences.is_empty() {
-            return;
+            self.writing_errors.push(WritingError {
+                category: ErrorCategory::SentenceBoundary,
+                word: original_text.clone(),
+                suggestion: punctuated,
+                explanation: format!("Setningsgrense: teksten ser ut til å inneholde {} setninger uten punktum.", split_sents.len()),
+                rule_name: "setningsgrense".to_string(),
+                sentence_context: original_text.clone(),
+                position: 0,
+                ignored: false,
+            });
         }
 
+        // --- Step 2: Spelling + grammar check on each split sentence ---
         for trimmed in &new_sentences {
-            eprintln!("Grammar check: '{}'", trimmed);
+            let sent_h = hash_str(trimmed);
+
+            // Skip sentences we already checked and found clean
+            if self.clean_sentence_hashes.contains(&sent_h) {
+                continue;
+            }
+
+            // Skip sentences that already have errors recorded
+            let has_errors = self.writing_errors.iter().any(|e| {
+                e.sentence_context == *trimmed && !e.ignored
+            });
+            if has_errors {
+                continue;
+            }
+
+            log!("Grammar check: '{}'", trimmed);
 
             // Check spelling of each word in new sentences
             for word in trimmed.split_whitespace() {
-                let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»');
+                let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
                 if !clean.is_empty() {
                     self.check_spelling(clean, trimmed);
                 }
@@ -951,26 +1131,26 @@ impl ContextApp {
             };
 
             let errors = checker.check_sentence(trimmed);
-            if errors.is_empty() { continue; }
-
-            // Don't add duplicate grammar errors for this sentence
-            if self.writing_errors.iter().any(|e| {
-                matches!(e.category, ErrorCategory::Grammar)
-                    && e.sentence_context == *trimmed
-                    && !e.ignored
-            }) {
+            if errors.is_empty() {
+                // Mark as clean so we don't re-check next poll
+                self.clean_sentence_hashes.insert(sent_h);
                 continue;
             }
 
             for ge in &errors {
-                eprintln!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
+                log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
             }
 
             // Score candidates with BERT (only runs when Prolog found errors)
             let corrections = self.best_sentence_corrections(trimmed, &errors);
 
             for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
-                eprintln!("  Correction #{}: ({:.1}) '{}' -> '{}' [{}]", i+1, score, trimmed, corrected, rule_name);
+                // Skip no-op corrections (suggestion identical to original)
+                if corrected.trim() == trimmed.trim() {
+                    log!("  Skipping no-op correction: '{}'", corrected);
+                    continue;
+                }
+                log!("  Correction #{}: ({:.1}) '{}' -> '{}' [{}]", i+1, score, trimmed, corrected, rule_name);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
                     word: trimmed.to_string(),
@@ -1743,6 +1923,12 @@ fn remove_word_from_sentence(sentence: &str, word: &str) -> String {
 }
 
 
+fn hash_str(s: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
@@ -1872,13 +2058,52 @@ impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Execute deferred find-and-replace
         if let Some((find, replace, context)) = self.pending_fix.take() {
-            eprintln!("pending_fix: find='{}' replace='{}' ctx='{}'", find, replace, context);
-            if context.is_empty() {
-                let ok = self.manager.find_and_replace(&find, &replace);
-                eprintln!("  find_and_replace result: {}", ok);
+            log!("pending_fix: bridge='{}' find='{}' replace='{}'",
+                self.manager.active_bridge_name(),
+                &find[..find.len().min(60)], &replace[..replace.len().min(60)]);
+            let ok = if context.is_empty() {
+                let r = self.manager.find_and_replace(&find, &replace);
+                log!("  find_and_replace result: {}", r);
+                r
             } else {
-                let ok = self.manager.find_and_replace_in_context(&find, &replace, &context);
-                eprintln!("  find_and_replace_in_context result: {}", ok);
+                let r = self.manager.find_and_replace_in_context(&find, &replace, &context);
+                log!("  find_and_replace_in_context result: {}", r);
+                r
+            };
+            if ok {
+                // Document changed — reset doc hash so next poll re-scans
+                self.last_doc_hash = 0;
+                // Mark the replacement sentences as clean AND prolog-checked
+                // so they don't get re-flagged or re-split
+                let mark_clean = |text: &str, clean: &mut std::collections::HashSet<u64>, prolog: &mut std::collections::HashSet<u64>| {
+                    let h = hash_str(text);
+                    clean.insert(h);
+                    prolog.insert(h);
+                    // Also mark without trailing punctuation (Prolog strips it)
+                    let stripped = text.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
+                    if !stripped.is_empty() && stripped != text {
+                        let sh = hash_str(stripped);
+                        clean.insert(sh);
+                        prolog.insert(sh);
+                    }
+                };
+                // Mark the full replacement
+                mark_clean(&replace, &mut self.clean_sentence_hashes, &mut self.prolog_checked_hashes);
+                // Mark each sub-sentence within the replacement
+                for sent in replace.split_inclusive(|c: char| c == '.' || c == '!' || c == '?') {
+                    let trimmed = sent.trim();
+                    if !trimmed.is_empty() {
+                        mark_clean(trimmed, &mut self.clean_sentence_hashes, &mut self.prolog_checked_hashes);
+                    }
+                }
+                // Also remove any existing errors that match the old find text
+                let find_lower = find.to_lowercase();
+                self.writing_errors.retain(|e| {
+                    e.word.to_lowercase() != find_lower
+                        && e.sentence_context.to_lowercase() != find_lower
+                });
+                log!("Fix applied: marked {} clean, {} prolog-checked",
+                    self.clean_sentence_hashes.len(), self.prolog_checked_hashes.len());
             }
         }
 
@@ -2561,11 +2786,17 @@ impl eframe::App for ContextApp {
 
             // === Tab: Grammatikk (1) ===
             if self.selected_tab == 1 {
-                let active_errors: Vec<usize> = self.writing_errors.iter()
+                let mut active_errors: Vec<usize> = self.writing_errors.iter()
                     .enumerate()
                     .filter(|(_, e)| !e.ignored)
                     .map(|(i, _)| i)
                     .collect();
+                // Sort: SentenceBoundary first, then Grammar, then Spelling
+                active_errors.sort_by_key(|&i| match self.writing_errors[i].category {
+                    ErrorCategory::SentenceBoundary => 0,
+                    ErrorCategory::Grammar => 1,
+                    ErrorCategory::Spelling => 2,
+                });
 
                 if active_errors.is_empty() {
                     ui.label(
@@ -2600,7 +2831,38 @@ impl eframe::App for ContextApp {
 
                         ui.separator();
                         ui.scope(|ui| {
-                            if matches!(error.category, ErrorCategory::Grammar) {
+                            if matches!(error.category, ErrorCategory::SentenceBoundary) {
+                                // --- Sentence boundary suggestion ---
+                                let err_suggestion = error.suggestion.clone();
+                                ui.horizontal(|ui| {
+                                    if icon_button(ui, "👍", "Sett inn punktum") {
+                                        action = Some((idx, "fix"));
+                                    }
+                                    if icon_button(ui, "👎", "Ignorer") {
+                                        action = Some((idx, "ignore"));
+                                    }
+                                    if icon_button(ui, "🔊", "Les opp") {
+                                        tts::speak_word(&err_suggestion);
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new("Mangler punktum:")
+                                        .size(11.0)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(0, 100, 180)),
+                                );
+                                // Show the suggested punctuated version
+                                ui.label(
+                                    egui::RichText::new(&error.suggestion)
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(0, 120, 60)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&error.explanation)
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                                );
+                            } else if matches!(error.category, ErrorCategory::Grammar) {
                                 shown_contexts.insert(error.sentence_context.clone());
                                 // Show all alternatives for this sentence
                                 let ctx = error.sentence_context.clone();
@@ -2714,11 +2976,17 @@ impl eframe::App for ContextApp {
                                 let suggestion = error.suggestion.clone();
                                 let word = error.word.clone();
                                 let context = error.sentence_context.clone();
-                                self.pending_fix = Some((word, suggestion, context));
+                                self.pending_fix = Some((word.clone(), suggestion.clone(), context));
+                                log!("FIX action: idx={} bridge='{}' word='{}' suggestion='{}'",
+                                    idx, self.manager.active_bridge_name(),
+                                    &word[..word.len().min(60)], &suggestion[..suggestion.len().min(60)]);
                                 // Mark all alternatives for this sentence as ignored
                                 let ctx = self.writing_errors[idx].sentence_context.clone();
                                 for e in &mut self.writing_errors {
-                                    if e.sentence_context == ctx && matches!(e.category, ErrorCategory::Grammar) {
+                                    if e.sentence_context == ctx
+                                        && (matches!(e.category, ErrorCategory::Grammar)
+                                            || matches!(e.category, ErrorCategory::SentenceBoundary))
+                                    {
                                         e.ignored = true;
                                     }
                                 }

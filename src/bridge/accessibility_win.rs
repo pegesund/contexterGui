@@ -1,4 +1,5 @@
 use super::{CursorContext, RawCursorText, TextBridge, build_context, extract_word_before_cursor, extract_word_after_cursor};
+use std::io::Write;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
@@ -6,9 +7,21 @@ use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
+fn bridge_log(msg: &str) {
+    let path = std::env::temp_dir().join("acatts-bridge.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true).open(&path)
+    {
+        let _ = writeln!(f, "{}", msg);
+        let _ = f.flush();
+    }
+}
+
 pub struct AccessibilityBridge {
     /// Saved HWND of the target app (set externally when good context is read)
     pub target_hwnd: std::cell::Cell<isize>,
+    /// Cached HWND of the actual edit control inside the target app
+    edit_hwnd: std::cell::Cell<isize>,
     /// Cached full document text from last successful read
     cached_doc: std::cell::RefCell<String>,
 }
@@ -17,6 +30,7 @@ impl AccessibilityBridge {
     pub fn new() -> Self {
         AccessibilityBridge {
             target_hwnd: std::cell::Cell::new(0),
+            edit_hwnd: std::cell::Cell::new(0),
             cached_doc: std::cell::RefCell::new(String::new()),
         }
     }
@@ -287,22 +301,32 @@ impl AccessibilityBridge {
 
     /// Find text in document and replace via UIA
     fn find_replace_via_uia(&self, find: &str, replace: &str, context: &str) -> bool {
-        eprintln!("find_replace_via_uia: find='{}' replace='{}' ctx='{}'", find, replace, context);
+        bridge_log(&format!("=== find_replace_via_uia ==="));
+        bridge_log(&format!("FIND: '{}'", find));
+        bridge_log(&format!("REPLACE: '{}'", replace));
         unsafe {
             let pattern = match self.get_text_pattern() {
-                Some(p) => { eprintln!("  got TextPattern"); p }
-                None => { eprintln!("  FAILED: no TextPattern"); return false; }
+                Some(p) => p,
+                None => { bridge_log("FAILED: no TextPattern"); return false; }
             };
 
             let doc_range = match pattern.DocumentRange() {
-                Ok(r) => { eprintln!("  got DocumentRange"); r }
-                Err(e) => { eprintln!("  FAILED: DocumentRange: {:?}", e); return false; }
+                Ok(r) => r,
+                Err(e) => { bridge_log(&format!("FAILED: DocumentRange: {:?}", e)); return false; }
             };
 
+            // Log full document text BEFORE change
+            let doc_before = doc_range.GetText(-1).unwrap_or_default().to_string();
+            bridge_log(&format!("DOC BEFORE ({} chars):\n{}", doc_before.len(), doc_before));
+
+            // Re-get doc range for FindText (GetText may have consumed it)
+            let doc_range = pattern.DocumentRange().unwrap();
             let find_bstr = windows::core::BSTR::from(find);
             match doc_range.FindText(&find_bstr, false, false) {
                 Ok(found_range) => {
-                    eprintln!("  FindText found match");
+                    let selected_text = found_range.GetText(-1).unwrap_or_default().to_string();
+                    bridge_log(&format!("FindText matched: '{}' ({} chars)", selected_text, selected_text.len()));
+
                     if !context.is_empty() {
                         let check_range = found_range.Clone().unwrap();
                         let _ = check_range.MoveEndpointByUnit(
@@ -318,30 +342,67 @@ impl AccessibilityBridge {
                         let surrounding = check_range.GetText(-1).unwrap_or_default().to_string();
                         let ctx_words: Vec<&str> = context.split_whitespace().take(3).collect();
                         let matches = ctx_words.iter().any(|w| surrounding.contains(w));
-                        eprintln!("  context check: surrounding='{}' ctx_words={:?} matches={}", surrounding, ctx_words, matches);
+                        bridge_log(&format!("Context check: matches={}", matches));
                         if !matches {
-                            eprintln!("  FAILED: context mismatch");
+                            bridge_log("FAILED: context mismatch");
                             return false;
                         }
                     }
 
-                    // Return focus to target app before typing
+                    // Get or cache the edit control HWND
                     let hwnd_val = self.target_hwnd.get();
-                    eprintln!("  target_hwnd={}", hwnd_val);
-                    if hwnd_val != 0 {
-                        let _ = SetForegroundWindow(HWND(hwnd_val as *mut _));
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    let edit_val = self.edit_hwnd.get();
+                    let edit = if edit_val != 0 {
+                        HWND(edit_val as *mut _)
+                    } else if hwnd_val != 0 {
+                        let found = find_edit_child(HWND(hwnd_val as *mut _));
+                        self.edit_hwnd.set(found.0 as isize);
+                        found
+                    } else {
+                        HWND(std::ptr::null_mut())
+                    };
+                    bridge_log(&format!("target_hwnd={} edit_hwnd={}", hwnd_val, edit.0 as isize));
+
+                    // Select the text via UIA (needed so EM_REPLACESEL knows what to replace)
+                    let doc_range2 = pattern.DocumentRange().unwrap();
+                    let found_range2 = doc_range2.FindText(&windows::core::BSTR::from(find), false, false);
+                    match found_range2 {
+                        Ok(fr) => {
+                            let sel_result = fr.Select();
+                            bridge_log(&format!("Select result: {:?}", sel_result));
+                        }
+                        Err(e) => {
+                            bridge_log(&format!("Re-FindText failed: {:?}", e));
+                            return false;
+                        }
                     }
 
-                    let sel_result = found_range.Select();
-                    eprintln!("  Select result: {:?}", sel_result);
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                    send_string(replace);
-                    eprintln!("  sent replacement string");
+                    bridge_log(&format!("Sending replacement: '{}' ({} chars)", replace, replace.len()));
+
+                    if edit.0 as isize != 0 {
+                        // EM_REPLACESEL: atomic, no focus needed, targets edit control directly
+                        replace_selection(edit, replace);
+                    } else {
+                        // Fallback: SendInput (needs focus)
+                        if hwnd_val != 0 {
+                            let _ = SetForegroundWindow(HWND(hwnd_val as *mut _));
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        send_string(replace);
+                    }
+
+                    // Update cached doc so grammar checker sees the new text
+                    {
+                        let mut cached = self.cached_doc.borrow_mut();
+                        *cached = cached.replacen(find, replace, 1);
+                        bridge_log(&format!("DOC AFTER ({} chars):\n{}", cached.len(), &*cached));
+                    }
+
                     return true;
                 }
                 Err(e) => {
-                    eprintln!("  FAILED: FindText: {:?}", e);
+                    bridge_log(&format!("FAILED: FindText: {:?}", e));
                 }
             }
 
@@ -399,6 +460,9 @@ impl TextBridge for AccessibilityBridge {
     }
 
     fn set_target_hwnd(&self, hwnd: isize) {
+        if hwnd != self.target_hwnd.get() {
+            self.edit_hwnd.set(0); // Reset cached edit control when app changes
+        }
         self.target_hwnd.set(hwnd);
     }
 }
@@ -538,7 +602,93 @@ fn select_word_keyboard() {
     }
 }
 
-/// Type a string by sending keyboard input events
+/// Recursively find the edit control inside a window (e.g., Notepad's RichEditD2DPT).
+/// Windows 11 Notepad nests the edit control several levels deep.
+fn find_edit_child(parent: HWND) -> HWND {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetClassNameW};
+        let none = HWND(std::ptr::null_mut());
+
+        fn search_recursive(parent: HWND, depth: u32) -> Option<HWND> {
+            if depth > 10 { return None; }
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetClassNameW};
+                let none = HWND(std::ptr::null_mut());
+                let edit_classes = ["RichEditD2DPT", "Edit", "RichEdit20W", "RICHEDIT50W"];
+
+                // Check direct children for edit classes
+                for class in &edit_classes {
+                    let class_wide: Vec<u16> = class.encode_utf16().chain(std::iter::once(0)).collect();
+                    if let Ok(child) = FindWindowExW(Some(parent), Some(none),
+                        windows::core::PCWSTR(class_wide.as_ptr()), windows::core::PCWSTR(std::ptr::null()))
+                    {
+                        if child.0 as isize != 0 {
+                            bridge_log(&format!("Found edit child: class='{}' hwnd={:?} depth={}", class, child, depth));
+                            return Some(child);
+                        }
+                    }
+                }
+
+                // Recurse into all children
+                let mut prev = none;
+                loop {
+                    match FindWindowExW(Some(parent), Some(prev),
+                        windows::core::PCWSTR(std::ptr::null()), windows::core::PCWSTR(std::ptr::null()))
+                    {
+                        Ok(child) if child.0 as isize != 0 => {
+                            if let Some(found) = search_recursive(child, depth + 1) {
+                                return Some(found);
+                            }
+                            prev = child;
+                        }
+                        _ => break,
+                    }
+                }
+                None
+            }
+        }
+
+        if let Some(edit) = search_recursive(parent, 0) {
+            return edit;
+        }
+        bridge_log("No edit child found, using parent window");
+        parent
+    }
+}
+
+/// Replace the current selection in an edit control using EM_REPLACESEL.
+/// This is a single atomic message — no focus issues, no character-by-character.
+fn replace_selection(hwnd: HWND, text: &str) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        const EM_REPLACESEL: u32 = 0x00C2;
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        SendMessageW(
+            hwnd,
+            EM_REPLACESEL,
+            Some(windows::Win32::Foundation::WPARAM(1)), // fCanUndo = TRUE
+            Some(windows::Win32::Foundation::LPARAM(wide.as_ptr() as isize)),
+        );
+        bridge_log(&format!("replace_selection: {} chars sent via EM_REPLACESEL", text.chars().count()));
+    }
+}
+
+/// Type a string by sending WM_CHAR messages directly to a window handle.
+/// Unlike SendInput (which goes to the foreground window), PostMessage targets
+/// a specific window and works even if our GUI steals focus.
+fn send_string_to_hwnd(text: &str, hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CHAR};
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        for ch in text.encode_utf16() {
+            let _ = PostMessageW(Some(hwnd), WM_CHAR, windows::Win32::Foundation::WPARAM(ch as usize), windows::Win32::Foundation::LPARAM(0));
+        }
+        bridge_log(&format!("send_string_to_hwnd: {} chars posted to hwnd {:?}", text.chars().count(), hwnd));
+    }
+}
+
+/// Fallback: Type a string via SendInput (goes to foreground window)
 fn send_string(text: &str) {
     unsafe {
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -572,5 +722,6 @@ fn send_string(text: &str) {
             ];
             SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         }
+        bridge_log(&format!("send_string: {} chars via SendInput", text.chars().count()));
     }
 }
