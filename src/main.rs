@@ -1360,9 +1360,10 @@ impl ContextApp {
         let is_major_change = (new_sentence_count as isize - old_sentence_count as isize).unsigned_abs() > 2;
 
         if is_major_change {
-            // Paste/delete — clear clean caches so new occurrences get checked
-            self.clean_sentence_hashes.clear();
-            log!("Major doc change: {} → {} sentences, clearing caches", old_sentence_count, new_sentence_count);
+            // Paste/delete — clean hashes are kept (same sentence text = same grammar result,
+            // regardless of position). No need to rescan sentences already known clean.
+            log!("Major doc change: {} → {} sentences (keeping {} clean hashes)",
+                old_sentence_count, new_sentence_count, self.clean_sentence_hashes.len());
         }
 
         let mut sentences = split_sentences(&doc_text);
@@ -1533,17 +1534,16 @@ impl ContextApp {
             });
         }
 
-        // --- Step 2: Build queue of sentences to check (spelling done inline, grammar queued) ---
+        // --- Step 2: Check each sentence — skip already-known ones, only scan new ---
         let mut queue: Vec<(String, usize)> = Vec::new();
         for (trimmed, doc_offset) in &new_sentences {
             let sent_h = hash_str(trimmed);
 
-            // Skip if this sentence text was already checked and found clean
+            // Already seen this sentence text? Position updated in Step 0, skip entirely.
             if self.clean_sentence_hashes.contains(&sent_h) {
                 continue;
             }
-
-            // Skip if this specific occurrence already has errors recorded
+            // Also skip if this occurrence already has errors recorded (re-mapped in Step 0)
             let has_errors = self.writing_errors.iter().any(|e| {
                 e.sentence_context == *trimmed && e.doc_offset == *doc_offset && !e.ignored
             });
@@ -1551,17 +1551,15 @@ impl ContextApp {
                 continue;
             }
 
-            // Check spelling of each word (fast — dictionary lookups only)
+            // New sentence — run spelling + queue for grammar
             for word in trimmed.split_whitespace() {
                 let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
                 if !clean.is_empty() {
                     self.check_spelling(clean, trimmed, *doc_offset);
                 }
             }
-            // Validate consonant confusion candidates with grammar checker
             self.validate_consonant_checks();
 
-            // If spelling errors were found, skip grammar queue for this sentence
             let has_spelling_errors = self.writing_errors.iter().any(|e| {
                 e.sentence_context == *trimmed
                     && e.doc_offset == *doc_offset
@@ -1573,7 +1571,6 @@ impl ContextApp {
                 continue;
             }
 
-            // Queue for incremental grammar checking
             queue.push((trimmed.clone(), *doc_offset));
         }
 
