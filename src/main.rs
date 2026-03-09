@@ -1,4 +1,5 @@
 mod bridge;
+mod grammar_actor;
 mod ocr;
 mod tts;
 
@@ -7,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
@@ -42,10 +43,15 @@ use nostos_cognio::wordfreq;
 
 // --- Grammar checker abstraction ---
 
-enum AnyChecker {
+pub(crate) enum AnyChecker {
     Neo(GrammarChecker),
     Swi(SwiGrammarChecker),
 }
+
+// SAFETY: AnyChecker is only ever accessed from one thread at a time.
+// SWI-Prolog's raw pointers (PredicateT) are !Send, but the grammar actor
+// ensures single-threaded access via mpsc channel serialization.
+unsafe impl Send for AnyChecker {}
 
 impl AnyChecker {
     fn has_word(&self, word: &str) -> bool {
@@ -138,27 +144,27 @@ impl AnyChecker {
 // --- Error list for spelling and grammar ---
 
 #[derive(Clone, Debug)]
-enum ErrorCategory {
+pub(crate) enum ErrorCategory {
     Spelling,
     Grammar,
     SentenceBoundary,
 }
 
 #[derive(Clone, Debug)]
-struct WritingError {
-    category: ErrorCategory,
-    word: String,
-    suggestion: String,
-    explanation: String,
-    rule_name: String,
+pub(crate) struct WritingError {
+    pub(crate) category: ErrorCategory,
+    pub(crate) word: String,
+    pub(crate) suggestion: String,
+    pub(crate) explanation: String,
+    pub(crate) rule_name: String,
     /// The sentence text containing the error
-    sentence_context: String,
+    pub(crate) sentence_context: String,
     /// Character offset of the sentence in the document (for position-aware duplicate handling)
-    doc_offset: usize,
+    pub(crate) doc_offset: usize,
     /// Alternative index (0 = primary, >0 = secondary alternatives for grammar)
-    position: usize,
+    pub(crate) position: usize,
     /// true if user clicked "Ignorer"
-    ignored: bool,
+    pub(crate) ignored: bool,
 }
 
 // --- Data paths ---
@@ -326,12 +332,16 @@ struct ContextApp {
     poll_interval: Duration,
     follow_cursor: bool,
     last_caret_pos: Option<(i32, i32)>,
-    // Grammar checker
+    // Grammar checker (kept for main-thread dictionary lookups; SWI grammar ops go through actor)
     checker: Option<AnyChecker>,
+    /// Direct analyzer reference for dictionary lookups (cloned from checker before actor takes it)
+    analyzer: Option<std::sync::Arc<mtag::Analyzer>>,
+    /// Grammar actor: runs grammar checking on background thread
+    grammar_actor: Option<grammar_actor::GrammarActorHandle>,
     grammar_errors: Vec<GrammarError>,
     last_checked_sentence: String,
     // Word completer
-    model: Option<Model>,
+    model: Option<Arc<Mutex<Model>>>,
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Baselines>,
     wordfreq: Option<HashMap<String, u64>>,
@@ -387,6 +397,10 @@ struct ContextApp {
     prolog_checked_hashes: std::collections::HashSet<u64>,
     /// Hashes of sentences grammar-checked and found clean (no errors)
     clean_sentence_hashes: std::collections::HashSet<u64>,
+    /// Pending grammar work: sentences still to check (incremental, one per frame)
+    grammar_queue: Vec<(String, usize)>,
+    /// Whether a grammar scan is in progress (shows indicator in UI)
+    grammar_scanning: bool,
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
     pending_fix: Option<(String, String, String, usize)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
@@ -460,7 +474,7 @@ impl ContextApp {
         let minilm_tok = data.join("minilm-onnx/tokenizer.json");
         let embed_cache = data.join("word_embeddings.bin");
 
-        let (model, prefix_index, baselines, wf, embedding_store) =
+        let (model_opt, prefix_index, baselines, wf, embedding_store) =
             match Self::load_completer(
                 &onnx_path, &tokenizer_path, &wordfreq_path,
                 &minilm_onnx, &minilm_tok, &embed_cache,
@@ -473,6 +487,7 @@ impl ContextApp {
                     (None, None, None, None, None)
                 }
             };
+        let model = model_opt.map(|m| Arc::new(Mutex::new(m)));
 
         ContextApp {
             manager: BridgeManager::new(),
@@ -482,6 +497,8 @@ impl ContextApp {
             follow_cursor: true,
             last_caret_pos: None,
             checker,
+            analyzer: None,
+            grammar_actor: None,
             grammar_errors: Vec::new(),
             last_checked_sentence: String::new(),
             model,
@@ -518,6 +535,8 @@ impl ContextApp {
             last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
             clean_sentence_hashes: std::collections::HashSet::new(),
+            grammar_queue: Vec::new(),
+            grammar_scanning: false,
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
             suggestion_window: None,
@@ -1014,7 +1033,8 @@ impl ContextApp {
 
         let mut scored: Vec<(String, f32)> = Vec::new();
 
-        if let Some(model) = &mut self.model {
+        if let Some(model_arc) = &self.model {
+            let mut model = model_arc.lock().unwrap();
             if let Ok((logits, _ms)) = model.single_forward(&masked_context) {
                 // Score = BERT logit score × trigram similarity
                 // BERT ensures contextual fit, trigram ensures orthographic closeness
@@ -1085,10 +1105,11 @@ impl ContextApp {
         let words: Vec<&str> = sentence.split_whitespace().collect();
         if words.is_empty() { return f32::NEG_INFINITY; }
 
-        let model = match &mut self.model {
+        let model_arc = match &self.model {
             Some(m) => m,
             None => return 0.0,
         };
+        let mut model = model_arc.lock().unwrap();
 
         let mut total_score: f32 = 0.0;
         for i in 0..words.len() {
@@ -1305,14 +1326,16 @@ impl ContextApp {
         });
     }
 
-    /// Update the error list with grammar errors from the current sentence.
-    /// Called when a sentence boundary is detected.
-    ///
-    /// Pipeline: 1) Read document text
-    ///           2) Split on punctuation (or Prolog for unpunctuated text)
-    ///           3) If Prolog split found boundaries → add SentenceBoundary suggestions
-    ///           4) Grammar-check each split sentence individually
+    /// Prepare grammar scan: read document, split sentences, compute offsets, fill queue.
+    /// This is fast (no SWI/BERT calls) and runs every poll when document changes.
+    /// The actual per-sentence grammar checking happens incrementally in process_grammar_queue().
     fn update_grammar_errors(&mut self) {
+        // If there's pending work in the queue, don't re-scan — just keep processing
+        if !self.grammar_queue.is_empty() {
+            self.process_grammar_queue();
+            return;
+        }
+
         // Read document text and check all complete sentences
         let doc_text = match self.manager.read_full_document() {
             Some(t) => { self.last_doc_text = t.clone(); t }
@@ -1361,7 +1384,7 @@ impl ContextApp {
 
                 // Fallback to BERT if Prolog found nothing
                 if sentences.is_empty() {
-                    if let Some(model) = &mut self.model {
+                    if let Some(model_arc) = &self.model {
                         let verb_fn: Option<Box<dyn Fn(&str) -> bool>> = match &self.checker {
                             Some(AnyChecker::Swi(c)) => {
                                 let analyzer = c.analyzer().clone();
@@ -1373,7 +1396,8 @@ impl ContextApp {
                         };
 
                         let verb_ref: Option<&dyn Fn(&str) -> bool> = verb_fn.as_deref();
-                        match nostos_cognio::punctuation::split_into_sentences_with_verbs(model, &doc_text, 10.0, verb_ref) {
+                        let mut model = model_arc.lock().unwrap();
+                        match nostos_cognio::punctuation::split_into_sentences_with_verbs(&mut *model, &doc_text, 10.0, verb_ref) {
                             Ok(predicted) => {
                                 sentences = predicted;
                             }
@@ -1509,7 +1533,8 @@ impl ContextApp {
             });
         }
 
-        // --- Step 2: Spelling + grammar check on each split sentence ---
+        // --- Step 2: Build queue of sentences to check (spelling done inline, grammar queued) ---
+        let mut queue: Vec<(String, usize)> = Vec::new();
         for (trimmed, doc_offset) in &new_sentences {
             let sent_h = hash_str(trimmed);
 
@@ -1526,9 +1551,7 @@ impl ContextApp {
                 continue;
             }
 
-            log!("Grammar check: '{}' (offset={})", trimmed, doc_offset);
-
-            // Check spelling of each word in new sentences
+            // Check spelling of each word (fast — dictionary lookups only)
             for word in trimmed.split_whitespace() {
                 let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
                 if !clean.is_empty() {
@@ -1538,9 +1561,7 @@ impl ContextApp {
             // Validate consonant confusion candidates with grammar checker
             self.validate_consonant_checks();
 
-            // If spelling errors were found in this sentence, skip grammar check.
-            // Fixing spelling first will change the sentence, so grammar results
-            // would be unreliable anyway. Re-check grammar after spelling is fixed.
+            // If spelling errors were found, skip grammar queue for this sentence
             let has_spelling_errors = self.writing_errors.iter().any(|e| {
                 e.sentence_context == *trimmed
                     && e.doc_offset == *doc_offset
@@ -1548,92 +1569,129 @@ impl ContextApp {
                     && matches!(e.category, ErrorCategory::Spelling)
             });
             if has_spelling_errors {
-                log!("  Skipping grammar check — spelling errors pending in this sentence");
+                log!("  Skipping grammar check — spelling errors pending in '{}'", trimmed);
                 continue;
             }
 
-            let checker = match &mut self.checker {
-                Some(c) => c,
-                None => return,
-            };
+            // Queue for incremental grammar checking
+            queue.push((trimmed.clone(), *doc_offset));
+        }
 
-            let errors = checker.check_sentence(trimmed);
-            if errors.is_empty() {
-                // Mark as clean so we don't re-check next poll
-                self.clean_sentence_hashes.insert(sent_h);
-                continue;
+        if !queue.is_empty() {
+            log!("Grammar queue: {} sentences to check", queue.len());
+            self.grammar_queue = queue;
+            self.grammar_scanning = true;
+            // Process first one immediately
+            self.process_grammar_queue();
+        }
+    }
+
+    /// Process ONE sentence from the grammar queue per call.
+    /// This keeps the UI responsive — each call does ~5-50ms of work.
+    fn process_grammar_queue(&mut self) {
+        let (trimmed, doc_offset) = match self.grammar_queue.first() {
+            Some(item) => item.clone(),
+            None => {
+                self.grammar_scanning = false;
+                return;
             }
+        };
+        self.grammar_queue.remove(0);
 
-            for ge in &errors {
-                log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
-            }
+        if self.grammar_queue.is_empty() {
+            self.grammar_scanning = false;
+        }
 
-            // Score candidates with BERT (only runs when Prolog found errors)
-            let corrections = self.best_sentence_corrections(trimmed, &errors);
+        let sent_h = hash_str(&trimmed);
 
-            if corrections.is_empty() {
-                // No BERT-scored correction — fall back to direct grammar suggestions
-                let errors_with_suggestions: Vec<_> = errors.iter()
-                    .filter(|e| !e.suggestion.is_empty())
-                    .collect();
-                if !errors_with_suggestions.is_empty() {
-                    // Apply each grammar error's suggestion directly as a sentence-level fix
-                    for (i, ge) in errors_with_suggestions.iter().enumerate() {
-                        let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
-                        let corrected = replace_word_at_position(trimmed, &ge.word, first_alt);
-                        if corrected.trim() == trimmed.trim() {
-                            continue;
-                        }
-                        log!("  Direct grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
-                        self.writing_errors.push(WritingError {
-                            category: ErrorCategory::Grammar,
-                            word: trimmed.to_string(),
-                            suggestion: corrected,
-                            explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
-                            rule_name: ge.rule_name.clone(),
-                            sentence_context: trimmed.to_string(),
-                            doc_offset: *doc_offset,
-                            position: i,
-                            ignored: false,
-                        });
+        // Re-check: skip if already has errors (may have been added by spelling in preparation)
+        let has_errors = self.writing_errors.iter().any(|e| {
+            e.sentence_context == trimmed && e.doc_offset == doc_offset && !e.ignored
+        });
+        if has_errors {
+            return;
+        }
+
+        log!("Grammar check: '{}' (offset={}, {} remaining)", trimmed, doc_offset, self.grammar_queue.len());
+
+        let checker = match &mut self.checker {
+            Some(c) => c,
+            None => return,
+        };
+
+        let errors = checker.check_sentence(&trimmed);
+        if errors.is_empty() {
+            // Mark as clean so we don't re-check next poll
+            self.clean_sentence_hashes.insert(sent_h);
+            return;
+        }
+
+        for ge in &errors {
+            log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
+        }
+
+        // Score candidates with BERT (only runs when Prolog found errors)
+        let corrections = self.best_sentence_corrections(&trimmed, &errors);
+
+        if corrections.is_empty() {
+            // No BERT-scored correction — fall back to direct grammar suggestions
+            let errors_with_suggestions: Vec<_> = errors.iter()
+                .filter(|e| !e.suggestion.is_empty())
+                .collect();
+            if !errors_with_suggestions.is_empty() {
+                for (i, ge) in errors_with_suggestions.iter().enumerate() {
+                    let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
+                    let corrected = replace_word_at_position(&trimmed, &ge.word, first_alt);
+                    if corrected.trim() == trimmed.trim() {
+                        continue;
                     }
-                } else {
-                    // No suggestions at all — flag without correction
-                    let first = &errors[0];
-                    log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
+                    log!("  Direct grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
                     self.writing_errors.push(WritingError {
                         category: ErrorCategory::Grammar,
                         word: trimmed.to_string(),
-                        suggestion: String::new(),
-                        explanation: first.explanation.clone(),
-                        rule_name: first.rule_name.clone(),
+                        suggestion: corrected,
+                        explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
+                        rule_name: ge.rule_name.clone(),
                         sentence_context: trimmed.to_string(),
-                        doc_offset: *doc_offset,
-                        position: 0,
+                        doc_offset,
+                        position: i,
                         ignored: false,
                     });
                 }
-            }
-
-            for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
-                // Skip no-op corrections (suggestion identical to original)
-                if corrected.trim() == trimmed.trim() {
-                    log!("  Skipping no-op correction: '{}'", corrected);
-                    continue;
-                }
-                log!("  Correction #{}: ({:.1}) '{}' -> '{}' [{}]", i+1, score, trimmed, corrected, rule_name);
+            } else {
+                let first = &errors[0];
+                log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
                     word: trimmed.to_string(),
-                    suggestion: corrected.clone(),
-                    explanation: explanation.clone(),
-                    rule_name: rule_name.clone(),
+                    suggestion: String::new(),
+                    explanation: first.explanation.clone(),
+                    rule_name: first.rule_name.clone(),
                     sentence_context: trimmed.to_string(),
-                    doc_offset: *doc_offset,
-                    position: i,
+                    doc_offset,
+                    position: 0,
                     ignored: false,
                 });
             }
+        }
+
+        for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
+            if corrected.trim() == trimmed.trim() {
+                log!("  Skipping no-op correction: '{}'", corrected);
+                continue;
+            }
+            log!("  Correction #{}: ({:.1}) '{}' -> '{}' [{}]", i+1, score, &trimmed, corrected, rule_name);
+            self.writing_errors.push(WritingError {
+                category: ErrorCategory::Grammar,
+                word: trimmed.to_string(),
+                suggestion: corrected.clone(),
+                explanation: explanation.clone(),
+                rule_name: rule_name.clone(),
+                sentence_context: trimmed.to_string(),
+                doc_offset,
+                position: i,
+                ignored: false,
+            });
         }
     }
 
@@ -1692,7 +1750,8 @@ impl ContextApp {
         // Fill-in-the-blank using full sentence context
         // Works with prefix (typed letters) or without (just pressed space)
         if let Some(masked) = &self.context.masked_sentence.clone() {
-            if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
+            if let (Some(model_arc), Some(pi)) = (&self.model, &self.prefix_index) {
+                let mut model = model_arc.lock().unwrap();
                 let t_bert = Instant::now();
                 let prefix_lower = prefix.to_lowercase();
                 // Collect nearby words before <mask> to filter repetition
@@ -2249,7 +2308,8 @@ impl ContextApp {
             });
             let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
 
-            if let (Some(model), Some(pi)) = (&mut self.model, &self.prefix_index) {
+            if let (Some(model_arc), Some(pi)) = (&self.model, &self.prefix_index) {
+                let mut model = model_arc.lock().unwrap();
                 let ctx = {
                     let sentence = &self.context.sentence;
                     let sentence_ctx = sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end();
@@ -2275,7 +2335,7 @@ impl ContextApp {
 
                 let t_bert = Instant::now();
                 match complete_word(
-                    model,
+                    &mut *model,
                     ctx.as_str(),
                     prefix,
                     pi,
@@ -2391,7 +2451,7 @@ fn consonant_variants(word: &str) -> Vec<String> {
 
 /// Split text into sentences for embedding.
 /// Replace first occurrence of a word (whole word match) in a sentence.
-fn replace_word_at_position(sentence: &str, word: &str, replacement: &str) -> String {
+pub(crate) fn replace_word_at_position(sentence: &str, word: &str, replacement: &str) -> String {
     let words: Vec<&str> = sentence.split_whitespace().collect();
     let mut result = Vec::new();
     let mut replaced = false;
@@ -2426,7 +2486,7 @@ fn remove_word_from_sentence(sentence: &str, word: &str) -> String {
 }
 
 
-fn hash_str(s: &str) -> u64 {
+pub(crate) fn hash_str(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
@@ -2592,6 +2652,9 @@ impl eframe::App for ContextApp {
             if ok {
                 // Document changed — reset doc hash so next poll re-scans
                 self.last_doc_hash = 0;
+                // Clear grammar queue — document changed, stale sentences
+                self.grammar_queue.clear();
+                self.grammar_scanning = false;
                 // Mark the replacement sentences as clean AND prolog-checked
                 // so they don't get re-flagged or re-split
                 let mark_clean = |text: &str, clean: &mut std::collections::HashSet<u64>, prolog: &mut std::collections::HashSet<u64>| {
@@ -2773,7 +2836,8 @@ impl eframe::App for ContextApp {
                     None => true,
                 };
                 if needs_warmup {
-                    if let Some(model) = &mut self.model {
+                    if let Some(model_arc) = &self.model {
+                        let mut model = model_arc.lock().unwrap();
                         let t = Instant::now();
                         if let Ok((logits, _)) = model.single_forward(masked) {
                             let fwd_ms = t.elapsed().as_millis();
@@ -3068,7 +3132,12 @@ impl eframe::App for ContextApp {
             }
         }
 
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // Request faster repaints while grammar queue is draining
+        if self.grammar_scanning {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         // Style
         // Clear the default background so transparency works
@@ -3317,6 +3386,19 @@ impl eframe::App for ContextApp {
 
             // === Tab: Grammatikk (1) ===
             if self.selected_tab == 1 {
+                // Show scanning indicator while grammar queue is draining
+                if self.grammar_scanning {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new(format!("Sjekker... ({} igjen)", self.grammar_queue.len()))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(100, 100, 180)),
+                        );
+                    });
+                    ui.add_space(2.0);
+                }
+
                 let mut active_errors: Vec<usize> = self.writing_errors.iter()
                     .enumerate()
                     .filter(|(_, e)| !e.ignored)
