@@ -83,6 +83,21 @@ impl AnyChecker {
         }
     }
 
+    /// Get the set of POS tags for a word from the dictionary
+    fn pos_set(&self, word: &str) -> std::collections::HashSet<String> {
+        let analyzer = match self {
+            AnyChecker::Neo(c) => c.analyzer().clone(),
+            AnyChecker::Swi(c) => c.analyzer().clone(),
+        };
+        let mut pos = std::collections::HashSet::new();
+        if let Some(readings) = analyzer.dict_lookup(word) {
+            for r in &readings {
+                pos.insert(r.pos.to_string());
+            }
+        }
+        pos
+    }
+
     /// Split unpunctuated text into sentences using Prolog sentence boundary detection.
     /// Returns None if not using SWI checker or no boundaries found.
     /// Validates that each resulting sub-sentence has at least one likely verb —
@@ -95,12 +110,20 @@ impl AnyChecker {
                     return None;
                 }
                 // Validate: every sub-sentence must have at least one likely verb.
-                // Checks for unambiguous verb OR pronoun+verb pair.
                 let analyzer = c.analyzer().clone();
                 for sent in &sentences {
                     let stripped = sent.trim_end_matches(|ch: char| ch == '.' || ch == '!' || ch == '?').trim();
                     if !nostos_cognio::punctuation::has_likely_verb_in_sentence(&analyzer, stripped) {
                         eprintln!("Grammar: rejecting Prolog split — '{}' has no likely verb", stripped);
+                        return None;
+                    }
+                }
+                // Validate: every sub-sentence must pass grammar check.
+                // Rejects splits like "Jeg liker." + "Å gikk tur." where sub-sentences have errors.
+                for sent in &sentences {
+                    let errors = c.check_sentence(sent);
+                    if !errors.is_empty() {
+                        eprintln!("Grammar: rejecting Prolog split — '{}' has {} grammar errors", sent, errors.len());
                         return None;
                     }
                 }
@@ -204,10 +227,32 @@ impl BridgeManager {
             }
         }
 
+        // Only update active_idx when a real app has focus (not our own windows)
+        let our_window_focused = {
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+                let fg = unsafe { GetForegroundWindow() };
+                let mut buf = [0u16; 64];
+                let len = unsafe { GetWindowTextW(fg, &mut buf) };
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                title.contains("NorskTale") || title.starts_with("Forslag") || title.starts_with("Regelinfo")
+            }
+            #[cfg(not(target_os = "windows"))]
+            { false }
+        };
+
         for (i, bridge) in self.bridges.iter().enumerate() {
             if bridge.is_available() {
                 if let Some(ctx) = bridge.read_context() {
-                    self.active_idx = i;
+                    if !our_window_focused {
+                        if self.active_idx != i {
+                            eprintln!("Bridge switch: {} → {} ('{}')",
+                                self.bridges[self.active_idx].name(), bridge.name(),
+                                if !ctx.word.is_empty() { &ctx.word } else { &ctx.sentence });
+                        }
+                        self.active_idx = i;
+                    }
                     return Some(ctx);
                 }
             }
@@ -336,6 +381,8 @@ struct ContextApp {
     clean_sentence_hashes: std::collections::HashSet<u64>,
     /// Deferred find-and-replace (word, replacement, optional sentence context) — executed next frame
     pending_fix: Option<(String, String, String)>,
+    /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
+    pending_consonant_checks: Vec<WritingError>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
     suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
@@ -463,6 +510,7 @@ impl ContextApp {
             prolog_checked_hashes: std::collections::HashSet::new(),
             clean_sentence_hashes: std::collections::HashSet::new(),
             pending_fix: None,
+            pending_consonant_checks: Vec::new(),
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
@@ -619,6 +667,71 @@ impl ContextApp {
                     }
                 }
             }
+
+            // Single/double consonant confusion check (e.g. "spile" vs "spille")
+            // Only check words >= 4 chars to avoid noise on short words
+            if clean.len() >= 4 {
+                let orig_pos = checker.pos_set(&clean);
+                let consonant_alts: Vec<String> = consonant_variants(&clean).into_iter()
+                    .filter(|v| {
+                        if !checker.has_word(v) { return false; }
+                        // Must share at least one POS tag (same grammatical function)
+                        let v_pos = checker.pos_set(v);
+                        let shared = orig_pos.intersection(&v_pos).count() > 0;
+                        if !shared {
+                            log!("  consonant skip '{}' → '{}' (no shared POS: {:?} vs {:?})", clean, v, orig_pos, v_pos);
+                        }
+                        shared
+                    })
+                    .collect();
+                if !consonant_alts.is_empty() {
+                    if let Some(model) = &mut self.model {
+                        let sentence_lower = sentence_ctx.to_lowercase();
+                        if let Some(pos) = sentence_lower.find(&clean) {
+                            let before = &sentence_ctx[..pos];
+                            let after = &sentence_ctx[pos + clean.len()..];
+                            let masked = format!("{}<mask>{}", before.trim_end(), after);
+                            if let Ok((logits, _)) = model.single_forward(&masked) {
+                                let score_w = |w: &str| -> Option<f32> {
+                                    let ids = model.tokenizer.encode(w, false).ok()?;
+                                    let token_ids = ids.get_ids();
+                                    Some(token_ids.iter().map(|&id| logits.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY)).sum::<f32>())
+                                };
+                                let s_orig = score_w(&clean);
+                                // Find the best-scoring consonant variant
+                                let mut best_alt: Option<(String, f32)> = None;
+                                for alt in &consonant_alts {
+                                    if let Some(s) = score_w(alt) {
+                                        if best_alt.as_ref().map_or(true, |(_, bs)| s > *bs) {
+                                            best_alt = Some((alt.clone(), s));
+                                        }
+                                    }
+                                }
+                                if let (Some(s_orig), Some((best, s_best))) = (s_orig, best_alt) {
+                                    log!("consonant check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, best, s_best);
+                                    if s_best > s_orig {
+                                        // Build corrected sentence (replace word in context)
+                                        let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
+                                        // Collect as pending — grammar validation happens after borrow release
+                                        // Store orig:variant words in rule_name for freq lookup later
+                                        self.pending_consonant_checks.push(WritingError {
+                                            category: ErrorCategory::Grammar,
+                                            word: sentence_ctx.to_string(),
+                                            suggestion: corrected_sentence,
+                                            explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
+                                            rule_name: format!("consonant_confusion:{}:{}", clean, best),
+                                            sentence_context: sentence_ctx.to_string(),
+                                            position: 0,
+                                            ignored: false,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             return;
         }
 
@@ -691,6 +804,67 @@ impl ContextApp {
             clean, self.writing_errors.last().unwrap().suggestion);
     }
 
+    /// Validate pending consonant confusion candidates with grammar checker + word frequency.
+    /// Promotes to writing_errors if:
+    /// 1. The variant sentence has fewer grammar errors (variant fixes something), OR
+    /// 2. Grammar is equal for both BUT the variant is much more frequent (≥10x in wordfreq)
+    ///    — catches rare/dialectal forms like "spile" when "spille" is the standard form.
+    fn validate_consonant_checks(&mut self) {
+        if self.pending_consonant_checks.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_consonant_checks);
+        let checker = match &mut self.checker {
+            Some(c) => c,
+            None => return,
+        };
+        for mut candidate in pending {
+            // Already flagged for this sentence?
+            if self.writing_errors.iter().any(|e| e.sentence_context == candidate.sentence_context && !e.ignored) {
+                continue;
+            }
+            // Extract orig_word and variant_word from rule_name "consonant_confusion:spile:spille"
+            let parts: Vec<&str> = candidate.rule_name.splitn(3, ':').collect();
+            let (orig_word, variant_word) = if parts.len() == 3 {
+                (parts[1].to_string(), parts[2].to_string())
+            } else {
+                continue;
+            };
+
+            // Grammar check original sentence vs corrected sentence
+            let orig_errors = checker.check_sentence(&candidate.word);
+            let variant_errors = checker.check_sentence(&candidate.suggestion);
+            log!("consonant grammar validate: '{}' → '{}' | orig_errors={}, variant_errors={}",
+                orig_word, variant_word, orig_errors.len(), variant_errors.len());
+
+            // Clean up rule_name for display
+            candidate.rule_name = "consonant_confusion".to_string();
+
+            if variant_errors.len() < orig_errors.len() {
+                log!("consonant confirmed: '{}' → '{}' (grammar improved)", orig_word, variant_word);
+                self.writing_errors.push(candidate);
+            } else if variant_errors.len() == orig_errors.len() {
+                // Grammar is equal — check word frequency as tiebreaker
+                let orig_freq = self.wordfreq.as_ref()
+                    .and_then(|wf| wf.get(&orig_word).copied())
+                    .unwrap_or(0);
+                let variant_freq = self.wordfreq.as_ref()
+                    .and_then(|wf| wf.get(&variant_word).copied())
+                    .unwrap_or(0);
+                log!("  freq: '{}' = {}, '{}' = {}", orig_word, orig_freq, variant_word, variant_freq);
+                if variant_freq >= 10 * orig_freq.max(1) {
+                    log!("consonant confirmed: '{}' → '{}' (variant {}x more frequent)",
+                        orig_word, variant_word, variant_freq / orig_freq.max(1));
+                    self.writing_errors.push(candidate);
+                } else {
+                    log!("consonant rejected: '{}' → '{}' (freq ratio too low)", orig_word, variant_word);
+                }
+            } else {
+                log!("consonant rejected: '{}' → '{}' (grammar worse)", orig_word, variant_word);
+            }
+        }
+    }
+
     /// Upgrade spelling error suggestions using BERT context.
     /// Called after update_grammar_errors() to replace fuzzy-only suggestions
     /// with contextually appropriate ones (e.g. "bossller" → "boller" not "fossiler").
@@ -709,26 +883,15 @@ impl ContextApp {
         for (idx, word, sentence_ctx) in to_upgrade {
             let existing = self.writing_errors[idx].suggestion.clone();
             let mut suggestions = self.trigram_suggestions(&word, &sentence_ctx);
-            // Boost existing suggestion (e.g. from compound lookup) — it's dictionary-confirmed
+            // Ensure existing suggestion is in the candidate list (it's dictionary-confirmed)
             if !existing.is_empty() {
-                let et = Self::trigrams(&existing.to_lowercase());
-                let wt = Self::trigrams(&word.to_lowercase());
-                let common = wt.iter().filter(|t| et.contains(t)).count();
-                let total = wt.len().max(et.len()).max(1);
-                let sim = common as f32 / total as f32;
-                let score = 2.0 + sim;
-                // Replace score if already present, or add new
-                if let Some(pos) = suggestions.iter().position(|(w, _)| w == &existing) {
-                    suggestions[pos].1 = suggestions[pos].1.max(score);
-                } else {
-                    suggestions.push((existing.clone(), score));
+                if !suggestions.iter().any(|(w, _)| *w == existing) {
+                    suggestions.push((existing.clone(), 0.0)); // will be re-scored by BERT below
                 }
-                suggestions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             }
             if let Some((best, score)) = suggestions.first() {
                 log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
                     word, best, score, existing, suggestions.len());
-                // Log top 5 for debugging
                 for (i, (w, s)) in suggestions.iter().take(5).enumerate() {
                     log!("  #{}: '{}' score={:.2}", i+1, w, s);
                 }
@@ -739,127 +902,143 @@ impl ContextApp {
         }
     }
 
-    /// Find suggestion candidates using BERT semantic predictions + trigram ranking.
-    /// Uses complete_word with empty prefix to get BPE-extended candidates (e.g. "håndball"),
-    /// then re-ranks by trigram similarity to the misspelled word.
+    /// Find spelling suggestion candidates and rank them with BERT sentence scoring.
+    /// 1. Collect candidates from all sources (fuzzy, prefix, compound, wordfreq)
+    /// 2. Score each by encoding the word and summing BERT logits at the masked position
+    /// 3. Tiebreaker: prefix match wins when BERT scores are close
     fn trigram_suggestions(&mut self, word: &str, sentence_ctx: &str) -> Vec<(String, f32)> {
         let word_lower = word.to_lowercase();
         let word_trigrams = Self::trigrams(&word_lower);
         let word_first = word_lower.chars().next().unwrap_or(' ');
 
-        // Step 1: Get semantic candidates via complete_word (handles BPE extension)
-        let mut semantic_words: Vec<(String, f32)> = Vec::new();
+        // ── Collect unique candidates from all sources ──
+        let mut candidates: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut add = |w: String, seen: &mut std::collections::HashSet<String>| {
+            let wl = w.to_lowercase();
+            if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                // Pre-filter: need trigram overlap or same first letter
+                let w_trigrams = Self::trigrams(&wl);
+                let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
+                if common > 0 || wl.chars().next().unwrap_or(' ') == word_first {
+                    return Some(wl);
+                }
+            }
+            None
+        };
 
-        // Build masked context: replace the misspelled word with <mask>, keep surrounding text
+        // Source 1: Fuzzy Levenshtein matches (distance 2)
+        if let Some(checker) = &self.checker {
+            let fuzzy = checker.fuzzy_lookup(&word_lower, 2);
+            eprintln!("Forslag: fuzzy(2) returned {} matches for '{}'", fuzzy.len(), word_lower);
+            for (w, _dist) in fuzzy {
+                if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+            }
+        }
+
+        // Source 2: Prefix lookup (missing-letter typos: "fotbal" → "fotball")
+        let mut prefix_matches: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(checker) = &self.checker {
+            for w in checker.prefix_lookup(&word_lower, 20) {
+                let wl = w.to_lowercase();
+                let extra = wl.len() as i32 - word_lower.len() as i32;
+                if extra >= 1 && extra <= 3 {
+                    prefix_matches.insert(wl.clone());
+                    if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                }
+            }
+        }
+
+        // Source 3: Prefix with last char removed (typo in final position)
+        if word_lower.len() >= 3 {
+            let shorter = &word_lower[..word_lower.len()-1];
+            if let Some(checker) = &self.checker {
+                for w in checker.prefix_lookup(shorter, 20) {
+                    if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                }
+            }
+        }
+
+        // Source 4: Wordfreq — common words with trigram overlap
+        if let Some(wf) = &self.wordfreq {
+            for (w, _freq) in wf.iter() {
+                let wl = w.to_lowercase();
+                if wl == word_lower || seen.contains(&wl) { continue; }
+                if wl.chars().next().unwrap_or(' ') != word_first { continue; }
+                let w_trigrams = Self::trigrams(&wl);
+                let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
+                if common >= 2 && seen.insert(wl.clone()) {
+                    candidates.push(wl);
+                }
+            }
+        }
+
+        eprintln!("Forslag: {} candidates for '{}'", candidates.len(), word_lower);
+
+        // ── Score each candidate with BERT ──
+        // Build masked context: replace the misspelled word with <mask>
         let sentence_lower = sentence_ctx.to_lowercase();
         let masked_context = if let Some(pos) = sentence_lower.find(&word_lower) {
             let before = &sentence_ctx[..pos];
             let after = &sentence_ctx[pos + word_lower.len()..];
             format!("{}<mask>{}", before.trim_end(), after)
         } else {
-            // Fallback: use full sentence as context
             format!("{} <mask>", sentence_ctx)
         };
-        eprintln!("Forslag: word='{}' masked context = '{}'", word_lower, masked_context);
+        eprintln!("Forslag: masked context = '{}'", masked_context);
 
-        // Step 1: Get BERT logits via single_forward, then extract top token-words
-        let mut bert_words: Vec<(String, f32)> = Vec::new();
+        let mut scored: Vec<(String, f32)> = Vec::new();
+
         if let Some(model) = &mut self.model {
             if let Ok((logits, _ms)) = model.single_forward(&masked_context) {
-                // Get top-200 tokens by logit score
-                let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
-                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-                for &(token_id, score) in indexed.iter().take(200) {
-                    if let Some(token) = model.tokenizer.id_to_token(token_id as u32) {
-                        // Strip BPE prefix (Ġ = word-initial space)
-                        let clean = token.replace('Ġ', "").to_lowercase();
-                        if clean.len() < 2 || clean == word_lower { continue; }
-                        // Skip tokens with special chars
-                        if clean.chars().any(|c| !c.is_alphanumeric() && c != '-') { continue; }
-                        if !bert_words.iter().any(|(w, _)| *w == clean) {
-                            bert_words.push((clean, score));
+                // Score = BERT logit score × trigram similarity
+                // BERT ensures contextual fit, trigram ensures orthographic closeness
+                for w in &candidates {
+                    let bert_score = if let Ok(enc) = model.tokenizer.encode(w.as_str(), false) {
+                        let ids = enc.get_ids();
+                        if ids.is_empty() { 0.0 }
+                        else {
+                            ids.iter()
+                                .map(|&id| logits.get(id as usize).copied().unwrap_or(0.0))
+                                .sum::<f32>()
+                                / ids.len() as f32
                         }
-                    }
+                    } else { 0.0 };
+
+                    let w_trigrams = Self::trigrams(w);
+                    let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
+                    let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
+                    let trigram_sim = common as f32 / max_t as f32;
+
+                    // Combined: BERT × trigram. Both must be positive to score well.
+                    // Prefix match bonus: the fewer extra chars, the stronger the signal
+                    // "fotbal"→"fotball" (+1 char) is much more likely than "fotbal"→"fotballe" (+2)
+                    let prefix_bonus = if prefix_matches.contains(w) {
+                        let extra = w.len() as f32 - word_lower.len() as f32;
+                        if extra <= 1.0 { 1.5 } else if extra <= 2.0 { 1.2 } else { 1.1 }
+                    } else { 1.0 };
+                    let score = bert_score.max(0.0) * trigram_sim * prefix_bonus;
+
+                    scored.push((w.clone(), score));
                 }
-                eprintln!("Forslag: got {} BERT token-words", bert_words.len());
             }
         }
 
-        // Build BERT score lookup
-        let bert_scores: HashMap<String, f32> = bert_words.iter().cloned().collect();
-
-        // Step 2: Score BERT words by trigram similarity to misspelled word
-        let mut scored: Vec<(String, f32)> = bert_words.into_iter()
-            .filter_map(|(w, bert_score)| {
-                let w_trigrams = Self::trigrams(&w);
-                let common = word_trigrams.iter()
-                    .filter(|t| w_trigrams.contains(t))
-                    .count();
-                if common == 0 && w.chars().next().unwrap_or(' ') != word_first {
-                    return None; // need either trigram overlap or same first letter
-                }
-                let max_trigrams = word_trigrams.len().max(w_trigrams.len()).max(1);
-                let trigram_score = common as f32 / max_trigrams as f32;
-                // BERT is primary (scores 15-25), trigram is tiebreaker (0-1)
-                let mut score = bert_score / 10.0;
-                score += trigram_score;
-                if w.chars().next().unwrap_or(' ') == word_first {
-                    score += 0.3;
-                }
-                Some((w, score))
-            })
-            .collect();
-
-        // Step 3: Add fuzzy Levenshtein matches (distance 2) scored with BERT + trigram
-        if let Some(checker) = &self.checker {
-            let fuzzy = checker.fuzzy_lookup(&word_lower, 2);
-            eprintln!("Forslag: fuzzy(2) returned {} matches", fuzzy.len());
-            for (w, dist) in fuzzy {
-                if w == word_lower { continue; }
-                if scored.iter().any(|(s, _)| s == &w) { continue; }
-                let w_trigrams = Self::trigrams(&w);
+        // If no BERT model, fall back to trigram-only scoring
+        if scored.is_empty() {
+            for w in &candidates {
+                let w_trigrams = Self::trigrams(w);
                 let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
                 let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
-                let trigram_score = common as f32 / max_t as f32;
-                let mut score = 1.0 - (dist as f32 * 0.2) + trigram_score;
-                if w.chars().next().unwrap_or(' ') == word_first {
-                    score += 0.3;
-                }
-                if let Some(&bs) = bert_scores.get(&w) {
-                    score += bs / 10.0;
-                }
-                scored.push((w, score));
+                scored.push((w.clone(), common as f32 / max_t as f32));
             }
         }
-
-        // Step 4: Wordfreq trigram search — finds common words with orthographic overlap
-        if let Some(wf) = &self.wordfreq {
-            for (w, _freq) in wf.iter() {
-                let wl = w.to_lowercase();
-                if wl == word_lower { continue; }
-                if scored.iter().any(|(s, _)| *s == wl) { continue; }
-                if wl.chars().next().unwrap_or(' ') != word_first { continue; }
-                let w_trigrams = Self::trigrams(&wl);
-                let common = word_trigrams.iter()
-                    .filter(|t| w_trigrams.contains(t))
-                    .count();
-                if common < 2 { continue; }
-                let max_trigrams = word_trigrams.len().max(w_trigrams.len()).max(1);
-                let trigram_score = common as f32 / max_trigrams as f32;
-                let mut score = trigram_score + 0.3;
-                if let Some(&bs) = bert_scores.get(&wl) {
-                    score += bs / 10.0;
-                }
-                scored.push((wl, score));
-            }
-        }
-
-        eprintln!("Forslag: top results for '{}': {:?}", word_lower,
-            scored.iter().take(10).collect::<Vec<_>>());
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.dedup_by(|a, b| a.0 == b.0);
+
+        eprintln!("Forslag: top BERT×trigram for '{}': {:?}", word_lower,
+            scored.iter().take(5).collect::<Vec<_>>());
+
         scored.truncate(10);
         scored
     }
@@ -906,6 +1085,7 @@ impl ContextApp {
 
         // 1. Apply each individual grammar suggestion
         //    If suggestion contains '|' (multiple alternatives), try each one separately
+        //    Also generate single/double consonant variants (common dyslexia error)
         for e in errors {
             if !e.suggestion.is_empty() {
                 let alternatives: Vec<&str> = e.suggestion.split('|').collect();
@@ -913,12 +1093,22 @@ impl ContextApp {
                     let fixed = replace_word_at_position(sentence, &e.word, alt);
                     let expl = format!("«{}» -> «{}»: {}", e.word, alt, e.explanation);
                     candidates.push((fixed, expl, e.rule_name.clone()));
+
+                    // Try double/single consonant variants of the suggestion
+                    for variant in consonant_variants(alt) {
+                        if let Some(checker) = &self.checker {
+                            if checker.has_word(&variant) {
+                                let vfixed = replace_word_at_position(sentence, &e.word, &variant);
+                                let vexpl = format!("«{}» -> «{}»: {}", e.word, variant, e.explanation);
+                                candidates.push((vfixed, vexpl, e.rule_name.clone()));
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // 2a. Always try removing "å" before the error word as an alternative
-        // "I går å gikk" → removing "å" gives "I går gikk" (correct), BERT picks best
+        // 2a. Try removing "å" before the error word, and also removing å + applying substitution
         for e in errors {
             let words: Vec<&str> = sentence.split_whitespace().collect();
             if let Some(pos) = words.iter().position(|w| {
@@ -927,9 +1117,19 @@ impl ContextApp {
                 if pos > 0 {
                     let prev = words[pos - 1].trim_matches(|c: char| c.is_ascii_punctuation());
                     if prev == "å" {
+                        // Try just removing å
                         let removed_aa = remove_word_from_sentence(sentence, "å");
                         if removed_aa != sentence {
-                            candidates.push((removed_aa, format!("Fjernet «å» foran «{}».", e.word), e.rule_name.clone()));
+                            candidates.push((removed_aa.clone(), format!("Fjernet «å» foran «{}».", e.word), e.rule_name.clone()));
+                        }
+                        // Try removing å AND applying the substitution
+                        // e.g. "har å gikk" → "har gått" (remove å, replace gikk with suggestion)
+                        if !e.suggestion.is_empty() {
+                            let first_alt = e.suggestion.split('|').next().unwrap_or(&e.suggestion);
+                            let combined = replace_word_at_position(&removed_aa, &e.word, first_alt);
+                            if combined != sentence && combined != removed_aa {
+                                candidates.push((combined, format!("«å {}» → «{}»", e.word, first_alt), e.rule_name.clone()));
+                            }
                         }
                     }
                 }
@@ -977,15 +1177,24 @@ impl ContextApp {
         }
 
         // Grammar-check each candidate: discard ones that still have errors
+        // Also verify all words in the correction exist in the dictionary
         let valid_candidates: Vec<(String, String, String)> = if let Some(checker) = &mut self.checker {
             candidates.into_iter()
                 .filter(|(c, _, _)| {
                     let errs = checker.check_sentence(c);
-                    let ok = errs.is_empty();
-                    if !ok {
+                    if !errs.is_empty() {
                         eprintln!("    REJECTED (grammar): '{}' — {} errors", c, errs.len());
+                        return false;
                     }
-                    ok
+                    // Check all words exist in dictionary (catches misspelled suggestions like "spile")
+                    for word in c.split_whitespace() {
+                        let clean = word.trim_matches(|ch: char| ch.is_ascii_punctuation() || ch == '\u{00ab}' || ch == '\u{00bb}').to_lowercase();
+                        if clean.len() >= 2 && !clean.chars().all(|ch| ch.is_ascii_digit()) && !checker.has_word(&clean) {
+                            eprintln!("    REJECTED (spelling): '{}' — '{}' not in dictionary", c, clean);
+                            return false;
+                        }
+                    }
+                    true
                 })
                 .collect()
         } else {
@@ -1227,6 +1436,8 @@ impl ContextApp {
                     self.check_spelling(clean, trimmed);
                 }
             }
+            // Validate consonant confusion candidates with grammar checker
+            self.validate_consonant_checks();
 
             let checker = match &mut self.checker {
                 Some(c) => c,
@@ -1246,6 +1457,22 @@ impl ContextApp {
 
             // Score candidates with BERT (only runs when Prolog found errors)
             let corrections = self.best_sentence_corrections(trimmed, &errors);
+
+            if corrections.is_empty() {
+                // No valid correction found — still flag the error without a suggestion
+                let first = &errors[0];
+                log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Grammar,
+                    word: trimmed.to_string(),
+                    suggestion: String::new(),
+                    explanation: first.explanation.clone(),
+                    rule_name: first.rule_name.clone(),
+                    sentence_context: trimmed.to_string(),
+                    position: 0,
+                    ignored: false,
+                });
+            }
 
             for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
                 // Skip no-op corrections (suggestion identical to original)
@@ -1989,6 +2216,37 @@ impl ContextApp {
     }
 }
 
+/// Generate single↔double consonant variants of a word.
+/// "spile" → ["spille"], "balle" → ["bale"], "skinn" → ["skin"], etc.
+fn consonant_variants(word: &str) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let mut variants = Vec::new();
+    let consonants = "bcdfghjklmnpqrstvwxz";
+
+    // Try doubling each single consonant
+    for i in 0..chars.len() {
+        if consonants.contains(chars[i]) {
+            // Only double if not already doubled
+            if i + 1 >= chars.len() || chars[i + 1] != chars[i] {
+                let mut v: Vec<char> = chars.clone();
+                v.insert(i + 1, chars[i]);
+                variants.push(v.into_iter().collect());
+            }
+        }
+    }
+
+    // Try removing one from each double consonant
+    for i in 0..chars.len().saturating_sub(1) {
+        if chars[i] == chars[i + 1] && consonants.contains(chars[i]) {
+            let mut v: Vec<char> = chars.clone();
+            v.remove(i + 1);
+            variants.push(v.into_iter().collect());
+        }
+    }
+
+    variants
+}
+
 /// Split text into sentences for embedding.
 /// Replace first occurrence of a word (whole word match) in a sentence.
 fn replace_word_at_position(sentence: &str, word: &str, replacement: &str) -> String {
@@ -2321,6 +2579,7 @@ impl eframe::App for ContextApp {
                         self.check_spelling(w, &sentence);
                     }
                 }
+                self.validate_consonant_checks();
                 // Sentence boundary: run grammar check
                 self.run_grammar_check();
             } else {
@@ -2337,6 +2596,7 @@ impl eframe::App for ContextApp {
                         self.check_spelling(w, &sentence);
                     }
                 }
+                self.validate_consonant_checks();
                 self.run_grammar_check();
             }
 
@@ -3581,14 +3841,53 @@ fn main() -> eframe::Result {
         for path in &candidates {
             if std::path::Path::new(path).exists() {
                 unsafe { std::env::set_var("ORT_DYLIB_PATH", path); }
-                eprintln!("ORT_DYLIB_PATH={}", path);
                 break;
             }
         }
     }
 
+    // Console spelling test mode — exercises exact same code as GUI
+    if std::env::args().any(|a| a == "--test-spelling") {
+        eprintln!("=== Spelling test mode ===");
+        let mut app = ContextApp::new(true, true, 2);
+
+        let tests: Vec<(&str, &str, &str)> = vec![
+            // (word, sentence_context, expected_suggestion)
+            ("fotbal", "jeg spiller og fotbal", "fotball"),
+            ("blåsjell", "vi spiser blåsjell", "blåskjell"),
+            ("ishoki", "han liker ishoki", "ishockey"),
+        ];
+
+        let mut pass = 0;
+        let mut fail = 0;
+        for (word, sentence, expected) in &tests {
+            app.last_spell_checked_word.clear();
+            app.writing_errors.clear();
+            app.pending_consonant_checks.clear();
+
+            // Step 1: check_spelling (same as GUI)
+            app.check_spelling(word, sentence);
+            app.validate_consonant_checks();
+
+            // Step 2: upgrade_spelling_suggestions with BERT (same as GUI)
+            app.upgrade_spelling_suggestions();
+
+            let suggestion = app.writing_errors.first()
+                .map(|e| e.suggestion.as_str())
+                .unwrap_or("(none)");
+
+            let ok = suggestion == *expected;
+            if ok { pass += 1; } else { fail += 1; }
+            println!("{} '{}' → '{}' (expected '{}')",
+                if ok { "✓" } else { "✗" }, word, suggestion, expected);
+        }
+
+        println!("\n{}/{} passed", pass, pass + fail);
+        std::process::exit(if fail == 0 { 0 } else { 1 });
+    }
+
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
-    let use_swipl = std::env::args().any(|a| a == "--swipl");
+    let use_swipl = !std::env::args().any(|a| a == "--no-swipl");
     let quality: u8 = {
         let args: Vec<String> = std::env::args().collect();
         args.iter()
