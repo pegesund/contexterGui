@@ -610,72 +610,43 @@ impl ContextApp {
             return;
         }
 
-        let checker = match &self.checker {
-            Some(c) => c,
-            None => return,
-        };
+        // Phase 1: Dictionary lookups (immutable borrow on checker)
+        let found;
+        let kt_gt_valid_alt: Option<String>;
+        let consonant_alts: Vec<String>;
+        let compound_suggestion: Option<String>;
+        let fuzzy_candidates: Vec<(String, u32)>;
+        let original_found;
 
-        // Check if word exists in dictionary (with normert reading)
-        let found = checker.has_word(&clean);
-        eprintln!("  has_word('{}') = {}", clean, found);
-        if found {
-            // kt/gt confusion check — common dyslexia error (e.g. "trykt" vs "trygt")
-            let kt_gt_alt = if clean.ends_with("kt") {
-                Some(format!("{}gt", &clean[..clean.len()-2]))
-            } else if clean.ends_with("gt") {
-                Some(format!("{}kt", &clean[..clean.len()-2]))
+        {
+            let checker = match &self.checker {
+                Some(c) => c,
+                None => return,
+            };
+
+            found = checker.has_word(&clean);
+            eprintln!("  has_word('{}') = {}", clean, found);
+
+            // kt/gt confusion: check if alt form exists
+            kt_gt_valid_alt = if found {
+                let alt = if clean.ends_with("kt") {
+                    Some(format!("{}gt", &clean[..clean.len()-2]))
+                } else if clean.ends_with("gt") {
+                    Some(format!("{}kt", &clean[..clean.len()-2]))
+                } else {
+                    None
+                };
+                alt.filter(|a| checker.has_word(a))
             } else {
                 None
             };
-            if let Some(alt) = kt_gt_alt {
-                if checker.has_word(&alt) {
-                    // Both forms exist — use BERT to pick the better one in context
-                    if let Some(model) = &mut self.model {
-                        let sentence_lower = sentence_ctx.to_lowercase();
-                        if let Some(pos) = sentence_lower.find(&clean) {
-                            let before = &sentence_ctx[..pos];
-                            let after = &sentence_ctx[pos + clean.len()..];
-                            let masked = format!("{}<mask>{}", before.trim_end(), after);
-                            if let Ok((logits, _)) = model.single_forward(&masked) {
-                                let score_w = |w: &str| -> Option<f32> {
-                                    let ids = model.tokenizer.encode(w, false).ok()?;
-                                    let token_ids = ids.get_ids();
-                                    Some(token_ids.iter().map(|&id| logits.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY)).sum::<f32>())
-                                };
-                                if let (Some(s_orig), Some(s_alt)) = (score_w(&clean), score_w(&alt)) {
-                                    log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
-                                    if s_alt > s_orig {
-                                        if !self.writing_errors.iter().any(|e| {
-                                            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
-                                        }) {
-                                            log!("kt/gt confusion: '{}' → '{}'", clean, alt);
-                                            self.writing_errors.push(WritingError {
-                                                category: ErrorCategory::Spelling,
-                                                word: clean.clone(),
-                                                suggestion: alt.clone(),
-                                                explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
-                                                rule_name: "kt_gt".to_string(),
-                                                sentence_context: sentence_ctx.to_string(),
-                                                position: 0,
-                                                ignored: false,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
-            // Single/double consonant confusion check (e.g. "spile" vs "spille")
-            // Only check words >= 4 chars to avoid noise on short words
-            if clean.len() >= 4 {
+            // Consonant confusion: find valid alternatives with shared POS
+            consonant_alts = if found && clean.len() >= 4 {
                 let orig_pos = checker.pos_set(&clean);
-                let consonant_alts: Vec<String> = consonant_variants(&clean).into_iter()
+                consonant_variants(&clean).into_iter()
                     .filter(|v| {
                         if !checker.has_word(v) { return false; }
-                        // Must share at least one POS tag (same grammatical function)
                         let v_pos = checker.pos_set(v);
                         let shared = orig_pos.intersection(&v_pos).count() > 0;
                         if !shared {
@@ -683,51 +654,82 @@ impl ContextApp {
                         }
                         shared
                     })
-                    .collect();
-                if !consonant_alts.is_empty() {
-                    if let Some(model) = &mut self.model {
-                        let sentence_lower = sentence_ctx.to_lowercase();
-                        if let Some(pos) = sentence_lower.find(&clean) {
-                            let before = &sentence_ctx[..pos];
-                            let after = &sentence_ctx[pos + clean.len()..];
-                            let masked = format!("{}<mask>{}", before.trim_end(), after);
-                            if let Ok((logits, _)) = model.single_forward(&masked) {
-                                let score_w = |w: &str| -> Option<f32> {
-                                    let ids = model.tokenizer.encode(w, false).ok()?;
-                                    let token_ids = ids.get_ids();
-                                    Some(token_ids.iter().map(|&id| logits.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY)).sum::<f32>())
-                                };
-                                let s_orig = score_w(&clean);
-                                // Find the best-scoring consonant variant
-                                let mut best_alt: Option<(String, f32)> = None;
-                                for alt in &consonant_alts {
-                                    if let Some(s) = score_w(alt) {
-                                        if best_alt.as_ref().map_or(true, |(_, bs)| s > *bs) {
-                                            best_alt = Some((alt.clone(), s));
-                                        }
-                                    }
-                                }
-                                if let (Some(s_orig), Some((best, s_best))) = (s_orig, best_alt) {
-                                    log!("consonant check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, best, s_best);
-                                    if s_best > s_orig {
-                                        // Build corrected sentence (replace word in context)
-                                        let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
-                                        // Collect as pending — grammar validation happens after borrow release
-                                        // Store orig:variant words in rule_name for freq lookup later
-                                        self.pending_consonant_checks.push(WritingError {
-                                            category: ErrorCategory::Grammar,
-                                            word: sentence_ctx.to_string(),
-                                            suggestion: corrected_sentence,
-                                            explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
-                                            rule_name: format!("consonant_confusion:{}:{}", clean, best),
-                                            sentence_context: sentence_ctx.to_string(),
-                                            position: 0,
-                                            ignored: false,
-                                        });
-                                    }
-                                }
-                            }
-                        }
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            original_found = if !found { checker.has_word(word.trim()) } else { false };
+
+            compound_suggestion = if !found && !original_found {
+                checker.suggest_compound(&clean)
+            } else {
+                None
+            };
+
+            fuzzy_candidates = if !found && !original_found && compound_suggestion.is_none() {
+                checker.fuzzy_lookup(&clean, 2).into_iter()
+                    .filter(|(w, _)| w != &clean)
+                    .take(10)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        } // checker borrow dropped
+
+        // Phase 2: BERT scoring + writing errors (mutable borrow on self)
+        if found {
+            // kt/gt confusion — BERT sentence scoring
+            if let Some(alt) = kt_gt_valid_alt {
+                let s_orig = self.bert_sentence_score(sentence_ctx);
+                let alt_sentence = sentence_ctx.replacen(&clean, &alt, 1);
+                let s_alt = self.bert_sentence_score(&alt_sentence);
+                log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
+                if s_alt > s_orig {
+                    if !self.writing_errors.iter().any(|e| {
+                        matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+                    }) {
+                        log!("kt/gt confusion: '{}' → '{}'", clean, alt);
+                        self.writing_errors.push(WritingError {
+                            category: ErrorCategory::Spelling,
+                            word: clean.clone(),
+                            suggestion: alt.clone(),
+                            explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
+                            rule_name: "kt_gt".to_string(),
+                            sentence_context: sentence_ctx.to_string(),
+                            position: 0,
+                            ignored: false,
+                        });
+                    }
+                }
+            }
+
+            // Consonant confusion — BERT sentence scoring
+            if !consonant_alts.is_empty() {
+                let s_orig = self.bert_sentence_score(sentence_ctx);
+                let mut best_alt: Option<(String, f32)> = None;
+                for alt in &consonant_alts {
+                    let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
+                    let s_alt = self.bert_sentence_score(&alt_sentence);
+                    log!("consonant BERT sentence: '{}' orig={:.2}, '{}' variant={:.2}", clean, s_orig, alt, s_alt);
+                    if best_alt.as_ref().map_or(true, |(_, bs)| s_alt > *bs) {
+                        best_alt = Some((alt.clone(), s_alt));
+                    }
+                }
+                if let Some((best, s_best)) = best_alt {
+                    log!("consonant check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, best, s_best);
+                    if s_best > s_orig {
+                        let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
+                        self.pending_consonant_checks.push(WritingError {
+                            category: ErrorCategory::Grammar,
+                            word: sentence_ctx.to_string(),
+                            suggestion: corrected_sentence,
+                            explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
+                            rule_name: format!("consonant_confusion:{}:{}", clean, best),
+                            sentence_context: sentence_ctx.to_string(),
+                            position: 0,
+                            ignored: false,
+                        });
                     }
                 }
             }
@@ -735,14 +737,12 @@ impl ContextApp {
             return;
         }
 
-        // Also check the original case (proper nouns)
-        let original = word.trim();
-        if checker.has_word(original) {
+        if original_found {
             return;
         }
 
-        // Try compound suggestion via Prolog (e.g. "blåsjell" → "blåskjell")
-        if let Some(compound) = checker.suggest_compound(&clean) {
+        // Try compound suggestion via Prolog
+        if let Some(compound) = compound_suggestion {
             log!("  Compound suggestion: '{}' → '{}'", clean, compound);
             if self.writing_errors.iter().any(|e| {
                 matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
@@ -762,13 +762,8 @@ impl ContextApp {
             return;
         }
 
-        // Word not found — get fuzzy suggestions from FST
-        let fuzzy = checker.fuzzy_lookup(&clean, 2);
-
-        let mut candidates: Vec<(String, u32)> = fuzzy.into_iter()
-            .filter(|(w, _)| w != &clean) // exclude exact match
-            .take(10)
-            .collect();
+        // Word not found — use fuzzy suggestions
+        let mut candidates = fuzzy_candidates;
 
         // Boost by word frequency
         if let Some(wf) = &self.wordfreq {
@@ -840,25 +835,10 @@ impl ContextApp {
             // Clean up rule_name for display
             candidate.rule_name = "consonant_confusion".to_string();
 
-            if variant_errors.len() < orig_errors.len() {
-                log!("consonant confirmed: '{}' → '{}' (grammar improved)", orig_word, variant_word);
+            if variant_errors.len() <= orig_errors.len() {
+                // BERT already decided the variant is better — accept unless grammar gets worse
+                log!("consonant confirmed: '{}' → '{}' (BERT preferred, grammar ok)", orig_word, variant_word);
                 self.writing_errors.push(candidate);
-            } else if variant_errors.len() == orig_errors.len() {
-                // Grammar is equal — check word frequency as tiebreaker
-                let orig_freq = self.wordfreq.as_ref()
-                    .and_then(|wf| wf.get(&orig_word).copied())
-                    .unwrap_or(0);
-                let variant_freq = self.wordfreq.as_ref()
-                    .and_then(|wf| wf.get(&variant_word).copied())
-                    .unwrap_or(0);
-                log!("  freq: '{}' = {}, '{}' = {}", orig_word, orig_freq, variant_word, variant_freq);
-                if variant_freq >= 10 * orig_freq.max(1) {
-                    log!("consonant confirmed: '{}' → '{}' (variant {}x more frequent)",
-                        orig_word, variant_word, variant_freq / orig_freq.max(1));
-                    self.writing_errors.push(candidate);
-                } else {
-                    log!("consonant rejected: '{}' → '{}' (freq ratio too low)", orig_word, variant_word);
-                }
             } else {
                 log!("consonant rejected: '{}' → '{}' (grammar worse)", orig_word, variant_word);
             }
@@ -914,6 +894,7 @@ impl ContextApp {
         // ── Collect unique candidates from all sources ──
         let mut candidates: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut edit_distances: HashMap<String, u32> = HashMap::new();
         let mut add = |w: String, seen: &mut std::collections::HashSet<String>| {
             let wl = w.to_lowercase();
             if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
@@ -931,7 +912,9 @@ impl ContextApp {
         if let Some(checker) = &self.checker {
             let fuzzy = checker.fuzzy_lookup(&word_lower, 2);
             eprintln!("Forslag: fuzzy(2) returned {} matches for '{}'", fuzzy.len(), word_lower);
-            for (w, _dist) in fuzzy {
+            for (w, dist) in fuzzy {
+                let wl = w.to_lowercase();
+                edit_distances.insert(wl, dist);
                 if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
             }
         }
@@ -944,6 +927,8 @@ impl ContextApp {
                 let extra = wl.len() as i32 - word_lower.len() as i32;
                 if extra >= 1 && extra <= 3 {
                     prefix_matches.insert(wl.clone());
+                    // Prefix match = insertion of extra chars, edit distance = extra chars
+                    edit_distances.entry(wl.clone()).or_insert(extra as u32);
                     if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
                 }
             }
@@ -954,6 +939,10 @@ impl ContextApp {
             let shorter = &word_lower[..word_lower.len()-1];
             if let Some(checker) = &self.checker {
                 for w in checker.prefix_lookup(shorter, 20) {
+                    let wl = w.to_lowercase();
+                    // Approximate edit distance: removed 1 char + added extra
+                    let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
+                    edit_distances.entry(wl).or_insert(diff);
                     if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
                 }
             }
@@ -1010,14 +999,25 @@ impl ContextApp {
                     let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
                     let trigram_sim = common as f32 / max_t as f32;
 
-                    // Combined: BERT × trigram. Both must be positive to score well.
+                    // Orthographic similarity: combine trigram and edit distance
+                    // Edit distance is more reliable for transpositions/insertions
+                    // dist 1 → 0.85, dist 2 → 0.65, unknown → use trigram only
+                    let edit_sim = match edit_distances.get(w) {
+                        Some(1) => 0.85,
+                        Some(2) => 0.65,
+                        _ => 0.0,
+                    };
+                    // Take the best of trigram or edit-distance similarity
+                    let ortho_sim = trigram_sim.max(edit_sim);
+
                     // Prefix match bonus: the fewer extra chars, the stronger the signal
-                    // "fotbal"→"fotball" (+1 char) is much more likely than "fotbal"→"fotballe" (+2)
                     let prefix_bonus = if prefix_matches.contains(w) {
                         let extra = w.len() as f32 - word_lower.len() as f32;
                         if extra <= 1.0 { 1.5 } else if extra <= 2.0 { 1.2 } else { 1.1 }
                     } else { 1.0 };
-                    let score = bert_score.max(0.0) * trigram_sim * prefix_bonus;
+
+                    // Combined: BERT × orthographic similarity × prefix bonus
+                    let score = bert_score.max(0.0) * ortho_sim * prefix_bonus;
 
                     scored.push((w.clone(), score));
                 }
@@ -3850,36 +3850,50 @@ fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--test-spelling") {
         eprintln!("=== Spelling test mode ===");
         let mut app = ContextApp::new(true, true, 2);
-
-        let tests: Vec<(&str, &str, &str)> = vec![
-            // (word, sentence_context, expected_suggestion)
-            ("fotbal", "jeg spiller og fotbal", "fotball"),
-            ("blåsjell", "vi spiser blåsjell", "blåskjell"),
-            ("ishoki", "han liker ishoki", "ishockey"),
-        ];
-
         let mut pass = 0;
         let mut fail = 0;
-        for (word, sentence, expected) in &tests {
+
+        // --- Spelling suggestion tests (word NOT in dictionary) ---
+        let spelling_tests: Vec<(&str, &str, &str)> = vec![
+            ("fotbal", "jeg spiller og fotbal", "fotball"),
+            ("blåsjell", "vi spiser blåsjell", "blåskjell"),
+            ("spitlt", "Jeg hadde spitlt fotball.", "spilt"),
+        ];
+        for (word, sentence, expected) in &spelling_tests {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
-
-            // Step 1: check_spelling (same as GUI)
             app.check_spelling(word, sentence);
             app.validate_consonant_checks();
-
-            // Step 2: upgrade_spelling_suggestions with BERT (same as GUI)
             app.upgrade_spelling_suggestions();
-
             let suggestion = app.writing_errors.first()
-                .map(|e| e.suggestion.as_str())
-                .unwrap_or("(none)");
-
+                .map(|e| e.suggestion.as_str()).unwrap_or("(none)");
             let ok = suggestion == *expected;
             if ok { pass += 1; } else { fail += 1; }
             println!("{} '{}' → '{}' (expected '{}')",
                 if ok { "✓" } else { "✗" }, word, suggestion, expected);
+        }
+
+        // --- Consonant confusion tests (word IS in dictionary, sibling should win) ---
+        eprintln!("\n=== Consonant confusion tests ===");
+        let consonant_tests: Vec<(&str, &str, &str)> = vec![
+            // (word, sentence, expected_variant_word)
+            ("spil", "Det er et morsomt spil.", "spill"),
+            ("spiler", "Jeg spiler og fotball.", "spiller"),
+        ];
+        for (word, sentence, expected_variant) in &consonant_tests {
+            app.last_spell_checked_word.clear();
+            app.writing_errors.clear();
+            app.pending_consonant_checks.clear();
+            app.check_spelling(word, sentence);
+            eprintln!("  '{}': pending={}", word, app.pending_consonant_checks.len());
+            app.validate_consonant_checks();
+            let got = app.writing_errors.first()
+                .map(|e| e.suggestion.as_str()).unwrap_or("(none)");
+            let ok = got.contains(expected_variant);
+            if ok { pass += 1; } else { fail += 1; }
+            println!("{} consonant '{}' → '{}' (expected '{}')",
+                if ok { "✓" } else { "✗" }, word, got, expected_variant);
         }
 
         println!("\n{}/{} passed", pass, pass + fail);
