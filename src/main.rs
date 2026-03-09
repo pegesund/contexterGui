@@ -1461,6 +1461,19 @@ impl ContextApp {
             // Validate consonant confusion candidates with grammar checker
             self.validate_consonant_checks();
 
+            // If spelling errors were found in this sentence, skip grammar check.
+            // Fixing spelling first will change the sentence, so grammar results
+            // would be unreliable anyway. Re-check grammar after spelling is fixed.
+            let has_spelling_errors = self.writing_errors.iter().any(|e| {
+                e.sentence_context == *trimmed
+                    && !e.ignored
+                    && matches!(e.category, ErrorCategory::Spelling)
+            });
+            if has_spelling_errors {
+                log!("  Skipping grammar check — spelling errors pending in this sentence");
+                continue;
+            }
+
             let checker = match &mut self.checker {
                 Some(c) => c,
                 None => return,
@@ -1481,19 +1494,45 @@ impl ContextApp {
             let corrections = self.best_sentence_corrections(trimmed, &errors);
 
             if corrections.is_empty() {
-                // No valid correction found — still flag the error without a suggestion
-                let first = &errors[0];
-                log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
-                self.writing_errors.push(WritingError {
-                    category: ErrorCategory::Grammar,
-                    word: trimmed.to_string(),
-                    suggestion: String::new(),
-                    explanation: first.explanation.clone(),
-                    rule_name: first.rule_name.clone(),
-                    sentence_context: trimmed.to_string(),
-                    position: 0,
-                    ignored: false,
-                });
+                // No BERT-scored correction — fall back to direct grammar suggestions
+                let errors_with_suggestions: Vec<_> = errors.iter()
+                    .filter(|e| !e.suggestion.is_empty())
+                    .collect();
+                if !errors_with_suggestions.is_empty() {
+                    // Apply each grammar error's suggestion directly as a sentence-level fix
+                    for (i, ge) in errors_with_suggestions.iter().enumerate() {
+                        let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
+                        let corrected = replace_word_at_position(trimmed, &ge.word, first_alt);
+                        if corrected.trim() == trimmed.trim() {
+                            continue;
+                        }
+                        log!("  Direct grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
+                        self.writing_errors.push(WritingError {
+                            category: ErrorCategory::Grammar,
+                            word: trimmed.to_string(),
+                            suggestion: corrected,
+                            explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
+                            rule_name: ge.rule_name.clone(),
+                            sentence_context: trimmed.to_string(),
+                            position: i,
+                            ignored: false,
+                        });
+                    }
+                } else {
+                    // No suggestions at all — flag without correction
+                    let first = &errors[0];
+                    log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
+                    self.writing_errors.push(WritingError {
+                        category: ErrorCategory::Grammar,
+                        word: trimmed.to_string(),
+                        suggestion: String::new(),
+                        explanation: first.explanation.clone(),
+                        rule_name: first.rule_name.clone(),
+                        sentence_context: trimmed.to_string(),
+                        position: 0,
+                        ignored: false,
+                    });
+                }
             }
 
             for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
