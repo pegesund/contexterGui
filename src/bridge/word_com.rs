@@ -339,7 +339,8 @@ impl TextBridge for WordComBridge {
     }
 
     fn is_available(&self) -> bool {
-        self.is_foreground()
+        // Word COM works via COM calls regardless of which window has focus
+        true
     }
 
     fn read_context(&self) -> Option<CursorContext> {

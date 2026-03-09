@@ -610,6 +610,28 @@ impl ContextApp {
             return;
         }
 
+        // Common modal verb misspellings — BERT can't distinguish "vil" vs "ville" in context
+        let modal_fixes: &[(&str, &str)] = &[
+            ("vile", "ville"), ("skule", "skulle"), ("kune", "kunne"), ("måte", "måtte"),
+            ("bure", "burde"), ("tore", "torde"), ("gide", "gidde"),
+        ];
+        if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean) {
+            if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && !e.ignored) {
+                log!("modal fix: '{}' → '{}'", clean, correct);
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Spelling,
+                    word: clean.clone(),
+                    suggestion: correct.to_string(),
+                    explanation: format!("«{}» → «{}»", clean, correct),
+                    rule_name: "stavefeil_modal".to_string(),
+                    sentence_context: sentence_ctx.to_string(),
+                    position: 0,
+                    ignored: false,
+                });
+            }
+            return;
+        }
+
         // Phase 1: Dictionary lookups (immutable borrow on checker)
         let found;
         let kt_gt_valid_alt: Option<String>;
