@@ -301,6 +301,10 @@ impl BridgeManager {
         self.active_bridge().and_then(|b| b.read_full_document())
     }
 
+    fn select_range(&self, char_start: usize, char_end: usize) -> bool {
+        self.active_bridge().map(|b| b.select_range(char_start, char_end)).unwrap_or(false)
+    }
+
     fn set_target_hwnd(&self, hwnd: isize) {
         for bridge in &self.bridges {
             bridge.set_target_hwnd(hwnd);
@@ -399,6 +403,8 @@ struct ContextApp {
     clean_sentence_hashes: std::collections::HashSet<u64>,
     /// Pending grammar work: sentences still to check (incremental, one per frame)
     grammar_queue: Vec<(String, usize)>,
+    /// Total sentences when grammar scan started (for progress bar)
+    grammar_queue_total: usize,
     /// Whether a grammar scan is in progress (shows indicator in UI)
     grammar_scanning: bool,
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
@@ -536,6 +542,7 @@ impl ContextApp {
             prolog_checked_hashes: std::collections::HashSet::new(),
             clean_sentence_hashes: std::collections::HashSet::new(),
             grammar_queue: Vec::new(),
+            grammar_queue_total: 0,
             grammar_scanning: false,
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
@@ -924,13 +931,32 @@ impl ContextApp {
                     suggestions.push((existing.clone(), 0.0)); // will be re-scored by BERT below
                 }
             }
-            if let Some((best, score)) = suggestions.first() {
-                log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
-                    word, best, score, existing, suggestions.len());
+            // Pick best suggestion that doesn't introduce grammar errors
+            if !suggestions.is_empty() {
                 for (i, (w, s)) in suggestions.iter().take(5).enumerate() {
                     log!("  #{}: '{}' score={:.2}", i+1, w, s);
                 }
-                self.writing_errors[idx].suggestion = best.clone();
+                let mut picked: Option<(String, f32)> = None;
+                if let Some(checker) = &mut self.checker {
+                    for (candidate, score) in suggestions.iter().take(8) {
+                        let corrected = sentence_ctx.replacen(&word, candidate, 1);
+                        let errors = checker.check_sentence(&corrected);
+                        log!("Spelling grammar-check: '{}' in '{}' → {} errors", candidate, corrected, errors.len());
+                        if errors.is_empty() {
+                            picked = Some((candidate.clone(), *score));
+                            break;
+                        }
+                    }
+                }
+                // Fallback to BERT-best if none pass grammar
+                if picked.is_none() {
+                    picked = suggestions.first().map(|(w, s)| (w.clone(), *s));
+                }
+                if let Some((best, score)) = &picked {
+                    log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
+                        word, best, score, existing, suggestions.len());
+                    self.writing_errors[idx].suggestion = best.clone();
+                }
             }
             // Mark as processed regardless so we don't retry
             self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
@@ -1576,6 +1602,7 @@ impl ContextApp {
 
         if !queue.is_empty() {
             log!("Grammar queue: {} sentences to check", queue.len());
+            self.grammar_queue_total = queue.len();
             self.grammar_queue = queue;
             self.grammar_scanning = true;
             // Process first one immediately
@@ -3384,14 +3411,15 @@ impl eframe::App for ContextApp {
             // === Tab: Grammatikk (1) ===
             if self.selected_tab == 1 {
                 // Show scanning indicator while grammar queue is draining
-                if self.grammar_scanning {
+                if self.grammar_scanning && self.grammar_queue_total > 0 {
+                    let done = self.grammar_queue_total - self.grammar_queue.len();
+                    let progress = done as f32 / self.grammar_queue_total as f32;
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(
-                            egui::RichText::new(format!("Sjekker... ({} igjen)", self.grammar_queue.len()))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(100, 100, 180)),
-                        );
+                        ui.add(egui::ProgressBar::new(progress)
+                            .text(format!("{}/{}", done, self.grammar_queue_total))
+                            .desired_width(ui.available_width() - 30.0)
+                            .desired_height(14.0));
                     });
                     ui.add_space(2.0);
                 }
@@ -3454,6 +3482,9 @@ impl eframe::App for ContextApp {
                                     if icon_button(ui, "🔊", "Les opp") {
                                         tts::speak_word(&err_suggestion);
                                     }
+                                    if icon_button(ui, "▶", "Vis i dokument") {
+                                        action = Some((idx, "goto"));
+                                    }
                                 });
                                 ui.label(
                                     egui::RichText::new("Mangler punktum:")
@@ -3510,6 +3541,9 @@ impl eframe::App for ContextApp {
                                         let fix_idx = first_alt.unwrap_or(idx);
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                     }
+                                    if icon_button(ui, "▶", "Vis i dokument") {
+                                        action = Some((idx, "goto"));
+                                    }
                                 });
                                 // Original (red, strikethrough) then suggestion (green) — stacked
                                 ui.label(
@@ -3554,6 +3588,9 @@ impl eframe::App for ContextApp {
                                     }
                                     if icon_button(ui, "?", "Flere forslag") {
                                         action = Some((idx, "suggest"));
+                                    }
+                                    if icon_button(ui, "▶", "Vis i dokument") {
+                                        action = Some((idx, "goto"));
                                     }
                                 });
                                 ui.label(
@@ -3651,6 +3688,14 @@ impl eframe::App for ContextApp {
                                         e.ignored = true;
                                     }
                                 }
+                            }
+                            "goto" => {
+                                let error = &self.writing_errors[idx];
+                                let start = error.doc_offset;
+                                let end = start + error.sentence_context.chars().count();
+                                log!("GOTO: selecting range {}..{} for '{}'", start, end,
+                                    &error.sentence_context[..error.sentence_context.len().min(50)]);
+                                self.manager.select_range(start, end);
                             }
                             _ => {}
                         }

@@ -374,6 +374,19 @@ impl TextBridge for WordComBridge {
         content.get_string("Text").ok()
     }
 
+    fn select_range(&self, char_start: usize, char_end: usize) -> bool {
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let range_v = doc.call("Range", &[make_i4(char_start as i32), make_i4(char_end as i32)])?;
+            let range = unsafe { extract_dispatch(&range_v)? };
+            range.call("Select", &[])?;
+            // Bring Word to foreground so the selection is visible
+            app.call("Activate", &[])?;
+            Ok(true)
+        })().unwrap_or(false)
+    }
+
     fn replace_word(&self, new_text: &str) -> bool {
         (|| -> Result<()> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;

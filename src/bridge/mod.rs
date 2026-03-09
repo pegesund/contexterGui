@@ -48,6 +48,9 @@ pub trait TextBridge {
     /// Read the full document text (for grammar checking all sentences).
     fn read_full_document(&self) -> Option<String> { None }
 
+    /// Select/highlight a character range in the document (for navigating to errors).
+    fn select_range(&self, _char_start: usize, _char_end: usize) -> bool { false }
+
     /// Set the target window handle for cross-process reads (no-op by default).
     fn set_target_hwnd(&self, _hwnd: isize) {}
 }
