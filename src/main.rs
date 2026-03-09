@@ -151,9 +151,11 @@ struct WritingError {
     suggestion: String,
     explanation: String,
     rule_name: String,
-    /// Approximate character offset in the sentence where the error occurred
+    /// The sentence text containing the error
     sentence_context: String,
-    /// Position within the sentence (token index or char offset)
+    /// Character offset of the sentence in the document (for position-aware duplicate handling)
+    doc_offset: usize,
+    /// Alternative index (0 = primary, >0 = secondary alternatives for grammar)
     position: usize,
     /// true if user clicked "Ignorer"
     ignored: bool,
@@ -281,6 +283,10 @@ impl BridgeManager {
         self.active_bridge().map(|b| b.find_and_replace_in_context(find, replace, context)).unwrap_or(false)
     }
 
+    fn find_and_replace_in_context_at(&self, find: &str, replace: &str, context: &str, char_offset: usize) -> bool {
+        self.active_bridge().map(|b| b.find_and_replace_in_context_at(find, replace, context, char_offset)).unwrap_or(false)
+    }
+
     fn read_document_context(&self) -> Option<String> {
         self.active_bridge().and_then(|b| b.read_document_context())
     }
@@ -375,12 +381,14 @@ struct ContextApp {
     last_doc_text: String,
     /// Hash of last document text — skip entire update if doc unchanged
     last_doc_hash: u64,
+    /// Number of sentences in last scan — detect paste vs fix
+    last_sentence_count: usize,
     /// Hashes of sentences already checked for Prolog sub-splitting (expensive, persists across doc changes)
     prolog_checked_hashes: std::collections::HashSet<u64>,
-    /// Hashes of sentences grammar-checked and found clean (no errors) — avoid re-checking
+    /// Hashes of sentences grammar-checked and found clean (no errors)
     clean_sentence_hashes: std::collections::HashSet<u64>,
-    /// Deferred find-and-replace (word, replacement, optional sentence context) — executed next frame
-    pending_fix: Option<(String, String, String)>,
+    /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
+    pending_fix: Option<(String, String, String, usize)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
     /// Suggestion window: (misspelled_word, candidates)
@@ -507,6 +515,7 @@ impl ContextApp {
             last_spell_checked_word: String::new(),
             last_doc_text: String::new(),
             last_doc_hash: 0,
+            last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
             clean_sentence_hashes: std::collections::HashSet::new(),
             pending_fix: None,
@@ -592,7 +601,7 @@ impl ContextApp {
     }
 
     /// Check spelling of a word. `sentence_ctx` is the sentence it appears in.
-    fn check_spelling(&mut self, word: &str, sentence_ctx: &str) {
+    fn check_spelling(&mut self, word: &str, sentence_ctx: &str, doc_offset: usize) {
         let clean = word.trim().to_lowercase();
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
             return;
@@ -616,7 +625,7 @@ impl ContextApp {
             ("bure", "burde"), ("tore", "torde"), ("gide", "gidde"),
         ];
         if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean) {
-            if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && !e.ignored) {
+            if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
                 log!("modal fix: '{}' → '{}'", clean, correct);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Spelling,
@@ -625,6 +634,7 @@ impl ContextApp {
                     explanation: format!("«{}» → «{}»", clean, correct),
                     rule_name: "stavefeil_modal".to_string(),
                     sentence_context: sentence_ctx.to_string(),
+                    doc_offset,
                     position: 0,
                     ignored: false,
                 });
@@ -709,7 +719,7 @@ impl ContextApp {
                 log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
                 if s_alt > s_orig {
                     if !self.writing_errors.iter().any(|e| {
-                        matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+                        matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
                     }) {
                         log!("kt/gt confusion: '{}' → '{}'", clean, alt);
                         self.writing_errors.push(WritingError {
@@ -719,6 +729,7 @@ impl ContextApp {
                             explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
                             rule_name: "kt_gt".to_string(),
                             sentence_context: sentence_ctx.to_string(),
+                            doc_offset,
                             position: 0,
                             ignored: false,
                         });
@@ -749,6 +760,7 @@ impl ContextApp {
                             explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
                             rule_name: format!("consonant_confusion:{}:{}", clean, best),
                             sentence_context: sentence_ctx.to_string(),
+                            doc_offset,
                             position: 0,
                             ignored: false,
                         });
@@ -767,7 +779,7 @@ impl ContextApp {
         if let Some(compound) = compound_suggestion {
             log!("  Compound suggestion: '{}' → '{}'", clean, compound);
             if self.writing_errors.iter().any(|e| {
-                matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+                matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
             }) {
                 return;
             }
@@ -778,6 +790,7 @@ impl ContextApp {
                 explanation: format!("«{}» → «{}» (sammensatt ord)", clean, compound),
                 rule_name: "stavefeil".to_string(),
                 sentence_context: sentence_ctx.to_string(),
+                doc_offset,
                 position: 0,
                 ignored: false,
             });
@@ -799,9 +812,9 @@ impl ContextApp {
 
         let best = candidates.first().map(|(w, _)| w.clone()).unwrap_or_default();
 
-        // Don't add duplicate errors for the same word
+        // Don't add duplicate errors for the same word at the same offset
         if self.writing_errors.iter().any(|e| {
-            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
         }) {
             return;
         }
@@ -813,6 +826,7 @@ impl ContextApp {
             explanation: format!("«{}» finnes ikke i ordboken.", clean),
             rule_name: "stavefeil".to_string(),
             sentence_context: sentence_ctx.to_string(),
+            doc_offset,
             position: 0,
             ignored: false,
         };
@@ -836,8 +850,8 @@ impl ContextApp {
             None => return,
         };
         for mut candidate in pending {
-            // Already flagged for this sentence?
-            if self.writing_errors.iter().any(|e| e.sentence_context == candidate.sentence_context && !e.ignored) {
+            // Already flagged for this sentence occurrence?
+            if self.writing_errors.iter().any(|e| e.sentence_context == candidate.sentence_context && e.doc_offset == candidate.doc_offset && !e.ignored) {
                 continue;
             }
             // Extract orig_word and variant_word from rule_name "consonant_confusion:spile:spille"
@@ -1316,6 +1330,18 @@ impl ContextApp {
         }
         self.last_doc_hash = doc_hash;
 
+        // Count sentences to detect paste (large change) vs fix (small change)
+        let new_sentence_count = split_sentences(&doc_text).len();
+        let old_sentence_count = self.last_sentence_count;
+        self.last_sentence_count = new_sentence_count;
+        let is_major_change = (new_sentence_count as isize - old_sentence_count as isize).unsigned_abs() > 2;
+
+        if is_major_change {
+            // Paste/delete — clear clean caches so new occurrences get checked
+            self.clean_sentence_hashes.clear();
+            log!("Major doc change: {} → {} sentences, clearing caches", old_sentence_count, new_sentence_count);
+        }
+
         let mut sentences = split_sentences(&doc_text);
         // Track which original sentences were sub-split by Prolog
         // (original_text → split_sentences) for boundary suggestions
@@ -1394,11 +1420,61 @@ impl ContextApp {
             return;
         }
 
-        // All sentences in the current document — duplicates are filtered by existing errors below
-        let new_sentences: Vec<String> = sentences.iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // All sentences in the current document with their char offsets.
+        // For duplicate sentences, each occurrence gets its own offset.
+        let doc_lower = doc_text.to_lowercase();
+        let new_sentences: Vec<(String, usize)> = {
+            let trimmed_list: Vec<String> = sentences.iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut result = Vec::new();
+            let mut claimed_offsets: Vec<usize> = Vec::new();
+            for s in &trimmed_list {
+                let s_lower = s.to_lowercase();
+                // Find the next unclaimed occurrence of this sentence in the doc
+                let mut search_from = 0usize;
+                let mut found_offset = None;
+                while let Some(byte_pos) = doc_lower[search_from..].find(&s_lower) {
+                    let abs_byte = search_from + byte_pos;
+                    let char_offset = doc_text[..abs_byte].chars().count();
+                    if !claimed_offsets.contains(&char_offset) {
+                        found_offset = Some(char_offset);
+                        claimed_offsets.push(char_offset);
+                        break;
+                    }
+                    search_from = abs_byte + 1;
+                }
+                result.push((s.clone(), found_offset.unwrap_or(0)));
+            }
+            result
+        };
+
+        // --- Step 0: Re-map existing errors to new offsets, remove stale ones ---
+        {
+            let mut available_offsets: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+            for (s, off) in &new_sentences {
+                available_offsets.entry(s.clone()).or_default().push(*off);
+            }
+            let mut claimed: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+            for e in &mut self.writing_errors {
+                if e.ignored { continue; }
+                let key = e.sentence_context.clone();
+                if let Some(offsets) = available_offsets.get(&key) {
+                    let already_claimed = claimed.entry(key.clone()).or_default();
+                    if let Some(&off) = offsets.iter().find(|o| !already_claimed.contains(o)) {
+                        e.doc_offset = off;
+                        already_claimed.push(off);
+                    } else {
+                        e.ignored = true;
+                        log!("Removed stale error: '{}' (no matching position)", &e.word[..e.word.len().min(40)]);
+                    }
+                } else {
+                    e.ignored = true;
+                    log!("Removed stale error: '{}' (sentence gone)", &e.word[..e.word.len().min(40)]);
+                }
+            }
+        }
 
         // --- Step 1: Sentence boundary suggestions (shown first, highest priority) ---
         for (original_text, split_sents) in &prolog_splits {
@@ -1427,35 +1503,36 @@ impl ContextApp {
                 explanation: format!("Setningsgrense: teksten ser ut til å inneholde {} setninger uten punktum.", split_sents.len()),
                 rule_name: "setningsgrense".to_string(),
                 sentence_context: original_text.clone(),
+                doc_offset: 0,
                 position: 0,
                 ignored: false,
             });
         }
 
         // --- Step 2: Spelling + grammar check on each split sentence ---
-        for trimmed in &new_sentences {
+        for (trimmed, doc_offset) in &new_sentences {
             let sent_h = hash_str(trimmed);
 
-            // Skip sentences we already checked and found clean
+            // Skip if this sentence text was already checked and found clean
             if self.clean_sentence_hashes.contains(&sent_h) {
                 continue;
             }
 
-            // Skip sentences that already have errors recorded
+            // Skip if this specific occurrence already has errors recorded
             let has_errors = self.writing_errors.iter().any(|e| {
-                e.sentence_context == *trimmed && !e.ignored
+                e.sentence_context == *trimmed && e.doc_offset == *doc_offset && !e.ignored
             });
             if has_errors {
                 continue;
             }
 
-            log!("Grammar check: '{}'", trimmed);
+            log!("Grammar check: '{}' (offset={})", trimmed, doc_offset);
 
             // Check spelling of each word in new sentences
             for word in trimmed.split_whitespace() {
                 let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
                 if !clean.is_empty() {
-                    self.check_spelling(clean, trimmed);
+                    self.check_spelling(clean, trimmed, *doc_offset);
                 }
             }
             // Validate consonant confusion candidates with grammar checker
@@ -1466,6 +1543,7 @@ impl ContextApp {
             // would be unreliable anyway. Re-check grammar after spelling is fixed.
             let has_spelling_errors = self.writing_errors.iter().any(|e| {
                 e.sentence_context == *trimmed
+                    && e.doc_offset == *doc_offset
                     && !e.ignored
                     && matches!(e.category, ErrorCategory::Spelling)
             });
@@ -1514,6 +1592,7 @@ impl ContextApp {
                             explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
                             rule_name: ge.rule_name.clone(),
                             sentence_context: trimmed.to_string(),
+                            doc_offset: *doc_offset,
                             position: i,
                             ignored: false,
                         });
@@ -1529,6 +1608,7 @@ impl ContextApp {
                         explanation: first.explanation.clone(),
                         rule_name: first.rule_name.clone(),
                         sentence_context: trimmed.to_string(),
+                        doc_offset: *doc_offset,
                         position: 0,
                         ignored: false,
                     });
@@ -1549,6 +1629,7 @@ impl ContextApp {
                     explanation: explanation.clone(),
                     rule_name: rule_name.clone(),
                     sentence_context: trimmed.to_string(),
+                    doc_offset: *doc_offset,
                     position: i,
                     ignored: false,
                 });
@@ -2352,20 +2433,36 @@ fn hash_str(s: &str) -> u64 {
 }
 
 fn split_sentences(text: &str) -> Vec<String> {
+    split_sentences_with_offsets(text).into_iter().map(|(s, _)| s).collect()
+}
+
+/// Split text into sentences, returning each sentence with its character offset in the text.
+fn split_sentences_with_offsets(text: &str) -> Vec<(String, usize)> {
     let mut sentences = Vec::new();
     let mut current = String::new();
+    let mut start_byte = 0usize; // byte offset of current sentence start
+    let mut pos = 0usize; // current byte position
     for c in text.chars() {
+        if current.is_empty() || current.chars().all(|ch| ch.is_whitespace()) {
+            // Haven't started real content yet — track the start
+            if current.is_empty() {
+                start_byte = pos;
+            }
+        }
         current.push(c);
+        pos += c.len_utf8();
         if c == '.' || c == '!' || c == '?' {
             let trimmed = current.trim().to_string();
             if !trimmed.is_empty() && trimmed.len() > 5 {
-                sentences.push(trimmed);
+                // Find actual start: skip leading whitespace
+                let leading_ws = current.len() - current.trim_start().len();
+                let char_offset = text[..start_byte + leading_ws].chars().count();
+                sentences.push((trimmed, char_offset));
             }
             current.clear();
+            start_byte = pos;
         }
     }
-    // Don't embed the trailing incomplete sentence — only complete sentences
-    // ending with .!? produce stable embeddings across sync cycles.
     sentences
 }
 
@@ -2479,16 +2576,16 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Execute deferred find-and-replace
-        if let Some((find, replace, context)) = self.pending_fix.take() {
-            log!("pending_fix: bridge='{}' find='{}' replace='{}'",
+        if let Some((find, replace, context, doc_offset)) = self.pending_fix.take() {
+            log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
                 self.manager.active_bridge_name(),
-                &find[..find.len().min(60)], &replace[..replace.len().min(60)]);
+                &find[..find.len().min(60)], &replace[..replace.len().min(60)], doc_offset);
             let ok = if context.is_empty() {
                 let r = self.manager.find_and_replace(&find, &replace);
                 log!("  find_and_replace result: {}", r);
                 r
             } else {
-                let r = self.manager.find_and_replace_in_context(&find, &replace, &context);
+                let r = self.manager.find_and_replace_in_context_at(&find, &replace, &context, doc_offset);
                 log!("  find_and_replace_in_context result: {}", r);
                 r
             };
@@ -2518,11 +2615,18 @@ impl eframe::App for ContextApp {
                         mark_clean(trimmed, &mut self.clean_sentence_hashes, &mut self.prolog_checked_hashes);
                     }
                 }
-                // Also remove any existing errors that match the old find text
+                // Remove only the specific error that was fixed (matching text + offset)
                 let find_lower = find.to_lowercase();
+                let mut removed_one = false;
                 self.writing_errors.retain(|e| {
-                    e.word.to_lowercase() != find_lower
-                        && e.sentence_context.to_lowercase() != find_lower
+                    if removed_one { return true; }
+                    if (e.word.to_lowercase() == find_lower || e.sentence_context.to_lowercase() == find_lower)
+                        && e.doc_offset == doc_offset
+                    {
+                        removed_one = true;
+                        return false;
+                    }
+                    true
                 });
                 log!("Fix applied: marked {} clean, {} prolog-checked",
                     self.clean_sentence_hashes.len(), self.prolog_checked_hashes.len());
@@ -2637,7 +2741,7 @@ impl eframe::App for ContextApp {
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        self.check_spelling(w, &sentence);
+                        self.check_spelling(w, &sentence, 0);
                     }
                 }
                 self.validate_consonant_checks();
@@ -2654,7 +2758,7 @@ impl eframe::App for ContextApp {
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        self.check_spelling(w, &sentence);
+                        self.check_spelling(w, &sentence, 0);
                     }
                 }
                 self.validate_consonant_checks();
@@ -3242,8 +3346,8 @@ impl eframe::App for ContextApp {
 
                     let mut action: Option<(usize, &str)> = None;
 
-                    // Group grammar errors by sentence_context
-                    let mut shown_contexts: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    // Group grammar errors by (sentence_context, doc_offset)
+                    let mut shown_contexts: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
 
                     egui::ScrollArea::vertical().max_height(ui.available_height() - 4.0).show(ui, |ui| {
                     for &idx in &active_errors {
@@ -3251,7 +3355,7 @@ impl eframe::App for ContextApp {
 
                         // For grammar errors with position > 0, skip — they're shown as alternatives
                         if matches!(error.category, ErrorCategory::Grammar) && error.position > 0 {
-                            if shown_contexts.contains(&error.sentence_context) {
+                            if shown_contexts.contains(&(error.sentence_context.clone(), error.doc_offset)) {
                                 continue;
                             }
                         }
@@ -3290,14 +3394,16 @@ impl eframe::App for ContextApp {
                                         .color(egui::Color32::from_rgb(100, 100, 100)),
                                 );
                             } else if matches!(error.category, ErrorCategory::Grammar) {
-                                shown_contexts.insert(error.sentence_context.clone());
-                                // Show all alternatives for this sentence
+                                shown_contexts.insert((error.sentence_context.clone(), error.doc_offset));
+                                // Show all alternatives for this sentence occurrence
                                 let ctx = error.sentence_context.clone();
+                                let ctx_offset = error.doc_offset;
                                 let alternatives: Vec<usize> = active_errors.iter()
                                     .filter(|&&i| {
                                         let e = &self.writing_errors[i];
                                         matches!(e.category, ErrorCategory::Grammar)
                                             && e.sentence_context == ctx
+                                            && e.doc_offset == ctx_offset
                                             && !e.suggestion.is_empty()
                                     })
                                     .copied()
@@ -3403,14 +3509,16 @@ impl eframe::App for ContextApp {
                                 let suggestion = error.suggestion.clone();
                                 let word = error.word.clone();
                                 let context = error.sentence_context.clone();
-                                self.pending_fix = Some((word.clone(), suggestion.clone(), context));
+                                let off = error.doc_offset;
+                                self.pending_fix = Some((word.clone(), suggestion.clone(), context, off));
                                 log!("FIX action: idx={} bridge='{}' word='{}' suggestion='{}'",
                                     idx, self.manager.active_bridge_name(),
                                     &word[..word.len().min(60)], &suggestion[..suggestion.len().min(60)]);
-                                // Mark all alternatives for this sentence as ignored
+                                // Mark all alternatives for this sentence occurrence as ignored
                                 let ctx = self.writing_errors[idx].sentence_context.clone();
+                                let ctx_off = self.writing_errors[idx].doc_offset;
                                 for e in &mut self.writing_errors {
-                                    if e.sentence_context == ctx
+                                    if e.sentence_context == ctx && e.doc_offset == ctx_off
                                         && (matches!(e.category, ErrorCategory::Grammar)
                                             || matches!(e.category, ErrorCategory::SentenceBoundary))
                                     {
@@ -3458,8 +3566,9 @@ impl eframe::App for ContextApp {
                             }
                             "ignore_group" => {
                                 let ctx = self.writing_errors[idx].sentence_context.clone();
+                                let ctx_off = self.writing_errors[idx].doc_offset;
                                 for e in &mut self.writing_errors {
-                                    if e.sentence_context == ctx && matches!(e.category, ErrorCategory::Grammar) {
+                                    if e.sentence_context == ctx && e.doc_offset == ctx_off && matches!(e.category, ErrorCategory::Grammar) {
                                         e.ignored = true;
                                     }
                                 }
@@ -3482,11 +3591,11 @@ impl eframe::App for ContextApp {
                     if idx < candidates_clone.len() {
                         let replacement = candidates_clone[idx].0.clone();
                         log!("Suggestion selected: '{}' → '{}'", word_clone, replacement);
-                        let sent_ctx = self.writing_errors.iter()
+                        let (sent_ctx, sent_off) = self.writing_errors.iter()
                             .find(|e| e.word == word_clone && !e.ignored)
-                            .map(|e| e.sentence_context.clone())
+                            .map(|e| (e.sentence_context.clone(), e.doc_offset))
                             .unwrap_or_default();
-                        self.pending_fix = Some((word_clone.clone(), replacement.clone(), sent_ctx));
+                        self.pending_fix = Some((word_clone.clone(), replacement.clone(), sent_ctx, sent_off));
                         for e in &mut self.writing_errors {
                             if e.word == word_clone && !e.ignored {
                                 e.suggestion = replacement;
@@ -3752,18 +3861,21 @@ impl eframe::App for ContextApp {
                     let s = error.suggestion.clone();
                     let w = error.word.clone();
                     let c = error.sentence_context.clone();
-                    self.pending_fix = Some((w, s, c));
+                    let o = error.doc_offset;
+                    self.pending_fix = Some((w, s, c, o));
                     let sctx = self.writing_errors[fix_idx].sentence_context.clone();
+                    let soff = self.writing_errors[fix_idx].doc_offset;
                     for e in &mut self.writing_errors {
-                        if e.sentence_context == sctx && matches!(e.category, ErrorCategory::Grammar) {
+                        if e.sentence_context == sctx && e.doc_offset == soff && matches!(e.category, ErrorCategory::Grammar) {
                             e.ignored = true;
                         }
                     }
                     self.rule_info_window = None;
                 } else if do_ignore {
                     let sctx = self.writing_errors[fix_idx].sentence_context.clone();
+                    let soff = self.writing_errors[fix_idx].doc_offset;
                     for e in &mut self.writing_errors {
-                        if e.sentence_context == sctx && matches!(e.category, ErrorCategory::Grammar) {
+                        if e.sentence_context == sctx && e.doc_offset == soff && matches!(e.category, ErrorCategory::Grammar) {
                             e.ignored = true;
                         }
                     }
@@ -3924,7 +4036,7 @@ fn main() -> eframe::Result {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
-            app.check_spelling(word, sentence);
+            app.check_spelling(word, sentence, 0);
             app.validate_consonant_checks();
             app.upgrade_spelling_suggestions();
             let suggestion = app.writing_errors.first()
@@ -3946,7 +4058,7 @@ fn main() -> eframe::Result {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
-            app.check_spelling(word, sentence);
+            app.check_spelling(word, sentence, 0);
             eprintln!("  '{}': pending={}", word, app.pending_consonant_checks.len());
             app.validate_consonant_checks();
             let got = app.writing_errors.first()

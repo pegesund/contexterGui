@@ -35,6 +35,12 @@ pub trait TextBridge {
     /// Find a word within a specific sentence context and replace it.
     fn find_and_replace_in_context(&self, _find: &str, _replace: &str, _context: &str) -> bool { false }
 
+    /// Find a word within a specific sentence at a known char offset in the document.
+    /// Default: falls back to find_and_replace_in_context (ignoring offset).
+    fn find_and_replace_in_context_at(&self, find: &str, replace: &str, context: &str, _char_offset: usize) -> bool {
+        self.find_and_replace_in_context(find, replace, context)
+    }
+
     /// Read a larger text window for context (e.g. 5000 chars before cursor).
     /// Used for sentence embeddings / topic extraction.
     fn read_document_context(&self) -> Option<String> { None }
