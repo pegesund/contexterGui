@@ -338,6 +338,7 @@ struct ContextApp {
     pending_fix: Option<(String, String, String)>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
+    suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
     /// Rule info popup: (rule_name, explanation, sentence_context, fix_idx, suggestion)
     rule_info_window: Option<(String, String, String, usize, String)>,
     // OCR clipboard monitoring
@@ -463,6 +464,7 @@ impl ContextApp {
             clean_sentence_hashes: std::collections::HashSet::new(),
             pending_fix: None,
             suggestion_window: None,
+            suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
             ocr: match ocr::OcrClipboard::new() {
                 Ok(o) => { eprintln!("OCR clipboard monitor ready"); Some(o) }
@@ -569,6 +571,54 @@ impl ContextApp {
         let found = checker.has_word(&clean);
         eprintln!("  has_word('{}') = {}", clean, found);
         if found {
+            // kt/gt confusion check — common dyslexia error (e.g. "trykt" vs "trygt")
+            let kt_gt_alt = if clean.ends_with("kt") {
+                Some(format!("{}gt", &clean[..clean.len()-2]))
+            } else if clean.ends_with("gt") {
+                Some(format!("{}kt", &clean[..clean.len()-2]))
+            } else {
+                None
+            };
+            if let Some(alt) = kt_gt_alt {
+                if checker.has_word(&alt) {
+                    // Both forms exist — use BERT to pick the better one in context
+                    if let Some(model) = &mut self.model {
+                        let sentence_lower = sentence_ctx.to_lowercase();
+                        if let Some(pos) = sentence_lower.find(&clean) {
+                            let before = &sentence_ctx[..pos];
+                            let after = &sentence_ctx[pos + clean.len()..];
+                            let masked = format!("{}<mask>{}", before.trim_end(), after);
+                            if let Ok((logits, _)) = model.single_forward(&masked) {
+                                let score_w = |w: &str| -> Option<f32> {
+                                    let ids = model.tokenizer.encode(w, false).ok()?;
+                                    let token_ids = ids.get_ids();
+                                    Some(token_ids.iter().map(|&id| logits.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY)).sum::<f32>())
+                                };
+                                if let (Some(s_orig), Some(s_alt)) = (score_w(&clean), score_w(&alt)) {
+                                    log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
+                                    if s_alt > s_orig {
+                                        if !self.writing_errors.iter().any(|e| {
+                                            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && !e.ignored
+                                        }) {
+                                            log!("kt/gt confusion: '{}' → '{}'", clean, alt);
+                                            self.writing_errors.push(WritingError {
+                                                category: ErrorCategory::Spelling,
+                                                word: clean.clone(),
+                                                suggestion: alt.clone(),
+                                                explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
+                                                rule_name: "kt_gt".to_string(),
+                                                sentence_context: sentence_ctx.to_string(),
+                                                position: 0,
+                                                ignored: false,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -761,14 +811,18 @@ impl ContextApp {
             })
             .collect();
 
-        // Step 3: Add fuzzy Levenshtein matches (distance 2) scored with BERT
+        // Step 3: Add fuzzy Levenshtein matches (distance 2) scored with BERT + trigram
         if let Some(checker) = &self.checker {
             let fuzzy = checker.fuzzy_lookup(&word_lower, 2);
             eprintln!("Forslag: fuzzy(2) returned {} matches", fuzzy.len());
             for (w, dist) in fuzzy {
                 if w == word_lower { continue; }
                 if scored.iter().any(|(s, _)| s == &w) { continue; }
-                let mut score = 1.0 - (dist as f32 * 0.2);
+                let w_trigrams = Self::trigrams(&w);
+                let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
+                let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
+                let trigram_score = common as f32 / max_t as f32;
+                let mut score = 1.0 - (dist as f32 * 0.2) + trigram_score;
                 if w.chars().next().unwrap_or(' ') == word_first {
                     score += 0.3;
                 }
@@ -2202,7 +2256,10 @@ impl eframe::App for ContextApp {
                             windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(fg, &mut buf)
                         };
                         let title = String::from_utf16_lossy(&buf[..len as usize]);
-                        if !title.contains(our_title) {
+                        if !title.contains(our_title)
+                            && !title.starts_with("Forslag")
+                            && !title.starts_with("Regelinfo")
+                        {
                             self.word_hwnd = Some(fg.0 as isize);
                             self.manager.set_target_hwnd(fg.0 as isize);
                         }
@@ -3043,7 +3100,32 @@ impl eframe::App for ContextApp {
                             "suggest" => {
                                 let word = self.writing_errors[idx].word.clone();
                                 let sentence_ctx = self.writing_errors[idx].sentence_context.clone();
-                                let suggestions = self.trigram_suggestions(&word, &sentence_ctx);
+                                let existing = self.writing_errors[idx].suggestion.clone();
+                                let mut suggestions = self.trigram_suggestions(&word, &sentence_ctx);
+                                // Boost existing suggestion (compound/confirmed) to top
+                                if !existing.is_empty() {
+                                    let et = Self::trigrams(&existing.to_lowercase());
+                                    let wt = Self::trigrams(&word.to_lowercase());
+                                    let common = wt.iter().filter(|t| et.contains(t)).count();
+                                    let total = wt.len().max(et.len()).max(1);
+                                    let sim = common as f32 / total as f32;
+                                    let boost_score = 2.0 + sim;
+                                    if let Some(pos) = suggestions.iter().position(|(w, _)| w == &existing) {
+                                        suggestions[pos].1 = suggestions[pos].1.max(boost_score);
+                                    } else {
+                                        suggestions.push((existing.clone(), boost_score));
+                                    }
+                                    suggestions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                }
+                                // Grammar-filter: substitute each candidate into the sentence and check
+                                if let Some(checker) = &mut self.checker {
+                                    suggestions.retain(|(candidate, _score)| {
+                                        let test_sentence = sentence_ctx.to_lowercase()
+                                            .replacen(&word.to_lowercase(), candidate, 1);
+                                        let errors = checker.check_sentence(&test_sentence);
+                                        errors.is_empty()
+                                    });
+                                }
                                 self.suggestion_window = Some((word, suggestions));
                             }
                             "ignore" => {
@@ -3067,60 +3149,101 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // === Suggestion window ===
+            // === Suggestion window — separate OS window, centered ===
             if self.suggestion_window.is_some() {
-                let mut selected: Option<String> = None;
-                let mut open = true;
+                // Check if a selection was made in a previous frame (via Arc<Mutex>)
+                let prev_selection = self.suggestion_selection.lock().unwrap().take();
                 let (word, candidates) = self.suggestion_window.as_ref().unwrap();
                 let word_clone = word.clone();
                 let candidates_clone: Vec<(String, f32)> = candidates.clone();
 
-                egui::Window::new(format!("Forslag for «{}»", word_clone))
-                    .open(&mut open)
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(250.0)
-                    .max_height(300.0)
-                    .show(ctx, |ui| {
-                        if candidates_clone.is_empty() {
-                            ui.label("Ingen forslag funnet.");
-                        } else {
-                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                for (candidate, _score) in &candidates_clone {
-                                    ui.horizontal(|ui| {
-                                        if icon_button(ui, "🔊", "Les opp") {
-                                            tts::speak_word(candidate);
-                                        }
-                                        if ui.button(
-                                            egui::RichText::new(candidate).size(12.0).strong()
-                                        ).clicked() {
-                                            selected = Some(candidate.clone());
-                                        }
-                                    });
-                                }
-                            });
+                if let Some(idx) = prev_selection {
+                    if idx < candidates_clone.len() {
+                        let replacement = candidates_clone[idx].0.clone();
+                        log!("Suggestion selected: '{}' → '{}'", word_clone, replacement);
+                        let sent_ctx = self.writing_errors.iter()
+                            .find(|e| e.word == word_clone && !e.ignored)
+                            .map(|e| e.sentence_context.clone())
+                            .unwrap_or_default();
+                        self.pending_fix = Some((word_clone.clone(), replacement.clone(), sent_ctx));
+                        for e in &mut self.writing_errors {
+                            if e.word == word_clone && !e.ignored {
+                                e.suggestion = replacement;
+                                e.ignored = true;
+                                break;
+                            }
                         }
-                    });
-
-                if let Some(replacement) = selected {
-                    // Replace in document and mark error as fixed
-                    let ctx = self.writing_errors.iter()
-                        .find(|e| e.word == word_clone && !e.ignored)
-                        .map(|e| e.sentence_context.clone())
-                        .unwrap_or_default();
-                    self.pending_fix = Some((word_clone.clone(), replacement.clone(), ctx));
-                    // Update the error's suggestion and mark ignored
-                    for e in &mut self.writing_errors {
-                        if e.word == word_clone && !e.ignored {
-                            e.suggestion = replacement;
-                            e.ignored = true;
-                            break;
-                        }
+                        self.suggestion_window = None;
                     }
-                    self.suggestion_window = None;
-                }
-                if !open {
-                    self.suggestion_window = None;
+                } else {
+                    let mut do_close = false;
+                    let selection = self.suggestion_selection.clone();
+
+                    let win_w = 320.0_f32;
+                    let win_h = 340.0_f32;
+                    let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
+                    let screen_center = egui::pos2(
+                        (monitor.x - win_w) / 2.0,
+                        (monitor.y - win_h) / 2.0,
+                    );
+
+                    ctx.show_viewport_immediate(
+                        egui::ViewportId::from_hash_of("suggestion_viewport"),
+                        egui::ViewportBuilder::default()
+                            .with_title(format!("Forslag for «{}»", word_clone))
+                            .with_inner_size([win_w, win_h])
+                            .with_position(screen_center)
+                            .with_always_on_top()
+                            .with_decorations(true),
+                        |vp_ctx, _class| {
+                            vp_ctx.set_visuals(egui::Visuals::light());
+
+                            if vp_ctx.input(|i| i.viewport().close_requested()) {
+                                do_close = true;
+                            }
+
+                            egui::CentralPanel::default()
+                                .frame(
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::WHITE)
+                                        .inner_margin(16.0),
+                                )
+                                .show(vp_ctx, |ui| {
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+
+                                    ui.label(
+                                        egui::RichText::new(format!("Forslag for «{}»", word_clone))
+                                            .size(16.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(30, 70, 150)),
+                                    );
+                                    ui.add_space(8.0);
+
+                                    if candidates_clone.is_empty() {
+                                        ui.label("Ingen forslag funnet.");
+                                    } else {
+                                        egui::ScrollArea::vertical().max_height(win_h - 80.0).show(ui, |ui| {
+                                            for (i, (candidate, _score)) in candidates_clone.iter().enumerate() {
+                                                ui.horizontal(|ui| {
+                                                    if icon_button(ui, "🔊", "Les opp") {
+                                                        tts::speak_word(candidate);
+                                                    }
+                                                    if ui.button(
+                                                        egui::RichText::new(candidate).size(14.0).strong()
+                                                    ).clicked() {
+                                                        *selection.lock().unwrap() = Some(i);
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
+                                });
+                        },
+                    );
+
+                    if do_close {
+                        self.suggestion_window = None;
+                    }
                 }
             }
 
