@@ -166,6 +166,34 @@ pub(crate) struct WritingError {
     pub(crate) position: usize,
     /// true if user clicked "Ignorer"
     pub(crate) ignored: bool,
+    /// Absolute char offset of the error word in the document (for underline marking)
+    pub(crate) word_doc_start: usize,
+    /// Absolute char end offset of the error word in the document
+    pub(crate) word_doc_end: usize,
+    /// Whether we've applied a red wavy underline for this error
+    pub(crate) underlined: bool,
+}
+
+/// Find a word within a sentence and return (doc_start, doc_end) in absolute char offsets.
+/// `error_word` = the word to find, `sentence_ctx` = the sentence text,
+/// `doc_offset` = char offset of the sentence in the document.
+fn find_word_doc_range(error_word: &str, sentence_ctx: &str, doc_offset: usize) -> (usize, usize) {
+    let word_lower = error_word.to_lowercase();
+    let sent_lower = sentence_ctx.to_lowercase();
+    // Find word at a word boundary in the sentence
+    let chars: Vec<char> = sent_lower.chars().collect();
+    let word_chars: Vec<char> = word_lower.chars().collect();
+    let wlen = word_chars.len();
+    for i in 0..chars.len().saturating_sub(wlen.saturating_sub(1)) {
+        if i > 0 && chars[i - 1].is_alphanumeric() { continue; }
+        let end = i + wlen;
+        if end < chars.len() && chars[end].is_alphanumeric() { continue; }
+        if &chars[i..end] == &word_chars[..] {
+            return (doc_offset + i, doc_offset + end);
+        }
+    }
+    // Fallback: whole sentence range
+    (doc_offset, doc_offset + sentence_ctx.chars().count())
 }
 
 // --- Data paths ---
@@ -210,7 +238,9 @@ impl BridgeManager {
         #[cfg(target_os = "windows")]
         {
             if let Some(word) = bridge::word_com::WordComBridge::try_connect() {
-                println!("Word COM bridge connected");
+                log!("Word COM bridge connected");
+                let ok = word.disable_word_proofing();
+                log!("Word proofing disabled: {}", ok);
                 bridges.push(Box::new(word));
             }
             bridges.push(Box::new(bridge::accessibility_win::AccessibilityBridge::new()));
@@ -230,7 +260,9 @@ impl BridgeManager {
             let has_word = self.bridges.iter().any(|b| b.name() == "Word COM");
             if !has_word {
                 if let Some(word) = bridge::word_com::WordComBridge::try_connect() {
-                    println!("Word COM bridge connected (late)");
+                    eprintln!("Word COM bridge connected (late)");
+                    let ok = word.disable_word_proofing();
+                    eprintln!("Word proofing disabled (late): {}", ok);
                     self.bridges.insert(0, Box::new(word));
                 }
             }
@@ -310,6 +342,18 @@ impl BridgeManager {
         for bridge in &self.bridges {
             bridge.set_target_hwnd(hwnd);
         }
+    }
+
+    fn mark_error_underline(&self, char_start: usize, char_end: usize) -> bool {
+        self.active_bridge().map(|b| b.mark_error_underline(char_start, char_end)).unwrap_or(false)
+    }
+
+    fn clear_error_underline(&self, char_start: usize, char_end: usize) -> bool {
+        self.active_bridge().map(|b| b.clear_error_underline(char_start, char_end)).unwrap_or(false)
+    }
+
+    fn clear_all_error_underlines(&self) -> bool {
+        self.active_bridge().map(|b| b.clear_all_error_underlines()).unwrap_or(false)
     }
 }
 
@@ -406,6 +450,8 @@ struct ContextApp {
     load_errors: Vec<String>,
     // Tab navigation
     selected_tab: usize, // 0=Innhold, 1=Grammatikk, 2=Innstillinger, 3=Debug
+    /// Error index to scroll to when cursor clicks on an underlined word
+    focused_error_idx: Option<usize>,
     // Error list (spelling + grammar)
     writing_errors: Vec<WritingError>,
     /// Words the user has chosen to ignore (spelling)
@@ -432,6 +478,8 @@ struct ContextApp {
     pending_fix: Option<(String, String, String, usize)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
+    /// Deferred consonant checks where BERT model was busy — retry when model available
+    deferred_consonant_bert: Vec<(String, Vec<String>, String, usize)>, // (word, variants, sentence_ctx, doc_offset)
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
     suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
@@ -869,6 +917,7 @@ impl ContextApp {
             selected_column: 0,
             load_errors,
             selected_tab: 0,
+            focused_error_idx: None,
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
@@ -882,6 +931,7 @@ impl ContextApp {
             grammar_scanning: false,
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
+            deferred_consonant_bert: Vec::new(),
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
@@ -1006,6 +1056,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false,
                 });
             }
             return;
@@ -1081,27 +1132,34 @@ impl ContextApp {
         // Phase 2: BERT scoring + writing errors (mutable borrow on self)
         if found {
             // kt/gt confusion — BERT sentence scoring
-            if let Some(alt) = kt_gt_valid_alt {
+            if let Some(ref alt) = kt_gt_valid_alt {
                 let s_orig = self.bert_sentence_score(sentence_ctx);
-                let alt_sentence = sentence_ctx.replacen(&clean, &alt, 1);
-                let s_alt = self.bert_sentence_score(&alt_sentence);
-                log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
-                if s_alt > s_orig {
-                    if !self.writing_errors.iter().any(|e| {
-                        matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
-                    }) {
-                        log!("kt/gt confusion: '{}' → '{}'", clean, alt);
-                        self.writing_errors.push(WritingError {
-                            category: ErrorCategory::Spelling,
-                            word: clean.clone(),
-                            suggestion: alt.clone(),
-                            explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
-                            rule_name: "kt_gt".to_string(),
-                            sentence_context: sentence_ctx.to_string(),
-                            doc_offset,
-                            position: 0,
-                            ignored: false,
-                        });
+                if s_orig == 0.0 {
+                    // Model not loaded or busy — defer
+                    log!("kt/gt BERT deferred (model unavailable): '{}' → '{}'", clean, alt);
+                    self.deferred_consonant_bert.push((clean.clone(), vec![alt.clone()], sentence_ctx.to_string(), doc_offset));
+                } else {
+                    let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
+                    let s_alt = self.bert_sentence_score(&alt_sentence);
+                    log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
+                    if s_alt > s_orig {
+                        if !self.writing_errors.iter().any(|e| {
+                            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
+                        }) {
+                            log!("kt/gt confusion: '{}' → '{}'", clean, alt);
+                            self.writing_errors.push(WritingError {
+                                category: ErrorCategory::Spelling,
+                                word: clean.clone(),
+                                suggestion: alt.clone(),
+                                explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
+                                rule_name: "kt_gt".to_string(),
+                                sentence_context: sentence_ctx.to_string(),
+                                doc_offset,
+                                position: 0,
+                                ignored: false,
+                                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                            });
+                        }
                     }
                 }
             }
@@ -1109,30 +1167,37 @@ impl ContextApp {
             // Consonant confusion — BERT sentence scoring
             if !consonant_alts.is_empty() {
                 let s_orig = self.bert_sentence_score(sentence_ctx);
-                let mut best_alt: Option<(String, f32)> = None;
-                for alt in &consonant_alts {
-                    let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
-                    let s_alt = self.bert_sentence_score(&alt_sentence);
-                    log!("consonant BERT sentence: '{}' orig={:.2}, '{}' variant={:.2}", clean, s_orig, alt, s_alt);
-                    if best_alt.as_ref().map_or(true, |(_, bs)| s_alt > *bs) {
-                        best_alt = Some((alt.clone(), s_alt));
+                // Model not loaded yet or busy (try_lock failed) — defer for later
+                if s_orig == 0.0 {
+                    log!("consonant BERT deferred (model unavailable): '{}' variants={:?}", clean, consonant_alts);
+                    self.deferred_consonant_bert.push((clean.clone(), consonant_alts.clone(), sentence_ctx.to_string(), doc_offset));
+                } else {
+                    let mut best_alt: Option<(String, f32)> = None;
+                    for alt in &consonant_alts {
+                        let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
+                        let s_alt = self.bert_sentence_score(&alt_sentence);
+                        log!("consonant BERT sentence: '{}' orig={:.2}, '{}' variant={:.2}", clean, s_orig, alt, s_alt);
+                        if best_alt.as_ref().map_or(true, |(_, bs)| s_alt > *bs) {
+                            best_alt = Some((alt.clone(), s_alt));
+                        }
                     }
-                }
-                if let Some((best, s_best)) = best_alt {
-                    log!("consonant check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, best, s_best);
-                    if s_best > s_orig {
-                        let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
-                        self.pending_consonant_checks.push(WritingError {
-                            category: ErrorCategory::Grammar,
-                            word: sentence_ctx.to_string(),
-                            suggestion: corrected_sentence,
-                            explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
-                            rule_name: format!("consonant_confusion:{}:{}", clean, best),
-                            sentence_context: sentence_ctx.to_string(),
-                            doc_offset,
-                            position: 0,
-                            ignored: false,
-                        });
+                    if let Some((best, s_best)) = best_alt {
+                        log!("consonant check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, best, s_best);
+                        if s_best > s_orig {
+                            let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
+                            self.pending_consonant_checks.push(WritingError {
+                                category: ErrorCategory::Grammar,
+                                word: sentence_ctx.to_string(),
+                                suggestion: corrected_sentence,
+                                explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
+                                rule_name: format!("consonant_confusion:{}:{}", clean, best),
+                                sentence_context: sentence_ctx.to_string(),
+                                doc_offset,
+                                position: 0,
+                                ignored: false,
+                                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                            });
+                        }
                     }
                 }
             }
@@ -1162,6 +1227,7 @@ impl ContextApp {
                 doc_offset,
                 position: 0,
                 ignored: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false,
             });
             return;
         }
@@ -1198,6 +1264,7 @@ impl ContextApp {
             doc_offset,
             position: 0,
             ignored: false,
+            word_doc_start: 0, word_doc_end: 0, underlined: false,
         };
         self.writing_errors.push(error);
         eprintln!("Spelling: '{}' not found, suggesting '{}'",
@@ -1246,6 +1313,57 @@ impl ContextApp {
                 self.writing_errors.push(candidate);
             } else {
                 log!("consonant rejected: '{}' → '{}' (grammar worse)", orig_word, variant_word);
+            }
+        }
+    }
+
+    /// Retry deferred consonant confusion checks when BERT model becomes available.
+    fn process_deferred_consonant_bert(&mut self) {
+        if self.deferred_consonant_bert.is_empty() { return; }
+        // Quick check: model loaded and lockable?
+        let can_lock = self.model.as_ref().map_or(false, |m| {
+            m.try_lock().is_ok() // acquires and immediately drops
+        });
+        if !can_lock { return; }
+
+        let deferred = std::mem::take(&mut self.deferred_consonant_bert);
+        log!("processing {} deferred consonant BERT checks", deferred.len());
+        for (clean, variants, sentence_ctx, doc_offset) in deferred {
+            // Skip if already flagged
+            if self.writing_errors.iter().any(|e| e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
+                continue;
+            }
+            let s_orig = self.bert_sentence_score(&sentence_ctx);
+            if s_orig == 0.0 {
+                // Still unavailable — re-defer
+                self.deferred_consonant_bert.push((clean, variants, sentence_ctx, doc_offset));
+                continue;
+            }
+            let mut best_alt: Option<(String, f32)> = None;
+            for alt in &variants {
+                let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
+                let s_alt = self.bert_sentence_score(&alt_sentence);
+                log!("deferred consonant BERT: '{}' orig={:.2}, '{}' variant={:.2}", clean, s_orig, alt, s_alt);
+                if best_alt.as_ref().map_or(true, |(_, bs)| s_alt > *bs) {
+                    best_alt = Some((alt.clone(), s_alt));
+                }
+            }
+            if let Some((best, s_best)) = best_alt {
+                if s_best > s_orig {
+                    let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
+                    self.pending_consonant_checks.push(WritingError {
+                        category: ErrorCategory::Grammar,
+                        word: sentence_ctx.clone(),
+                        suggestion: corrected_sentence,
+                        explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
+                        rule_name: format!("consonant_confusion:{}:{}", clean, best),
+                        sentence_context: sentence_ctx,
+                        doc_offset,
+                        position: 0,
+                        ignored: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false,
+                    });
+                }
             }
         }
     }
@@ -1674,6 +1792,25 @@ impl ContextApp {
             }
             None => return, // Can't read doc (our window focused) — skip pruning
         };
+        // Clear underlines for errors that will be removed
+        for e in &mut self.writing_errors {
+            let should_remove = if e.ignored {
+                true
+            } else {
+                match e.category {
+                    ErrorCategory::Grammar => !doc_text.contains(&e.sentence_context.to_lowercase()),
+                    ErrorCategory::Spelling => {
+                        let word_lower = e.word.to_lowercase();
+                        !doc_text.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower)
+                    }
+                    ErrorCategory::SentenceBoundary => !doc_text.contains(&e.word.to_lowercase()),
+                }
+            };
+            if should_remove && e.underlined {
+                self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                e.underlined = false;
+            }
+        }
         self.writing_errors.retain(|e| {
             if e.ignored {
                 log!("Pruning ignored: {:?} '{}'", e.category, &e.word[..e.word.len().min(40)]);
@@ -1689,8 +1826,6 @@ impl ContextApp {
                         .any(|w| w == word_lower)
                 }
                 ErrorCategory::SentenceBoundary => {
-                    // Resolved when the original unpunctuated text no longer matches
-                    // (user accepted the fix or changed the text)
                     doc_text.contains(&e.word.to_lowercase())
                 }
             };
@@ -1798,6 +1933,7 @@ impl ContextApp {
                 // Strip trailing punctuation for Prolog analysis
                 let stripped = sent.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
                 if stripped.split_whitespace().count() >= 4 {
+                    log!("Prolog sub-split attempt: '{}' ({} words)", &stripped[..stripped.len().min(60)], stripped.split_whitespace().count());
                     if let Some(sub_sentences) = checker.split_by_prolog(stripped) {
                         eprintln!("Grammar: Prolog sub-split '{}' into {} sentences",
                             &stripped[..stripped.len().min(50)], sub_sentences.len());
@@ -1903,6 +2039,7 @@ impl ContextApp {
                 doc_offset: 0,
                 position: 0,
                 ignored: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false,
             });
         }
 
@@ -2026,6 +2163,7 @@ impl ContextApp {
                         doc_offset,
                         position: i,
                         ignored: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false,
                     });
                 }
             } else {
@@ -2041,6 +2179,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false,
                 });
             }
         }
@@ -2061,7 +2200,58 @@ impl ContextApp {
                 doc_offset,
                 position: i,
                 ignored: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false,
             });
+        }
+    }
+
+    /// Sync red wavy underlines in Word with current writing errors.
+    /// - Computes word positions for new errors (word_doc_start/end == 0)
+    /// - Applies underline for errors not yet marked
+    /// - Clears underline for ignored/removed errors
+    fn sync_error_underlines(&mut self) {
+        // Compute positions for errors that don't have them yet
+        for e in &mut self.writing_errors {
+            if e.word_doc_start == 0 && e.word_doc_end == 0 && !e.ignored {
+                // For spelling errors, word = the misspelled word
+                // For grammar errors, word = whole sentence — extract error word from explanation
+                if matches!(e.category, ErrorCategory::SentenceBoundary) {
+                    // Underline the whole sentence for boundary errors
+                    e.word_doc_start = e.doc_offset;
+                    e.word_doc_end = e.doc_offset + e.word.chars().count();
+                    log!("Underline: sentence boundary {}..{} for '{}'",
+                        e.word_doc_start, e.word_doc_end, &e.word[..e.word.len().min(50)]);
+                } else if matches!(e.category, ErrorCategory::Spelling) {
+                    // Spelling: underline just the misspelled word
+                    let (s, end) = find_word_doc_range(&e.word, &e.sentence_context, e.doc_offset);
+                    e.word_doc_start = s;
+                    e.word_doc_end = end;
+                    log!("Underline: spelling range {}..{} for '{}' in '{}'",
+                        s, end, e.word, &e.sentence_context[..e.sentence_context.len().min(50)]);
+                } else {
+                    // Grammar/consonant: underline the whole sentence
+                    e.word_doc_start = e.doc_offset;
+                    e.word_doc_end = e.doc_offset + e.sentence_context.chars().count();
+                    log!("Underline: grammar range {}..{} for '{}'",
+                        e.word_doc_start, e.word_doc_end, &e.sentence_context[..e.sentence_context.len().min(50)]);
+                }
+            }
+        }
+
+        // Apply underlines for new errors, clear for ignored ones
+        for e in &mut self.writing_errors {
+            if e.ignored && e.underlined {
+                // Error was ignored — remove underline
+                self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                e.underlined = false;
+            } else if !e.ignored && !e.underlined && e.word_doc_start < e.word_doc_end {
+                // New error — apply underline
+                log!("Underline: marking {}..{} rule={} expl='{}'",
+                    e.word_doc_start, e.word_doc_end, e.rule_name, &e.explanation[..e.explanation.len().min(50)]);
+                if self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end) {
+                    e.underlined = true;
+                }
+            }
         }
     }
 
@@ -2649,8 +2839,31 @@ impl eframe::App for ContextApp {
                         if big_change {
                             // Paste/cut/move detected — trigger full document grammar scan
                             self.update_grammar_errors();
+                            self.sync_error_underlines();
                         }
                     }
+                    // Check if cursor is on an underlined error word → switch to Grammatikk tab
+                    if let Some(cursor_off) = new_ctx.cursor_doc_offset {
+                        let hit = self.writing_errors.iter().enumerate().find(|(_, e)| {
+                            !e.ignored && e.underlined
+                                && cursor_off >= e.word_doc_start && cursor_off <= e.word_doc_end
+                        });
+                        if let Some((idx, e)) = hit {
+                            if self.focused_error_idx != Some(idx) {
+                                log!("Click hit: cursor={} → error idx={} '{}' range={}..{} rule={}",
+                                    cursor_off, idx, &e.explanation[..e.explanation.len().min(40)],
+                                    e.word_doc_start, e.word_doc_end, e.rule_name);
+                            }
+                            self.selected_tab = 1; // Always switch to Grammatikk
+                            self.focused_error_idx = Some(idx);
+                        } else {
+                            if self.focused_error_idx.is_some() {
+                                log!("Click miss: cursor={} (no underlined error at this offset)", cursor_off);
+                            }
+                            self.focused_error_idx = None;
+                        }
+                    }
+
                     self.context = new_ctx;
                 }
             }
@@ -2685,9 +2898,15 @@ impl eframe::App for ContextApp {
                         self.check_spelling(w, &sentence, 0);
                     }
                 }
+                self.process_deferred_consonant_bert();
                 self.validate_consonant_checks();
                 // Sentence boundary: run grammar check
                 self.run_grammar_check();
+                // Trigger full doc scan to pick up new errors from typing
+                // Only when no grammar queue is already being processed
+                if self.grammar_queue.is_empty() {
+                    self.update_grammar_errors();
+                }
                 // Word boundary work: prune, upgrade, drain grammar queue
                 // Only process grammar queue when no background forward in flight (avoids model mutex contention)
                 self.prune_resolved_errors();
@@ -2695,6 +2914,7 @@ impl eframe::App for ContextApp {
                 if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
                     self.process_grammar_queue();
                 }
+                self.sync_error_underlines();
             } else {
                 // No word, no context: clear and run grammar
                 self.completions.clear();
@@ -2711,12 +2931,16 @@ impl eframe::App for ContextApp {
                 }
                 self.validate_consonant_checks();
                 self.run_grammar_check();
+                if self.grammar_queue.is_empty() {
+                    self.update_grammar_errors();
+                }
                 // Word boundary work: prune, upgrade, drain grammar queue
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
                 if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
                     self.process_grammar_queue();
                 }
+                self.sync_error_underlines();
             }
 
             // Background completion: debounce + dispatch full completion + poll results
@@ -2908,6 +3132,17 @@ impl eframe::App for ContextApp {
                     }
                 }
             }
+        }
+
+        // Idle grammar queue + deferred consonant processing
+        // Runs every frame (not just at word boundaries) so queue drains even when user stops typing
+        if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
+            self.process_grammar_queue();
+        }
+        if !self.deferred_consonant_bert.is_empty() {
+            self.process_deferred_consonant_bert();
+            self.validate_consonant_checks();
+            self.sync_error_underlines();
         }
 
         // Phase 1: Ctrl+Space while Word has focus → enter selection mode
@@ -3465,14 +3700,25 @@ impl eframe::App for ContextApp {
                         let error = &self.writing_errors[idx];
 
                         // For grammar errors with position > 0, skip — they're shown as alternatives
-                        if matches!(error.category, ErrorCategory::Grammar) && error.position > 0 {
+                        // (but never skip the focused error — it must render for yellow highlight)
+                        if matches!(error.category, ErrorCategory::Grammar) && error.position > 0
+                            && self.focused_error_idx != Some(idx)
+                        {
                             if shown_contexts.contains(&(error.sentence_context.clone(), error.doc_offset)) {
                                 continue;
                             }
                         }
 
                         ui.separator();
-                        ui.scope(|ui| {
+                        // Highlight and scroll to the focused error (cursor on underlined word)
+                        let is_focused = self.focused_error_idx == Some(idx);
+                        let frame = if is_focused {
+                            egui::Frame::NONE.fill(egui::Color32::from_rgba_premultiplied(255, 255, 180, 255))
+                                .inner_margin(4.0).corner_radius(4.0)
+                        } else {
+                            egui::Frame::NONE
+                        };
+                        let frame_resp = frame.show(ui, |ui| {
                             if matches!(error.category, ErrorCategory::SentenceBoundary) {
                                 // --- Sentence boundary suggestion ---
                                 let err_suggestion = error.suggestion.clone();
@@ -3618,6 +3864,9 @@ impl eframe::App for ContextApp {
                                 );
                             }
                         });
+                        if is_focused {
+                            frame_resp.response.scroll_to_me(Some(egui::Align::Center));
+                        }
                     }
                     }); // end ScrollArea
 
@@ -4197,7 +4446,9 @@ fn main() -> eframe::Result {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
+            app.deferred_consonant_bert.clear();
             app.check_spelling(word, sentence, 0);
+            app.process_deferred_consonant_bert();
             app.validate_consonant_checks();
             app.upgrade_spelling_suggestions();
             let suggestion = app.writing_errors.first()
@@ -4219,7 +4470,9 @@ fn main() -> eframe::Result {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
+            app.deferred_consonant_bert.clear();
             app.check_spelling(word, sentence, 0);
+            app.process_deferred_consonant_bert();
             eprintln!("  '{}': pending={}", word, app.pending_consonant_checks.len());
             app.validate_consonant_checks();
             let got = app.writing_errors.first()

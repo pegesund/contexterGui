@@ -8,6 +8,8 @@ pub struct CursorContext {
     pub masked_sentence: Option<String>,
     /// Screen coordinates of the caret (x, y below the caret)
     pub caret_pos: Option<(i32, i32)>,
+    /// Character offset of the cursor in the document (for error range detection)
+    pub cursor_doc_offset: Option<usize>,
 }
 
 /// Abstraction for reading/writing text in the focused application.
@@ -53,6 +55,15 @@ pub trait TextBridge {
 
     /// Set the target window handle for cross-process reads (no-op by default).
     fn set_target_hwnd(&self, _hwnd: isize) {}
+
+    /// Mark a character range with red wavy underline (spelling/grammar error).
+    fn mark_error_underline(&self, _char_start: usize, _char_end: usize) -> bool { false }
+
+    /// Remove red wavy underline from a character range.
+    fn clear_error_underline(&self, _char_start: usize, _char_end: usize) -> bool { false }
+
+    /// Clear ALL error underlines in the document (cleanup on exit).
+    fn clear_all_error_underlines(&self) -> bool { false }
 }
 
 #[cfg(target_os = "windows")]
@@ -182,5 +193,6 @@ pub fn build_context(raw: &RawCursorText, caret_pos: Option<(i32, i32)>) -> Curs
         sentence,
         masked_sentence: masked,
         caret_pos,
+        cursor_doc_offset: None,
     }
 }

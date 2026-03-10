@@ -13,6 +13,10 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WD_WORD: i32 = 2;
 const OBJID_NATIVEOM: u32 = 0xFFFFFFF0;
+const WD_UNDERLINE_WAVY: i32 = 11;
+const WD_UNDERLINE_NONE: i32 = 0;
+const WD_COLOR_RED: i32 = 0x0000FF; // BGR format: red = 0x0000FF
+const WD_NORWEGIAN_BOKMAL: i32 = 1044; // wdNorwegianBokmal language ID
 
 // --- Raw VARIANT helpers (COM ABI layout) ---
 
@@ -272,7 +276,7 @@ impl WordComBridge {
         }
     }
 
-    fn get_raw_text(&self) -> Result<super::RawCursorText> {
+    fn get_raw_text(&self) -> Result<(super::RawCursorText, usize)> {
         let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
         let selection = app.get_dispatch("Selection")?;
         let sel_range = selection.get_dispatch("Range")?;
@@ -296,7 +300,7 @@ impl WordComBridge {
         let after = after_range.get_string("Text").unwrap_or_default()
             .replace('\r', " ").replace('\n', " ");
 
-        Ok(super::RawCursorText { before, after })
+        Ok((super::RawCursorText { before, after }, cursor_pos as usize))
     }
 
     fn caret_pos(&self) -> Option<(i32, i32)> {
@@ -316,6 +320,69 @@ impl WordComBridge {
             }
             None
         }
+    }
+
+    /// Disable Word's built-in spell/grammar checking so our underlines don't conflict.
+    pub fn disable_word_proofing(&self) -> bool {
+        let result = (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            // Application-level: turn off as-you-type checking
+            let options = app.get_dispatch("Options")?;
+            options.put("CheckSpellingAsYouType", make_bool(false))?;
+            options.put("CheckGrammarAsYouType", make_bool(false))?;
+            options.put("CheckGrammarWithSpelling", make_bool(false))?;
+            eprintln!("Word: disabled Options-level proofing");
+            // Document-level: hide existing squiggles
+            let doc = app.get_dispatch("ActiveDocument")?;
+            doc.put("ShowSpellingErrors", make_bool(false))?;
+            doc.put("ShowGrammaticalErrors", make_bool(false))?;
+            // Tell Word the document is already checked (clears existing marks)
+            doc.put("SpellingChecked", make_bool(true))?;
+            doc.put("GrammarChecked", make_bool(true))?;
+            // Set document content language to "No Proofing" (wdNoProofing=1024)
+            // This is the most reliable way to suppress Word 365 Editor squiggles
+            match doc.get_dispatch("Content") {
+                Ok(content) => {
+                    match content.put("LanguageID", make_i4(1024)) {
+                        Ok(_) => eprintln!("Word: Content.LanguageID = wdNoProofing OK"),
+                        Err(e) => eprintln!("Word: Content.LanguageID FAILED: {:?}", e),
+                    }
+                    match content.put("NoProofing", make_bool(true)) {
+                        Ok(_) => eprintln!("Word: Content.NoProofing = True OK"),
+                        Err(e) => eprintln!("Word: Content.NoProofing FAILED: {:?}", e),
+                    }
+                }
+                Err(e) => eprintln!("Word: get Content FAILED: {:?}", e),
+            }
+            eprintln!("Word: disabled document-level squiggles");
+            Ok(true)
+        })();
+        match &result {
+            Ok(_) => eprintln!("Word: disabled built-in spell/grammar checking"),
+            Err(e) => eprintln!("Word: FAILED to disable proofing: {:?}", e),
+        }
+        result.unwrap_or(false)
+    }
+
+    /// Re-enable Word's built-in spell/grammar checking.
+    pub fn enable_word_proofing(&self) -> bool {
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let options = app.get_dispatch("Options")?;
+            options.put("CheckSpellingAsYouType", make_bool(true))?;
+            options.put("CheckGrammarAsYouType", make_bool(true))?;
+            options.put("CheckGrammarWithSpelling", make_bool(true))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            doc.put("ShowSpellingErrors", make_bool(true))?;
+            doc.put("ShowGrammaticalErrors", make_bool(true))?;
+            // Restore Norwegian Bokmål language
+            if let Ok(content) = doc.get_dispatch("Content") {
+                let _ = content.put("LanguageID", make_i4(WD_NORWEGIAN_BOKMAL));
+                let _ = content.put("NoProofing", make_i4(0)); // VARIANT_FALSE
+            }
+            eprintln!("Word: re-enabled built-in spell/grammar checking");
+            Ok(true)
+        })().unwrap_or(false)
     }
 
     fn is_foreground(&self) -> bool {
@@ -346,7 +413,11 @@ impl TextBridge for WordComBridge {
     fn read_context(&self) -> Option<CursorContext> {
         let caret_pos = self.caret_pos();
         match self.get_raw_text() {
-            Ok(raw) => Some(super::build_context(&raw, caret_pos)),
+            Ok((raw, cursor_offset)) => {
+                let mut ctx = super::build_context(&raw, caret_pos);
+                ctx.cursor_doc_offset = Some(cursor_offset);
+                Some(ctx)
+            }
             Err(_) => Some(CursorContext {
                 caret_pos,
                 ..Default::default()
@@ -598,6 +669,44 @@ impl TextBridge for WordComBridge {
             Ok(false)
         })()
         .unwrap_or(false)
+    }
+
+    fn mark_error_underline(&self, char_start: usize, char_end: usize) -> bool {
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let range_v = doc.call("Range", &[make_i4(char_start as i32), make_i4(char_end as i32)])?;
+            let range = unsafe { extract_dispatch(&range_v)? };
+            let font = range.get_dispatch("Font")?;
+            font.put("Underline", make_i4(WD_UNDERLINE_WAVY))?;
+            font.put("UnderlineColor", make_i4(WD_COLOR_RED))?;
+            Ok(true)
+        })().unwrap_or(false)
+    }
+
+    fn clear_error_underline(&self, char_start: usize, char_end: usize) -> bool {
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let range_v = doc.call("Range", &[make_i4(char_start as i32), make_i4(char_end as i32)])?;
+            let range = unsafe { extract_dispatch(&range_v)? };
+            let font = range.get_dispatch("Font")?;
+            font.put("Underline", make_i4(WD_UNDERLINE_NONE))?;
+            Ok(true)
+        })().unwrap_or(false)
+    }
+
+    fn clear_all_error_underlines(&self) -> bool {
+        // Set entire document to no underline.
+        // Called on app exit to clean up our markings.
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let content = doc.get_dispatch("Content")?;
+            let font = content.get_dispatch("Font")?;
+            font.put("Underline", make_i4(WD_UNDERLINE_NONE))?;
+            Ok(true)
+        })().unwrap_or(false)
     }
 }
 
