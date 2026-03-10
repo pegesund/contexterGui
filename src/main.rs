@@ -710,16 +710,19 @@ fn build_right_completions(
         wordfreq.map_or(true, |wf| wf.contains_key(&key))
     };
 
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
         .enumerate()
         .filter(|(_, tok)| tok.starts_with('Ġ'))
-        .map(|(i, _)| {
+        .filter_map(|(i, _)| {
             let decoded = model.tokenizer
                 .decode(&[i as u32], false)
-                .unwrap_or_default().trim().to_string();
-            (decoded, logits[i])
+                .unwrap_or_default().trim().to_lowercase();
+            if decoded.is_empty() || decoded.len() <= 1 { return None; }
+            if !is_valid(&decoded) || left_words.contains(&decoded) { return None; }
+            if !seen.insert(decoded.clone()) { return None; }
+            Some((decoded, logits[i]))
         })
-        .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w) && !left_words.contains(&w.to_lowercase()))
         .collect();
     all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     all_scored.into_iter()
@@ -2877,6 +2880,9 @@ impl eframe::App for ContextApp {
                             let left_filtered: Vec<Completion> = left.into_iter()
                                 .filter(|c| checker.has_word(&c.word.to_lowercase()))
                                 .collect();
+                            let right_filtered: Vec<Completion> = right.into_iter()
+                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
+                                .collect();
                             let mut check_fn = |sentence: &str| -> GrammarCheckResult {
                                 let errors = checker.check_sentence(sentence);
                                 GrammarCheckResult {
@@ -2888,7 +2894,7 @@ impl eframe::App for ContextApp {
                                 }
                             };
                             self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
-                            self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
+                            self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
                         } else {
                             self.completions = left.into_iter().take(5).collect();
                             self.open_completions = right.into_iter().take(5).collect();
