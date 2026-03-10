@@ -175,11 +175,7 @@ pub fn build_context(raw: &RawCursorText, caret_pos: Option<(i32, i32)>) -> Curs
 
     let sentence = find_sentence_around_cursor(&raw.before, &raw.after);
 
-    let masked = if !word.is_empty() {
-        build_masked_sentence(raw, &word)
-    } else {
-        None
-    };
+    let masked = build_masked_sentence(raw, &word);
 
     CursorContext {
         word,
