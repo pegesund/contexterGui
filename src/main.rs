@@ -2683,6 +2683,19 @@ impl eframe::App for ContextApp {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
                 self.manager.active_bridge_name(),
                 &find[..find.len().min(60)], &replace[..replace.len().min(60)], doc_offset);
+            // Clear underline BEFORE replacement (positions are still valid in original doc)
+            let find_lower_pre = find.to_lowercase();
+            for e in &mut self.writing_errors {
+                if e.underlined
+                    && (e.word.to_lowercase() == find_lower_pre || e.sentence_context.to_lowercase() == find_lower_pre)
+                    && e.doc_offset == doc_offset
+                {
+                    self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                    e.underlined = false;
+                    log!("  Pre-cleared underline {}..{}", e.word_doc_start, e.word_doc_end);
+                    break;
+                }
+            }
             let ok = if context.is_empty() {
                 let r = self.manager.find_and_replace(&find, &replace);
                 log!("  find_and_replace result: {}", r);
@@ -2698,30 +2711,24 @@ impl eframe::App for ContextApp {
                 // Clear grammar queue — document changed, stale sentences
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
-                // Mark the replacement sentences as clean AND prolog-checked
-                // so they don't get re-flagged or re-split
-                let mark_clean = |text: &str, clean: &mut std::collections::HashSet<u64>, prolog: &mut std::collections::HashSet<u64>| {
+                // Mark replacement as prolog-checked (skip sentence splitting)
+                // but NOT as clean — allow grammar/spelling rescan to catch new errors
+                let mark_prolog = |text: &str, prolog: &mut std::collections::HashSet<u64>| {
                     let h = hash_str(text);
-                    clean.insert(h);
                     prolog.insert(h);
-                    // Also mark without trailing punctuation (Prolog strips it)
                     let stripped = text.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
                     if !stripped.is_empty() && stripped != text {
-                        let sh = hash_str(stripped);
-                        clean.insert(sh);
-                        prolog.insert(sh);
+                        prolog.insert(hash_str(stripped));
                     }
                 };
-                // Mark the full replacement
-                mark_clean(&replace, &mut self.clean_sentence_hashes, &mut self.prolog_checked_hashes);
-                // Mark each sub-sentence within the replacement
+                mark_prolog(&replace, &mut self.prolog_checked_hashes);
                 for sent in replace.split_inclusive(|c: char| c == '.' || c == '!' || c == '?') {
                     let trimmed = sent.trim();
                     if !trimmed.is_empty() {
-                        mark_clean(trimmed, &mut self.clean_sentence_hashes, &mut self.prolog_checked_hashes);
+                        mark_prolog(trimmed, &mut self.prolog_checked_hashes);
                     }
                 }
-                // Remove only the specific error that was fixed (matching text + offset)
+                // Remove the fixed error (underline already cleared above)
                 let find_lower = find.to_lowercase();
                 let mut removed_one = false;
                 self.writing_errors.retain(|e| {
@@ -2734,8 +2741,15 @@ impl eframe::App for ContextApp {
                     }
                     true
                 });
-                log!("Fix applied: marked {} clean, {} prolog-checked",
-                    self.clean_sentence_hashes.len(), self.prolog_checked_hashes.len());
+                // Also remove the OLD sentence from clean hashes so it gets rescanned
+                // (the corrected sentence text will be picked up on next poll)
+                self.clean_sentence_hashes.remove(&hash_str(&context));
+                let stripped_ctx = context.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
+                if !stripped_ctx.is_empty() && stripped_ctx != context {
+                    self.clean_sentence_hashes.remove(&hash_str(stripped_ctx));
+                }
+                log!("Fix applied: underline cleared, sentence '{}' will be rescanned",
+                    &context[..context.len().min(50)]);
             }
         }
 
