@@ -1396,26 +1396,51 @@ impl ContextApp {
                 }
             }
             // Pick best suggestion that doesn't introduce grammar errors
+            // Prefer candidates with verb readings (avoids noun-for-verb substitution)
             if !suggestions.is_empty() {
                 for (i, (w, s)) in suggestions.iter().take(5).enumerate() {
                     log!("  #{}: '{}' score={:.2}", i+1, w, s);
                 }
-                let mut picked: Option<(String, f32)> = None;
+                // Collect all grammar-passing candidates (not just first)
+                let mut passing: Vec<(String, f32)> = Vec::new();
                 if let Some(checker) = &mut self.checker {
                     for (candidate, score) in suggestions.iter().take(8) {
                         let corrected = sentence_ctx.replacen(&word, candidate, 1);
                         let errors = checker.check_sentence(&corrected);
                         log!("Spelling grammar-check: '{}' in '{}' → {} errors", candidate, corrected, errors.len());
                         if errors.is_empty() {
-                            picked = Some((candidate.clone(), *score));
-                            break;
+                            passing.push((candidate.clone(), *score));
                         }
                     }
                 }
-                // Fallback to BERT-best if none pass grammar
-                if picked.is_none() {
-                    picked = suggestions.first().map(|(w, s)| (w.clone(), *s));
-                }
+                // Among grammar-passing candidates, prefer ones with verb readings
+                // (avoids "skrivere" (noun) over "skriver" (verb) after a pronoun)
+                let picked = if passing.len() > 1 {
+                    if let Some(checker) = &self.checker {
+                        // Check if any passing candidate has a verb reading
+                        let with_verb: Vec<_> = passing.iter()
+                            .filter(|(w, _)| {
+                                let pos = checker.pos_set(w);
+                                pos.contains("verb")
+                            })
+                            .collect();
+                        if !with_verb.is_empty() {
+                            // Among verb candidates, pick highest BERT score
+                            let best = with_verb.into_iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+                            log!("Spelling: preferring verb candidate '{}' ({:.2})", best.0, best.1);
+                            Some(best.clone())
+                        } else {
+                            Some(passing[0].clone())
+                        }
+                    } else {
+                        Some(passing[0].clone())
+                    }
+                } else if !passing.is_empty() {
+                    Some(passing[0].clone())
+                } else {
+                    // Fallback to BERT-best if none pass grammar
+                    suggestions.first().map(|(w, s)| (w.clone(), *s))
+                };
                 if let Some((best, score)) = &picked {
                     log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
                         word, best, score, existing, suggestions.len());
@@ -2889,14 +2914,19 @@ impl eframe::App for ContextApp {
                 if !self.selection_mode {
                     self.selected_completion = None;
                 }
-                // Word boundary: check spelling of the last finished word
+                // Word boundary: check spelling of the word just typed (before cursor)
                 let sentence = self.context.sentence.clone();
-                let spell_word = sentence.split_whitespace().last()
+                let cursor_off = self.context.cursor_doc_offset.unwrap_or(0);
+                // Get the word just before the cursor (last word in sentence before cursor position)
+                let spell_word = sentence.split_whitespace().rev()
+                    .find(|w| {
+                        let clean = w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»');
+                        !clean.is_empty() && clean.len() >= 2
+                    })
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
-                    if !w.is_empty() {
-                        self.check_spelling(w, &sentence, 0);
-                    }
+                    log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, &sentence[..sentence.len().min(50)], cursor_off);
+                    self.check_spelling(w, &sentence, cursor_off);
                 }
                 self.process_deferred_consonant_bert();
                 self.validate_consonant_checks();
@@ -2922,11 +2952,12 @@ impl eframe::App for ContextApp {
                 self.last_completed_prefix.clear();
                 // Check spelling + grammar on the last word/sentence
                 let sentence = self.context.sentence.clone();
+                let cursor_off = self.context.cursor_doc_offset.unwrap_or(0);
                 let spell_word = sentence.split_whitespace().last()
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        self.check_spelling(w, &sentence, 0);
+                        self.check_spelling(w, &sentence, cursor_off);
                     }
                 }
                 self.validate_consonant_checks();
