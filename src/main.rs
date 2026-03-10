@@ -450,6 +450,7 @@ struct ContextApp {
     load_errors: Vec<String>,
     // Tab navigation
     selected_tab: usize, // 0=Innhold, 1=Grammatikk, 2=Innstillinger, 3=Debug
+    show_debug_tab: bool,
     /// Error index to scroll to when cursor clicks on an underlined word
     focused_error_idx: Option<usize>,
     // Error list (spelling + grammar)
@@ -780,7 +781,7 @@ fn build_right_completions(
 }
 
 impl ContextApp {
-    fn new(grammar_completion: bool, use_swipl: bool, quality: u8) -> Self {
+    fn new(grammar_completion: bool, use_swipl: bool, quality: u8, show_debug_tab: bool) -> Self {
         #[cfg(target_os = "windows")]
         unsafe {
             use windows::Win32::System::Com::*;
@@ -917,6 +918,7 @@ impl ContextApp {
             selected_column: 0,
             load_errors,
             selected_tab: 0,
+            show_debug_tab,
             focused_error_idx: None,
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
@@ -3350,14 +3352,24 @@ impl eframe::App for ContextApp {
         // Window sizing
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !self.open_completions.is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
-        let win_h = if has_content || recently_replaced || self.selected_tab >= 1 { 250.0 } else { 110.0 };
-        const WIN_W: f32 = 420.0;
+        let win_h = if self.selected_tab >= 1 {
+            250.0
+        } else if has_content || recently_replaced {
+            150.0
+        } else {
+            80.0
+        };
+        let win_w = if self.selected_tab == 0 {
+            260.0
+        } else {
+            420.0
+        };
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
 
         if self.follow_cursor {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIN_W, win_h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size();
                 let pos_y = if (y as f32 + win_h) > screen_h {
@@ -3365,7 +3377,7 @@ impl eframe::App for ContextApp {
                 } else {
                     y as f32
                 };
-                let pos_x = (x as f32).min(screen_w - WIN_W).max(0.0);
+                let pos_x = (x as f32).min(screen_w - win_w).max(0.0);
 
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     egui::pos2(pos_x, pos_y),
@@ -3426,37 +3438,55 @@ impl eframe::App for ContextApp {
             let tts_speaking = tts::is_speaking();
             let ocr_is_busy = self.ocr_receiver.is_some();
             ui.horizontal(|ui| {
-                let tab_labels = ["Innhold", "Grammatikk", "Innst.", "Debug"];
-                for (i, name) in tab_labels.iter().enumerate() {
-                    // Draw colored dot for tabs 0 and 1
-                    if i == 0 || i == 1 {
-                        let dot_color = if i == 0 {
-                            if has_completions { egui::Color32::from_rgb(0, 180, 60) }
-                            else { egui::Color32::from_rgb(180, 180, 180) }
-                        } else {
-                            if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
-                            else { egui::Color32::from_rgb(0, 180, 60) }
-                        };
+                // Tab list: 💡 (Innhold), ✏ (Grammatikk), ⚙ (Innstillinger), optionally Debug
+                let mut tabs: Vec<(usize, &str)> = vec![
+                    (0, "\u{1F4A1}"), (1, "\u{270F}"), (2, "\u{2699}")
+                ];
+                if self.show_debug_tab {
+                    tabs.push((3, "Debug"));
+                }
+                for (tab_idx, (id, name)) in tabs.iter().enumerate() {
+                    // Draw colored dot for Grammatikk tab only
+                    if *id == 1 {
+                        let dot_color = if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
+                            else { egui::Color32::from_rgb(0, 180, 60) };
                         let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
                         let center = egui::pos2(dot_rect.min.x + 5.0, dot_rect.center().y);
                         ui.painter().circle_filled(center, 4.0, dot_color);
                     }
 
-                    let is_selected = self.selected_tab == i;
-                    let text = egui::RichText::new(*name).size(12.0);
+                    let is_selected = self.selected_tab == *id;
+                    let font_size = if *id <= 2 { 16.0 } else { 12.0 };
+                    let text = egui::RichText::new(*name).size(font_size);
                     let text = if is_selected {
                         text.strong().color(egui::Color32::from_rgb(0, 70, 160))
                     } else {
                         text.color(egui::Color32::from_rgb(100, 100, 100))
                     };
                     if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
-                        self.selected_tab = i;
+                        self.selected_tab = *id;
                     }
-                    if i < tab_labels.len() - 1 {
+                    if tab_idx < tabs.len() - 1 {
                         ui.add_space(2.0);
                         ui.label(egui::RichText::new("|").size(12.0).color(egui::Color32::from_rgb(180, 170, 140)));
                         ui.add_space(2.0);
                     }
+                }
+
+                // Floating window toggle in main bar
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("|").size(12.0).color(egui::Color32::from_rgb(180, 170, 140)));
+                ui.add_space(4.0);
+                let pin_icon = if self.follow_cursor { "\u{1F4CC}" } else { "\u{1F4CC}" }; // 📌
+                let pin_color = if self.follow_cursor {
+                    egui::Color32::from_rgb(0, 120, 60)
+                } else {
+                    egui::Color32::from_rgb(160, 160, 160)
+                };
+                if ui.add(egui::Label::new(
+                    egui::RichText::new(pin_icon).size(14.0).color(pin_color)
+                ).sense(egui::Sense::click())).clicked() {
+                    self.follow_cursor = !self.follow_cursor;
                 }
 
                 // TTS reading indicator + stop button
@@ -3492,9 +3522,15 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     let whisper_ready = self.whisper_engine.is_some();
+                    let mic_color = if whisper_ready {
+                        egui::Color32::from_rgb(100, 100, 100)
+                    } else {
+                        egui::Color32::from_rgb(160, 160, 160)
+                    };
                     let mic_btn = ui.add_enabled(whisper_ready, egui::Button::new(
-                        egui::RichText::new("🎤").size(13.0)
-                    ).min_size(egui::vec2(22.0, 16.0)));
+                        egui::RichText::new("🎤").size(13.0).color(mic_color)
+                    ).fill(egui::Color32::TRANSPARENT)
+                     .min_size(egui::vec2(22.0, 16.0)));
                     if !whisper_ready {
                         mic_btn.on_hover_text("Whisper laster...");
                     } else if mic_btn.on_hover_text("Start talegjenkjenning").clicked() {
@@ -3548,17 +3584,6 @@ impl eframe::App for ContextApp {
             // === Tab: Innhold (0) ===
             if self.selected_tab == 0 {
                 if !self.completions.is_empty() || !self.open_completions.is_empty() {
-                    let header = if self.selection_mode {
-                        "Forslag: (↑↓ velg, Enter godta, Esc avbryt)"
-                    } else {
-                        "Forslag: (Ctrl+Space for å velge)"
-                    };
-                    ui.label(
-                        egui::RichText::new(header)
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(100, 100, 100)),
-                    );
-                    ui.add_space(2.0);
 
                     let sel = self.selected_completion;
                     let mut clicked_word: Option<String> = None;
@@ -3616,7 +3641,7 @@ impl eframe::App for ContextApp {
 
                     if has_dual {
                         let avail_w = ui.available_width();
-                        let col_w = (avail_w - 10.0) / 2.0;
+                        let col_w = (avail_w - 4.0) / 2.0;
                         let max_rows = self.completions.len().max(self.open_completions.len());
                         for row in 0..max_rows {
                             ui.horizontal(|ui| {
@@ -3629,7 +3654,7 @@ impl eframe::App for ContextApp {
                                 } else {
                                     ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
                                 }
-                                ui.add_space(10.0);
+                                ui.add_space(4.0);
                                 if row < self.open_completions.len() {
                                     let comp = &self.open_completions[row];
                                     let is_sel = self.selected_column == 1 && sel == Some(row);
@@ -3657,20 +3682,6 @@ impl eframe::App for ContextApp {
                         }
                     }
 
-                    // Copy button
-                    ui.add_space(4.0);
-                    if ui.small_button("Kopier").clicked() {
-                        let mut text = String::new();
-                        text.push_str(&format!("Ord: {}\n", self.context.word));
-                        text.push_str("Venstre: ");
-                        text.push_str(&self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                        text.push_str("\nHøyre: ");
-                        text.push_str(&self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                        if let Some(masked) = &self.context.masked_sentence {
-                            text.push_str(&format!("\nMaskert: {}", masked));
-                        }
-                        ctx.copy_text(text);
-                    }
 
                     if let Some(word) = clicked_word {
                         self.return_focus_to_app();
@@ -4381,11 +4392,6 @@ impl eframe::App for ContextApp {
 
             // === Tab: Innstillinger (2) ===
             if self.selected_tab == 2 {
-                ui.checkbox(&mut self.follow_cursor,
-                    egui::RichText::new("Følg cursor").size(13.0)
-                        .color(egui::Color32::from_rgb(60, 60, 55))
-                );
-                ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(format!("Bro: {}", self.manager.active_bridge_name()))
                         .size(12.0)
@@ -4477,7 +4483,7 @@ fn main() -> eframe::Result {
     // Console spelling test mode — exercises exact same code as GUI
     if std::env::args().any(|a| a == "--test-spelling") {
         eprintln!("=== Spelling test mode ===");
-        let mut app = ContextApp::new(true, true, 2);
+        let mut app = ContextApp::new(true, true, 2, false);
         let mut pass = 0;
         let mut fail = 0;
 
@@ -4534,6 +4540,7 @@ fn main() -> eframe::Result {
 
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
     let use_swipl = !std::env::args().any(|a| a == "--no-swipl");
+    let show_debug_tab = std::env::args().any(|a| a == "--debug");
     let quality: u8 = {
         let args: Vec<String> = std::env::args().collect();
         args.iter()
@@ -4600,7 +4607,7 @@ fn main() -> eframe::Result {
             } else {
                 eprintln!("Warning: Open Sans font not found at {}", font_path);
             }
-            Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality)))
+            Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab)))
         }),
     )
 }
