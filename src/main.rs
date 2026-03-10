@@ -2752,8 +2752,12 @@ impl eframe::App for ContextApp {
                         };
                         let nearby_words: std::collections::HashSet<String> = {
                             let before_mask = masked.split("<mask>").next().unwrap_or("");
-                            before_mask.split_whitespace()
-                                .rev().take(5)
+                            // Only look at current sentence (after last sentence boundary)
+                            // to avoid filtering words that appear in prior context sentences
+                            let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
+                                .map(|i| i + 1).unwrap_or(0);
+                            let current_sent = &before_mask[sent_start..];
+                            current_sent.split_whitespace()
                                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
                                 .filter(|w| w.len() > 1)
                                 .collect()
@@ -2868,6 +2872,11 @@ impl eframe::App for ContextApp {
                                 .map(|i| i + 1).unwrap_or(0);
                             let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
                             let prefix = extract_prefix(&self.context.word);
+                            // Pre-filter: remove words not in mtag dictionary (e.g. "sports")
+                            // Grammar checker can't validate unknown words
+                            let left_filtered: Vec<Completion> = left.into_iter()
+                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
+                                .collect();
                             let mut check_fn = |sentence: &str| -> GrammarCheckResult {
                                 let errors = checker.check_sentence(sentence);
                                 GrammarCheckResult {
@@ -2878,7 +2887,7 @@ impl eframe::App for ContextApp {
                                         .collect(),
                                 }
                             };
-                            self.completions = grammar_filter(&left, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                            self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
                             self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
                         } else {
                             self.completions = left.into_iter().take(5).collect();

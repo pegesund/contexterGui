@@ -48,3 +48,7 @@ path = "src/test_mennesker.rs"
 [[bin]]
 name = "test-tts"
 path = "src/test_tts.rs"
+
+[[bin]]
+name = "test-fotball"
+path = "src/test_fotball.rs"
