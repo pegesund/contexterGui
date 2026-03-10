@@ -159,6 +159,8 @@ impl WhisperEngine {
 /// Result from whisper transcription
 pub struct TranscribeResult {
     pub text: String,
+    /// true = partial (more coming), false = final
+    pub partial: bool,
 }
 
 /// Handle for controlling microphone recording + whisper transcription
@@ -180,8 +182,9 @@ pub fn is_recording() -> bool {
 }
 
 /// Start recording from default microphone.
-/// Uses a preloaded WhisperEngine for fast transcription after stop.
-pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, String> {
+/// Uses `streaming_engine` (base) for fast partial transcription during recording,
+/// and `final_engine` (medium-q5) for high-quality final transcription after stop.
+pub fn start_recording(final_engine: Arc<Mutex<WhisperEngine>>, streaming_engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, String> {
     if MIC_RECORDING.load(Ordering::Relaxed) {
         return Err("Already recording".into());
     }
@@ -203,7 +206,7 @@ pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, S
             None => {
                 eprintln!("Microphone: no input device found");
                 MIC_RECORDING.store(false, Ordering::Relaxed);
-                let _ = result_tx.send(TranscribeResult { text: "(ingen mikrofon funnet)".into() });
+                let _ = result_tx.send(TranscribeResult { text: "(ingen mikrofon funnet)".into(), partial: false });
                 return;
             }
         };
@@ -214,7 +217,7 @@ pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, S
             Err(e) => {
                 eprintln!("Microphone: no config: {}", e);
                 MIC_RECORDING.store(false, Ordering::Relaxed);
-                let _ = result_tx.send(TranscribeResult { text: format!("Feil: {}", e) });
+                let _ = result_tx.send(TranscribeResult { text: format!("Feil: {}", e), partial: false });
                 return;
             }
         };
@@ -266,7 +269,7 @@ pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, S
             fmt => {
                 eprintln!("Microphone: unsupported format {:?}", fmt);
                 MIC_RECORDING.store(false, Ordering::Relaxed);
-                let _ = result_tx.send(TranscribeResult { text: format!("Feil: format {:?}", fmt) });
+                let _ = result_tx.send(TranscribeResult { text: format!("Feil: format {:?}", fmt), partial: false });
                 return;
             }
         };
@@ -276,7 +279,7 @@ pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, S
             Err(e) => {
                 eprintln!("Microphone: failed to build stream: {}", e);
                 MIC_RECORDING.store(false, Ordering::Relaxed);
-                let _ = result_tx.send(TranscribeResult { text: format!("Feil: {}", e) });
+                let _ = result_tx.send(TranscribeResult { text: format!("Feil: {}", e), partial: false });
                 return;
             }
         };
@@ -284,15 +287,60 @@ pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, S
         if let Err(e) = stream.play() {
             eprintln!("Microphone: failed to start: {}", e);
             MIC_RECORDING.store(false, Ordering::Relaxed);
-            let _ = result_tx.send(TranscribeResult { text: format!("Feil: {}", e) });
+            let _ = result_tx.send(TranscribeResult { text: format!("Feil: {}", e), partial: false });
             return;
         }
 
         eprintln!("Microphone: recording started");
 
-        // Wait for stop signal
-        while !stop_clone.load(Ordering::Acquire) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        // Streaming transcription: transcribe periodically while recording
+        // Uses base model for fast partials (0.24x realtime)
+        // First chunk after 2s, then every 2s of new audio
+        let first_chunk_samples = sample_rate as usize * 2; // 2 seconds
+        let chunk_interval_samples = sample_rate as usize * 2; // 2 seconds
+        let mut last_transcribed_len: usize = 0;
+        let mut next_threshold = first_chunk_samples;
+
+        loop {
+            if stop_clone.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Check if we have enough new audio for a partial transcription
+            let current_len = {
+                let buf = audio_buf.lock().unwrap();
+                buf.len()
+            };
+
+            if current_len >= next_threshold && current_len > last_transcribed_len {
+                // Grab all audio so far
+                let raw_audio = {
+                    let buf = audio_buf.lock().unwrap();
+                    buf.clone()
+                };
+
+                // Resample to 16kHz
+                let audio_16k = if sample_rate != 16000 {
+                    resample(&raw_audio, sample_rate, 16000)
+                } else {
+                    raw_audio
+                };
+
+                eprintln!("Microphone: streaming transcribe {:.1}s of audio (base)...",
+                    audio_16k.len() as f64 / 16000.0);
+                let start = std::time::Instant::now();
+                let text = {
+                    let eng = streaming_engine.lock().unwrap();
+                    eng.transcribe(&audio_16k)
+                };
+                eprintln!("Microphone: partial result in {:.1}s: '{}'",
+                    start.elapsed().as_secs_f64(), &text[..text.len().min(80)]);
+
+                let _ = result_tx.send(TranscribeResult { text, partial: true });
+                last_transcribed_len = current_len;
+                next_threshold = current_len + chunk_interval_samples;
+            }
         }
 
         // Drop stream to stop recording
@@ -300,37 +348,35 @@ pub fn start_recording(engine: Arc<Mutex<WhisperEngine>>) -> Result<MicHandle, S
         MIC_RECORDING.store(false, Ordering::Relaxed);
         eprintln!("Microphone: recording stopped");
 
-        // Get captured audio
+        // Final transcription of all audio
         let raw_audio = {
             let buf = audio_buf.lock().unwrap();
             buf.clone()
         };
 
         if raw_audio.is_empty() {
-            let _ = result_tx.send(TranscribeResult { text: "(ingen lyd fanget)".into() });
+            let _ = result_tx.send(TranscribeResult { text: "(ingen lyd fanget)".into(), partial: false });
             return;
         }
 
-        eprintln!("Microphone: captured {} samples ({:.1}s at {}Hz)",
-            raw_audio.len(), raw_audio.len() as f64 / sample_rate as f64, sample_rate);
+        eprintln!("Microphone: final transcribe {:.1}s of audio",
+            raw_audio.len() as f64 / sample_rate as f64);
 
-        // Resample to 16kHz if needed
         let audio_16k = if sample_rate != 16000 {
             resample(&raw_audio, sample_rate, 16000)
         } else {
             raw_audio
         };
 
-        eprintln!("Microphone: resampled to {} samples ({:.1}s at 16kHz)",
-            audio_16k.len(), audio_16k.len() as f64 / 16000.0);
-
-        // Transcribe using preloaded engine
+        eprintln!("Microphone: final transcribe {:.1}s of audio (medium-q5)...",
+            audio_16k.len() as f64 / 16000.0);
+        let final_start = std::time::Instant::now();
         let text = {
-            let eng = engine.lock().unwrap();
+            let eng = final_engine.lock().unwrap();
             eng.transcribe(&audio_16k)
         };
-        eprintln!("Whisper result: '{}'", text);
-        let _ = result_tx.send(TranscribeResult { text });
+        eprintln!("Whisper final result in {:.1}s: '{}'", final_start.elapsed().as_secs_f64(), text);
+        let _ = result_tx.send(TranscribeResult { text, partial: false });
     });
 
     Ok(MicHandle { stop_flag, result_rx })

@@ -387,6 +387,7 @@ enum StartupItem {
         errors: Vec<String>,
     },
     Whisper(Result<microphone::WhisperEngine, String>),
+    WhisperStreaming(Result<microphone::WhisperEngine, String>),
 }
 
 struct ContextApp {
@@ -495,7 +496,8 @@ struct ContextApp {
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     ocr_text: Option<String>,
     // Microphone / Whisper
-    whisper_engine: Option<Arc<Mutex<microphone::WhisperEngine>>>,
+    whisper_engine: Option<Arc<Mutex<microphone::WhisperEngine>>>,       // medium-q5 for final
+    whisper_streaming: Option<Arc<Mutex<microphone::WhisperEngine>>>,    // base for fast partials
     mic_handle: Option<microphone::MicHandle>,
     mic_transcribing: bool,
     mic_result_text: Option<String>,
@@ -866,16 +868,30 @@ impl ContextApp {
             });
         });
 
-        // Thread 3: Whisper engine
-        let tx3 = startup_tx;
+        // Thread 3: Whisper engine (medium-q5 for final transcription)
+        let tx3 = startup_tx.clone();
         std::thread::spawn(move || {
             let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../whisper-build/bin/Release")
                 .to_string_lossy().to_string();
             let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../contexter-repo/training-data/ggml-nb-whisper-small.bin")
+                .join("../../contexter-repo/training-data/ggml-nb-whisper-medium-q5.bin")
                 .to_string_lossy().to_string();
             let _ = tx3.send(StartupItem::Whisper(
+                microphone::WhisperEngine::load(&dll_dir, &model_path)
+            ));
+        });
+
+        // Thread 4: Whisper streaming engine (base for fast partial transcription)
+        let tx4 = startup_tx;
+        std::thread::spawn(move || {
+            let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../whisper-build/bin/Release")
+                .to_string_lossy().to_string();
+            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contexter-repo/training-data/ggml-nb-whisper-base.bin")
+                .to_string_lossy().to_string();
+            let _ = tx4.send(StartupItem::WhisperStreaming(
                 microphone::WhisperEngine::load(&dll_dir, &model_path)
             ));
         });
@@ -949,12 +965,13 @@ impl ContextApp {
             ocr_receiver: None,
             ocr_text: None,
             whisper_engine: None,
+            whisper_streaming: None,
             mic_handle: None,
             mic_transcribing: false,
             mic_result_text: None,
             startup_rx: Some(startup_rx),
             startup_done: Vec::new(),
-            startup_total: 2, // completer, whisper
+            startup_total: 3, // completer, whisper, whisper-streaming
         }
     }
 
@@ -2800,12 +2817,26 @@ impl eframe::App for ContextApp {
                             Ok(engine) => {
                                 self.whisper_engine = Some(Arc::new(Mutex::new(engine)));
                                 self.startup_done.push("Whisper".into());
-                                eprintln!("Startup: Whisper engine ready");
+                                eprintln!("Startup: Whisper medium-q5 engine ready");
                             }
                             Err(e) => {
                                 self.load_errors.push(format!("Whisper: {}", e));
                                 self.startup_done.push("Whisper (feil)".into());
                                 eprintln!("Whisper engine failed to load: {}", e);
+                            }
+                        }
+                    }
+                    StartupItem::WhisperStreaming(result) => {
+                        match result {
+                            Ok(engine) => {
+                                self.whisper_streaming = Some(Arc::new(Mutex::new(engine)));
+                                self.startup_done.push("Whisper-streaming".into());
+                                eprintln!("Startup: Whisper base streaming engine ready");
+                            }
+                            Err(e) => {
+                                self.load_errors.push(format!("Whisper-streaming: {}", e));
+                                self.startup_done.push("Whisper-streaming (feil)".into());
+                                eprintln!("Whisper streaming engine failed to load: {}", e);
                             }
                         }
                     }
@@ -2816,13 +2847,20 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Microphone: check if whisper transcription finished
+        // Microphone: check for whisper transcription results (partial or final)
         if let Some(handle) = &self.mic_handle {
-            if let Ok(result) = handle.result_rx.try_recv() {
-                eprintln!("Whisper transcription complete: '{}'", result.text);
-                self.mic_result_text = Some(result.text);
-                self.mic_handle = None;
-                self.mic_transcribing = false;
+            // Drain all available results, keep the latest
+            while let Ok(result) = handle.result_rx.try_recv() {
+                if result.partial {
+                    eprintln!("Whisper partial: '{}'", &result.text[..result.text.len().min(60)]);
+                    self.mic_result_text = Some(result.text);
+                } else {
+                    eprintln!("Whisper final: '{}'", &result.text[..result.text.len().min(60)]);
+                    self.mic_result_text = Some(result.text);
+                    self.mic_handle = None;
+                    self.mic_transcribing = false;
+                    break;
+                }
             }
         }
 
@@ -3368,7 +3406,10 @@ impl eframe::App for ContextApp {
         // Window sizing
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !self.open_completions.is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
-        let win_h = if self.selected_tab >= 1 {
+        let mic_active = self.mic_result_text.is_some();
+        let win_h = if mic_active {
+            400.0
+        } else if self.selected_tab >= 1 {
             250.0
         } else if has_content || recently_replaced {
             150.0
@@ -3430,7 +3471,7 @@ impl eframe::App for ContextApp {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     let progress = self.startup_done.len() as f32 / self.startup_total as f32;
-                    let loading: Vec<&str> = ["NorBERT4", "Whisper"]
+                    let loading: Vec<&str> = ["NorBERT4", "Whisper", "Whisper-streaming"]
                         .iter()
                         .filter(|s| !self.startup_done.iter().any(|d| d.starts_with(*s)))
                         .copied()
@@ -3518,20 +3559,28 @@ impl eframe::App for ContextApp {
                         self.ocr_text = None;
                     }
                 } else if mic_recording {
-                    // Recording: show stop button
-                    if ui.add(egui::Button::new(
-                        egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
-                    ).fill(egui::Color32::from_rgb(200, 40, 40))
-                     .min_size(egui::vec2(22.0, 16.0))
-                    ).clicked() {
-                        if let Some(handle) = &self.mic_handle {
-                            handle.stop();
-                            self.mic_transcribing = true;
+                    if self.mic_transcribing {
+                        // Transcribing: show spinner-like indicator
+                        ui.add(egui::Button::new(
+                            egui::RichText::new("⏳").size(13.0)
+                        ).fill(egui::Color32::TRANSPARENT)
+                         .min_size(egui::vec2(22.0, 16.0)));
+                    } else {
+                        // Recording: show stop button
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                        ).fill(egui::Color32::from_rgb(200, 40, 40))
+                         .min_size(egui::vec2(22.0, 16.0))
+                        ).clicked() {
+                            if let Some(handle) = &self.mic_handle {
+                                handle.stop();
+                                self.mic_transcribing = true;
+                            }
                         }
                     }
                 } else {
                     // Idle: show mic button
-                    let whisper_ready = self.whisper_engine.is_some();
+                    let whisper_ready = self.whisper_engine.is_some() && self.whisper_streaming.is_some();
                     let mic_color = if whisper_ready { inactive } else { egui::Color32::from_rgb(160, 160, 160) };
                     let mic_btn = ui.add_enabled(whisper_ready, egui::Button::new(
                         egui::RichText::new("\u{1F3A4}").size(13.0).color(mic_color)
@@ -3540,8 +3589,8 @@ impl eframe::App for ContextApp {
                     if !whisper_ready {
                         mic_btn.on_hover_text("Whisper laster...");
                     } else if mic_btn.on_hover_text("Start talegjenkjenning").clicked() {
-                        if let Some(engine) = &self.whisper_engine {
-                            match microphone::start_recording(engine.clone()) {
+                        if let (Some(final_engine), Some(stream_engine)) = (&self.whisper_engine, &self.whisper_streaming) {
+                            match microphone::start_recording(final_engine.clone(), stream_engine.clone()) {
                                 Ok(handle) => {
                                     eprintln!("Microphone recording started");
                                     self.mic_handle = Some(handle);
@@ -3617,6 +3666,45 @@ impl eframe::App for ContextApp {
             });
 
             ui.separator();
+
+            // === Whisper transcription result (inline) ===
+            let is_streaming = microphone::is_recording() || self.mic_transcribing;
+            if self.mic_result_text.is_some() {
+                let text_clone = self.mic_result_text.clone().unwrap_or_default();
+                let bg = if is_streaming {
+                    egui::Color32::from_rgb(230, 240, 250) // blue tint while streaming
+                } else {
+                    egui::Color32::from_rgb(245, 245, 230) // warm when final
+                };
+                egui::Frame::NONE
+                    .fill(bg)
+                    .inner_margin(8.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new(&text_clone).size(16.0)
+                                    .color(egui::Color32::from_rgb(30, 30, 30)));
+                                if is_streaming {
+                                    ui.label(egui::RichText::new(" ...").size(16.0)
+                                        .color(egui::Color32::from_rgb(150, 150, 150)));
+                                }
+                            });
+                        });
+                        if !is_streaming {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("Kopier").size(11.0)).clicked() {
+                                    ctx.copy_text(text_clone.clone());
+                                }
+                                if ui.button(egui::RichText::new("Lukk").size(11.0)).clicked() {
+                                    self.mic_result_text = None;
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(4.0);
+            }
 
             // === Tab: Innhold (0) ===
             if self.selected_tab == 0 {
@@ -4401,38 +4489,7 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // === Whisper transcription result window ===
-            if self.mic_result_text.is_some() {
-                let mut do_close = false;
-                let text_clone = self.mic_result_text.clone().unwrap_or_default();
-                egui::Window::new("Talegjenkjenning")
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(400.0)
-                    .default_height(200.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(&text_clone)
-                                    .size(14.0)
-                                    .color(egui::Color32::from_rgb(30, 30, 30)),
-                            );
-                        });
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button(egui::RichText::new("Kopier").size(13.0)).clicked() {
-                                ctx.copy_text(text_clone.clone());
-                            }
-                            if ui.button(egui::RichText::new("Lukk").size(13.0)).clicked() {
-                                do_close = true;
-                            }
-                        });
-                    });
-                if do_close {
-                    self.mic_result_text = None;
-                }
-            }
+            // === Whisper transcription result (inline) ===
 
             // === Tab: Innstillinger (2) ===
             if self.selected_tab == 2 {
