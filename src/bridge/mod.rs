@@ -135,7 +135,14 @@ pub fn find_sentence_around_cursor(before: &str, after: &str) -> String {
 /// Result: context with word replaced by `<mask>`.
 pub fn build_masked_sentence(raw: &RawCursorText, word: &str) -> Option<String> {
     if word.is_empty() {
-        return None;
+        // No word at cursor (e.g. just pressed space) — place mask at cursor position
+        let before = raw.before.trim_end();
+        if before.is_empty() {
+            return None;
+        }
+        let after = raw.after.trim_start();
+        let after_part = if after.is_empty() { ".".to_string() } else { after.to_string() };
+        return Some(format!("{} <mask> {}", before, after_part));
     }
     // Strip the word from before text (it's the suffix being typed)
     let before_trimmed = if raw.before.ends_with(word) {

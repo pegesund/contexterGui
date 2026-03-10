@@ -1,5 +1,6 @@
 mod bridge;
 mod grammar_actor;
+mod microphone;
 mod ocr;
 mod tts;
 
@@ -329,6 +330,19 @@ fn extract_prefix(word: &str) -> &str {
 
 // --- egui app ---
 
+/// Items delivered by background startup threads
+enum StartupItem {
+    Completer {
+        model: Option<Arc<Mutex<Model>>>,
+        prefix_index: Option<PrefixIndex>,
+        baselines: Option<Baselines>,
+        wordfreq: Option<Arc<HashMap<String, u64>>>,
+        embedding_store: Option<EmbeddingStore>,
+        errors: Vec<String>,
+    },
+    Whisper(Result<microphone::WhisperEngine, String>),
+}
+
 struct ContextApp {
     manager: BridgeManager,
     context: CursorContext,
@@ -346,9 +360,16 @@ struct ContextApp {
     last_checked_sentence: String,
     // Word completer
     model: Option<Arc<Mutex<Model>>>,
+    /// Background completion: receives (cache_key, completions, open_completions)
+    completion_rx: Option<std::sync::mpsc::Receiver<(String, Vec<Completion>, Vec<Completion>)>>,
+    completion_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Last time context changed — for debouncing completion dispatch
+    last_context_change: Instant,
+    /// The cache key we last dispatched (avoid re-dispatching same)
+    dispatched_key: String,
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Baselines>,
-    wordfreq: Option<HashMap<String, u64>>,
+    wordfreq: Option<Arc<HashMap<String, u64>>>,
     embedding_store: Option<EmbeddingStore>,
     completions: Vec<Completion>,
     /// Open suggestions (any word) for fill-in-the-blank mode
@@ -420,6 +441,291 @@ struct ContextApp {
     ocr: Option<ocr::OcrClipboard>,
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     ocr_text: Option<String>,
+    // Microphone / Whisper
+    whisper_engine: Option<Arc<Mutex<microphone::WhisperEngine>>>,
+    mic_handle: Option<microphone::MicHandle>,
+    mic_transcribing: bool,
+    mic_result_text: Option<String>,
+    // Startup loading
+    startup_rx: Option<std::sync::mpsc::Receiver<StartupItem>>,
+    startup_done: Vec<String>,    // labels of completed items
+    startup_total: usize,         // total items to load
+}
+
+/// Build left completions via BPE extension (when prefix_index has matches).
+/// Runs on background thread — no access to self.
+fn build_bpe_completions(
+    model: &mut Model,
+    masked: &str,
+    prefix_lower: &str,
+    matches: &[(u32, String)],
+    logits: &[f32],
+    wordfreq: Option<&HashMap<String, u64>>,
+    nearby_words: &std::collections::HashSet<String>,
+    capitalize: bool,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<Completion> {
+    use std::sync::atomic::Ordering;
+
+    let is_valid = |w: &str| -> bool {
+        let key = w.to_lowercase();
+        if nearby_words.contains(&key) { return false; }
+        wordfreq.map_or(true, |wf| wf.contains_key(&key))
+    };
+    let cap = |s: &str| -> String {
+        let mut c = s.chars();
+        match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().to_string() + c.as_str(),
+        }
+    };
+
+    let mut token_scored: Vec<(String, f32)> = matches.iter()
+        .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
+        .collect();
+    token_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    struct Candidate {
+        token_ids: Vec<u32>,
+        word: String,
+        score: f32,
+        done: bool,
+    }
+    let mut candidate_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
+
+    // Top 20 by logit
+    for (tok_word, tok_score) in token_scored.iter().take(20) {
+        if candidate_set.insert(tok_word.clone()) {
+            if let Some((tid, _)) = matches.iter().find(|(_, w)| w == tok_word) {
+                candidates.push(Candidate {
+                    token_ids: vec![*tid],
+                    word: tok_word.clone(),
+                    score: *tok_score,
+                    done: false,
+                });
+            }
+        }
+    }
+    // Top 20 long tokens (≥5 chars)
+    let mut long_tokens: Vec<&(String, f32)> = token_scored.iter()
+        .filter(|(w, s)| w.len() >= 5 && *s > 0.0)
+        .collect();
+    long_tokens.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (tok_word, tok_score) in long_tokens.iter().take(20) {
+        if candidate_set.insert(tok_word.clone()) {
+            if let Some((tid, _)) = matches.iter().find(|(_, w)| w == tok_word) {
+                candidates.push(Candidate {
+                    token_ids: vec![*tid],
+                    word: tok_word.clone(),
+                    score: *tok_score,
+                    done: false,
+                });
+            }
+        }
+    }
+
+    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+    let ctx_before = mask_parts[0].trim_end();
+    let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
+
+    let max_steps = if prefix_lower.len() <= 3 { 1 } else { 0 };
+    for _step in 0..max_steps {
+        if cancel.load(Ordering::Acquire) { return vec![]; }
+        let best_score = candidates.iter()
+            .filter(|c| !c.done)
+            .map(|c| c.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let threshold = best_score - 15.0;
+        let mut to_extend: Vec<usize> = candidates.iter().enumerate()
+            .filter(|(_, c)| !c.done && c.score >= threshold)
+            .map(|(i, _)| i)
+            .collect();
+        for c in candidates.iter_mut() {
+            if !c.done && c.score < threshold { c.done = true; }
+        }
+        let batch_cap = if prefix_lower.len() <= 2 { 5 } else { 10 };
+        to_extend.truncate(batch_cap);
+        if to_extend.is_empty() { break; }
+
+        let batch_texts: Vec<String> = to_extend.iter()
+            .map(|&i| {
+                let accumulated = model.tokenizer
+                    .decode(&candidates[i].token_ids, false)
+                    .unwrap_or_default();
+                let accumulated = accumulated.trim();
+                format!("{} {}<mask> {}", ctx_before, accumulated, ctx_after)
+            })
+            .collect();
+
+        match model.batched_forward_argmax(&batch_texts) {
+            Ok((argmaxes, _)) => {
+                for (k, &i) in to_extend.iter().enumerate() {
+                    let best_id = argmaxes[k];
+                    let best_token = &model.id_to_token[best_id as usize];
+                    let is_continuation = !best_token.starts_with('Ġ')
+                        && !matches!(best_token.as_str(), "." | "," | "!" | "?" | ";" | ":");
+                    if is_continuation {
+                        candidates[i].token_ids.push(best_id);
+                        candidates[i].word = model.tokenizer
+                            .decode(&candidates[i].token_ids, false)
+                            .unwrap_or_default().trim().to_string();
+                    } else {
+                        candidates[i].done = true;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let mut left_scored: Vec<(String, f32)> = Vec::new();
+    let mut seen_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in &candidates {
+        let key = c.word.to_lowercase();
+        if is_valid(&key) && seen_words.insert(key.clone()) {
+            left_scored.push((key, c.score));
+        }
+    }
+    eprintln!("BPE candidates: [{}]",
+        candidates.iter().take(10).map(|c| format!("{}({:.1},done={})", c.word, c.score, c.done))
+        .collect::<Vec<_>>().join(", "));
+
+    left_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    left_scored.into_iter()
+        .take(25)
+        .map(|(w, s)| Completion {
+            word: if capitalize { cap(&w) } else { w },
+            score: s,
+            elapsed_ms: 0.0,
+        })
+        .collect()
+}
+
+/// Build left completions from pre-fetched mtag candidates scored by BERT.
+/// Runs on background thread — no access to self.
+fn build_mtag_completions(
+    model: &mut Model,
+    masked: &str,
+    mtag_candidates: &[String],
+    logits: &[f32],
+    capitalize: bool,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<Completion> {
+    use std::sync::atomic::Ordering;
+    if mtag_candidates.is_empty() { return vec![]; }
+
+    let cap = |s: &str| -> String {
+        let mut c = s.chars();
+        match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().to_string() + c.as_str(),
+        }
+    };
+
+    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+    let ctx_before = mask_parts[0].trim_end();
+    let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
+
+    let candidates_with_tokens: Vec<(String, Vec<u32>)> = mtag_candidates.iter()
+        .filter_map(|w| {
+            let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            if ids.is_empty() { return None; }
+            Some((w.clone(), ids))
+        })
+        .collect();
+
+    // First-token score
+    let mut scores: Vec<f32> = candidates_with_tokens.iter()
+        .map(|(_, ids)| logits[ids[0] as usize])
+        .collect();
+
+    // Multi-token scoring
+    let max_tokens = candidates_with_tokens.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
+    for t in 1..max_tokens {
+        if cancel.load(Ordering::Acquire) { return vec![]; }
+        let to_score: Vec<usize> = candidates_with_tokens.iter().enumerate()
+            .filter(|(_, (_, ids))| ids.len() > t)
+            .map(|(i, _)| i)
+            .collect();
+        if to_score.is_empty() { break; }
+
+        let mut unique_prefixes: Vec<Vec<u32>> = Vec::new();
+        let mut prefix_to_idx: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+        let mut candidate_to_prefix: Vec<usize> = Vec::new();
+        for &i in &to_score {
+            let token_prefix = candidates_with_tokens[i].1[..t].to_vec();
+            let pidx = if let Some(&existing) = prefix_to_idx.get(&token_prefix) {
+                existing
+            } else {
+                let idx = unique_prefixes.len();
+                prefix_to_idx.insert(token_prefix.clone(), idx);
+                unique_prefixes.push(token_prefix);
+                idx
+            };
+            candidate_to_prefix.push(pidx);
+        }
+
+        let batch_texts: Vec<String> = unique_prefixes.iter()
+            .map(|ids| {
+                let partial = model.tokenizer.decode(ids, false).unwrap_or_default();
+                format!("{} {}<mask> {}", ctx_before, partial.trim(), ctx_after)
+            })
+            .collect();
+
+        if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
+            for (k, &i) in to_score.iter().enumerate() {
+                let pidx = candidate_to_prefix[k];
+                scores[i] += batch_logits[pidx][candidates_with_tokens[i].1[t] as usize];
+            }
+        }
+    }
+
+    let mut scored: Vec<(String, f32)> = candidates_with_tokens.iter().enumerate()
+        .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter()
+        .take(25)
+        .map(|(w, s)| Completion {
+            word: if capitalize { cap(&w) } else { w },
+            score: s,
+            elapsed_ms: 0.0,
+        })
+        .collect()
+}
+
+/// Build right-column completions from logits (no model call needed).
+fn build_right_completions(
+    model: &Model,
+    logits: &[f32],
+    wordfreq: Option<&HashMap<String, u64>>,
+    nearby_words: &std::collections::HashSet<String>,
+    left_words: &std::collections::HashSet<String>,
+) -> Vec<Completion> {
+    let is_valid = |w: &str| -> bool {
+        let key = w.to_lowercase();
+        if nearby_words.contains(&key) { return false; }
+        wordfreq.map_or(true, |wf| wf.contains_key(&key))
+    };
+
+    let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
+        .enumerate()
+        .filter(|(_, tok)| tok.starts_with('Ġ'))
+        .map(|(i, _)| {
+            let decoded = model.tokenizer
+                .decode(&[i as u32], false)
+                .unwrap_or_default().trim().to_string();
+            (decoded, logits[i])
+        })
+        .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w) && !left_words.contains(&w.to_lowercase()))
+        .collect();
+    all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    all_scored.into_iter()
+        .take(10)
+        .map(|(w, s)| Completion { word: w, score: s, elapsed_ms: 0.0 })
+        .collect()
 }
 
 impl ContextApp {
@@ -432,7 +738,7 @@ impl ContextApp {
 
         let mut load_errors = Vec::new();
 
-        // Load grammar checker
+        // Grammar checker must load on main thread (SWI-Prolog requires it)
         let checker: Option<AnyChecker> = if use_swipl {
             match Self::load_swipl_checker() {
                 Ok(c) => {
@@ -443,7 +749,6 @@ impl ContextApp {
                     let msg = format!("SWI-Prolog: {}", e);
                     eprintln!("{}", msg);
                     load_errors.push(msg);
-                    // Fallback to neorusticus
                     match Self::load_checker() {
                         Ok(c) => {
                             eprintln!("Fallback: neorusticus loaded ({} clauses)", c.clause_count());
@@ -471,29 +776,53 @@ impl ContextApp {
             }
         };
 
-        // Load NorBERT4 model + completer infrastructure
-        let data = data_dir();
-        let onnx_path = data.join("onnx/norbert4_base_int8.onnx");
-        let tokenizer_path = data.join("onnx/tokenizer.json");
-        let wordfreq_path = data.join("wordfreq.tsv");
-        let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
-        let minilm_tok = data.join("minilm-onnx/tokenizer.json");
-        let embed_cache = data.join("word_embeddings.bin");
+        // Spawn heavy model loading on background threads
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
 
-        let (model_opt, prefix_index, baselines, wf, embedding_store) =
-            match Self::load_completer(
-                &onnx_path, &tokenizer_path, &wordfreq_path,
-                &minilm_onnx, &minilm_tok, &embed_cache,
-            ) {
-                Ok(parts) => parts,
-                Err(e) => {
-                    let msg = format!("Completer: {}", e);
-                    eprintln!("{}", msg);
-                    load_errors.push(msg);
-                    (None, None, None, None, None)
-                }
-            };
-        let model = model_opt.map(|m| Arc::new(Mutex::new(m)));
+        // Thread 1: NorBERT4 + completer
+        let tx2 = startup_tx.clone();
+        std::thread::spawn(move || {
+            let data = data_dir();
+            let onnx_path = data.join("onnx/norbert4_base_int8.onnx");
+            let tokenizer_path = data.join("onnx/tokenizer.json");
+            let wordfreq_path = data.join("wordfreq.tsv");
+            let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
+            let minilm_tok = data.join("minilm-onnx/tokenizer.json");
+            let embed_cache = data.join("word_embeddings.bin");
+
+            let mut errors = Vec::new();
+            let (model_opt, prefix_index, baselines, wf, embedding_store) =
+                match ContextApp::load_completer(
+                    &onnx_path, &tokenizer_path, &wordfreq_path,
+                    &minilm_onnx, &minilm_tok, &embed_cache,
+                ) {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        let msg = format!("Completer: {}", e);
+                        eprintln!("{}", msg);
+                        errors.push(msg);
+                        (None, None, None, None, None)
+                    }
+                };
+            let model = model_opt.map(|m| Arc::new(Mutex::new(m)));
+            let _ = tx2.send(StartupItem::Completer {
+                model, prefix_index, baselines, wordfreq: wf, embedding_store, errors,
+            });
+        });
+
+        // Thread 3: Whisper engine
+        let tx3 = startup_tx;
+        std::thread::spawn(move || {
+            let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../whisper-build/bin/Release")
+                .to_string_lossy().to_string();
+            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contexter-repo/training-data/ggml-nb-whisper-small.bin")
+                .to_string_lossy().to_string();
+            let _ = tx3.send(StartupItem::Whisper(
+                microphone::WhisperEngine::load(&dll_dir, &model_path)
+            ));
+        });
 
         ContextApp {
             manager: BridgeManager::new(),
@@ -507,11 +836,15 @@ impl ContextApp {
             grammar_actor: None,
             grammar_errors: Vec::new(),
             last_checked_sentence: String::new(),
-            model,
-            prefix_index,
-            baselines,
-            wordfreq: wf,
-            embedding_store,
+            model: None,
+            completion_rx: None,
+            completion_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_context_change: Instant::now(),
+            dispatched_key: String::new(),
+            prefix_index: None,
+            baselines: None,
+            wordfreq: None,
+            embedding_store: None,
             completions: Vec::new(),
             open_completions: Vec::new(),
             last_completed_prefix: String::new(),
@@ -555,6 +888,13 @@ impl ContextApp {
             },
             ocr_receiver: None,
             ocr_text: None,
+            whisper_engine: None,
+            mic_handle: None,
+            mic_transcribing: false,
+            mic_result_text: None,
+            startup_rx: Some(startup_rx),
+            startup_done: Vec::new(),
+            startup_total: 2, // completer, whisper
         }
     }
 
@@ -583,7 +923,7 @@ impl ContextApp {
         Option<Model>,
         Option<PrefixIndex>,
         Option<Baselines>,
-        Option<HashMap<String, u64>>,
+        Option<Arc<HashMap<String, u64>>>,
         Option<EmbeddingStore>,
     )> {
         eprintln!("Loading NorBERT4 from {}...", onnx_path.display());
@@ -607,7 +947,7 @@ impl ContextApp {
         // PMI topic words (via NorBERT4 baselines) still active.
         let embedding_store: Option<EmbeddingStore> = None;
 
-        Ok((Some(model), Some(pi), Some(baselines), Some(wf), embedding_store))
+        Ok((Some(model), Some(pi), Some(baselines), Some(Arc::new(wf)), embedding_store))
     }
 
     fn run_grammar_check(&mut self) {
@@ -911,6 +1251,9 @@ impl ContextApp {
     /// Called after update_grammar_errors() to replace fuzzy-only suggestions
     /// with contextually appropriate ones (e.g. "bossller" → "boller" not "fossiler").
     fn upgrade_spelling_suggestions(&mut self) {
+        // Wait for BERT model — without it, scoring falls back to trigrams which can't distinguish candidates
+        if self.model.is_none() { return; }
+
         // Collect indices + data for spelling errors that need upgrading
         let to_upgrade: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
             .filter(|(_, e)| {
@@ -1135,7 +1478,10 @@ impl ContextApp {
             Some(m) => m,
             None => return 0.0,
         };
-        let mut model = model_arc.lock().unwrap();
+        let mut model = match model_arc.try_lock() {
+            Ok(m) => m,
+            Err(_) => return 0.0, // model busy (background forward) — skip scoring
+        };
 
         let mut total_score: f32 = 0.0;
         for i in 0..words.len() {
@@ -1356,11 +1702,8 @@ impl ContextApp {
     /// This is fast (no SWI/BERT calls) and runs every poll when document changes.
     /// The actual per-sentence grammar checking happens incrementally in process_grammar_queue().
     fn update_grammar_errors(&mut self) {
-        // If there's pending work in the queue, don't re-scan — just keep processing
-        if !self.grammar_queue.is_empty() {
-            self.process_grammar_queue();
-            return;
-        }
+        // Called on paste/cut/move only — not on every keystroke.
+        // Queue processing happens at word boundaries in the main poll loop.
 
         // Read document text and check all complete sentences
         let doc_text = match self.manager.read_full_document() {
@@ -1771,555 +2114,13 @@ impl ContextApp {
         self.last_completed_prefix = cache_key;
         let t_total = Instant::now();
 
-        // Fill-in-the-blank using full sentence context
-        // Works with prefix (typed letters) or without (just pressed space)
-        if let Some(masked) = &self.context.masked_sentence.clone() {
-            if let (Some(model_arc), Some(pi)) = (&self.model, &self.prefix_index) {
-                let mut model = model_arc.lock().unwrap();
-                let t_bert = Instant::now();
-                let prefix_lower = prefix.to_lowercase();
-                // Collect nearby words before <mask> to filter repetition
-                let nearby_words: std::collections::HashSet<String> = {
-                    let before_mask = masked.split("<mask>").next().unwrap_or("");
-                    before_mask.split_whitespace()
-                        .rev().take(5)
-                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
-                        .filter(|w| w.len() > 1)
-                        .collect()
-                };
-
-                // Cache the initial forward pass: masked sentence is identical across keystrokes
-                // (only the prefix changes), so we reuse logits when masked text hasn't changed.
-                let forward_result = if let Some((ref cached_masked, ref cached_logits)) = self.cached_forward {
-                    if cached_masked == masked {
-                        eprintln!("fill-blank: reusing cached forward pass");
-                        Ok((cached_logits.clone(), 0.0))
-                    } else {
-                        model.single_forward(masked)
-                    }
-                } else {
-                    model.single_forward(masked)
-                };
-                match forward_result {
-                    Ok((logits, _ms)) => {
-                        self.cached_forward = Some((masked.clone(), logits.clone()));
-                        let checker_ref = self.checker.as_ref();
-                        let wf_ref = self.wordfreq.as_ref();
-                        let is_valid = |w: &str| -> bool {
-                            let key = w.to_lowercase();
-                            if nearby_words.contains(&key) { return false; }
-                            if let Some(c) = checker_ref { c.has_word(&key) }
-                            else { wf_ref.map_or(true, |wf| wf.contains_key(&key)) }
-                        };
-
-                        // Left list: first-letter matches, expanded via BPE extension
-                        // Skip when no prefix (space-only trigger shows right column only)
-                        let matches: Vec<(u32, String)> = if prefix.is_empty() {
-                            Vec::new()
-                        } else {
-                            pi.get(&prefix_lower).cloned().unwrap_or_default()
-                        };
-
-                        // If BPE has no matches, try mtag dictionary prefix search
-                        // Score candidates using BERT logits for contextual ranking
-                        if matches.is_empty() && !prefix.is_empty() {
-                            if let Some(checker) = &self.checker {
-                                let mtag_hits = checker.prefix_lookup(&prefix_lower, 50);
-                                if !mtag_hits.is_empty() {
-                                    let capitalize = prefix.chars().next().map_or(false, |c| c.is_uppercase());
-                                    let cap = |s: &str| -> String {
-                                        let mut c = s.chars();
-                                        match c.next() {
-                                            None => String::new(),
-                                            Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                                        }
-                                    };
-                                    // Score candidates using BERT batched forward
-                                    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
-                                    let ctx_before_m = mask_parts[0].trim_end();
-                                    let ctx_after_m = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
-
-                                    // Tokenize all candidates
-                                    let candidates_with_tokens: Vec<(String, Vec<u32>)> = mtag_hits.into_iter()
-                                        .filter_map(|w| {
-                                            let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
-                                            let ids: Vec<u32> = enc.get_ids().to_vec();
-                                            if ids.is_empty() { return None; }
-                                            Some((w, ids))
-                                        })
-                                        .collect();
-
-                                    // First-token score from existing mask logits
-                                    let mut scores: Vec<f32> = candidates_with_tokens.iter()
-                                        .map(|(_, ids)| logits[ids[0] as usize])
-                                        .collect();
-
-                                    // Batched extension with dedup: candidates sharing the same
-                                    // token prefix produce identical masked texts — run once, reuse logits
-                                    let max_tokens = candidates_with_tokens.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
-                                    for t in 1..max_tokens {
-                                        let to_score: Vec<usize> = candidates_with_tokens.iter().enumerate()
-                                            .filter(|(_, (_, ids))| ids.len() > t)
-                                            .map(|(i, _)| i)
-                                            .collect();
-                                        if to_score.is_empty() { break; }
-
-                                        // Group by token prefix (ids[..t]) to deduplicate
-                                        let mut unique_prefixes: Vec<Vec<u32>> = Vec::new();
-                                        let mut prefix_to_idx: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
-                                        let mut candidate_to_prefix: Vec<usize> = Vec::new(); // maps to_score index → unique prefix index
-
-                                        for &i in &to_score {
-                                            let token_prefix = candidates_with_tokens[i].1[..t].to_vec();
-                                            let pidx = if let Some(&existing) = prefix_to_idx.get(&token_prefix) {
-                                                existing
-                                            } else {
-                                                let idx = unique_prefixes.len();
-                                                prefix_to_idx.insert(token_prefix.clone(), idx);
-                                                unique_prefixes.push(token_prefix);
-                                                idx
-                                            };
-                                            candidate_to_prefix.push(pidx);
-                                        }
-
-                                        // One forward pass per unique prefix
-                                        let batch_texts: Vec<String> = unique_prefixes.iter()
-                                            .map(|ids| {
-                                                let partial = model.tokenizer.decode(ids, false).unwrap_or_default();
-                                                format!("{} {}<mask> {}", ctx_before_m, partial.trim(), ctx_after_m)
-                                            })
-                                            .collect();
-
-                                        if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
-                                            for (k, &i) in to_score.iter().enumerate() {
-                                                let pidx = candidate_to_prefix[k];
-                                                scores[i] += batch_logits[pidx][candidates_with_tokens[i].1[t] as usize];
-                                            }
-                                        }
-                                    }
-
-                                    // Average per token so long words aren't penalized
-                                    let mut scored: Vec<(String, f32)> = candidates_with_tokens.iter().enumerate()
-                                        .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
-                                        .collect();
-                                    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                    let left: Vec<Completion> = scored.into_iter()
-                                        .take(25)
-                                        .map(|(w, s)| Completion {
-                                            word: if capitalize { cap(&w) } else { w },
-                                            score: s,
-                                            elapsed_ms: 0.0,
-                                        })
-                                        .collect();
-                                    let bert_ms = t_bert.elapsed().as_millis();
-                                    // Right list
-                                    let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
-                                        .enumerate()
-                                        .filter(|(_, tok)| tok.starts_with('Ġ'))
-                                        .map(|(i, _)| {
-                                            let decoded = model.tokenizer
-                                                .decode(&[i as u32], false)
-                                                .unwrap_or_default().trim().to_string();
-                                            (decoded, logits[i])
-                                        })
-                                        .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
-                                        .collect();
-                                    all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                    let right: Vec<Completion> = all_scored.iter()
-                                        .take(10)
-                                        .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
-                                        .collect();
-                                    eprintln!("mtag fallback (BERT-ranked): left=[{}] bert={}ms",
-                                        left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
-                                        bert_ms);
-
-                                    // Grammar filter
-                                    if self.grammar_completion {
-                                        if let Some(checker) = &mut self.checker {
-                                            let ctx_for_grammar = masked.replace("<mask>", "").trim().to_string();
-                                            let mut check_fn = |sentence: &str| -> GrammarCheckResult {
-                                                let errors = checker.check_sentence(sentence);
-                                                GrammarCheckResult {
-                                                    ok: errors.is_empty(),
-                                                    suggestions: errors.iter()
-                                                        .filter(|e| !e.suggestion.is_empty())
-                                                        .map(|e| e.suggestion.clone())
-                                                        .collect(),
-                                                }
-                                            };
-                                            self.completions = grammar_filter(&left, &ctx_for_grammar, prefix, &mut check_fn, 5);
-                                            self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
-                                        } else {
-                                            self.completions = left.into_iter().take(5).collect();
-                                            self.open_completions = right.into_iter().take(5).collect();
-                                        }
-                                    } else {
-                                        self.completions = left.into_iter().take(5).collect();
-                                        self.open_completions = right.into_iter().take(5).collect();
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                        let mut token_scored: Vec<(String, f32)> = matches.iter()
-                            .map(|(tid, word)| (word.clone(), logits[*tid as usize]))
-                            .collect();
-                        token_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                        // Iterative BPE extension (like Python cognio_demo)
-                        // Diverse candidates: top 20 by logit + top 20 long tokens (≥5 chars)
-                        // Short tokens dominate logits but long tokens carry semantic meaning
-                        let mut left_scored: Vec<(String, f32)> = Vec::new();
-                        let mut seen_words: std::collections::HashSet<String> = std::collections::HashSet::new();
-                        struct Candidate {
-                            token_ids: Vec<u32>,
-                            word: String,
-                            score: f32,
-                            done: bool,
-                        }
-                        let mut candidate_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-                        let mut candidates: Vec<Candidate> = Vec::new();
-
-                        // Top 20 by logit
-                        for (tok_word, tok_score) in token_scored.iter().take(20) {
-                            if candidate_set.insert(tok_word.clone()) {
-                                if let Some((tid, _)) = matches.iter().find(|(_, w)| w == tok_word) {
-                                    candidates.push(Candidate {
-                                        token_ids: vec![*tid],
-                                        word: tok_word.clone(),
-                                        score: *tok_score,
-                                        done: false,
-                                    });
-                                }
-                            }
-                        }
-                        // Top 20 long tokens (≥5 chars) — these are word stems like "menneske"
-                        let mut long_tokens: Vec<&(String, f32)> = token_scored.iter()
-                            .filter(|(w, s)| w.len() >= 5 && *s > 0.0)
-                            .collect();
-                        long_tokens.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        for (tok_word, tok_score) in long_tokens.iter().take(20) {
-                            if candidate_set.insert(tok_word.clone()) {
-                                if let Some((tid, _)) = matches.iter().find(|(_, w)| w == tok_word) {
-                                    candidates.push(Candidate {
-                                        token_ids: vec![*tid],
-                                        word: tok_word.clone(),
-                                        score: *tok_score,
-                                        done: false,
-                                    });
-                                }
-                            }
-                        }
-
-                        // Extract context parts from masked sentence
-                        let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
-                        let ctx_before = mask_parts[0].trim_end();
-                        let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
-
-                        // Adaptive max_steps: longer prefixes need fewer BPE extensions
-                        // since BPE tokens already cover most of the word.
-                        // 1-3 chars → 1 step (needed for compounds like for→forut→forutsi)
-                        // 4+ → 0 steps
-                        let max_steps = if prefix_lower.len() <= 3 { 1 } else { 0 };
-                        for _step in 0..max_steps {
-                            let best_score = candidates.iter()
-                                .filter(|c| !c.done)
-                                .map(|c| c.score)
-                                .fold(f32::NEG_INFINITY, f32::max);
-                            let threshold = best_score - 15.0;
-                            let mut to_extend: Vec<usize> = candidates.iter().enumerate()
-                                .filter(|(_, c)| !c.done && c.score >= threshold)
-                                .map(|(i, _)| i)
-                                .collect();
-                            // Mark low-scoring candidates as done
-                            for c in candidates.iter_mut() {
-                                if !c.done && c.score < threshold {
-                                    c.done = true;
-                                }
-                            }
-                            // Cap batch size: 5 for short prefixes (speed), 10 otherwise
-                            let batch_cap = if prefix_lower.len() <= 2 { 5 } else { 10 };
-                            to_extend.truncate(batch_cap);
-                            if to_extend.is_empty() { break; }
-
-                            // Build batch: "{ctx} {accumulated}<mask> {after}"
-                            // NO space before <mask> → forces continuation token prediction
-                            let batch_texts: Vec<String> = to_extend.iter()
-                                .map(|&i| {
-                                    let accumulated = model.tokenizer
-                                        .decode(&candidates[i].token_ids, false)
-                                        .unwrap_or_default();
-                                    let accumulated = accumulated.trim();
-                                    format!("{} {}<mask> {}", ctx_before, accumulated, ctx_after)
-                                })
-                                .collect();
-
-                            match model.batched_forward_argmax(&batch_texts) {
-                                Ok((argmaxes, _)) => {
-                                    for (k, &i) in to_extend.iter().enumerate() {
-                                        let best_id = argmaxes[k];
-                                        let best_token = &model.id_to_token[best_id as usize];
-
-                                        // Continuation token = no Ġ prefix and not punctuation
-                                        let is_continuation = !best_token.starts_with('Ġ')
-                                            && !matches!(best_token.as_str(), "." | "," | "!" | "?" | ";" | ":");
-
-                                        if is_continuation {
-                                            candidates[i].token_ids.push(best_id);
-                                            candidates[i].word = model.tokenizer
-                                                .decode(&candidates[i].token_ids, false)
-                                                .unwrap_or_default().trim().to_string();
-                                        } else {
-                                            candidates[i].done = true;
-                                        }
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-
-                        // Collect extended words into left_scored
-                        for c in &candidates {
-                            let key = c.word.to_lowercase();
-                            if is_valid(&key) && seen_words.insert(key.clone()) {
-                                left_scored.push((key, c.score));
-                            }
-                        }
-                        eprintln!("BPE candidates: [{}]",
-                            candidates.iter().take(10).map(|c| format!("{}({:.1},done={})", c.word, c.score, c.done))
-                            .collect::<Vec<_>>().join(", "));
-
-                        // Supplement BPE with mtag prefix search + BERT batch scoring.
-                        // Cached per masked_sentence — subsequent keystrokes just filter by prefix.
-                        if !prefix.is_empty() && prefix_lower.len() >= 3 {
-                            let same_masked = self.cached_mtag_supplement.as_ref()
-                                .map_or(false, |(m, _)| m == masked);
-
-                            // Collect new words not already in cache
-                            let already_cached: std::collections::HashSet<String> = if same_masked {
-                                self.cached_mtag_supplement.as_ref()
-                                    .map_or_else(std::collections::HashSet::new, |(_, v)| v.iter().map(|(w, _)| w.clone()).collect())
-                            } else {
-                                std::collections::HashSet::new()
-                            };
-
-                            {
-                                if let Some(checker) = &self.checker {
-                                    let mut mtag_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-                                    // Search from extended BPE words and sub-prefixes
-                                    for c in &candidates {
-                                        let key = c.word.to_lowercase();
-                                        if key.len() > prefix_lower.len() {
-                                            for w in checker.prefix_lookup(&key, 10) {
-                                                if !already_cached.contains(&w) {
-                                                    mtag_set.insert(w);
-                                                }
-                                            }
-                                            let chars: Vec<char> = key.chars().collect();
-                                            let plen = prefix_lower.chars().count();
-                                            for end in (plen + 1)..chars.len() {
-                                                let sub: String = chars[..end].iter().collect();
-                                                for w in checker.prefix_lookup(&sub, 5) {
-                                                    if !already_cached.contains(&w) {
-                                                        mtag_set.insert(w);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    for w in checker.prefix_lookup(&prefix_lower, 10) {
-                                        if !already_cached.contains(&w) {
-                                            mtag_set.insert(w);
-                                        }
-                                    }
-
-                                    if !mtag_set.is_empty() {
-                                        // Phase 1: first-token score + frequency boost
-                                        let mut all_cands: Vec<(String, Vec<u32>, f32)> = mtag_set.into_iter()
-                                            .filter_map(|w| {
-                                                let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
-                                                let ids: Vec<u32> = enc.get_ids().to_vec();
-                                                if ids.is_empty() { return None; }
-                                                let mut score = logits[ids[0] as usize];
-                                                // Frequency boost: common words get +2, unknown get -2
-                                                if let Some(wf) = wf_ref {
-                                                    if wf.contains_key(&w) {
-                                                        score += 2.0;
-                                                    } else {
-                                                        score -= 2.0;
-                                                    }
-                                                }
-                                                Some((w, ids, score))
-                                            })
-                                            .collect();
-
-
-                                        all_cands.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                                        all_cands.truncate(10);
-
-                                        let cands: Vec<(String, Vec<u32>)> = all_cands.iter()
-                                            .map(|(w, ids, _)| (w.clone(), ids.clone())).collect();
-                                        let mut scores: Vec<f32> = all_cands.iter().map(|(_, _, s)| *s).collect();
-
-                                        // Phase 2: multi-token batch scoring with dedup
-                                        let max_tokens = cands.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1).min(3);
-                                        for t in 1..max_tokens {
-                                            let to_score: Vec<usize> = cands.iter().enumerate()
-                                                .filter(|(_, (_, ids))| ids.len() > t)
-                                                .map(|(i, _)| i).collect();
-                                            if to_score.is_empty() { break; }
-
-                                            let mut unique_prefixes: Vec<Vec<u32>> = Vec::new();
-                                            let mut prefix_map: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
-                                            let mut cand_to_prefix: Vec<usize> = Vec::new();
-                                            for &i in &to_score {
-                                                let tp = cands[i].1[..t].to_vec();
-                                                let pidx = *prefix_map.entry(tp.clone()).or_insert_with(|| {
-                                                    let idx = unique_prefixes.len();
-                                                    unique_prefixes.push(tp);
-                                                    idx
-                                                });
-                                                cand_to_prefix.push(pidx);
-                                            }
-
-                                            let batch_texts: Vec<String> = unique_prefixes.iter()
-                                                .map(|ids| {
-                                                    let partial = model.tokenizer.decode(ids, false).unwrap_or_default();
-                                                    format!("{} {}<mask> {}", ctx_before, partial.trim(), ctx_after)
-                                                }).collect();
-
-                                            if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
-                                                for (k, &i) in to_score.iter().enumerate() {
-                                                    let pidx = cand_to_prefix[k];
-                                                    scores[i] += batch_logits[pidx][cands[i].1[t] as usize];
-                                                }
-                                            }
-                                        }
-
-                                        let mtag_scored: Vec<(String, f32)> = cands.iter().enumerate()
-                                            .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
-                                            .collect();
-                                        // Accumulate into cache
-                                        if same_masked {
-                                            if let Some((_, ref mut existing)) = self.cached_mtag_supplement {
-                                                eprintln!("mtag supplement: +{} new (total {})", mtag_scored.len(), existing.len() + mtag_scored.len());
-                                                existing.extend(mtag_scored);
-                                            }
-                                        } else {
-                                            eprintln!("mtag supplement (BERT-ranked, {} cands): computed and cached", mtag_scored.len());
-                                            self.cached_mtag_supplement = Some((masked.clone(), mtag_scored));
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Merge cached results filtered by current prefix
-                            if let Some((_, ref scored)) = self.cached_mtag_supplement {
-                                let filtered: Vec<(String, f32)> = scored.iter()
-                                    .filter(|(w, _)| w.starts_with(&prefix_lower) && !seen_words.contains(w.as_str()))
-                                    .take(10)
-                                    .cloned()
-                                    .collect();
-                                for (w, score) in filtered {
-                                    seen_words.insert(w.clone());
-                                    left_scored.push((w, score));
-                                }
-                            }
-                        }
-
-                        left_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        let left: Vec<Completion> = left_scored.iter()
-                            .take(25)
-                            .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
-                            .collect();
-
-                        // Right list: cached since it only depends on masked sentence, not prefix
-                        let right_scored = if let Some((ref cached_m, ref cached_right)) = self.cached_right_column {
-                            if cached_m == masked {
-                                cached_right.clone()
-                            } else {
-                                let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
-                                    .enumerate()
-                                    .filter(|(_, tok)| tok.starts_with('Ġ'))
-                                    .map(|(i, _)| {
-                                        let decoded = model.tokenizer
-                                            .decode(&[i as u32], false)
-                                            .unwrap_or_default().trim().to_string();
-                                        (decoded, logits[i])
-                                    })
-                                    .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
-                                    .collect();
-                                all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                all_scored.truncate(20);
-                                self.cached_right_column = Some((masked.clone(), all_scored.clone()));
-                                all_scored
-                            }
-                        } else {
-                            let mut all_scored: Vec<(String, f32)> = model.id_to_token.iter()
-                                .enumerate()
-                                .filter(|(_, tok)| tok.starts_with('Ġ'))
-                                .map(|(i, _)| {
-                                    let decoded = model.tokenizer
-                                        .decode(&[i as u32], false)
-                                        .unwrap_or_default().trim().to_string();
-                                    (decoded, logits[i])
-                                })
-                                .filter(|(w, _)| !w.is_empty() && w.len() > 1 && is_valid(w))
-                                .collect();
-                            all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                            all_scored.truncate(20);
-                            self.cached_right_column = Some((masked.clone(), all_scored.clone()));
-                            all_scored
-                        };
-                        let left_words: std::collections::HashSet<&str> = left.iter().map(|c| c.word.as_str()).collect();
-                        let right: Vec<Completion> = right_scored.iter()
-                            .filter(|(w, _)| !left_words.contains(w.as_str()))
-                            .take(10)
-                            .map(|(w, s)| Completion { word: w.clone(), score: *s, elapsed_ms: 0.0 })
-                            .collect();
-
-                        let bert_ms = t_bert.elapsed().as_millis();
-
-                        // Grammar filter both lists
-                        if self.grammar_completion {
-                            if let Some(checker) = &mut self.checker {
-                                // Build context: sentence fragment before <mask>
-                                let before_mask = masked.split("<mask>").next().unwrap_or("");
-                                let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
-                                    .map(|i| i + 1).unwrap_or(0);
-                                let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
-                                let mut check_fn = |sentence: &str| -> GrammarCheckResult {
-                                    let errors = checker.check_sentence(sentence);
-                                    GrammarCheckResult {
-                                        ok: errors.is_empty(),
-                                        suggestions: errors.iter()
-                                            .filter(|e| !e.suggestion.is_empty())
-                                            .map(|e| e.suggestion.clone())
-                                            .collect(),
-                                    }
-                                };
-                                self.completions = grammar_filter(&left, &ctx_for_grammar, prefix, &mut check_fn, 5);
-                                self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
-                            } else {
-                                self.completions = left.into_iter().take(5).collect();
-                                self.open_completions = right.into_iter().take(5).collect();
-                            }
-                        } else {
-                            self.completions = left.into_iter().take(5).collect();
-                            self.open_completions = right.into_iter().take(5).collect();
-                        }
-
-                        let total_ms = t_total.elapsed().as_millis();
-                        eprintln!("fill-blank bert={}ms total={}ms left=[{}] right=[{}]",
-                            bert_ms, total_ms,
-                            self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
-                            self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                    }
-                    Err(e) => eprintln!("Fill-blank error: {}", e),
-                }
-            }
+        // Fill-in-the-blank completions are handled by the background completion thread.
+        // This function only handles the legacy complete_word path (no masked sentence).
+        if self.context.masked_sentence.is_some() {
             return;
         }
+
+        // Legacy complete_word path (no masked sentence)
 
         // Build context and run completion (borrows checker immutably for has_word)
         let raw_results = {
@@ -2364,7 +2165,7 @@ impl ContextApp {
                     prefix,
                     pi,
                     self.baselines.as_ref(),
-                    self.wordfreq.as_ref(),
+                    self.wordfreq.as_deref(),
                     fallback_ref,
                     prefix_ref,
                     self.embedding_store.as_ref(),
@@ -2750,6 +2551,51 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // Startup: poll background loading threads
+        if let Some(rx) = &self.startup_rx {
+            while let Ok(item) = rx.try_recv() {
+                match item {
+                    StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
+                        self.model = model;
+                        self.prefix_index = prefix_index;
+                        self.baselines = baselines;
+                        self.wordfreq = wordfreq;
+                        self.embedding_store = embedding_store;
+                        self.load_errors.extend(errors);
+                        self.startup_done.push("NorBERT4".into());
+                        eprintln!("Startup: NorBERT4 completer ready");
+                    }
+                    StartupItem::Whisper(result) => {
+                        match result {
+                            Ok(engine) => {
+                                self.whisper_engine = Some(Arc::new(Mutex::new(engine)));
+                                self.startup_done.push("Whisper".into());
+                                eprintln!("Startup: Whisper engine ready");
+                            }
+                            Err(e) => {
+                                self.load_errors.push(format!("Whisper: {}", e));
+                                self.startup_done.push("Whisper (feil)".into());
+                                eprintln!("Whisper engine failed to load: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            if self.startup_done.len() >= self.startup_total {
+                self.startup_rx = None;
+            }
+        }
+
+        // Microphone: check if whisper transcription finished
+        if let Some(handle) = &self.mic_handle {
+            if let Ok(result) = handle.result_rx.try_recv() {
+                eprintln!("Whisper transcription complete: '{}'", result.text);
+                self.mic_result_text = Some(result.text);
+                self.mic_handle = None;
+                self.mic_transcribing = false;
+            }
+        }
+
         // Poll for new context
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
@@ -2781,46 +2627,51 @@ impl eframe::App for ContextApp {
                 // Only update context if we got something useful — don't overwrite
                 // good context with empty when our own window is focused
                 if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
+                    // Cursor moved — clear stale grammar queue
+                    if new_ctx.masked_sentence != self.context.masked_sentence && !self.grammar_queue.is_empty() {
+                        eprintln!("Cursor moved — clearing {} stale grammar queue items", self.grammar_queue.len());
+                        self.grammar_queue.clear();
+                        self.grammar_scanning = false;
+                    }
                     // Update doc text cache from masked sentence (strip <mask> to get real text)
+                    // Detect paste/cut/move: large jump in text length triggers full doc scan
                     if let Some(ref masked) = new_ctx.masked_sentence {
                         let doc_approx = masked.replace("<mask>", &new_ctx.word);
+                        let old_len = self.last_doc_text.len();
+                        let new_len = doc_approx.len();
+                        let big_change = old_len == 0 || (new_len as isize - old_len as isize).unsigned_abs() > 20;
                         if doc_approx.len() > self.last_doc_text.len() / 2 {
                             self.last_doc_text = doc_approx;
+                        }
+                        if big_change {
+                            // Paste/cut/move detected — trigger full document grammar scan
+                            self.update_grammar_errors();
                         }
                     }
                     self.context = new_ctx;
                 }
-                // Remove errors for words that have been manually corrected
-                self.prune_resolved_errors();
             }
 
             // Sync document sentences for topic-aware completion
             self.sync_embeddings();
 
-            // Always run grammar check (not just at word boundaries)
-            self.update_grammar_errors();
-            self.upgrade_spelling_suggestions();
-
             let mid = is_mid_word(&self.context.word);
             if mid {
                 // Mid-word: mark prefix change for debouncing
+                // Only trigger run_completion for legacy path (no masked sentence)
+                // Fill-in-the-blank is handled by background completion thread
                 let prefix = extract_prefix(&self.context.word);
-                if prefix != self.last_completed_prefix {
+                if self.context.masked_sentence.is_none() && prefix != self.last_completed_prefix {
                     self.last_prefix_change = Instant::now();
                     self.pending_completion = true;
-                    if !self.selection_mode {
-                        self.selected_completion = None;
-                    }
+                }
+                if !self.selection_mode {
+                    self.selected_completion = None;
                 }
             } else if self.context.masked_sentence.is_some() {
-                // No prefix but have context (e.g. after space): suggest next word
-                let cache_key = format!("__noprefix__{}", self.context.masked_sentence.as_deref().unwrap_or(""));
-                if cache_key != self.last_completed_prefix {
-                    self.last_prefix_change = Instant::now();
-                    self.pending_completion = true;
-                    if !self.selection_mode {
-                        self.selected_completion = None;
-                    }
+                // No prefix but have context (e.g. after space): next-word handled by background thread
+                if !self.selection_mode {
+                    self.selected_completion = None;
                 }
                 // Word boundary: check spelling of the last finished word
                 let sentence = self.context.sentence.clone();
@@ -2834,6 +2685,13 @@ impl eframe::App for ContextApp {
                 self.validate_consonant_checks();
                 // Sentence boundary: run grammar check
                 self.run_grammar_check();
+                // Word boundary work: prune, upgrade, drain grammar queue
+                // Only process grammar queue when no background forward in flight (avoids model mutex contention)
+                self.prune_resolved_errors();
+                self.upgrade_spelling_suggestions();
+                if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
+                    self.process_grammar_queue();
+                }
             } else {
                 // No word, no context: clear and run grammar
                 self.completions.clear();
@@ -2850,124 +2708,188 @@ impl eframe::App for ContextApp {
                 }
                 self.validate_consonant_checks();
                 self.run_grammar_check();
+                // Word boundary work: prune, upgrade, drain grammar queue
+                self.prune_resolved_errors();
+                self.upgrade_spelling_suggestions();
+                if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
+                    self.process_grammar_queue();
+                }
             }
 
-            // Pre-warm forward cache: when masked_sentence changes, run single_forward
-            // eagerly so the first keystroke hits the cache instead of waiting ~150ms.
-            if let Some(masked) = &self.context.masked_sentence {
-                let needs_warmup = match &self.cached_forward {
-                    Some((cached_masked, _)) => cached_masked != masked,
-                    None => true,
-                };
-                if needs_warmup {
+            // Background completion: debounce + dispatch full completion + poll results
+            if let Some(masked) = &self.context.masked_sentence.clone() {
+                let prefix = extract_prefix(&self.context.word);
+                let prefix_lower = prefix.to_lowercase();
+                let cache_key = format!("{}|{}", masked, prefix);
+                let needs_completion = cache_key != self.last_completed_prefix;
+
+                if needs_completion && cache_key != self.dispatched_key {
+                    // Context or prefix changed — reset debounce timer, cancel in-flight
+                    self.last_context_change = Instant::now();
+                    self.dispatched_key = cache_key.clone();
+                    self.completion_cancel.store(true, std::sync::atomic::Ordering::Release);
+                    // Immediately filter existing completions by new prefix
+                    if !prefix_lower.is_empty() {
+                        self.completions.retain(|c| c.word.to_lowercase().starts_with(&prefix_lower));
+                    }
+                }
+
+                // Dispatch after 300ms idle
+                if needs_completion
+                    && self.completion_rx.is_none()
+                    && self.last_context_change.elapsed() >= Duration::from_millis(300)
+                {
                     if let Some(model_arc) = &self.model {
-                        let mut model = model_arc.lock().unwrap();
-                        let t = Instant::now();
-                        if let Ok((logits, _)) = model.single_forward(masked) {
-                            let fwd_ms = t.elapsed().as_millis();
-                            self.cached_forward = Some((masked.clone(), logits.clone()));
-
-                            // Pre-warm mtag supplement: use top word-initial tokens as stems
-                            // to discover and score dictionary words before user types
-                            if let Some(checker) = &self.checker {
-                                let t2 = Instant::now();
-                                // Get top 15 word-initial tokens as stems
-                                let mut stems: Vec<(String, f32)> = model.id_to_token.iter()
-                                    .enumerate()
-                                    .filter(|(_, tok)| tok.starts_with('Ġ'))
-                                    .map(|(i, _)| {
-                                        let decoded = model.tokenizer
-                                            .decode(&[i as u32], false)
-                                            .unwrap_or_default().trim().to_string();
-                                        (decoded, logits[i])
-                                    })
-                                    .filter(|(w, _)| w.len() >= 3)
-                                    .collect();
-                                stems.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                stems.truncate(15);
-
-                                // Find mtag words from these stems + sub-prefixes
-                                let mut mtag_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-                                for (stem, _) in &stems {
-                                    let lower = stem.to_lowercase();
-                                    for w in checker.prefix_lookup(&lower, 5) {
-                                        mtag_set.insert(w);
-                                    }
-                                    // Sub-prefixes for compound discovery
-                                    let chars: Vec<char> = lower.chars().collect();
-                                    for end in 2..chars.len() {
-                                        let sub: String = chars[..end].iter().collect();
-                                        for w in checker.prefix_lookup(&sub, 3) {
-                                            mtag_set.insert(w);
+                        // Pre-fetch on main thread (fast, uses checker)
+                        let matches: Vec<(u32, String)> = self.prefix_index.as_ref()
+                            .and_then(|pi| pi.get(&prefix_lower))
+                            .cloned()
+                            .unwrap_or_default();
+                        let mtag_candidates: Vec<String> = if matches.is_empty() && !prefix.is_empty() {
+                            self.checker.as_ref().map_or(vec![], |c| c.prefix_lookup(&prefix_lower, 50))
+                        } else {
+                            vec![]
+                        };
+                        let nearby_words: std::collections::HashSet<String> = {
+                            let before_mask = masked.split("<mask>").next().unwrap_or("");
+                            before_mask.split_whitespace()
+                                .rev().take(5)
+                                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+                                .filter(|w| w.len() > 1)
+                                .collect()
+                        };
+                        let wordfreq_clone = self.wordfreq.clone();
+                        let model_clone = model_arc.clone();
+                        let cancel = self.completion_cancel.clone();
+                        cancel.store(false, std::sync::atomic::Ordering::Release);
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        // Trim masked text to ~3 sentences around <mask> to keep forward fast
+                        // (full doc context makes BERT 25x slower: 512 tokens vs ~30 tokens)
+                        // Keep 3 sentence boundaries = current sentence + 2 previous for context
+                        let masked_trimmed = {
+                            let parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+                            let before = parts[0];
+                            let after = parts.get(1).map(|s| *s).unwrap_or("");
+                            let trimmed_before = {
+                                let bytes = before.as_bytes();
+                                let mut cuts = 0;
+                                let mut start = 0;
+                                for i in (0..bytes.len()).rev() {
+                                    if bytes[i] == b'.' || bytes[i] == b'!' || bytes[i] == b'?' {
+                                        cuts += 1;
+                                        if cuts >= 3 {
+                                            start = i + 1;
+                                            break;
                                         }
                                     }
                                 }
-
-                                if !mtag_set.is_empty() {
-                                    // Tokenize + first-token filter + frequency boost
-                                    let wf = self.wordfreq.as_ref();
-                                    let mut all_cands: Vec<(String, Vec<u32>, f32)> = mtag_set.into_iter()
-                                        .filter_map(|w| {
-                                            let enc = model.tokenizer.encode(format!(" {}", w).as_str(), false).ok()?;
-                                            let ids: Vec<u32> = enc.get_ids().to_vec();
-                                            if ids.is_empty() { return None; }
-                                            let mut score = logits[ids[0] as usize];
-                                            if let Some(wf) = wf {
-                                                if wf.contains_key(&w) { score += 2.0; } else { score -= 2.0; }
-                                            }
-                                            Some((w, ids, score))
-                                        })
-                                        .collect();
-                                    all_cands.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                                    all_cands.truncate(10);
-
-                                    let cands: Vec<(String, Vec<u32>)> = all_cands.iter()
-                                        .map(|(w, ids, _)| (w.clone(), ids.clone())).collect();
-                                    let mut scores: Vec<f32> = all_cands.iter().map(|(_, _, s)| *s).collect();
-
-                                    // Multi-token scoring (max 2 rounds)
-                                    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
-                                    let ctx_b = mask_parts[0].trim_end();
-                                    let ctx_a = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
-                                    let max_t = cands.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1).min(3);
-                                    for t in 1..max_t {
-                                        let to_score: Vec<usize> = cands.iter().enumerate()
-                                            .filter(|(_, (_, ids))| ids.len() > t)
-                                            .map(|(i, _)| i).collect();
-                                        if to_score.is_empty() { break; }
-                                        let mut unique_pfx: Vec<Vec<u32>> = Vec::new();
-                                        let mut pfx_map: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
-                                        let mut c2p: Vec<usize> = Vec::new();
-                                        for &i in &to_score {
-                                            let tp = cands[i].1[..t].to_vec();
-                                            let pidx = *pfx_map.entry(tp.clone()).or_insert_with(|| {
-                                                let idx = unique_pfx.len(); unique_pfx.push(tp); idx
-                                            });
-                                            c2p.push(pidx);
-                                        }
-                                        let texts: Vec<String> = unique_pfx.iter()
-                                            .map(|ids| {
-                                                let p = model.tokenizer.decode(ids, false).unwrap_or_default();
-                                                format!("{} {}<mask> {}", ctx_b, p.trim(), ctx_a)
-                                            }).collect();
-                                        if let Ok((bl, _)) = model.batched_forward(&texts) {
-                                            for (k, &i) in to_score.iter().enumerate() {
-                                                scores[i] += bl[c2p[k]][cands[i].1[t] as usize];
-                                            }
-                                        }
-                                    }
-
-                                    let mtag_scored: Vec<(String, f32)> = cands.iter().enumerate()
-                                        .map(|(i, (w, ids))| (w.clone(), scores[i] / ids.len() as f32))
-                                        .collect();
-                                    self.cached_mtag_supplement = Some((masked.clone(), mtag_scored));
-                                    self.cached_right_column = None; // will be recomputed on first keystroke
+                                before[start..].trim_start()
+                            };
+                            // Keep first sentence after mask
+                            let trimmed_after = {
+                                if let Some(pos) = after.find(|c: char| ".!?".contains(c)) {
+                                    &after[..=pos]
+                                } else {
+                                    after
                                 }
-                                eprintln!("pre-warmed forward+mtag in {}ms+{}ms", fwd_ms, t2.elapsed().as_millis());
+                            };
+                            format!("{}<mask>{}", trimmed_before, trimmed_after)
+                        };
+                        let masked_clone = masked_trimmed;
+                        let prefix_lower_clone = prefix_lower.clone();
+                        let key_clone = cache_key.clone();
+                        let capitalize = prefix.chars().next().map_or(false, |c| c.is_uppercase());
+
+                        std::thread::spawn(move || {
+                            let t_start = std::time::Instant::now();
+                            let mut model = model_clone.lock().unwrap();
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) { return; }
+
+                            // single_forward → logits (trimmed context for speed)
+                            eprintln!("BERT context: {} chars", masked_clone.len());
+                            let logits = match model.single_forward(&masked_clone) {
+                                Ok((l, _)) => l,
+                                Err(e) => { eprintln!("Background forward error: {}", e); return; }
+                            };
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) { return; }
+
+                            // Build left completions
+                            let left = if matches.is_empty() && !prefix_lower_clone.is_empty() {
+                                build_mtag_completions(&mut model, &masked_clone, &mtag_candidates, &logits, capitalize, &cancel)
+                            } else if !prefix_lower_clone.is_empty() {
+                                build_bpe_completions(&mut model, &masked_clone, &prefix_lower_clone, &matches, &logits, wordfreq_clone.as_deref(), &nearby_words, capitalize, &cancel)
                             } else {
-                                eprintln!("pre-warmed forward cache in {}ms", fwd_ms);
+                                vec![]
+                            };
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) { return; }
+
+                            // Build right completions
+                            let left_words: std::collections::HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
+                            let right = build_right_completions(&model, &logits, wordfreq_clone.as_deref(), &nearby_words, &left_words);
+
+                            let elapsed = t_start.elapsed().as_millis();
+                            eprintln!("Background completion in {}ms: left=[{}] right=[{}]", elapsed,
+                                left.iter().take(5).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
+                                right.iter().take(5).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+
+                            if !cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                let _ = tx.send((key_clone, left, right));
                             }
+                        });
+
+                        self.completion_rx = Some(rx);
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                    }
+                } else if needs_completion && self.completion_rx.is_none() {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+            }
+
+            // Poll background completion results
+            if let Some(rx) = &self.completion_rx {
+                match rx.try_recv() {
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Background thread exited without sending (cancelled)
+                        eprintln!("Background completion cancelled (sender dropped)");
+                        self.completion_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still running — check again soon
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                    }
+                    Ok((key, left, right)) => {
+                    eprintln!("Background completion received: {} left, {} right", left.len(), right.len());
+                    // Apply grammar filter on main thread (checker isn't Send)
+                    if self.grammar_completion {
+                        if let Some(checker) = &mut self.checker {
+                            let masked = self.context.masked_sentence.as_deref().unwrap_or("");
+                            let before_mask = masked.split("<mask>").next().unwrap_or("");
+                            let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
+                                .map(|i| i + 1).unwrap_or(0);
+                            let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
+                            let prefix = extract_prefix(&self.context.word);
+                            let mut check_fn = |sentence: &str| -> GrammarCheckResult {
+                                let errors = checker.check_sentence(sentence);
+                                GrammarCheckResult {
+                                    ok: errors.is_empty(),
+                                    suggestions: errors.iter()
+                                        .filter(|e| !e.suggestion.is_empty())
+                                        .map(|e| e.suggestion.clone())
+                                        .collect(),
+                                }
+                            };
+                            self.completions = grammar_filter(&left, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                            self.open_completions = grammar_filter(&right, &ctx_for_grammar, "", &mut check_fn, 5);
+                        } else {
+                            self.completions = left.into_iter().take(5).collect();
+                            self.open_completions = right.into_iter().take(5).collect();
                         }
+                    } else {
+                        self.completions = left.into_iter().take(5).collect();
+                        self.open_completions = right.into_iter().take(5).collect();
+                    }
+                    self.last_completed_prefix = key;
+                    self.completion_rx = None;
                     }
                 }
             }
@@ -3175,6 +3097,35 @@ impl eframe::App for ContextApp {
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 170, 140)))
             .inner_margin(8.0);
 
+        // Startup loading status bar
+        if self.startup_rx.is_some() {
+            egui::TopBottomPanel::bottom("startup_status").frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(245, 245, 225))
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+            ).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let progress = self.startup_done.len() as f32 / self.startup_total as f32;
+                    let loading: Vec<&str> = ["NorBERT4", "Whisper"]
+                        .iter()
+                        .filter(|s| !self.startup_done.iter().any(|d| d.starts_with(*s)))
+                        .copied()
+                        .collect();
+                    let label = if loading.is_empty() {
+                        "Klar!".to_string()
+                    } else {
+                        format!("Laster {}...", loading.join(", "))
+                    };
+                    ui.add(egui::ProgressBar::new(progress)
+                        .text(label)
+                        .desired_width(ui.available_width())
+                        .desired_height(14.0));
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // Tab bar with painted dot indicators
             let tts_speaking = tts::is_speaking();
@@ -3224,6 +3175,44 @@ impl eframe::App for ContextApp {
                     ).clicked() {
                         tts::stop_speaking();
                         self.ocr_text = None;
+                    }
+                }
+
+                // Microphone button / recording indicator
+                let mic_recording = microphone::is_recording() || self.mic_transcribing;
+                ui.add_space(4.0);
+                if mic_recording {
+                    ui.spinner();
+                    let label = if self.mic_transcribing { "Transkriberer..." } else { "Lytter..." };
+                    ui.label(egui::RichText::new(label).size(10.0).color(egui::Color32::from_rgb(200, 60, 60)));
+                    if ui.add(egui::Button::new(
+                        egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(200, 40, 40))
+                     .min_size(egui::vec2(18.0, 16.0))
+                    ).clicked() {
+                        if let Some(handle) = &self.mic_handle {
+                            handle.stop();
+                            self.mic_transcribing = true;
+                        }
+                    }
+                } else {
+                    let whisper_ready = self.whisper_engine.is_some();
+                    let mic_btn = ui.add_enabled(whisper_ready, egui::Button::new(
+                        egui::RichText::new("🎤").size(13.0)
+                    ).min_size(egui::vec2(22.0, 16.0)));
+                    if !whisper_ready {
+                        mic_btn.on_hover_text("Whisper laster...");
+                    } else if mic_btn.on_hover_text("Start talegjenkjenning").clicked() {
+                        if let Some(engine) = &self.whisper_engine {
+                            match microphone::start_recording(engine.clone()) {
+                                Ok(handle) => {
+                                    eprintln!("Microphone recording started");
+                                    self.mic_handle = Some(handle);
+                                    self.mic_result_text = None;
+                                }
+                                Err(e) => eprintln!("Microphone error: {}", e),
+                            }
+                        }
                     }
                 }
 
@@ -4045,6 +4034,39 @@ impl eframe::App for ContextApp {
                     if let Some(ocr) = &mut self.ocr {
                         ocr.dismiss();
                     }
+                }
+            }
+
+            // === Whisper transcription result window ===
+            if self.mic_result_text.is_some() {
+                let mut do_close = false;
+                let text_clone = self.mic_result_text.clone().unwrap_or_default();
+                egui::Window::new("Talegjenkjenning")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(400.0)
+                    .default_height(200.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&text_clone)
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(30, 30, 30)),
+                            );
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("Kopier").size(13.0)).clicked() {
+                                ctx.copy_text(text_clone.clone());
+                            }
+                            if ui.button(egui::RichText::new("Lukk").size(13.0)).clicked() {
+                                do_close = true;
+                            }
+                        });
+                    });
+                if do_close {
+                    self.mic_result_text = None;
                 }
             }
 
