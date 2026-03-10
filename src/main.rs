@@ -172,6 +172,8 @@ pub(crate) struct WritingError {
     pub(crate) word_doc_end: usize,
     /// Whether we've applied a red wavy underline for this error
     pub(crate) underlined: bool,
+    /// Pinned to top of error list (newly found at word boundary)
+    pub(crate) pinned: bool,
 }
 
 /// Find a word within a sentence and return (doc_start, doc_end) in absolute char offsets.
@@ -453,6 +455,8 @@ struct ContextApp {
     show_debug_tab: bool,
     /// Error index to scroll to when cursor clicks on an underlined word
     focused_error_idx: Option<usize>,
+    focused_error_set_time: Instant,
+    /// Error index pinned to top of list (persists until explicitly cleared)
     // Error list (spelling + grammar)
     writing_errors: Vec<WritingError>,
     /// Words the user has chosen to ignore (spelling)
@@ -920,6 +924,7 @@ impl ContextApp {
             selected_tab: 0,
             show_debug_tab,
             focused_error_idx: None,
+            focused_error_set_time: Instant::now() - Duration::from_secs(10),
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
@@ -1058,7 +1063,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                 });
             }
             return;
@@ -1159,7 +1164,7 @@ impl ContextApp {
                                 doc_offset,
                                 position: 0,
                                 ignored: false,
-                                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                             });
                         }
                     }
@@ -1197,7 +1202,7 @@ impl ContextApp {
                                 doc_offset,
                                 position: 0,
                                 ignored: false,
-                                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                             });
                         }
                     }
@@ -1229,7 +1234,7 @@ impl ContextApp {
                 doc_offset,
                 position: 0,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
             });
             return;
         }
@@ -1266,7 +1271,7 @@ impl ContextApp {
             doc_offset,
             position: 0,
             ignored: false,
-            word_doc_start: 0, word_doc_end: 0, underlined: false,
+            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
         };
         self.writing_errors.push(error);
         eprintln!("Spelling: '{}' not found, suggesting '{}'",
@@ -1363,7 +1368,7 @@ impl ContextApp {
                         doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                     });
                 }
             }
@@ -1407,6 +1412,11 @@ impl ContextApp {
                 let mut passing: Vec<(String, f32)> = Vec::new();
                 if let Some(checker) = &mut self.checker {
                     for (candidate, score) in suggestions.iter().take(8) {
+                        // Candidate must be a real dictionary word
+                        if !checker.has_word(candidate) {
+                            log!("Spelling grammar-check: '{}' — not in dictionary, skipping", candidate);
+                            continue;
+                        }
                         let corrected = sentence_ctx.replacen(&word, candidate, 1);
                         let errors = checker.check_sentence(&corrected);
                         log!("Spelling grammar-check: '{}' in '{}' → {} errors", candidate, corrected, errors.len());
@@ -1415,29 +1425,8 @@ impl ContextApp {
                         }
                     }
                 }
-                // Among grammar-passing candidates, prefer ones with verb readings
-                // (avoids "skrivere" (noun) over "skriver" (verb) after a pronoun)
-                let picked = if passing.len() > 1 {
-                    if let Some(checker) = &self.checker {
-                        // Check if any passing candidate has a verb reading
-                        let with_verb: Vec<_> = passing.iter()
-                            .filter(|(w, _)| {
-                                let pos = checker.pos_set(w);
-                                pos.contains("verb")
-                            })
-                            .collect();
-                        if !with_verb.is_empty() {
-                            // Among verb candidates, pick highest BERT score
-                            let best = with_verb.into_iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-                            log!("Spelling: preferring verb candidate '{}' ({:.2})", best.0, best.1);
-                            Some(best.clone())
-                        } else {
-                            Some(passing[0].clone())
-                        }
-                    } else {
-                        Some(passing[0].clone())
-                    }
-                } else if !passing.is_empty() {
+                // Pick the highest-scoring candidate that passes grammar
+                let picked = if !passing.is_empty() {
                     Some(passing[0].clone())
                 } else {
                     // Fallback to BERT-best if none pass grammar
@@ -1560,10 +1549,10 @@ impl ContextApp {
                         let ids = enc.get_ids();
                         if ids.is_empty() { 0.0 }
                         else {
-                            ids.iter()
-                                .map(|&id| logits.get(id as usize).copied().unwrap_or(0.0))
-                                .sum::<f32>()
-                                / ids.len() as f32
+                            // Use FIRST token only: MLM predicts one token at mask position.
+                            // Averaging multi-token words inflates scores via common subtokens
+                            // (e.g. "er" has high logit everywhere, boosting "skriverer" over "skriver")
+                            logits.get(ids[0] as usize).copied().unwrap_or(0.0)
                         }
                     } else { 0.0 };
 
@@ -2066,7 +2055,7 @@ impl ContextApp {
                 doc_offset: 0,
                 position: 0,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
             });
         }
 
@@ -2085,6 +2074,13 @@ impl ContextApp {
             });
             if has_errors {
                 continue;
+            }
+            // Skip the sentence the user is currently editing (cursor is inside it)
+            if let Some(cursor_off) = self.context.cursor_doc_offset {
+                let sent_end = *doc_offset + trimmed.chars().count();
+                if cursor_off >= *doc_offset && cursor_off <= sent_end {
+                    continue;
+                }
             }
 
             // New sentence — run spelling + queue for grammar
@@ -2190,7 +2186,7 @@ impl ContextApp {
                         doc_offset,
                         position: i,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                     });
                 }
             } else {
@@ -2206,7 +2202,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                 });
             }
         }
@@ -2227,7 +2223,7 @@ impl ContextApp {
                 doc_offset,
                 position: i,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
             });
         }
     }
@@ -2897,11 +2893,18 @@ impl eframe::App for ContextApp {
                             }
                             self.selected_tab = 1; // Always switch to Grammatikk
                             self.focused_error_idx = Some(idx);
+                            // Clear old pins, pin the clicked error
+                            for e in &mut self.writing_errors { e.pinned = false; }
+                            self.writing_errors[idx].pinned = true;
+                            self.focused_error_set_time = Instant::now();
                         } else {
                             if self.focused_error_idx.is_some() {
-                                log!("Click miss: cursor={} (no underlined error at this offset)", cursor_off);
+                                // Don't clear if recently set (e.g. by word-boundary spell check)
+                                if self.focused_error_set_time.elapsed() > Duration::from_millis(500) {
+                                    log!("Click miss: cursor={} (no underlined error at this offset)", cursor_off);
+                                    self.focused_error_idx = None;
+                                }
                             }
-                            self.focused_error_idx = None;
                         }
                     }
 
@@ -2941,8 +2944,21 @@ impl eframe::App for ContextApp {
                     })
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
-                    log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, &sentence[..sentence.len().min(50)], cursor_off);
-                    self.check_spelling(w, &sentence, cursor_off);
+                    if *w != self.last_spell_checked_word {
+                        let errors_before = self.writing_errors.len();
+                        log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, &sentence[..sentence.len().min(50)], cursor_off);
+                        self.check_spelling(w, &sentence, cursor_off);
+                        self.last_spell_checked_word = w.clone();
+                        // If a new error was found, switch to Grammatikk tab and highlight it
+                        if self.writing_errors.len() > errors_before {
+                            self.selected_tab = 1;
+                            let new_idx = self.writing_errors.len() - 1;
+                            self.focused_error_idx = Some(new_idx);
+                            for e in &mut self.writing_errors { e.pinned = false; }
+                            self.writing_errors[new_idx].pinned = true;
+                            self.focused_error_set_time = Instant::now();
+                        }
+                    }
                 }
                 self.process_deferred_consonant_bert();
                 self.validate_consonant_checks();
@@ -3438,82 +3454,75 @@ impl eframe::App for ContextApp {
             let tts_speaking = tts::is_speaking();
             let ocr_is_busy = self.ocr_receiver.is_some();
             ui.horizontal(|ui| {
-                // Tab list: 💡 (Innhold), ✏ (Grammatikk), ⚙ (Innstillinger), optionally Debug
-                let mut tabs: Vec<(usize, &str)> = vec![
-                    (0, "\u{1F4A1}"), (1, "\u{270F}"), (2, "\u{2699}")
-                ];
-                if self.show_debug_tab {
-                    tabs.push((3, "Debug"));
-                }
-                for (tab_idx, (id, name)) in tabs.iter().enumerate() {
-                    // Draw colored dot for Grammatikk tab only
-                    if *id == 1 {
-                        let dot_color = if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
-                            else { egui::Color32::from_rgb(0, 180, 60) };
-                        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
-                        let center = egui::pos2(dot_rect.min.x + 5.0, dot_rect.center().y);
-                        ui.painter().circle_filled(center, 4.0, dot_color);
-                    }
+                let sep = egui::Color32::from_rgb(180, 170, 140);
+                let active = egui::Color32::from_rgb(0, 70, 160);
+                let inactive = egui::Color32::from_rgb(100, 100, 100);
 
-                    let is_selected = self.selected_tab == *id;
-                    let font_size = if *id <= 2 { 16.0 } else { 12.0 };
-                    let text = egui::RichText::new(*name).size(font_size);
-                    let text = if is_selected {
-                        text.strong().color(egui::Color32::from_rgb(0, 70, 160))
-                    } else {
-                        text.color(egui::Color32::from_rgb(100, 100, 100))
-                    };
-                    if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
-                        self.selected_tab = *id;
-                    }
-                    if tab_idx < tabs.len() - 1 {
-                        ui.add_space(2.0);
-                        ui.label(egui::RichText::new("|").size(12.0).color(egui::Color32::from_rgb(180, 170, 140)));
-                        ui.add_space(2.0);
-                    }
+                // --- Left side: 💡 | ● ✏ | 📌 | 🎤 ---
+
+                // 💡 Innhold
+                let innhold_color = if self.selected_tab == 0 { active } else { inactive };
+                if ui.add(egui::Label::new(
+                    egui::RichText::new("\u{1F4A1}").size(16.0).color(innhold_color)
+                ).sense(egui::Sense::click())).clicked() {
+                    self.selected_tab = 0;
                 }
 
-                // Floating window toggle in main bar
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("|").size(12.0).color(egui::Color32::from_rgb(180, 170, 140)));
-                ui.add_space(4.0);
-                let pin_icon = if self.follow_cursor { "\u{1F4CC}" } else { "\u{1F4CC}" }; // 📌
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("|").size(12.0).color(sep));
+                ui.add_space(2.0);
+
+                // ● ✏ Grammatikk (dot + pen)
+                let dot_color = if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
+                    else { egui::Color32::from_rgb(0, 180, 60) };
+                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+                let center = egui::pos2(dot_rect.min.x + 5.0, dot_rect.center().y);
+                ui.painter().circle_filled(center, 4.0, dot_color);
+                let gram_color = if self.selected_tab == 1 { active } else { inactive };
+                if ui.add(egui::Label::new(
+                    egui::RichText::new("\u{270F}").size(16.0).color(gram_color)
+                ).sense(egui::Sense::click())).clicked() {
+                    self.selected_tab = 1;
+                }
+
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("|").size(12.0).color(sep));
+                ui.add_space(2.0);
+
+                // 📌 Follow cursor toggle
                 let pin_color = if self.follow_cursor {
                     egui::Color32::from_rgb(0, 120, 60)
                 } else {
                     egui::Color32::from_rgb(160, 160, 160)
                 };
                 if ui.add(egui::Label::new(
-                    egui::RichText::new(pin_icon).size(14.0).color(pin_color)
+                    egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
                 ).sense(egui::Sense::click())).clicked() {
                     self.follow_cursor = !self.follow_cursor;
                 }
 
-                // TTS reading indicator + stop button
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("|").size(12.0).color(sep));
+                ui.add_space(2.0);
+
+                // 🎤 Microphone / TTS speaking / recording — always same slot
+                let mic_recording = microphone::is_recording() || self.mic_transcribing;
                 if tts_speaking || ocr_is_busy {
-                    ui.add_space(4.0);
-                    ui.spinner();
+                    // TTS speaking: show stop button in mic slot
                     if ui.add(egui::Button::new(
                         egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
-                     .min_size(egui::vec2(18.0, 16.0))
+                     .min_size(egui::vec2(22.0, 16.0))
                     ).clicked() {
                         tts::stop_speaking();
                         self.ocr_text = None;
                     }
-                }
-
-                // Microphone button / recording indicator
-                let mic_recording = microphone::is_recording() || self.mic_transcribing;
-                ui.add_space(4.0);
-                if mic_recording {
-                    ui.spinner();
-                    let label = if self.mic_transcribing { "Transkriberer..." } else { "Lytter..." };
-                    ui.label(egui::RichText::new(label).size(10.0).color(egui::Color32::from_rgb(200, 60, 60)));
+                } else if mic_recording {
+                    // Recording: show stop button
                     if ui.add(egui::Button::new(
                         egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
-                     .min_size(egui::vec2(18.0, 16.0))
+                     .min_size(egui::vec2(22.0, 16.0))
                     ).clicked() {
                         if let Some(handle) = &self.mic_handle {
                             handle.stop();
@@ -3521,14 +3530,11 @@ impl eframe::App for ContextApp {
                         }
                     }
                 } else {
+                    // Idle: show mic button
                     let whisper_ready = self.whisper_engine.is_some();
-                    let mic_color = if whisper_ready {
-                        egui::Color32::from_rgb(100, 100, 100)
-                    } else {
-                        egui::Color32::from_rgb(160, 160, 160)
-                    };
+                    let mic_color = if whisper_ready { inactive } else { egui::Color32::from_rgb(160, 160, 160) };
                     let mic_btn = ui.add_enabled(whisper_ready, egui::Button::new(
-                        egui::RichText::new("🎤").size(13.0).color(mic_color)
+                        egui::RichText::new("\u{1F3A4}").size(13.0).color(mic_color)
                     ).fill(egui::Color32::TRANSPARENT)
                      .min_size(egui::vec2(22.0, 16.0)));
                     if !whisper_ready {
@@ -3547,19 +3553,50 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // Drag area for remaining space (leave room for close button)
+                // Debug tab (if enabled)
+                if self.show_debug_tab {
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("|").size(12.0).color(sep));
+                    ui.add_space(2.0);
+                    let dbg_color = if self.selected_tab == 3 { active } else { inactive };
+                    if ui.add(egui::Label::new(
+                        egui::RichText::new("Debug").size(12.0).color(dbg_color)
+                    ).sense(egui::Sense::click())).clicked() {
+                        self.selected_tab = 3;
+                    }
+                }
+
+                // --- Error count (on Grammatikk tab) ---
+                if self.selected_tab == 1 {
+                    let err_count = self.writing_errors.iter().filter(|e| !e.ignored).count();
+                    if err_count > 0 {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Tips:").size(9.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0).strong().color(egui::Color32::from_rgb(180, 60, 60)));
+                    }
+                }
+
+                // --- Right side: drag area, ⚙, ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let close_w = 20.0;
+                let right_w = 42.0; // ⚙ + ✕
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
-                    egui::pos2(remaining.max.x - close_w, remaining.max.y),
+                    egui::pos2(remaining.max.x - right_w, remaining.max.y),
                 );
                 let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
-                // Close button
+                // ⚙ Settings
+                let settings_color = if self.selected_tab == 2 { active } else { inactive };
+                if ui.add(egui::Label::new(
+                    egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
+                ).sense(egui::Sense::click())).clicked() {
+                    self.selected_tab = 2;
+                }
+
+                // ✕ Close button
                 let close_resp = ui.allocate_rect(
                     egui::Rect::from_min_size(ui.cursor().min, egui::vec2(18.0, 18.0)),
                     egui::Sense::click() | egui::Sense::hover(),
@@ -3724,11 +3761,21 @@ impl eframe::App for ContextApp {
                     .filter(|(_, e)| !e.ignored)
                     .map(|(i, _)| i)
                     .collect();
-                // Sort: SentenceBoundary first, then Grammar, then Spelling
-                active_errors.sort_by_key(|&i| match self.writing_errors[i].category {
-                    ErrorCategory::SentenceBoundary => 0,
-                    ErrorCategory::Grammar => 1,
-                    ErrorCategory::Spelling => 2,
+                // Sort: focused error first, then SentenceBoundary, Grammar, Spelling
+                let focused = self.focused_error_idx;
+                active_errors.sort_by_key(|&i| {
+                    let is_focused = focused == Some(i);
+                    let is_pinned = self.writing_errors[i].pinned;
+                    // Focused/pinned → 0, rest sorted by category
+                    if is_focused || is_pinned { (0, 0) }
+                    else {
+                        let cat = match self.writing_errors[i].category {
+                            ErrorCategory::SentenceBoundary => 0,
+                            ErrorCategory::Grammar => 1,
+                            ErrorCategory::Spelling => 2,
+                        };
+                        (1, cat)
+                    }
                 });
 
                 if active_errors.is_empty() {
@@ -3738,13 +3785,6 @@ impl eframe::App for ContextApp {
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
                 } else {
-                    ui.label(
-                        egui::RichText::new(format!("Mulige feil? ({})", active_errors.len()))
-                            .size(12.0)
-                            .strong()
-                            .color(egui::Color32::from_rgb(80, 80, 80)),
-                    );
-                    ui.add_space(4.0);
 
                     let mut action: Option<(usize, &str)> = None;
 
@@ -3758,7 +3798,7 @@ impl eframe::App for ContextApp {
                         // For grammar errors with position > 0, skip — they're shown as alternatives
                         // (but never skip the focused error — it must render for yellow highlight)
                         if matches!(error.category, ErrorCategory::Grammar) && error.position > 0
-                            && self.focused_error_idx != Some(idx)
+                            && self.focused_error_idx != Some(idx) && !error.pinned
                         {
                             if shown_contexts.contains(&(error.sentence_context.clone(), error.doc_offset)) {
                                 continue;
@@ -3767,7 +3807,7 @@ impl eframe::App for ContextApp {
 
                         ui.separator();
                         // Highlight and scroll to the focused error (cursor on underlined word)
-                        let is_focused = self.focused_error_idx == Some(idx);
+                        let is_focused = self.focused_error_idx == Some(idx) || error.pinned;
                         let frame = if is_focused {
                             egui::Frame::NONE.fill(egui::Color32::from_rgba_premultiplied(255, 255, 180, 255))
                                 .inner_margin(4.0).corner_radius(4.0)
@@ -3928,6 +3968,10 @@ impl eframe::App for ContextApp {
 
                     // Handle actions after rendering
                     if let Some((idx, act)) = action {
+                        // Clear pin when user acts on any error
+                        if matches!(act, "fix" | "ignore" | "ignore_group") {
+                            self.writing_errors[idx].pinned = false;
+                        }
                         match act {
                             "fix" => {
                                 let error = &self.writing_errors[idx];

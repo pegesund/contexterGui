@@ -275,7 +275,7 @@ fn run_scan(
                         doc_offset: *doc_offset,
                         position: i,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                     });
                 }
             } else {
@@ -290,7 +290,7 @@ fn run_scan(
                     doc_offset: *doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                 });
             }
         }
@@ -309,7 +309,7 @@ fn run_scan(
                 doc_offset: *doc_offset,
                 position: i,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
             });
         }
     }
