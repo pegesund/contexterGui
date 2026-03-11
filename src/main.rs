@@ -242,6 +242,8 @@ struct BridgeManager {
     last_user_pid: u32,
     /// Last successfully read context (returned when our window is foreground)
     last_context: Option<CursorContext>,
+    /// Set when bridge switches — main loop should clear stale errors
+    bridge_switched: bool,
 }
 
 impl BridgeManager {
@@ -258,6 +260,8 @@ impl BridgeManager {
             }
             bridges.push(Box::new(bridge::accessibility_win::AccessibilityBridge::new()));
         }
+        // Browser bridge (via Chrome/Edge extension) — highest priority for browser textareas
+        bridges.push(Box::new(bridge::browser::BrowserBridge::new()));
 
         BridgeManager {
             bridges,
@@ -265,6 +269,7 @@ impl BridgeManager {
             active_idx: 0,
             last_user_pid: 0,
             last_context: None,
+            bridge_switched: false,
         }
     }
 
@@ -317,8 +322,16 @@ impl BridgeManager {
         // The user's caret is still in whatever app they were typing in.
         // Don't call GetFocusedElement() — it returns the terminal, not the user's app.
         if our_window_focused {
+            let active_name = self.bridges.get(self.active_idx).map(|b| b.name()).unwrap_or("");
             // For Word COM, we can safely re-read (COM calls work regardless of focus)
-            if self.bridges.get(self.active_idx).map(|b| b.name()) == Some("Word COM") {
+            if active_name == "Word COM" {
+                if let Some(ctx) = self.bridges[self.active_idx].read_context() {
+                    self.last_context = Some(ctx.clone());
+                    return Some(ctx);
+                }
+            }
+            // For Browser bridge, re-read (file-based, works regardless of focus)
+            if active_name == "Browser" {
                 if let Some(ctx) = self.bridges[self.active_idx].read_context() {
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
@@ -363,6 +376,7 @@ impl BridgeManager {
                             log!("Bridge switch: {} → {} ('{}')",
                                 self.bridges[self.active_idx].name(), bridge.name(),
                                 if !ctx.word.is_empty() { &ctx.word } else { trunc(&ctx.sentence, 40) });
+                            self.bridge_switched = true;
                         }
                         self.active_idx = i;
                         self.last_user_pid = fg_pid;
@@ -396,7 +410,11 @@ impl BridgeManager {
 
     #[allow(dead_code)]
     fn replace_word(&self, new_text: &str) -> bool {
-        self.active_bridge().map(|b| b.replace_word(new_text)).unwrap_or(false)
+        let bridge_name = self.active_bridge().map(|b| b.name()).unwrap_or("none");
+        log!("replace_word('{}') via bridge '{}' (idx={})", new_text, bridge_name, self.active_idx);
+        let result = self.active_bridge().map(|b| b.replace_word(new_text)).unwrap_or(false);
+        log!("replace_word result: {}", result);
+        result
     }
 
     fn find_and_replace(&self, find: &str, replace: &str) -> bool {
@@ -2824,6 +2842,12 @@ impl eframe::App for ContextApp {
                 r
             };
             if ok {
+                // Remove the fixed error from the error list
+                let find_lower = find.to_lowercase();
+                self.writing_errors.retain(|e| {
+                    !(e.word.to_lowercase() == find_lower && e.doc_offset == doc_offset)
+                });
+                log!("  Removed error '{}' from list", find);
                 // Document changed — reset doc hash so next poll re-scans
                 self.last_doc_hash = 0;
                 // Clear grammar queue — document changed, stale sentences
@@ -3001,10 +3025,25 @@ impl eframe::App for ContextApp {
             self.last_poll = Instant::now();
 
             if let Some(new_ctx) = self.manager.read_context() {
-                // Save the foreground window only when we got useful context from it
-                if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() {
-                    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-                    let fg = unsafe { GetForegroundWindow() };
+                // Clear stale errors when switching between bridges
+                if self.manager.bridge_switched {
+                    self.manager.bridge_switched = false;
+                    log!("Bridge switched — clearing {} stale errors", self.writing_errors.len());
+                    self.writing_errors.clear();
+                }
+                #[cfg(target_os = "windows")]
+                let fg = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
+                };
+                if new_ctx.caret_pos.is_some() {
+                    self.last_caret_pos = new_ctx.caret_pos;
+                }
+                // Only update context if we got something useful — don't overwrite
+                // good context with empty when our own window is focused
+                if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
+                    // Save the foreground HWND only when we got useful context
+                    // (prevents saving Slack/terminal HWND when just switching windows)
+                    #[cfg(target_os = "windows")]
                     if fg.0 as isize != 0 {
                         let our_title = "NorskTale";
                         let mut buf = [0u16; 64];
@@ -3020,13 +3059,6 @@ impl eframe::App for ContextApp {
                             self.manager.set_target_hwnd(fg.0 as isize);
                         }
                     }
-                }
-                if new_ctx.caret_pos.is_some() {
-                    self.last_caret_pos = new_ctx.caret_pos;
-                }
-                // Only update context if we got something useful — don't overwrite
-                // good context with empty when our own window is focused
-                if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
                     // Cursor moved — clear stale grammar queue
                     if new_ctx.masked_sentence != self.context.masked_sentence && !self.grammar_queue.is_empty() {
                         eprintln!("Cursor moved — clearing {} stale grammar queue items", self.grammar_queue.len());
@@ -3956,6 +3988,7 @@ impl eframe::App for ContextApp {
 
 
                     if let Some(word) = clicked_word {
+                        log!("CLICKED word: '{}' bridge={}", word, self.manager.active_bridge_name());
                         self.return_focus_to_app();
                         self.manager.replace_word(&word);
                         self.completions.clear();

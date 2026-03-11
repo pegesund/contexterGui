@@ -75,6 +75,8 @@ pub mod word_com;
 #[cfg(target_os = "windows")]
 pub mod accessibility_win;
 
+pub mod browser;
+
 // Future:
 // #[cfg(target_os = "macos")]
 // pub mod word_applescript;

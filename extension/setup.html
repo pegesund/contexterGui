@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NorskTale Extension Setup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a2e; color: #e0e0e0; min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  h1 { font-size: 1.4rem; padding: 20px 24px 10px; color: #7fdbca; }
+  h1 span { color: #888; font-weight: 400; font-size: 0.85rem; margin-left: 8px; }
+
+  .container {
+    display: grid; grid-template-columns: 340px 1fr; gap: 0;
+    flex: 1; overflow: hidden;
+  }
+
+  .steps {
+    background: #16213e; padding: 16px; overflow-y: auto;
+    border-right: 1px solid #2a2a4a;
+  }
+
+  .step {
+    background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 8px;
+    padding: 14px; margin-bottom: 12px; transition: border-color 0.2s;
+  }
+  .step.active { border-color: #7fdbca; }
+  .step.done { border-color: #4caf50; }
+
+  .step-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  }
+  .step-num {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #2a2a4a; color: #888; font-size: 0.8rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .step.done .step-num { background: #4caf50; color: #fff; }
+  .step.active .step-num { background: #7fdbca; color: #1a1a2e; }
+  .step-title { font-weight: 600; font-size: 0.9rem; }
+
+  .step-body { font-size: 0.82rem; color: #aaa; line-height: 1.5; }
+  .step-body code {
+    background: #2a2a4a; padding: 2px 6px; border-radius: 3px;
+    font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.78rem;
+    color: #7fdbca; word-break: break-all;
+  }
+  .step-body .path {
+    display: block; margin: 6px 0; padding: 6px 8px;
+    background: #0d1117; border-radius: 4px; font-size: 0.75rem;
+    font-family: monospace; color: #c9d1d9; user-select: all;
+  }
+
+  .id-input {
+    width: 100%; margin: 8px 0; padding: 8px 10px;
+    background: #0d1117; border: 1px solid #3a3a5a; border-radius: 4px;
+    color: #e0e0e0; font-family: monospace; font-size: 0.85rem;
+    outline: none; transition: border-color 0.2s;
+  }
+  .id-input:focus { border-color: #7fdbca; }
+  .id-input::placeholder { color: #555; }
+
+  .check { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .check input { accent-color: #4caf50; }
+  .check label { font-size: 0.82rem; cursor: pointer; }
+
+  /* Right panel */
+  .output {
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  .output-tabs {
+    display: flex; background: #16213e; border-bottom: 1px solid #2a2a4a;
+  }
+  .tab-btn {
+    padding: 10px 18px; background: none; border: none; color: #888;
+    font-size: 0.85rem; cursor: pointer; border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  .tab-btn:hover { color: #ccc; }
+  .tab-btn.active { color: #7fdbca; border-bottom-color: #7fdbca; }
+
+  .tab-content {
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: none;
+  }
+  .tab-content.active { display: block; }
+
+  .code-block {
+    background: #0d1117; border: 1px solid #2a2a4a; border-radius: 6px;
+    padding: 14px; font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.8rem; line-height: 1.6; white-space: pre-wrap;
+    word-break: break-all; color: #c9d1d9; position: relative;
+  }
+  .code-block .kw { color: #ff7b72; }
+  .code-block .str { color: #a5d6ff; }
+  .code-block .key { color: #d2a8ff; }
+  .code-block .val { color: #7ee787; }
+  .code-block .comment { color: #6a737d; }
+  .code-block .highlight { color: #ffa657; font-weight: 600; }
+
+  .copy-btn {
+    position: absolute; top: 8px; right: 8px;
+    background: #2a2a4a; border: none; color: #aaa; padding: 5px 10px;
+    border-radius: 4px; font-size: 0.75rem; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .copy-btn:hover { background: #3a3a5a; color: #fff; }
+  .copy-btn.copied { background: #4caf50; color: #fff; }
+
+  .section-title {
+    font-size: 0.9rem; font-weight: 600; color: #7fdbca;
+    margin: 16px 0 8px;
+  }
+  .section-title:first-child { margin-top: 0; }
+
+  .status-bar {
+    background: #16213e; border-top: 1px solid #2a2a4a;
+    padding: 10px 20px; display: flex; align-items: center; gap: 16px;
+    font-size: 0.82rem;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+  }
+  .status-dot.green { background: #4caf50; }
+  .status-dot.yellow { background: #ffa657; }
+  .status-dot.red { background: #f85149; }
+</style>
+</head>
+<body>
+
+<h1>NorskTale Extension Setup <span>Browser bridge for textarea cursor tracking</span></h1>
+
+<div class="container">
+  <div class="steps">
+
+    <div class="step" id="step1">
+      <div class="step-header">
+        <div class="step-num">1</div>
+        <div class="step-title">Load Extension in Edge</div>
+      </div>
+      <div class="step-body">
+        Open <code>edge://extensions/</code> in Edge<br><br>
+        Enable <strong>Developer mode</strong> (toggle in sidebar)<br><br>
+        Click <strong>Load unpacked</strong> and select:
+        <span class="path">C:\Users\pette\dev\contexter\NorskTale\acatts-rust\extension</span>
+        <div class="check">
+          <input type="checkbox" id="check1" onchange="updateState()">
+          <label for="check1">Extension loaded</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="step" id="step2">
+      <div class="step-header">
+        <div class="step-num">2</div>
+        <div class="step-title">Enter Extension ID</div>
+      </div>
+      <div class="step-body">
+        Copy the <strong>ID</strong> shown under the extension in Edge:
+        <input class="id-input" id="extId" type="text"
+          placeholder="e.g. abcdefghijklmnopqrstuvwxyz"
+          oninput="updateState()">
+      </div>
+    </div>
+
+    <div class="step" id="step3">
+      <div class="step-header">
+        <div class="step-num">3</div>
+        <div class="step-title">Save Native Manifest</div>
+      </div>
+      <div class="step-body">
+        Click <strong>Copy Manifest</strong> on the right, then save to:
+        <span class="path">C:\Users\pette\dev\contexter\NorskTale\acatts-rust\extension\com.norsktale.bridge.json</span>
+        Or click <strong>Auto-Save</strong> to write it directly.
+        <div class="check">
+          <input type="checkbox" id="check3" onchange="updateState()">
+          <label for="check3">Manifest saved</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="step" id="step4">
+      <div class="step-header">
+        <div class="step-num">4</div>
+        <div class="step-title">Register Native Host</div>
+      </div>
+      <div class="step-body">
+        Copy and run the <strong>registry commands</strong> from the right panel in a terminal (no admin needed — uses HKCU).
+        <div class="check">
+          <input type="checkbox" id="check4" onchange="updateState()">
+          <label for="check4">Registry updated</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="step" id="step5">
+      <div class="step-header">
+        <div class="step-num">5</div>
+        <div class="step-title">Restart Edge & NorskTale</div>
+      </div>
+      <div class="step-body">
+        Close and reopen Edge, then start NorskTale. Click in a textarea — NorskTale should now track your cursor position.
+        <div class="check">
+          <input type="checkbox" id="check5" onchange="updateState()">
+          <label for="check5">Working!</label>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="output">
+    <div class="output-tabs">
+      <button class="tab-btn active" onclick="switchTab('manifest')">Manifest JSON</button>
+      <button class="tab-btn" onclick="switchTab('registry')">Registry Commands</button>
+      <button class="tab-btn" onclick="switchTab('test')">Test</button>
+    </div>
+
+    <div class="tab-content active" id="tab-manifest">
+      <div class="section-title">com.norsktale.bridge.json</div>
+      <div class="code-block" id="manifest-code"></div>
+    </div>
+
+    <div class="tab-content" id="tab-registry">
+      <div class="section-title">Registry Commands (run in terminal)</div>
+      <div class="code-block" id="registry-code"></div>
+    </div>
+
+    <div class="tab-content" id="tab-test">
+      <div class="section-title">Quick Test</div>
+      <div style="font-size:0.85rem; color:#aaa; margin-bottom:16px; line-height:1.6;">
+        After setup, type in this textarea. If NorskTale picks it up with cursor tracking, the Browser bridge is working.
+      </div>
+      <textarea style="width:100%; height:120px; background:#0d1117; color:#e0e0e0; border:1px solid #2a2a4a;
+        border-radius:6px; padding:12px; font-size:1rem; font-family:inherit; resize:vertical; outline:none;"
+        placeholder="Skriv noe her for å teste..."></textarea>
+      <div style="margin-top:12px; font-size:0.82rem; color:#888;">
+        Check <code>%TEMP%\norsktale-browser.json</code> — it should update as you type.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="status-bar">
+  <span><span class="status-dot" id="status-dot"></span></span>
+  <span id="status-text">Enter extension ID to generate configuration</span>
+</div>
+
+<script>
+const CONFIG = {
+  hostName: 'com.norsktale.bridge',
+  hostPath: 'C:\\\\Users\\\\pette\\\\dev\\\\contexter\\\\NorskTale\\\\acatts-rust\\\\target\\\\release\\\\native_bridge.exe',
+  manifestPath: 'C:\\\\Users\\\\pette\\\\dev\\\\contexter\\\\NorskTale\\\\acatts-rust\\\\extension\\\\com.norsktale.bridge.json',
+  regEdge: 'HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.norsktale.bridge',
+  regChrome: 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.norsktale.bridge',
+};
+
+function getExtId() {
+  return document.getElementById('extId').value.trim().toLowerCase();
+}
+
+function getManifestObj(extId) {
+  return {
+    name: "com.norsktale.bridge",
+    description: "NorskTale native messaging host for browser textarea monitoring",
+    path: "C:\\Users\\pette\\dev\\contexter\\NorskTale\\acatts-rust\\target\\release\\native_bridge.exe",
+    type: "stdio",
+    allowed_origins: [
+      extId ? `chrome-extension://${extId}/` : "chrome-extension://EXTENSION_ID_HERE/"
+    ]
+  };
+}
+
+function getManifestJson(extId) {
+  return JSON.stringify(getManifestObj(extId), null, 2);
+}
+
+function getRegistryCommands(extId) {
+  const mp = CONFIG.manifestPath.replace(/\\\\/g, '\\');
+  return `@echo off\nREM Register NorskTale native messaging host\n\nREM Edge\nreg add "${CONFIG.regEdge}" /ve /t REG_SZ /d "${mp}" /f\n\nREM Chrome\nreg add "${CONFIG.regChrome}" /ve /t REG_SZ /d "${mp}" /f\n\necho Done.`;
+}
+
+function highlightJson(json) {
+  return json
+    .replace(/"([^"]+)"(\s*:)/g, '<span class="key">"$1"</span>$2')
+    .replace(/: "([^"]*EXTENSION_ID_HERE[^"]*)"/g, ': "<span class="highlight">$1</span>"')
+    .replace(/: "(chrome-extension:\/\/[a-z]+\/)"/g, ': "<span class="val">$1</span>"')
+    .replace(/: "([^"]*)"/g, ': "<span class="str">"$1"</span>"')
+    // fix double quotes from replace
+    .replace(/"<span class="str">/g, '<span class="str">')
+    .replace(/<\/span>""/g, '</span>"');
+}
+
+function highlightBat(bat) {
+  return bat
+    .replace(/^(REM .*)$/gm, '<span class="comment">$1</span>')
+    .replace(/^(@echo off)$/gm, '<span class="kw">$1</span>')
+    .replace(/(reg add)/g, '<span class="kw">$1</span>')
+    .replace(/(\/ve|\/t|\/d|\/f)/g, '<span class="val">$1</span>');
+}
+
+function copyText(text, btnId) {
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById(btnId);
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+function updateState() {
+  const extId = getExtId();
+  const checks = [
+    document.getElementById('check1').checked,
+    extId.length >= 10,
+    document.getElementById('check3').checked,
+    document.getElementById('check4').checked,
+    document.getElementById('check5').checked,
+  ];
+
+  // Update step states
+  for (let i = 1; i <= 5; i++) {
+    const step = document.getElementById('step' + i);
+    step.classList.remove('active', 'done');
+    if (checks[i-1]) step.classList.add('done');
+    else if (i === 1 || checks[i-2]) step.classList.add('active');
+  }
+
+  // Manifest preview
+  const manifestJson = getManifestJson(extId);
+  const manifestEl = document.getElementById('manifest-code');
+  manifestEl.innerHTML = highlightJson(manifestJson) +
+    `<button class="copy-btn" id="copy-manifest" onclick="copyText(getManifestJson(getExtId()), 'copy-manifest')">Copy</button>`;
+
+  // Registry preview
+  const regCmds = getRegistryCommands(extId);
+  const regEl = document.getElementById('registry-code');
+  regEl.innerHTML = highlightBat(regCmds) +
+    `<button class="copy-btn" id="copy-registry" onclick="copyText(getRegistryCommands(getExtId()), 'copy-registry')">Copy</button>`;
+
+  // Status bar
+  const dot = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  const doneCount = checks.filter(Boolean).length;
+  if (doneCount === 5) {
+    dot.className = 'status-dot green';
+    text.textContent = 'Setup complete! NorskTale browser bridge is ready.';
+  } else if (extId.length >= 10) {
+    dot.className = 'status-dot yellow';
+    text.textContent = `${doneCount}/5 steps done — Extension ID: ${extId}`;
+  } else {
+    dot.className = 'status-dot red';
+    text.textContent = 'Enter extension ID to generate configuration';
+  }
+}
+
+// Init
+updateState();
+</script>
+</body>
+</html>
