@@ -318,48 +318,34 @@ impl BridgeManager {
             log!("FG: '{}' pid={} our={} word={} last_user={}", trunc(&fg_title, 40), fg_pid, our_window_focused, word_is_foreground, self.last_user_pid);
         }
 
-        // When our window is foreground, return cached context.
-        // The user's caret is still in whatever app they were typing in.
-        // Don't call GetFocusedElement() — it returns the terminal, not the user's app.
+        // Our window is foreground — keep using saved bridge. No re-detection.
         if our_window_focused {
             let active_name = self.bridges.get(self.active_idx).map(|b| b.name()).unwrap_or("");
-            // For Word COM, we can safely re-read (COM calls work regardless of focus)
-            if active_name == "Word COM" {
+            // Word COM and Browser can re-read (COM calls / file reads work without focus)
+            if active_name == "Word COM" || active_name == "Browser" {
                 if let Some(ctx) = self.bridges[self.active_idx].read_context() {
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
                 }
             }
-            // For Browser bridge, re-read (file-based, works regardless of focus)
-            if active_name == "Browser" {
-                if let Some(ctx) = self.bridges[self.active_idx].read_context() {
-                    self.last_context = Some(ctx.clone());
-                    return Some(ctx);
-                }
-            }
-            // For accessibility bridge, return cached (GetFocusedElement is unreliable here)
             return self.last_context.clone();
         }
 
-        // Word is foreground — use Word COM
-        if word_is_foreground {
-            self.last_user_pid = fg_pid;
-            for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name() == "Word COM" {
-                    if let Some(ctx) = bridge.read_context() {
-                        if self.active_idx != i {
-                            log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
-                        }
-                        self.active_idx = i;
-                        self.last_context = Some(ctx.clone());
-                        return Some(ctx);
-                    }
-                }
-            }
-        }
+        // Detect which bridge to use based on foreground window type.
+        // One bridge per window type — no fallthrough.
+        let is_browser = fg_title.contains("Edge") || fg_title.contains("Chrome")
+            || fg_title.contains("Firefox") || fg_title.contains("Brave")
+            || fg_title.contains("gmail") || fg_title.contains("Inbox");
 
-        // Non-Word app is foreground — try accessibility bridge
-        // Pass foreground HWND so the bridge knows which app to target
+        let target_bridge = if word_is_foreground {
+            "Word COM"
+        } else if is_browser {
+            "Browser"
+        } else {
+            "Accessibility"
+        };
+
+        // Set foreground HWND for accessibility
         #[cfg(target_os = "windows")]
         {
             for bridge in self.bridges.iter() {
@@ -368,14 +354,14 @@ impl BridgeManager {
                 }
             }
         }
-        for (i, bridge) in self.bridges.iter().enumerate().rev() {
-            if bridge.name() != "Word COM" && bridge.is_available() {
+
+        // Try the one bridge that matches the foreground window
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name() == target_bridge {
                 if let Some(ctx) = bridge.read_context() {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                         if self.active_idx != i {
-                            log!("Bridge switch: {} → {} ('{}')",
-                                self.bridges[self.active_idx].name(), bridge.name(),
-                                if !ctx.word.is_empty() { &ctx.word } else { trunc(&ctx.sentence, 40) });
+                            log!("Bridge switch: {} → {}", self.bridges[self.active_idx].name(), target_bridge);
                             self.bridge_switched = true;
                         }
                         self.active_idx = i;
@@ -384,17 +370,7 @@ impl BridgeManager {
                         return Some(ctx);
                     }
                 }
-            }
-        }
-
-        // Fallback: try Word COM (it works even when Word isn't foreground)
-        for (i, bridge) in self.bridges.iter().enumerate() {
-            if bridge.name() == "Word COM" {
-                if let Some(ctx) = bridge.read_context() {
-                    self.active_idx = i;
-                    self.last_context = Some(ctx.clone());
-                    return Some(ctx);
-                }
+                break;
             }
         }
         None
@@ -1183,6 +1159,7 @@ impl ContextApp {
         let kt_gt_valid_alt: Option<String>;
         let consonant_alts: Vec<String>;
         let compound_suggestion: Option<String>;
+        let split_suggestion: Option<String>;
         let fuzzy_candidates: Vec<(String, u32)>;
         let original_found;
 
@@ -1235,7 +1212,15 @@ impl ContextApp {
                 None
             };
 
-            fuzzy_candidates = if !found && !original_found && compound_suggestion.is_none() {
+            // Try splitting "tilbutikken" → "til butikken" (function word + remainder)
+            // Only for unknown words — legitimate compounds are in the dictionary.
+            split_suggestion = if !found && !original_found && compound_suggestion.is_none() {
+                try_split_function_word(&clean, checker)
+            } else {
+                None
+            };
+
+            fuzzy_candidates = if !found && !original_found && compound_suggestion.is_none() && split_suggestion.is_none() {
                 checker.fuzzy_lookup(&clean, 2).into_iter()
                     .filter(|(w, _)| w != &clean)
                     .take(10)
@@ -1338,7 +1323,7 @@ impl ContextApp {
                 word: clean.clone(),
                 suggestion: compound.clone(),
                 explanation: format!("«{}» → «{}» (sammensatt ord)", clean, compound),
-                rule_name: "stavefeil".to_string(),
+                rule_name: "sammensatt_ord".to_string(),
                 sentence_context: sentence_ctx.to_string(),
                 doc_offset,
                 position: 0,
@@ -1346,6 +1331,44 @@ impl ContextApp {
                 word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
             });
             return;
+        }
+
+        // Try split suggestion: "tilbutikken" → "til butikken"
+        // Validate with grammar checker — the split must produce a valid sentence.
+        if let Some(ref split) = split_suggestion {
+            log!("  Split candidate: '{}' → '{}'", clean, split);
+            // Grammar-check the sentence with the split applied
+            let corrected = sentence_ctx.to_lowercase().replacen(&clean.to_lowercase(), split, 1);
+            let grammar_ok = if let Some(checker) = &mut self.checker {
+                let errors = checker.check_sentence(&corrected);
+                log!("  Split grammar check: '{}' → {} errors", corrected, errors.len());
+                errors.is_empty()
+            } else {
+                true // no checker available — accept the split
+            };
+            if grammar_ok {
+                log!("  Split suggestion: '{}' → '{}' (grammar OK)", clean, split);
+                if self.writing_errors.iter().any(|e| {
+                    matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
+                }) {
+                    return;
+                }
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Spelling,
+                    word: clean.clone(),
+                    suggestion: split.clone(),
+                    explanation: format!("«{}» → «{}» (mangler mellomrom)", clean, split),
+                    rule_name: "mangler_mellomrom".to_string(),
+                    sentence_context: sentence_ctx.to_string(),
+                    doc_offset,
+                    position: 0,
+                    ignored: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                });
+                return;
+            } else {
+                log!("  Split rejected: '{}' → '{}' (grammar errors)", clean, split);
+            }
         }
 
         // Word not found — use fuzzy suggestions
@@ -1534,12 +1557,13 @@ impl ContextApp {
                         }
                     }
                 }
-                // Pick the highest-scoring candidate that passes grammar
+                // Pick the highest-scoring candidate that passes grammar.
+                // If none pass, keep the existing suggestion — do NOT pick unvalidated BERT-best.
                 let picked = if !passing.is_empty() {
                     Some(passing[0].clone())
                 } else {
-                    // Fallback to BERT-best if none pass grammar
-                    suggestions.first().map(|(w, s)| (w.clone(), *s))
+                    log!("Spelling upgrade: no grammar-passing candidates for '{}', keeping '{}'", word, existing);
+                    None
                 };
                 if let Some((best, score)) = &picked {
                     log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
@@ -1549,6 +1573,58 @@ impl ContextApp {
             }
             // Mark as processed regardless so we don't retry
             self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
+        }
+    }
+
+    /// SINGLE VALIDATION GATE for ALL spelling suggestions.
+    /// Every suggestion must:
+    /// 1. Be a valid dictionary word (each word if multi-word split)
+    /// 2. Produce a grammatically valid sentence when substituted
+    /// Called AFTER upgrade_spelling_suggestions() — catches everything.
+    fn validate_all_suggestions(&mut self) {
+        let checker = match &mut self.checker {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mut to_remove: Vec<usize> = Vec::new();
+        for (i, e) in self.writing_errors.iter().enumerate() {
+            // Only validate spelling suggestions that have a non-empty suggestion
+            if !matches!(e.category, ErrorCategory::Spelling) { continue; }
+            if e.suggestion.is_empty() || e.ignored { continue; }
+
+            // 1. Dictionary check: every word in the suggestion must be a real word
+            let words: Vec<&str> = e.suggestion.split_whitespace().collect();
+            let mut dict_ok = true;
+            for w in &words {
+                if !checker.has_word(w) {
+                    log!("VALIDATION GATE REJECTED: '{}' → '{}' ('{}' not in dictionary)",
+                        e.word, e.suggestion, w);
+                    dict_ok = false;
+                    break;
+                }
+            }
+            if !dict_ok {
+                to_remove.push(i);
+                continue;
+            }
+
+            // 2. Grammar check: corrected sentence must be valid
+            if !e.sentence_context.is_empty() {
+                let corrected = e.sentence_context.to_lowercase()
+                    .replacen(&e.word.to_lowercase(), &e.suggestion, 1);
+                let errors = checker.check_sentence(&corrected);
+                if !errors.is_empty() {
+                    log!("VALIDATION GATE REJECTED: '{}' → '{}' ({} grammar errors in '{}')",
+                        e.word, e.suggestion, errors.len(), corrected);
+                    to_remove.push(i);
+                }
+            }
+        }
+
+        // Remove rejected suggestions in reverse order to preserve indices
+        for i in to_remove.into_iter().rev() {
+            self.writing_errors.remove(i);
         }
     }
 
@@ -2599,6 +2675,61 @@ impl ContextApp {
     }
 }
 
+/// Try splitting an unknown word into a function word + remainder.
+/// Returns "til butikken" for "tilbutikken", "i morgen" for "imorgen", etc.
+/// Only splits after known prepositions/adverbs/conjunctions — these never
+/// form legitimate compounds, so if the remainder is a dictionary word,
+/// the split is correct.
+fn try_split_function_word(word: &str, checker: &AnyChecker) -> Option<String> {
+    // Norwegian function words that are commonly glued to the next word.
+    // Sorted longest-first so "etter" matches before "et".
+    const FUNCTION_WORDS: &[&str] = &[
+        "gjennom", "mellom", "under", "etter", "langs", "rundt",
+        "foran", "bortover", "innover", "utover",
+        "forbi", "siden", "etter", "blant",
+        "over", "inne", "borte",
+        "uten", "utenfor", "innenfor",
+        "med", "mot", "ved", "hos", "fra",
+        "for", "som", "men",
+        "til", "per", "via",
+        "på", "av", "om",
+        "en", "et", "ei",
+        "og", "at",
+        "i",
+    ];
+
+    let lower = word.to_lowercase();
+
+    // Phase 1: Try known function word prefixes (high confidence)
+    for prefix in FUNCTION_WORDS {
+        if lower.len() <= prefix.len() + 1 { continue; } // remainder must be ≥2 chars
+        if !lower.starts_with(prefix) { continue; }
+        let remainder = &lower[prefix.len()..];
+        if remainder.len() < 2 { continue; }
+        if checker.has_word(remainder) {
+            return Some(format!("{} {}", prefix, remainder));
+        }
+    }
+
+    // Phase 2: General split — try all positions where both parts are dictionary words.
+    // Catches "løpsakte" → "løp sakte", "huserstore" → "huser store", etc.
+    // Both parts must be ≥3 chars to avoid spurious splits on short prefixes.
+    let chars: Vec<char> = lower.chars().collect();
+    let mut best_split: Option<(String, usize)> = None;
+    for split_at in 3..=(chars.len().saturating_sub(3)) {
+        let left: String = chars[..split_at].iter().collect();
+        let right: String = chars[split_at..].iter().collect();
+        if checker.has_word(&left) && checker.has_word(&right) {
+            // Prefer the most balanced split (both parts as long as possible)
+            let balance = left.len().min(right.len());
+            if best_split.as_ref().map(|(_, b)| balance > *b).unwrap_or(true) {
+                best_split = Some((format!("{} {}", left, right), balance));
+            }
+        }
+    }
+    best_split.map(|(s, _)| s)
+}
+
 /// Generate single↔double consonant variants of a word.
 /// "spile" → ["spille"], "balle" → ["bale"], "skinn" → ["skin"], etc.
 fn consonant_variants(word: &str) -> Vec<String> {
@@ -3177,6 +3308,7 @@ impl eframe::App for ContextApp {
                 // Only process grammar queue when no background forward in flight (avoids model mutex contention)
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
+                self.validate_all_suggestions();
                 if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
                     self.process_grammar_queue();
                 }
@@ -3204,6 +3336,7 @@ impl eframe::App for ContextApp {
                 // Word boundary work: prune, upgrade, drain grammar queue
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
+                self.validate_all_suggestions();
                 if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
                     self.process_grammar_queue();
                 }
@@ -4952,6 +5085,7 @@ fn main() -> eframe::Result {
             ("fotbal", "jeg spiller og fotbal", "fotball"),
             ("blåsjell", "vi spiser blåsjell", "blåskjell"),
             ("spitlt", "Jeg hadde spitlt fotball.", "spilt"),
+            ("skriverfeil", "Det er en skriverfeil.", "skrivefeil"),
         ];
         for (word, sentence, expected) in &spelling_tests {
             app.last_spell_checked_word.clear();
@@ -4962,6 +5096,7 @@ fn main() -> eframe::Result {
             app.process_deferred_consonant_bert();
             app.validate_consonant_checks();
             app.upgrade_spelling_suggestions();
+            app.validate_all_suggestions();
             let suggestion = app.writing_errors.first()
                 .map(|e| e.suggestion.as_str()).unwrap_or("(none)");
             let ok = suggestion == *expected;

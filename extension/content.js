@@ -53,8 +53,12 @@
         const sel = window.getSelection();
         const range = document.createRange();
         // Walk text nodes to find start/end offsets
+        // Gmail nests contenteditable divs — walk from the DEEPEST editable ancestor
+        let walkRoot = el;
+        // If el is a large container, try to find the actual editable div with text
+        // Gmail compose: div[contenteditable] > div > br/text
         let charCount = 0;
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
         let startNode = null, startOfs = 0, endNode = null, endOfs = 0;
         while (walker.nextNode()) {
           const node = walker.currentNode;
@@ -68,14 +72,27 @@
           charCount += nodeLen;
           if (startNode && endNode) break;
         }
+        console.log("NorskTale CE: totalChars:", charCount, "start:", start, "end:", end,
+          "startNode:", !!startNode, "endNode:", !!endNode,
+          "text:", JSON.stringify(el.innerText?.substring(0, 100)));
         if (startNode && endNode) {
           range.setStart(startNode, startOfs);
           range.setEnd(endNode, endOfs);
           sel.removeAllRanges();
           sel.addRange(range);
-          document.execCommand("insertText", false, replacement);
+          const ok = document.execCommand("insertText", false, replacement);
+          console.log("NorskTale CE: execCommand insertText result:", ok);
+          if (!ok) {
+            // Fallback: direct DOM manipulation
+            console.log("NorskTale CE: execCommand failed, trying InputEvent fallback");
+            range.deleteContents();
+            range.insertNode(document.createTextNode(replacement));
+            sel.collapseToEnd();
+            el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: replacement }));
+          }
+        } else {
+          console.log("NorskTale CE: could not find text nodes for range", start, "-", end);
         }
-        console.log("NorskTale: contenteditable replaced");
         lastSent = "";
       }
     }

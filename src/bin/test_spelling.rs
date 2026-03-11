@@ -146,6 +146,48 @@ fn score_candidates(
     if !passing.is_empty() { passing } else { scored }
 }
 
+/// Same logic as main.rs try_split_function_word
+fn try_split_function_word(word: &str, checker: &nostos_cognio::grammar::GrammarChecker) -> Option<String> {
+    const FUNCTION_WORDS: &[&str] = &[
+        "gjennom", "mellom", "under", "etter", "langs", "rundt",
+        "foran", "bortover", "innover", "utover",
+        "forbi", "siden", "etter", "blant",
+        "over", "inne", "borte",
+        "uten", "utenfor", "innenfor",
+        "med", "mot", "ved", "hos", "fra",
+        "for", "som", "men",
+        "til", "per", "via",
+        "på", "av", "om",
+        "en", "et", "ei",
+        "og", "at",
+        "i",
+    ];
+    let lower = word.to_lowercase();
+    for prefix in FUNCTION_WORDS {
+        if lower.len() <= prefix.len() + 1 { continue; }
+        if !lower.starts_with(prefix) { continue; }
+        let remainder = &lower[prefix.len()..];
+        if remainder.len() < 2 { continue; }
+        if checker.has_word(remainder) {
+            return Some(format!("{} {}", prefix, remainder));
+        }
+    }
+    // General split: both parts ≥3 chars, both in dictionary
+    let chars: Vec<char> = lower.chars().collect();
+    let mut best_split: Option<(String, usize)> = None;
+    for split_at in 3..=(chars.len().saturating_sub(3)) {
+        let left: String = chars[..split_at].iter().collect();
+        let right: String = chars[split_at..].iter().collect();
+        if checker.has_word(&left) && checker.has_word(&right) {
+            let balance = left.len().min(right.len());
+            if best_split.as_ref().map(|(_, b)| balance > *b).unwrap_or(true) {
+                best_split = Some((format!("{} {}", left, right), balance));
+            }
+        }
+    }
+    best_split.map(|(s, _)| s)
+}
+
 fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let training = base.join("../../contexter-repo/training-data");
@@ -202,6 +244,59 @@ fn main() {
             }
         } else {
             println!("  FAIL: no candidates");
+            fail += 1;
+        }
+    }
+
+    // === Split detection tests (function word + remainder) ===
+    println!("\n{}", "=".repeat(60));
+    println!("=== Split detection tests ===");
+
+    // (word, sentence_context, expected_split)
+    // sentence_context is used for grammar validation of the split
+    let split_tests: Vec<(&str, &str, &str)> = vec![
+        ("tilbutikken", "Han gikk tilbutikken.", "til butikken"),
+        ("imorgen", "Vi reiser imorgen.", ""),         // in dictionary
+        ("pågrunn", "Det skjedde pågrunn av regnet.", "på grunn"),
+        ("medvilje", "Han gjorde det medvilje.", "med vilje"),
+        ("avstand", "Hold avstand.", ""),       // legitimate compound
+        ("tilstand", "En god tilstand.", ""),   // legitimate compound
+        ("iform", "Han er iform.", "i form"),
+        ("tilslutt", "Vi kom tilslutt.", ""),   // in dictionary
+        ("frastart", "Vi var med frastart.", "fra start"),
+        ("vedsiden", "Hun stod vedsiden.", "ved siden"),
+        ("løpsakte", "Hun løpsakte gjennom parken.", "løp sakte"),
+    ];
+
+    for (word, sentence, expected_split) in &split_tests {
+        // In the real app, split is only tried for unknown words
+        let result = if checker.has_word(word) {
+            None // word exists in dictionary — no split needed
+        } else {
+            let split = try_split_function_word(word, &checker);
+            // Grammar-validate: check sentence with split applied
+            if let Some(ref s) = split {
+                let corrected = sentence.to_lowercase().replacen(&word.to_lowercase(), s, 1);
+                let errors = checker.check_sentence(&corrected);
+                if !errors.is_empty() {
+                    println!("  (grammar rejected: '{}' → {} errors)", corrected, errors.len());
+                    None
+                } else {
+                    split
+                }
+            } else {
+                split
+            }
+        };
+        let result_str = result.as_deref().unwrap_or("");
+        let ok = result_str == *expected_split;
+        if ok {
+            println!("  PASS  '{}' → '{}'", word, if expected_split.is_empty() { "(no split)" } else { expected_split });
+            pass += 1;
+        } else {
+            println!("  FAIL  '{}' → got '{}', expected '{}'", word,
+                if result_str.is_empty() { "(no split)" } else { result_str },
+                if expected_split.is_empty() { "(no split)" } else { expected_split });
             fail += 1;
         }
     }
