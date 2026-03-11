@@ -20,92 +20,154 @@ fn bridge_log(msg: &str) {
 pub struct AccessibilityBridge {
     /// Saved HWND of the target app (set externally when good context is read)
     pub target_hwnd: std::cell::Cell<isize>,
+    /// Foreground HWND set by BridgeManager before each read_context call
+    pub fg_hwnd: std::cell::Cell<isize>,
     /// Cached HWND of the actual edit control inside the target app
     edit_hwnd: std::cell::Cell<isize>,
     /// Cached full document text from last successful read
     cached_doc: std::cell::RefCell<String>,
+    /// Last known good UIA text element (e.g. the Edge textarea).
+    /// Re-read from this when GetFocusedElement() returns something else.
+    saved_element: std::cell::RefCell<Option<IUIAutomationElement>>,
+    /// PID of the app that owns the saved element
+    saved_element_pid: std::cell::Cell<u32>,
 }
 
 impl AccessibilityBridge {
     pub fn new() -> Self {
         AccessibilityBridge {
             target_hwnd: std::cell::Cell::new(0),
+            fg_hwnd: std::cell::Cell::new(0),
             edit_hwnd: std::cell::Cell::new(0),
             cached_doc: std::cell::RefCell::new(String::new()),
+            saved_element: std::cell::RefCell::new(None),
+            saved_element_pid: std::cell::Cell::new(0),
         }
     }
 
-    /// Try to get TextPattern2 from a UIA element
+    /// Try to read text from a UIA element using TextPattern2, TextPattern v1, or ValuePattern.
     fn try_read_raw(element: &IUIAutomationElement) -> Option<(RawCursorText, String)> {
         unsafe {
+            // 1. TextPattern2 — best: gives caret position + before/after text (Notepad, Word)
             if let Ok(pattern2) =
                 element.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
             {
                 let mut is_active = windows::core::BOOL::default();
                 if let Ok(caret_range) = pattern2.GetCaretRange(&mut is_active) {
-                    let before_range = caret_range.Clone().ok()?;
-                    let _ = before_range.MoveEndpointByUnit(
-                        TextPatternRangeEndpoint_Start,
-                        TextUnit_Character,
-                        -2000,
-                    );
-                    let before = before_range.GetText(-1).ok()?.to_string();
+                    let before = (|| -> Option<String> {
+                        let r = caret_range.Clone().ok()?;
+                        let _ = r.MoveEndpointByUnit(
+                            TextPatternRangeEndpoint_Start, TextUnit_Character, -2000);
+                        Some(r.GetText(-1).ok()?.to_string())
+                    })().unwrap_or_default();
 
-                    let after_range = caret_range.Clone().ok()?;
-                    let _ = after_range.MoveEndpointByUnit(
-                        TextPatternRangeEndpoint_End,
-                        TextUnit_Character,
-                        2000,
-                    );
-                    let after = after_range.GetText(-1).ok()?.to_string();
+                    let after = (|| -> Option<String> {
+                        let r = caret_range.Clone().ok()?;
+                        let _ = r.MoveEndpointByUnit(
+                            TextPatternRangeEndpoint_End, TextUnit_Character, 2000);
+                        Some(r.GetText(-1).ok()?.to_string())
+                    })().unwrap_or_default();
 
                     let doc = format!("{}{}", before, after);
-                    return Some((RawCursorText { before, after }, doc));
+                    if !doc.is_empty() {
+                        return Some((RawCursorText { before, after }, doc));
+                    }
                 }
             }
+
+            // 2. TextPattern v1 — Edge textareas: has DocumentRange but no caret position
+            if let Ok(tp1) =
+                element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            {
+                if let Ok(doc_range) = tp1.DocumentRange() {
+                    let text = doc_range.GetText(-1).unwrap_or_default().to_string();
+                    if !text.is_empty() {
+                        // No caret info from v1 — put everything as "before" (cursor at end)
+                        return Some((RawCursorText { before: text.clone(), after: String::new() }, text));
+                    }
+                }
+            }
+
+            // 3. ValuePattern — fallback for elements with text value but no TextPattern
+            if let Ok(vp) =
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            {
+                if let Ok(value) = vp.CurrentValue() {
+                    let text = value.to_string();
+                    if !text.is_empty() {
+                        return Some((RawCursorText { before: text.clone(), after: String::new() }, text));
+                    }
+                }
+            }
+
             None
         }
     }
 
-    /// Get raw text before and after cursor via UIA TextPattern2
+    /// Is this element a reasonable text field (not a terminal buffer)?
+    fn is_text_field(doc: &str) -> bool {
+        // Terminal buffers are huge (>100K). Text fields are usually <50K.
+        doc.len() < 100_000
+    }
+
+    /// Get raw text from the user's text field. Strategy:
+    /// 1. If fg_hwnd PID changed (user switched apps), clear saved element
+    /// 2. Try GetFocusedElement() — if it's a text field, save it and read
+    /// 3. If focused element is wrong (terminal, etc.), re-read from saved element
     fn get_raw_text(&self) -> Option<RawCursorText> {
         unsafe {
             let uia: IUIAutomation =
                 CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let our_pid = std::process::id();
 
-            // Try focused element first (works when target app has focus)
-            if let Ok(focused) = uia.GetFocusedElement() {
-                if let Some((raw, doc)) = Self::try_read_raw(&focused) {
-                    *self.cached_doc.borrow_mut() = doc;
-                    return Some(raw);
+            // Step 0: If foreground app changed, clear saved element so we discover
+            // the new app's text field via GetFocusedElement
+            let fg_hwnd_val = self.fg_hwnd.get();
+            if fg_hwnd_val != 0 {
+                let mut fg_pid = 0u32;
+                GetWindowThreadProcessId(HWND(fg_hwnd_val as *mut _), Some(&mut fg_pid));
+                let saved_pid = self.saved_element_pid.get();
+                if saved_pid != 0 && fg_pid != 0 && fg_pid != saved_pid {
+                    bridge_log(&format!("App changed: pid {} → {} — clearing saved element", saved_pid, fg_pid));
+                    *self.saved_element.borrow_mut() = None;
+                    self.saved_element_pid.set(0);
                 }
             }
 
-            // Fallback: use saved target HWND (works when our window has focus)
-            let hwnd_val = self.target_hwnd.get();
-            if hwnd_val != 0 {
-                let hwnd = HWND(hwnd_val as *mut _);
-                if let Ok(element) = uia.ElementFromHandle(hwnd) {
-                    // Try the element itself
-                    if let Some((raw, doc)) = Self::try_read_raw(&element) {
-                        *self.cached_doc.borrow_mut() = doc;
-                        return Some(raw);
-                    }
-                    // Try direct children only (avoids slow deep traversal)
-                    if let Ok(condition) = uia.CreateTrueCondition() {
-                        if let Ok(children) = element.FindAll(TreeScope_Children, &condition) {
-                            let count = children.Length().unwrap_or(0);
-                            for i in 0..count.min(10) {
-                                if let Ok(child) = children.GetElement(i) {
-                                    if let Some((raw, doc)) = Self::try_read_raw(&child) {
-                                        *self.cached_doc.borrow_mut() = doc;
-                                        return Some(raw);
-                                    }
-                                }
-                            }
+            // Step 1: Try GetFocusedElement — accept only if it's a text field (<100K)
+            if let Ok(focused) = uia.GetFocusedElement() {
+                let focused_pid = focused.CurrentProcessId().unwrap_or(0) as u32;
+                if focused_pid != our_pid && focused_pid != 0 {
+                    if let Some((raw, doc)) = Self::try_read_raw(&focused) {
+                        if !doc.is_empty() && Self::is_text_field(&doc) {
+                            bridge_log(&format!("Focused text field: '{}' ({} chars)",
+                                {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                            *self.cached_doc.borrow_mut() = doc;
+                            *self.saved_element.borrow_mut() = Some(focused);
+                            self.saved_element_pid.set(focused_pid);
+                            return Some(raw);
                         }
                     }
                 }
+            }
+
+            // Step 2: Focused element was wrong — re-read from saved element
+            // This gives us LIVE text even when the terminal has focus
+            let saved = self.saved_element.borrow().clone();
+            if let Some(ref element) = saved {
+                if let Some((raw, doc)) = Self::try_read_raw(element) {
+                    if !doc.is_empty() {
+                        bridge_log(&format!("Saved element re-read: '{}' ({} chars)",
+                            {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                        *self.cached_doc.borrow_mut() = doc;
+                        return Some(raw);
+                    }
+                }
+                // Saved element no longer readable — clear it
+                bridge_log("Saved element stale — clearing");
+                drop(saved);
+                *self.saved_element.borrow_mut() = None;
+                self.saved_element_pid.set(0);
             }
 
             None
@@ -464,6 +526,10 @@ impl TextBridge for AccessibilityBridge {
             self.edit_hwnd.set(0); // Reset cached edit control when app changes
         }
         self.target_hwnd.set(hwnd);
+    }
+
+    fn set_fg_hwnd(&self, hwnd: isize) {
+        self.fg_hwnd.set(hwnd);
     }
 }
 

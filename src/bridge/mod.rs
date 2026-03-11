@@ -56,6 +56,9 @@ pub trait TextBridge {
     /// Set the target window handle for cross-process reads (no-op by default).
     fn set_target_hwnd(&self, _hwnd: isize) {}
 
+    /// Set the foreground window handle (called by BridgeManager before read_context).
+    fn set_fg_hwnd(&self, _hwnd: isize) {}
+
     /// Mark a character range with red wavy underline (spelling/grammar error).
     fn mark_error_underline(&self, _char_start: usize, _char_end: usize) -> bool { false }
 
@@ -184,7 +187,22 @@ pub fn build_context(raw: &RawCursorText, caret_pos: Option<(i32, i32)>) -> Curs
     let word_after = extract_word_after_cursor(&raw.after);
     let word = format!("{}{}", word_before, word_after);
 
-    let sentence = find_sentence_around_cursor(&raw.before, &raw.after);
+    let mut sentence = find_sentence_around_cursor(&raw.before, &raw.after);
+
+    // If sentence is empty but we have text (e.g. cursor right after final period),
+    // use the last complete sentence from the before text.
+    if sentence.is_empty() && !raw.before.trim().is_empty() {
+        let trimmed = raw.before.trim_end();
+        // Strip trailing punctuation to find the previous sentence boundary
+        let without_final = trimmed.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
+        if !without_final.is_empty() {
+            let prev_end = without_final.rfind(|c: char| c == '.' || c == '!' || c == '?');
+            let start = prev_end.map(|p| p + 1).unwrap_or(0);
+            sentence = trimmed[start..].trim().to_string();
+        } else {
+            sentence = trimmed.to_string();
+        }
+    }
 
     let masked = build_masked_sentence(raw, &word);
 

@@ -31,6 +31,14 @@ macro_rules! log {
     }};
 }
 
+/// Truncate a string to at most `max` bytes, backing up to the nearest char boundary.
+fn trunc(s: &str, max: usize) -> &str {
+    if s.len() <= max { return s; }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
+}
+
 use nostos_cognio::baseline::{compute_baseline, Baselines};
 use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
 use nostos_cognio::embeddings::EmbeddingStore;
@@ -230,6 +238,10 @@ struct BridgeManager {
     last_check: Instant,
     /// Index of the bridge that last successfully read context
     active_idx: usize,
+    /// PID of the last app we successfully read text from (to avoid switching to terminals etc.)
+    last_user_pid: u32,
+    /// Last successfully read context (returned when our window is foreground)
+    last_context: Option<CursorContext>,
 }
 
 impl BridgeManager {
@@ -251,6 +263,8 @@ impl BridgeManager {
             bridges,
             last_check: Instant::now(),
             active_idx: 0,
+            last_user_pid: 0,
+            last_context: None,
         }
     }
 
@@ -261,40 +275,110 @@ impl BridgeManager {
             let has_word = self.bridges.iter().any(|b| b.name() == "Word COM");
             if !has_word {
                 if let Some(word) = bridge::word_com::WordComBridge::try_connect() {
-                    eprintln!("Word COM bridge connected (late)");
+                    log!("Word COM bridge connected (late)");
                     let ok = word.disable_word_proofing();
-                    eprintln!("Word proofing disabled (late): {}", ok);
+                    log!("Word proofing disabled (late): {}", ok);
                     self.bridges.insert(0, Box::new(word));
                 }
             }
         }
 
-        // Only update active_idx when a real app has focus (not our own windows)
-        let our_window_focused = {
-            #[cfg(target_os = "windows")]
-            {
-                use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
-                let fg = unsafe { GetForegroundWindow() };
-                let mut buf = [0u16; 64];
-                let len = unsafe { GetWindowTextW(fg, &mut buf) };
-                let title = String::from_utf16_lossy(&buf[..len as usize]);
-                title.contains("NorskTale") || title.starts_with("Forslag") || title.starts_with("Regelinfo")
-            }
-            #[cfg(not(target_os = "windows"))]
-            { false }
+        // Use GetForegroundWindow() to detect which app the user clicked on.
+        // When our own always-on-top window is foreground, keep reading from the
+        // last known user app (user is just looking at our UI, caret is still
+        // in the other app).
+        #[cfg(target_os = "windows")]
+        let (fg_hwnd_raw, fg_pid, fg_title) = {
+            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
+            let fg = unsafe { GetForegroundWindow() };
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)); }
+            let mut buf = [0u16; 128];
+            let len = unsafe { GetWindowTextW(fg, &mut buf) };
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            (fg.0 as isize, pid, title)
         };
+        #[cfg(not(target_os = "windows"))]
+        let (fg_hwnd_raw, fg_pid, fg_title) = (0isize, 0u32, String::new());
 
-        for (i, bridge) in self.bridges.iter().enumerate() {
-            if bridge.is_available() {
-                if let Some(ctx) = bridge.read_context() {
-                    if !our_window_focused {
+        let our_pid = std::process::id();
+        let our_window_focused = fg_pid == our_pid;
+        let word_is_foreground = fg_title.contains("Word") || fg_title.contains(".docx") || fg_title.contains(".doc");
+
+        // Log periodically
+        static LAST_FOCUS_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now_t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        if now_t > LAST_FOCUS_LOG.load(std::sync::atomic::Ordering::Relaxed) + 3 {
+            LAST_FOCUS_LOG.store(now_t, std::sync::atomic::Ordering::Relaxed);
+            log!("FG: '{}' pid={} our={} word={} last_user={}", trunc(&fg_title, 40), fg_pid, our_window_focused, word_is_foreground, self.last_user_pid);
+        }
+
+        // When our window is foreground, return cached context.
+        // The user's caret is still in whatever app they were typing in.
+        // Don't call GetFocusedElement() — it returns the terminal, not the user's app.
+        if our_window_focused {
+            // For Word COM, we can safely re-read (COM calls work regardless of focus)
+            if self.bridges.get(self.active_idx).map(|b| b.name()) == Some("Word COM") {
+                if let Some(ctx) = self.bridges[self.active_idx].read_context() {
+                    self.last_context = Some(ctx.clone());
+                    return Some(ctx);
+                }
+            }
+            // For accessibility bridge, return cached (GetFocusedElement is unreliable here)
+            return self.last_context.clone();
+        }
+
+        // Word is foreground — use Word COM
+        if word_is_foreground {
+            self.last_user_pid = fg_pid;
+            for (i, bridge) in self.bridges.iter().enumerate() {
+                if bridge.name() == "Word COM" {
+                    if let Some(ctx) = bridge.read_context() {
                         if self.active_idx != i {
-                            eprintln!("Bridge switch: {} → {} ('{}')",
-                                self.bridges[self.active_idx].name(), bridge.name(),
-                                if !ctx.word.is_empty() { &ctx.word } else { &ctx.sentence });
+                            log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
                         }
                         self.active_idx = i;
+                        self.last_context = Some(ctx.clone());
+                        return Some(ctx);
                     }
+                }
+            }
+        }
+
+        // Non-Word app is foreground — try accessibility bridge
+        // Pass foreground HWND so the bridge knows which app to target
+        #[cfg(target_os = "windows")]
+        {
+            for bridge in self.bridges.iter() {
+                if bridge.name() == "Accessibility" {
+                    bridge.set_fg_hwnd(fg_hwnd_raw);
+                }
+            }
+        }
+        for (i, bridge) in self.bridges.iter().enumerate().rev() {
+            if bridge.name() != "Word COM" && bridge.is_available() {
+                if let Some(ctx) = bridge.read_context() {
+                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                        if self.active_idx != i {
+                            log!("Bridge switch: {} → {} ('{}')",
+                                self.bridges[self.active_idx].name(), bridge.name(),
+                                if !ctx.word.is_empty() { &ctx.word } else { trunc(&ctx.sentence, 40) });
+                        }
+                        self.active_idx = i;
+                        self.last_user_pid = fg_pid;
+                        self.last_context = Some(ctx.clone());
+                        return Some(ctx);
+                    }
+                }
+            }
+        }
+
+        // Fallback: try Word COM (it works even when Word isn't foreground)
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name() == "Word COM" {
+                if let Some(ctx) = bridge.read_context() {
+                    self.active_idx = i;
+                    self.last_context = Some(ctx.clone());
                     return Some(ctx);
                 }
             }
@@ -1836,7 +1920,7 @@ impl ContextApp {
         }
         self.writing_errors.retain(|e| {
             if e.ignored {
-                log!("Pruning ignored: {:?} '{}'", e.category, &e.word[..e.word.len().min(40)]);
+                log!("Pruning ignored: {:?} '{}'", e.category, trunc(&e.word, 40));
                 return false;
             }
             let still_present = match e.category {
@@ -1853,7 +1937,7 @@ impl ContextApp {
                 }
             };
             if !still_present {
-                log!("Error resolved: {:?} '{}' no longer in document", e.category, &e.word[..e.word.len().min(40)]);
+                log!("Error resolved: {:?} '{}' no longer in document", e.category, trunc(&e.word, 40));
             }
             still_present
         });
@@ -1956,10 +2040,10 @@ impl ContextApp {
                 // Strip trailing punctuation for Prolog analysis
                 let stripped = sent.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
                 if stripped.split_whitespace().count() >= 4 {
-                    log!("Prolog sub-split attempt: '{}' ({} words)", &stripped[..stripped.len().min(60)], stripped.split_whitespace().count());
+                    log!("Prolog sub-split attempt: '{}' ({} words)", trunc(&stripped, 60), stripped.split_whitespace().count());
                     if let Some(sub_sentences) = checker.split_by_prolog(stripped) {
                         eprintln!("Grammar: Prolog sub-split '{}' into {} sentences",
-                            &stripped[..stripped.len().min(50)], sub_sentences.len());
+                            trunc(&stripped, 50), sub_sentences.len());
                         prolog_splits.push((sent.clone(), sub_sentences.clone()));
                         self.prolog_checked_hashes.insert(sent_h);
                         expanded.extend(sub_sentences);
@@ -1993,13 +2077,22 @@ impl ContextApp {
                 let mut found_offset = None;
                 while let Some(byte_pos) = doc_lower[search_from..].find(&s_lower) {
                     let abs_byte = search_from + byte_pos;
-                    let char_offset = doc_text[..abs_byte].chars().count();
+                    // Use doc_lower for char_offset since abs_byte is from doc_lower
+                    let char_offset = if abs_byte <= doc_lower.len() && doc_lower.is_char_boundary(abs_byte) {
+                        doc_lower[..abs_byte].chars().count()
+                    } else {
+                        0
+                    };
                     if !claimed_offsets.contains(&char_offset) {
                         found_offset = Some(char_offset);
                         claimed_offsets.push(char_offset);
                         break;
                     }
+                    // Advance past this match — must land on a char boundary
                     search_from = abs_byte + 1;
+                    while search_from < doc_lower.len() && !doc_lower.is_char_boundary(search_from) {
+                        search_from += 1;
+                    }
                 }
                 result.push((s.clone(), found_offset.unwrap_or(0)));
             }
@@ -2023,11 +2116,31 @@ impl ContextApp {
                         already_claimed.push(off);
                     } else {
                         e.ignored = true;
-                        log!("Removed stale error: '{}' (no matching position)", &e.word[..e.word.len().min(40)]);
+                        log!("Removed stale error: '{}' (no matching position)", trunc(&e.word, 40));
                     }
                 } else {
-                    e.ignored = true;
-                    log!("Removed stale error: '{}' (sentence gone)", &e.word[..e.word.len().min(40)]);
+                    // Sentence context changed — but if the error word still exists in the
+                    // document, try to find a new sentence that contains it (accessibility bridge
+                    // can produce different sentence boundaries on each read)
+                    let word_lower = e.word.to_lowercase();
+                    let mut relocated = false;
+                    for (s, off) in &new_sentences {
+                        if s.to_lowercase().contains(&word_lower) {
+                            let already_claimed = claimed.entry(s.clone()).or_default();
+                            if !already_claimed.contains(off) {
+                                e.sentence_context = s.clone();
+                                e.doc_offset = *off;
+                                already_claimed.push(*off);
+                                relocated = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !relocated {
+                        // Word truly gone from document
+                        e.ignored = true;
+                        log!("Removed stale error: '{}' (sentence gone)", trunc(&e.word, 40));
+                    }
                 }
             }
         }
@@ -2049,8 +2162,8 @@ impl ContextApp {
                 continue;
             }
             eprintln!("Sentence boundary suggestion: '{}' -> '{}'",
-                &original_text[..original_text.len().min(60)],
-                &punctuated[..punctuated.len().min(60)]);
+                trunc(&original_text, 60),
+                trunc(&punctuated, 60));
 
             self.writing_errors.push(WritingError {
                 category: ErrorCategory::SentenceBoundary,
@@ -2250,20 +2363,20 @@ impl ContextApp {
                     e.word_doc_start = e.doc_offset;
                     e.word_doc_end = e.doc_offset + e.word.chars().count();
                     log!("Underline: sentence boundary {}..{} for '{}'",
-                        e.word_doc_start, e.word_doc_end, &e.word[..e.word.len().min(50)]);
+                        e.word_doc_start, e.word_doc_end, trunc(&e.word, 50));
                 } else if matches!(e.category, ErrorCategory::Spelling) {
                     // Spelling: underline just the misspelled word
                     let (s, end) = find_word_doc_range(&e.word, &e.sentence_context, e.doc_offset);
                     e.word_doc_start = s;
                     e.word_doc_end = end;
                     log!("Underline: spelling range {}..{} for '{}' in '{}'",
-                        s, end, e.word, &e.sentence_context[..e.sentence_context.len().min(50)]);
+                        s, end, e.word, trunc(&e.sentence_context, 50));
                 } else {
                     // Grammar/consonant: underline the whole sentence
                     e.word_doc_start = e.doc_offset;
                     e.word_doc_end = e.doc_offset + e.sentence_context.chars().count();
                     log!("Underline: grammar range {}..{} for '{}'",
-                        e.word_doc_start, e.word_doc_end, &e.sentence_context[..e.sentence_context.len().min(50)]);
+                        e.word_doc_start, e.word_doc_end, trunc(&e.sentence_context, 50));
                 }
             }
         }
@@ -2277,7 +2390,7 @@ impl ContextApp {
             } else if !e.ignored && !e.underlined && e.word_doc_start < e.word_doc_end {
                 // New error — apply underline
                 log!("Underline: marking {}..{} rule={} expl='{}'",
-                    e.word_doc_start, e.word_doc_end, e.rule_name, &e.explanation[..e.explanation.len().min(50)]);
+                    e.word_doc_start, e.word_doc_end, e.rule_name, trunc(&e.explanation, 50));
                 if self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end) {
                     e.underlined = true;
                 }
@@ -2687,7 +2800,7 @@ impl eframe::App for ContextApp {
         if let Some((find, replace, context, doc_offset)) = self.pending_fix.take() {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
                 self.manager.active_bridge_name(),
-                &find[..find.len().min(60)], &replace[..replace.len().min(60)], doc_offset);
+                trunc(&find, 60), trunc(&replace, 60), doc_offset);
             // Clear underline BEFORE replacement (positions are still valid in original doc)
             let find_lower_pre = find.to_lowercase();
             for e in &mut self.writing_errors {
@@ -2754,7 +2867,7 @@ impl eframe::App for ContextApp {
                     self.clean_sentence_hashes.remove(&hash_str(stripped_ctx));
                 }
                 log!("Fix applied: underline cleared, sentence '{}' will be rescanned",
-                    &context[..context.len().min(50)]);
+                    trunc(&context, 50));
             }
         }
 
@@ -2866,10 +2979,10 @@ impl eframe::App for ContextApp {
             // Drain all available results, keep the latest
             while let Ok(result) = handle.result_rx.try_recv() {
                 if result.partial {
-                    log!("Whisper partial: '{}'", &result.text[..result.text.len().min(60)]);
+                    log!("Whisper partial: '{}'", trunc(&result.text, 60));
                     self.mic_result_text = Some(result.text);
                 } else {
-                    log!("Whisper final: '{}'", &result.text[..result.text.len().min(60)]);
+                    log!("Whisper final: '{}'", trunc(&result.text, 60));
                     self.mic_result_text = Some(result.text);
                     self.mic_handle = None;
                     self.mic_transcribing = false;
@@ -2945,7 +3058,7 @@ impl eframe::App for ContextApp {
                         if let Some((idx, e)) = hit {
                             if self.focused_error_idx != Some(idx) {
                                 log!("Click hit: cursor={} → error idx={} '{}' range={}..{} rule={}",
-                                    cursor_off, idx, &e.explanation[..e.explanation.len().min(40)],
+                                    cursor_off, idx, trunc(&e.explanation, 40),
                                     e.word_doc_start, e.word_doc_end, e.rule_name);
                             }
                             self.selected_tab = 1; // Always switch to Grammatikk
@@ -3003,7 +3116,7 @@ impl eframe::App for ContextApp {
                 if let Some(ref w) = spell_word {
                     if *w != self.last_spell_checked_word {
                         let errors_before = self.writing_errors.len();
-                        log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, &sentence[..sentence.len().min(50)], cursor_off);
+                        log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, trunc(&sentence, 50), cursor_off);
                         self.check_spelling(w, &sentence, cursor_off);
                         self.last_spell_checked_word = w.clone();
                         // If a new error was found, switch to Grammatikk tab and highlight it
@@ -4104,7 +4217,7 @@ impl eframe::App for ContextApp {
                                 self.pending_fix = Some((word.clone(), suggestion.clone(), context, off));
                                 log!("FIX action: idx={} bridge='{}' word='{}' suggestion='{}'",
                                     idx, self.manager.active_bridge_name(),
-                                    &word[..word.len().min(60)], &suggestion[..suggestion.len().min(60)]);
+                                    trunc(&word, 60), trunc(&suggestion, 60));
                                 // Mark all alternatives for this sentence occurrence as ignored
                                 let ctx = self.writing_errors[idx].sentence_context.clone();
                                 let ctx_off = self.writing_errors[idx].doc_offset;
@@ -4169,7 +4282,7 @@ impl eframe::App for ContextApp {
                                 let start = error.doc_offset;
                                 let end = start + error.sentence_context.chars().count();
                                 log!("GOTO: selecting range {}..{} for '{}'", start, end,
-                                    &error.sentence_context[..error.sentence_context.len().min(50)]);
+                                    trunc(&error.sentence_context, 50));
                                 self.manager.select_range(start, end);
                             }
                             _ => {}
