@@ -1659,9 +1659,11 @@ impl ContextApp {
                         if ids.is_empty() { 0.0 }
                         else {
                             // Use FIRST token only: MLM predicts one token at mask position.
-                            // Averaging multi-token words inflates scores via common subtokens
-                            // (e.g. "er" has high logit everywhere, boosting "skriverer" over "skriver")
-                            logits.get(ids[0] as usize).copied().unwrap_or(0.0)
+                            let raw = logits.get(ids[0] as usize).copied().unwrap_or(0.0);
+                            // Discount multi-token candidates: their first token is a common
+                            // subword prefix (e.g. "vann" for "vannete") whose logit is inflated.
+                            // Single-token candidates (e.g. "vannet") have a direct, reliable score.
+                            if ids.len() > 1 { raw * 0.9 } else { raw }
                         }
                     } else { 0.0 };
 
