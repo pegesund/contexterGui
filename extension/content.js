@@ -3,6 +3,7 @@
 
 (function() {
   "use strict";
+  console.log("NorskTale content.js v2 (text-node search) loaded");
 
   let lastSent = "";
   let lastCursor = -1;
@@ -26,15 +27,29 @@
       const el = activeElement || lastTextElement;
       console.log("NorskTale replace:", msg.text, "el:", el?.tagName, "active:", !!activeElement, "last:", !!lastTextElement);
       if (!el) { console.log("NorskTale: no element!"); return; }
-      const start = msg.start;
-      const end = msg.end;
+      let start = msg.start;
+      let end = msg.end;
       const replacement = msg.text;
-      console.log("NorskTale: value before:", JSON.stringify(el.value), "start:", start, "end:", end);
+      const expected = msg.expected || ""; // expected text at [start, end] for verification
+      console.log("NorskTale: start:", start, "end:", end, "expected:", JSON.stringify(expected));
       if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+        // Verify offset: check text at [start, end] matches expected
+        const val = el.value;
+        if (expected && val.substring(start, end).toLowerCase() !== expected.toLowerCase()) {
+          console.log("NorskTale: offset mismatch! got:", JSON.stringify(val.substring(start, end)), "expected:", JSON.stringify(expected));
+          // Search nearby (±5 chars) for the expected text
+          const searchLower = expected.toLowerCase();
+          const valLower = val.toLowerCase();
+          const nearby = valLower.indexOf(searchLower, Math.max(0, start - 5));
+          if (nearby >= 0 && nearby <= start + 5) {
+            console.log("NorskTale: corrected offset", start, "→", nearby);
+            start = nearby;
+            end = nearby + expected.length;
+          }
+        }
         // Use native input setter to bypass React/framework issues
         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
           || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-        const val = el.value;
         const newVal = val.substring(0, start) + replacement + val.substring(end);
         if (nativeSetter) {
           nativeSetter.call(el, newVal);
@@ -52,62 +67,93 @@
         el.focus();
         const sel = window.getSelection();
         const range = document.createRange();
-        // Walk ALL nodes to find start/end offsets.
-        // innerText adds \n for block elements (div, br, p) — we must count those too
-        // so our char positions match the innerText positions sent by the app.
-        let charCount = 0;
-        let startNode = null, startOfs = 0, endNode = null, endOfs = 0;
-        const blockTags = new Set(["DIV","P","BR","LI","TR","BLOCKQUOTE","H1","H2","H3","H4","H5","H6"]);
 
-        function walkNodes(parent) {
-          for (let child = parent.firstChild; child; child = child.nextSibling) {
-            if (startNode && endNode) return;
-            if (child.nodeType === Node.TEXT_NODE) {
-              const nodeLen = child.textContent.length;
-              if (!startNode && charCount + nodeLen >= start) {
-                startNode = child; startOfs = start - charCount;
+        // Search for expected text directly in text node content.
+        // This avoids innerText vs DOM offset mismatches (block element \n counting differs).
+        let startNode = null, startOfs = 0, endNode = null, endOfs = 0;
+        let found = false;
+
+        if (expected) {
+          // Collect all text nodes and their cumulative offsets in raw DOM text
+          const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          let buf = "";
+          const nodes = [];
+          while (walker.nextNode()) {
+            nodes.push({ node: walker.currentNode, off: buf.length });
+            buf += walker.currentNode.textContent;
+          }
+          // Search for expected text near the hint offset
+          const bufLower = buf.toLowerCase();
+          const searchLower = expected.toLowerCase();
+          let idx = bufLower.indexOf(searchLower, Math.max(0, start - 50));
+          if (idx < 0) idx = bufLower.indexOf(searchLower);
+          if (idx >= 0) {
+            const endIdx = idx + expected.length;
+            for (const n of nodes) {
+              const nodeEnd = n.off + n.node.textContent.length;
+              if (!startNode && idx < nodeEnd) {
+                startNode = n.node; startOfs = idx - n.off;
               }
-              if (!endNode && charCount + nodeLen >= end) {
-                endNode = child; endOfs = end - charCount;
+              if (endIdx <= nodeEnd) {
+                endNode = n.node; endOfs = endIdx - n.off;
+                break;
               }
-              charCount += nodeLen;
-            } else if (child.nodeType === Node.ELEMENT_NODE) {
-              if (child.tagName === "BR") {
-                // BR contributes \n to innerText
-                charCount += 1;
-              } else {
-                // Block elements add \n before their content (except first child)
-                const isBlock = blockTags.has(child.tagName);
-                if (isBlock && child !== parent.firstElementChild) {
-                  charCount += 1; // \n from block boundary
+            }
+            if (startNode && endNode) found = true;
+          }
+          console.log("NorskTale CE: text-node search for", JSON.stringify(expected),
+            "found:", found, "at buf idx:", idx, "DOM nodes:", nodes.length);
+        }
+
+        if (!found) {
+          // Fallback: walkNodes with offset (old approach, for messages without expected)
+          let charCount = 0;
+          const blockTags = new Set(["DIV","P","BR","LI","TR","BLOCKQUOTE","H1","H2","H3","H4","H5","H6"]);
+          function walkNodes(parent) {
+            for (let child = parent.firstChild; child; child = child.nextSibling) {
+              if (startNode && endNode) return;
+              if (child.nodeType === Node.TEXT_NODE) {
+                const nodeLen = child.textContent.length;
+                if (!startNode && charCount + nodeLen >= start) {
+                  startNode = child; startOfs = start - charCount;
                 }
-                walkNodes(child);
+                if (!endNode && charCount + nodeLen >= end) {
+                  endNode = child; endOfs = end - charCount;
+                }
+                charCount += nodeLen;
+              } else if (child.nodeType === Node.ELEMENT_NODE) {
+                if (child.tagName === "BR") { charCount += 1; }
+                else {
+                  const isBlock = blockTags.has(child.tagName);
+                  if (isBlock && child !== parent.firstElementChild) { charCount += 1; }
+                  walkNodes(child);
+                }
               }
             }
           }
+          walkNodes(el);
+          if (startNode && endNode) found = true;
+          console.log("NorskTale CE: walkNodes fallback, charCount:", charCount, "found:", found);
         }
-        walkNodes(el);
 
-        console.log("NorskTale CE: totalChars:", charCount, "start:", start, "end:", end,
-          "startNode:", !!startNode, "endNode:", !!endNode,
-          "text:", JSON.stringify(el.innerText?.substring(0, 100)));
-        if (startNode && endNode) {
+        if (found) {
           range.setStart(startNode, startOfs);
           range.setEnd(endNode, endOfs);
+          const selectedText = range.toString();
+          console.log("NorskTale CE: selected:", JSON.stringify(selectedText), "replacing with:", JSON.stringify(replacement));
           sel.removeAllRanges();
           sel.addRange(range);
           const ok = document.execCommand("insertText", false, replacement);
           console.log("NorskTale CE: execCommand insertText result:", ok);
           if (!ok) {
             // Fallback: direct DOM manipulation
-            console.log("NorskTale CE: execCommand failed, trying InputEvent fallback");
             range.deleteContents();
             range.insertNode(document.createTextNode(replacement));
             sel.collapseToEnd();
             el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: replacement }));
           }
         } else {
-          console.log("NorskTale CE: could not find text nodes for range", start, "-", end);
+          console.log("NorskTale CE: could not find text for replacement");
         }
         lastSent = "";
       }

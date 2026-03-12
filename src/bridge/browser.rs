@@ -224,9 +224,10 @@ impl TextBridge for BrowserBridge {
             log_browser(&format!("  FOUND at char {}..{}, sending replace JSON", start, end));
             log_browser(&format!("  text BEFORE replace: '{}'", &text[..text.len().min(200)]));
             let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
+            let find_escaped = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","start":{},"end":{},"text":"{}"}}"#,
-                start, end, escaped
+                r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+                start, end, escaped, find_escaped
             );
             log_browser(&format!("  reply JSON: {}", json));
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {

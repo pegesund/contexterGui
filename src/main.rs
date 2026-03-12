@@ -1,3 +1,4 @@
+mod bert_worker;
 mod bridge;
 mod grammar_actor;
 mod microphone;
@@ -451,12 +452,40 @@ fn extract_prefix(word: &str) -> &str {
     word.trim()
 }
 
+// --- Pending BERT state types ---
+
+/// Pending spelling BERT re-ranking
+struct PendingSpellingBert {
+    request_id: bert_worker::RequestId,
+    error_idx_word: String,       // word to match in writing_errors
+    error_doc_offset: usize,
+    candidates: Vec<(String, f32)>, // (candidate, ortho_sim)
+}
+
+/// Pending grammar correction BERT ranking
+struct PendingGrammarBert {
+    request_id: bert_worker::RequestId,
+    sentence_context: String,
+    doc_offset: usize,
+    candidates: Vec<(String, String, String)>, // (corrected_sentence, explanation, rule_name)
+}
+
+/// Pending consonant confusion BERT scoring
+struct PendingConsonantBert {
+    request_id: bert_worker::RequestId,
+    word: String,
+    variants: Vec<String>,
+    sentence_ctx: String,
+    doc_offset: usize,
+    // sentences[0] = original, sentences[1..] = variants
+}
+
 // --- egui app ---
 
 /// Items delivered by background startup threads
 enum StartupItem {
     Completer {
-        model: Option<Arc<Mutex<Model>>>,
+        model: Option<Model>,
         prefix_index: Option<PrefixIndex>,
         baselines: Option<Baselines>,
         wordfreq: Option<Arc<HashMap<String, u64>>>,
@@ -486,10 +515,9 @@ struct ContextApp {
     grammar_actor: Option<grammar_actor::GrammarActorHandle>,
     grammar_errors: Vec<GrammarError>,
     last_checked_sentence: String,
-    // Word completer
-    model: Option<Arc<Mutex<Model>>>,
-    /// Background completion: receives (cache_key, completions, open_completions)
-    completion_rx: Option<std::sync::mpsc::Receiver<(String, Vec<Completion>, Vec<Completion>)>>,
+    // Word completer — BERT model lives in dedicated worker thread (no lock contention)
+    bert_worker: Option<bert_worker::BertWorkerHandle>,
+    bert_ready: bool,
     completion_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// Last time context changed — for debouncing completion dispatch
     last_context_change: Instant,
@@ -565,8 +593,12 @@ struct ContextApp {
     pending_fix: Option<(String, String, String, usize)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
-    /// Deferred consonant checks where BERT model was busy — retry when model available
-    deferred_consonant_bert: Vec<(String, Vec<String>, String, usize)>, // (word, variants, sentence_ctx, doc_offset)
+    /// Pending async BERT scoring for spelling re-ranking
+    pending_spelling_bert: Vec<PendingSpellingBert>,
+    /// Pending async BERT scoring for grammar correction ranking
+    pending_grammar_bert: Vec<PendingGrammarBert>,
+    /// Pending async BERT scoring for consonant confusion
+    pending_consonant_bert: Vec<PendingConsonantBert>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
     suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
@@ -951,9 +983,8 @@ impl ContextApp {
                         (None, None, None, None, None)
                     }
                 };
-            let model = model_opt.map(|m| Arc::new(Mutex::new(m)));
             let _ = tx2.send(StartupItem::Completer {
-                model, prefix_index, baselines, wordfreq: wf, embedding_store, errors,
+                model: model_opt, prefix_index, baselines, wordfreq: wf, embedding_store, errors,
             });
         });
 
@@ -972,8 +1003,8 @@ impl ContextApp {
             grammar_actor: None,
             grammar_errors: Vec::new(),
             last_checked_sentence: String::new(),
-            model: None,
-            completion_rx: None,
+            bert_worker: None,
+            bert_ready: false,
             completion_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_context_change: Instant::now(),
             dispatched_key: String::new(),
@@ -1018,7 +1049,9 @@ impl ContextApp {
             grammar_scanning: false,
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
-            deferred_consonant_bert: Vec::new(),
+            pending_spelling_bert: Vec::new(),
+            pending_grammar_bert: Vec::new(),
+            pending_consonant_bert: Vec::new(),
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
@@ -1118,15 +1151,17 @@ impl ContextApp {
             return;
         }
         self.last_spell_checked_word = clean.clone();
-        eprintln!("spell-check: '{}'", clean);
 
         // Skip if word is in ignore list
         if self.ignored_words.contains(&clean) {
             return;
         }
 
-        // Skip punctuation-only or numbers
+        // Skip punctuation-only, numbers, or words without alphabetic characters
         if clean.chars().all(|c| c.is_ascii_punctuation() || c.is_ascii_digit()) {
+            return;
+        }
+        if !clean.chars().any(|c| c.is_alphabetic()) {
             return;
         }
 
@@ -1158,9 +1193,6 @@ impl ContextApp {
         let found;
         let kt_gt_valid_alt: Option<String>;
         let consonant_alts: Vec<String>;
-        let compound_suggestion: Option<String>;
-        let split_suggestion: Option<String>;
-        let fuzzy_candidates: Vec<(String, u32)>;
         let original_found;
 
         {
@@ -1170,7 +1202,9 @@ impl ContextApp {
             };
 
             found = checker.has_word(&clean);
-            eprintln!("  has_word('{}') = {}", clean, found);
+            if !found {
+                log!("spell: '{}' NOT in dict (sentence: '{}')", clean, trunc(sentence_ctx, 50));
+            }
 
             // kt/gt confusion: check if alt form exists
             kt_gt_valid_alt = if found {
@@ -1205,102 +1239,23 @@ impl ContextApp {
             };
 
             original_found = if !found { checker.has_word(word.trim()) } else { false };
-
-            compound_suggestion = if !found && !original_found {
-                checker.suggest_compound(&clean)
-            } else {
-                None
-            };
-
-            // Try splitting "tilbutikken" → "til butikken" (function word + remainder)
-            // Only for unknown words — legitimate compounds are in the dictionary.
-            split_suggestion = if !found && !original_found && compound_suggestion.is_none() {
-                try_split_function_word(&clean, checker)
-            } else {
-                None
-            };
-
-            fuzzy_candidates = if !found && !original_found && compound_suggestion.is_none() && split_suggestion.is_none() {
-                checker.fuzzy_lookup(&clean, 2).into_iter()
-                    .filter(|(w, _)| w != &clean)
-                    .take(10)
-                    .collect()
-            } else {
-                Vec::new()
-            };
         } // checker borrow dropped
 
-        // Phase 2: BERT scoring + writing errors (mutable borrow on self)
+        // Phase 2: BERT scoring via worker (async) + writing errors
         if found {
-            // kt/gt confusion — BERT sentence scoring
+            // kt/gt confusion — send to BERT worker for sentence scoring
             if let Some(ref alt) = kt_gt_valid_alt {
-                let s_orig = self.bert_sentence_score(sentence_ctx);
-                if s_orig == 0.0 {
-                    // Model not loaded or busy — defer
-                    log!("kt/gt BERT deferred (model unavailable): '{}' → '{}'", clean, alt);
-                    self.deferred_consonant_bert.push((clean.clone(), vec![alt.clone()], sentence_ctx.to_string(), doc_offset));
-                } else {
-                    let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
-                    let s_alt = self.bert_sentence_score(&alt_sentence);
-                    log!("kt/gt check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, alt, s_alt);
-                    if s_alt > s_orig {
-                        if !self.writing_errors.iter().any(|e| {
-                            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
-                        }) {
-                            log!("kt/gt confusion: '{}' → '{}'", clean, alt);
-                            self.writing_errors.push(WritingError {
-                                category: ErrorCategory::Spelling,
-                                word: clean.clone(),
-                                suggestion: alt.clone(),
-                                explanation: format!("«{}» → «{}» (kt/gt-forveksling)", clean, alt),
-                                rule_name: "kt_gt".to_string(),
-                                sentence_context: sentence_ctx.to_string(),
-                                doc_offset,
-                                position: 0,
-                                ignored: false,
-                                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-                            });
-                        }
+                let mut all_variants = vec![alt.clone()];
+                // Merge consonant alts if any
+                for a in &consonant_alts {
+                    if !all_variants.contains(a) {
+                        all_variants.push(a.clone());
                     }
                 }
-            }
-
-            // Consonant confusion — BERT sentence scoring
-            if !consonant_alts.is_empty() {
-                let s_orig = self.bert_sentence_score(sentence_ctx);
-                // Model not loaded yet or busy (try_lock failed) — defer for later
-                if s_orig == 0.0 {
-                    log!("consonant BERT deferred (model unavailable): '{}' variants={:?}", clean, consonant_alts);
-                    self.deferred_consonant_bert.push((clean.clone(), consonant_alts.clone(), sentence_ctx.to_string(), doc_offset));
-                } else {
-                    let mut best_alt: Option<(String, f32)> = None;
-                    for alt in &consonant_alts {
-                        let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
-                        let s_alt = self.bert_sentence_score(&alt_sentence);
-                        log!("consonant BERT sentence: '{}' orig={:.2}, '{}' variant={:.2}", clean, s_orig, alt, s_alt);
-                        if best_alt.as_ref().map_or(true, |(_, bs)| s_alt > *bs) {
-                            best_alt = Some((alt.clone(), s_alt));
-                        }
-                    }
-                    if let Some((best, s_best)) = best_alt {
-                        log!("consonant check: '{}' score={:.2}, '{}' score={:.2}", clean, s_orig, best, s_best);
-                        if s_best > s_orig {
-                            let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
-                            self.pending_consonant_checks.push(WritingError {
-                                category: ErrorCategory::Grammar,
-                                word: sentence_ctx.to_string(),
-                                suggestion: corrected_sentence,
-                                explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
-                                rule_name: format!("consonant_confusion:{}:{}", clean, best),
-                                sentence_context: sentence_ctx.to_string(),
-                                doc_offset,
-                                position: 0,
-                                ignored: false,
-                                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-                            });
-                        }
-                    }
-                }
+                self.send_consonant_bert(&clean, all_variants, sentence_ctx, doc_offset);
+            } else if !consonant_alts.is_empty() {
+                // Consonant confusion only (no kt/gt)
+                self.send_consonant_bert(&clean, consonant_alts.clone(), sentence_ctx, doc_offset);
             }
 
             return;
@@ -1310,104 +1265,47 @@ impl ContextApp {
             return;
         }
 
-        // Try compound suggestion via Prolog
-        if let Some(compound) = compound_suggestion {
-            log!("  Compound suggestion: '{}' → '{}'", clean, compound);
-            if self.writing_errors.iter().any(|e| {
-                matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
-            }) {
-                return;
-            }
-            self.writing_errors.push(WritingError {
-                category: ErrorCategory::Spelling,
-                word: clean.clone(),
-                suggestion: compound.clone(),
-                explanation: format!("«{}» → «{}» (sammensatt ord)", clean, compound),
-                rule_name: "sammensatt_ord".to_string(),
-                sentence_context: sentence_ctx.to_string(),
-                doc_offset,
-                position: 0,
-                ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-            });
-            return;
-        }
-
-        // Try split suggestion: "tilbutikken" → "til butikken"
-        // Validate with grammar checker — the split must produce a valid sentence.
-        if let Some(ref split) = split_suggestion {
-            log!("  Split candidate: '{}' → '{}'", clean, split);
-            // Grammar-check the sentence with the split applied
-            let corrected = sentence_ctx.to_lowercase().replacen(&clean.to_lowercase(), split, 1);
-            let grammar_ok = if let Some(checker) = &mut self.checker {
-                let errors = checker.check_sentence(&corrected);
-                log!("  Split grammar check: '{}' → {} errors", corrected, errors.len());
-                errors.is_empty()
-            } else {
-                true // no checker available — accept the split
-            };
-            if grammar_ok {
-                log!("  Split suggestion: '{}' → '{}' (grammar OK)", clean, split);
-                if self.writing_errors.iter().any(|e| {
-                    matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
-                }) {
-                    return;
-                }
-                self.writing_errors.push(WritingError {
-                    category: ErrorCategory::Spelling,
-                    word: clean.clone(),
-                    suggestion: split.clone(),
-                    explanation: format!("«{}» → «{}» (mangler mellomrom)", clean, split),
-                    rule_name: "mangler_mellomrom".to_string(),
-                    sentence_context: sentence_ctx.to_string(),
-                    doc_offset,
-                    position: 0,
-                    ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-                });
-                return;
-            } else {
-                log!("  Split rejected: '{}' → '{}' (grammar errors)", clean, split);
-            }
-        }
-
-        // Word not found — use fuzzy suggestions
-        let mut candidates = fuzzy_candidates;
-
-        // Boost by word frequency
-        if let Some(wf) = &self.wordfreq {
-            candidates.sort_by(|a, b| {
-                let freq_a = wf.get(&a.0).copied().unwrap_or(0);
-                let freq_b = wf.get(&b.0).copied().unwrap_or(0);
-                // Primary: distance ascending, secondary: frequency descending
-                a.1.cmp(&b.1).then(freq_b.cmp(&freq_a))
-            });
-        }
-
-        let best = candidates.first().map(|(w, _)| w.clone()).unwrap_or_default();
-
-        // Don't add duplicate errors for the same word at the same offset
+        // Word not found — unified suggestion pipeline
         if self.writing_errors.iter().any(|e| {
             matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
         }) {
             return;
         }
 
-        let error = WritingError {
+        // BERT must be available — no fallback without it
+        // Don't set last_spell_checked_word so we retry when BERT loads
+        if !self.bert_ready {
+            self.last_spell_checked_word.clear();
+            return;
+        }
+
+        let suggestions = self.find_spelling_suggestions(&clean, sentence_ctx);
+        // Fix up doc_offset on any pending BERT re-ranking request
+        if let Some(pending) = self.pending_spelling_bert.last_mut() {
+            if pending.error_doc_offset == 0 {
+                pending.error_doc_offset = doc_offset;
+            }
+        }
+        let best = suggestions.first().map(|(w, _)| w.clone()).unwrap_or_default();
+        let rule = "stavefeil_bert";
+
+        self.writing_errors.push(WritingError {
             category: ErrorCategory::Spelling,
             word: clean.clone(),
-            suggestion: best,
+            suggestion: best.clone(),
             explanation: format!("«{}» finnes ikke i ordboken.", clean),
-            rule_name: "stavefeil".to_string(),
+            rule_name: rule.to_string(),
             sentence_context: sentence_ctx.to_string(),
             doc_offset,
             position: 0,
             ignored: false,
             word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-        };
-        self.writing_errors.push(error);
-        eprintln!("Spelling: '{}' not found, suggesting '{}'",
-            clean, self.writing_errors.last().unwrap().suggestion);
+        });
+        if !best.is_empty() {
+            log!("Spelling: '{}' → '{}' (unified pipeline)", clean, best);
+        } else {
+            log!("Spelling: '{}' not found, no valid suggestion", clean);
+        }
     }
 
     /// Validate pending consonant confusion candidates with grammar checker + word frequency.
@@ -1456,261 +1354,311 @@ impl ContextApp {
         }
     }
 
-    /// Retry deferred consonant confusion checks when BERT model becomes available.
-    fn process_deferred_consonant_bert(&mut self) {
-        if self.deferred_consonant_bert.is_empty() { return; }
-        // Quick check: model loaded and lockable?
-        let can_lock = self.model.as_ref().map_or(false, |m| {
-            m.try_lock().is_ok() // acquires and immediately drops
+    /// Send consonant confusion check to BERT worker for async sentence scoring.
+    fn send_consonant_bert(&mut self, word: &str, variants: Vec<String>, sentence_ctx: &str, doc_offset: usize) {
+        if !self.bert_ready { return; }
+        // Skip if already flagged for this position
+        if self.writing_errors.iter().any(|e| e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
+            return;
+        }
+        let worker = match &mut self.bert_worker {
+            Some(w) => w,
+            None => return,
+        };
+        // Build sentences: [original, variant1_sentence, variant2_sentence, ...]
+        let mut sentences = vec![sentence_ctx.to_string()];
+        for v in &variants {
+            sentences.push(sentence_ctx.replacen(word, v, 1));
+        }
+        log!("consonant BERT send: '{}' variants={:?}", word, variants);
+        let request_id = worker.send(|id| bert_worker::BertRequest::SentenceScoreBatch { id, sentences });
+        self.pending_consonant_bert.push(PendingConsonantBert {
+            request_id,
+            word: word.to_string(),
+            variants,
+            sentence_ctx: sentence_ctx.to_string(),
+            doc_offset,
         });
-        if !can_lock { return; }
+    }
 
-        let deferred = std::mem::take(&mut self.deferred_consonant_bert);
-        log!("processing {} deferred consonant BERT checks", deferred.len());
-        for (clean, variants, sentence_ctx, doc_offset) in deferred {
-            // Skip if already flagged
-            if self.writing_errors.iter().any(|e| e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
-                continue;
+    /// Poll BERT worker for all response types and handle them.
+    fn poll_bert_responses(&mut self, ctx: &egui::Context) {
+        // Collect all available responses first (avoids borrow conflicts)
+        let mut responses: Vec<bert_worker::BertResponse> = Vec::new();
+        if let Some(worker) = &mut self.bert_worker {
+            while let Some(resp) = worker.try_recv() {
+                responses.push(resp);
             }
-            let s_orig = self.bert_sentence_score(&sentence_ctx);
-            if s_orig == 0.0 {
-                // Still unavailable — re-defer
-                self.deferred_consonant_bert.push((clean, variants, sentence_ctx, doc_offset));
-                continue;
-            }
-            let mut best_alt: Option<(String, f32)> = None;
-            for alt in &variants {
-                let alt_sentence = sentence_ctx.replacen(&clean, alt, 1);
-                let s_alt = self.bert_sentence_score(&alt_sentence);
-                log!("deferred consonant BERT: '{}' orig={:.2}, '{}' variant={:.2}", clean, s_orig, alt, s_alt);
-                if best_alt.as_ref().map_or(true, |(_, bs)| s_alt > *bs) {
-                    best_alt = Some((alt.clone(), s_alt));
+        }
+
+        for resp in responses {
+            match resp {
+                bert_worker::BertResponse::Completion { id: _, cache_key, left, right } => {
+                    log!("BERT completion received: {} left, {} right", left.len(), right.len());
+                    // Apply grammar filter on main thread (checker isn't Send)
+                    if self.grammar_completion {
+                        if let Some(checker) = &mut self.checker {
+                            let masked = self.context.masked_sentence.as_deref().unwrap_or("");
+                            let before_mask = masked.split("<mask>").next().unwrap_or("");
+                            let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
+                                .map(|i| i + 1).unwrap_or(0);
+                            let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
+                            let prefix = extract_prefix(&self.context.word);
+                            let left_filtered: Vec<Completion> = left.into_iter()
+                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
+                                .collect();
+                            let right_filtered: Vec<Completion> = right.into_iter()
+                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
+                                .collect();
+                            let mut check_fn = |sentence: &str| -> GrammarCheckResult {
+                                let errors = checker.check_sentence(sentence);
+                                GrammarCheckResult {
+                                    ok: errors.is_empty(),
+                                    suggestions: errors.iter()
+                                        .filter(|e| !e.suggestion.is_empty())
+                                        .map(|e| e.suggestion.clone())
+                                        .collect(),
+                                }
+                            };
+                            self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                            self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
+                        } else {
+                            self.completions = left.into_iter().take(5).collect();
+                            self.open_completions = right.into_iter().take(5).collect();
+                        }
+                    } else {
+                        self.completions = left.into_iter().take(5).collect();
+                        self.open_completions = right.into_iter().take(5).collect();
+                    }
+                    self.last_completed_prefix = cache_key;
+                }
+
+                bert_worker::BertResponse::SentenceScoreBatch { id, scores } => {
+                    if let Some(idx) = self.pending_spelling_bert.iter().position(|p| p.request_id == id) {
+                        let pending = self.pending_spelling_bert.remove(idx);
+                        self.handle_spelling_bert_response(pending, &scores);
+                    } else if let Some(idx) = self.pending_grammar_bert.iter().position(|p| p.request_id == id) {
+                        let pending = self.pending_grammar_bert.remove(idx);
+                        self.handle_grammar_bert_response(pending, &scores);
+                    } else if let Some(idx) = self.pending_consonant_bert.iter().position(|p| p.request_id == id) {
+                        let pending = self.pending_consonant_bert.remove(idx);
+                        self.handle_consonant_bert_response(pending, &scores);
+                    }
+                }
+
+                bert_worker::BertResponse::MlmForward { .. } => {
+                    // MLM results currently unused in async flow
                 }
             }
-            if let Some((best, s_best)) = best_alt {
-                if s_best > s_orig {
-                    let corrected_sentence = sentence_ctx.replacen(&clean, &best, 1);
-                    self.pending_consonant_checks.push(WritingError {
-                        category: ErrorCategory::Grammar,
-                        word: sentence_ctx.clone(),
-                        suggestion: corrected_sentence,
-                        explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", clean, best),
-                        rule_name: format!("consonant_confusion:{}:{}", clean, best),
-                        sentence_context: sentence_ctx,
-                        doc_offset,
-                        position: 0,
-                        ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-                    });
+        }
+        // Request repaint if there are pending requests
+        if !self.pending_spelling_bert.is_empty()
+            || !self.pending_grammar_bert.is_empty()
+            || !self.pending_consonant_bert.is_empty()
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    /// Handle BERT sentence scoring response for spelling re-ranking.
+    fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scores: &[f32]) {
+        if scores.len() != pending.candidates.len() {
+            log!("spelling BERT response: score count mismatch ({} vs {})", scores.len(), pending.candidates.len());
+            return;
+        }
+        // Re-rank using sqrt(ortho) weighting
+        let mut rescored: Vec<(String, f32)> = pending.candidates.iter().zip(scores.iter())
+            .map(|((candidate, ortho_sim), &sent_score)| {
+                let final_score = sent_score * ortho_sim.sqrt();
+                log!("  spelling BERT: '{}' sent={:.3} × sqrt(ortho {:.2}) = {:.3}", candidate, sent_score, ortho_sim, final_score);
+                (candidate.clone(), final_score)
+            })
+            .collect();
+        rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Update the matching writing error's suggestion
+        if let Some((best, _)) = rescored.first() {
+            for e in &mut self.writing_errors {
+                if matches!(e.category, ErrorCategory::Spelling)
+                    && e.word.to_lowercase() == pending.error_idx_word
+                    && !e.ignored
+                {
+                    if e.suggestion != *best {
+                        log!("spelling BERT upgrade: '{}' → '{}' (was '{}')", e.word, best, e.suggestion);
+                        e.suggestion = best.clone();
+                    }
+                    break;
                 }
             }
         }
     }
 
-    /// Upgrade spelling error suggestions using BERT context.
-    /// Called after update_grammar_errors() to replace fuzzy-only suggestions
-    /// with contextually appropriate ones (e.g. "bossller" → "boller" not "fossiler").
-    fn upgrade_spelling_suggestions(&mut self) {
-        // Wait for BERT model — without it, scoring falls back to trigrams which can't distinguish candidates
-        if self.model.is_none() { return; }
+    /// Handle BERT sentence scoring response for grammar correction ranking.
+    fn handle_grammar_bert_response(&mut self, pending: PendingGrammarBert, scores: &[f32]) {
+        if scores.is_empty() || scores.len() != pending.candidates.len() { return; }
+        // Find best-scoring candidate
+        let best_idx = scores.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let (best_sentence, best_expl, best_rule) = &pending.candidates[best_idx];
+        log!("grammar BERT: best='{}' (score={:.3})", best_sentence, scores[best_idx]);
 
-        // Collect indices + data for spelling errors that need upgrading
+        // Update matching grammar error
+        for e in &mut self.writing_errors {
+            if matches!(e.category, ErrorCategory::Grammar)
+                && e.sentence_context == pending.sentence_context
+                && !e.ignored
+            {
+                e.suggestion = best_sentence.clone();
+                e.explanation = best_expl.clone();
+                e.rule_name = best_rule.clone();
+                break;
+            }
+        }
+    }
+
+    /// Handle BERT sentence scoring response for consonant confusion.
+    fn handle_consonant_bert_response(&mut self, pending: PendingConsonantBert, scores: &[f32]) {
+        if scores.len() < 2 { return; } // need at least original + one variant
+        let orig_score = scores[0];
+        let mut best_alt: Option<(String, f32)> = None;
+        for (i, variant) in pending.variants.iter().enumerate() {
+            let variant_score = scores.get(i + 1).copied().unwrap_or(f32::NEG_INFINITY);
+            log!("consonant BERT: '{}' orig={:.2}, '{}' variant={:.2}", pending.word, orig_score, variant, variant_score);
+            if best_alt.as_ref().map_or(true, |(_, bs)| variant_score > *bs) {
+                best_alt = Some((variant.clone(), variant_score));
+            }
+        }
+        if let Some((best, s_best)) = best_alt {
+            if s_best > orig_score {
+                let corrected_sentence = pending.sentence_ctx.replacen(&pending.word, &best, 1);
+                self.pending_consonant_checks.push(WritingError {
+                    category: ErrorCategory::Grammar,
+                    word: pending.sentence_ctx.clone(),
+                    suggestion: corrected_sentence,
+                    explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", pending.word, best),
+                    rule_name: format!("consonant_confusion:{}:{}", pending.word, best),
+                    sentence_context: pending.sentence_ctx,
+                    doc_offset: pending.doc_offset,
+                    position: 0,
+                    ignored: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                });
+            }
+        }
+    }
+
+    /// Re-run unified suggestion pipeline for spelling errors that were created before
+    /// BERT was available. Once BERT loads, this upgrades ortho-only suggestions to BERT-ranked ones.
+    fn upgrade_spelling_suggestions(&mut self) {
+        if !self.bert_ready { return; }
+
         let to_upgrade: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
             .filter(|(_, e)| {
                 matches!(e.category, ErrorCategory::Spelling)
                     && !e.ignored
-                    && e.rule_name == "stavefeil" // not yet upgraded
+                    && e.rule_name == "stavefeil" // not yet BERT-ranked
                     && !e.sentence_context.is_empty()
             })
             .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
             .collect();
 
         for (idx, word, sentence_ctx) in to_upgrade {
-            let existing = self.writing_errors[idx].suggestion.clone();
-            let mut suggestions = self.trigram_suggestions(&word, &sentence_ctx);
-            // Ensure existing suggestion is in the candidate list (it's dictionary-confirmed)
-            if !existing.is_empty() {
-                if !suggestions.iter().any(|(w, _)| *w == existing) {
-                    suggestions.push((existing.clone(), 0.0)); // will be re-scored by BERT below
-                }
+            let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
+            if let Some((best, score)) = suggestions.first() {
+                log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, best, score);
+                self.writing_errors[idx].suggestion = best.clone();
             }
-            // Pick best suggestion that doesn't introduce grammar errors
-            // Prefer candidates with verb readings (avoids noun-for-verb substitution)
-            if !suggestions.is_empty() {
-                for (i, (w, s)) in suggestions.iter().take(5).enumerate() {
-                    log!("  #{}: '{}' score={:.2}", i+1, w, s);
-                }
-                // Collect all grammar-passing candidates (not just first)
-                let mut passing: Vec<(String, f32)> = Vec::new();
-                if let Some(checker) = &mut self.checker {
-                    for (candidate, score) in suggestions.iter().take(25) {
-                        // Candidate must be a real dictionary word
-                        if !checker.has_word(candidate) {
-                            log!("Spelling grammar-check: '{}' — not in dictionary, skipping", candidate);
-                            continue;
-                        }
-                        let corrected = sentence_ctx.replacen(&word, candidate, 1);
-                        let errors = checker.check_sentence(&corrected);
-                        log!("Spelling grammar-check: '{}' in '{}' → {} errors", candidate, corrected, errors.len());
-                        if errors.is_empty() {
-                            passing.push((candidate.clone(), *score));
-                        }
-                    }
-                }
-                // Pick the highest-scoring candidate that passes grammar.
-                // If none pass, keep the existing suggestion — do NOT pick unvalidated BERT-best.
-                let picked = if !passing.is_empty() {
-                    Some(passing[0].clone())
-                } else {
-                    log!("Spelling upgrade: no grammar-passing candidates for '{}', keeping '{}'", word, existing);
-                    None
-                };
-                if let Some((best, score)) = &picked {
-                    log!("Spelling upgrade: '{}' → '{}' score={:.2} (was '{}', {} candidates)",
-                        word, best, score, existing, suggestions.len());
-                    self.writing_errors[idx].suggestion = best.clone();
-                }
-            }
-            // Mark as processed regardless so we don't retry
             self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
         }
     }
 
-    /// SINGLE VALIDATION GATE for ALL spelling suggestions.
-    /// Every suggestion must:
-    /// 1. Be a valid dictionary word (each word if multi-word split)
-    /// 2. Produce a grammatically valid sentence when substituted
-    /// Called AFTER upgrade_spelling_suggestions() — catches everything.
-    fn validate_all_suggestions(&mut self) {
-        let checker = match &mut self.checker {
-            Some(c) => c,
-            None => return,
-        };
-
-        let mut to_remove: Vec<usize> = Vec::new();
-        for (i, e) in self.writing_errors.iter().enumerate() {
-            // Only validate spelling suggestions that have a non-empty suggestion
-            if !matches!(e.category, ErrorCategory::Spelling) { continue; }
-            if e.suggestion.is_empty() || e.ignored { continue; }
-
-            // 1. Dictionary check: every word in the suggestion must be a real word
-            let words: Vec<&str> = e.suggestion.split_whitespace().collect();
-            let mut dict_ok = true;
-            for w in &words {
-                if !checker.has_word(w) {
-                    log!("VALIDATION GATE REJECTED: '{}' → '{}' ('{}' not in dictionary)",
-                        e.word, e.suggestion, w);
-                    dict_ok = false;
-                    break;
-                }
-            }
-            if !dict_ok {
-                to_remove.push(i);
-                continue;
-            }
-
-            // 2. Grammar check: corrected sentence must be valid
-            if !e.sentence_context.is_empty() {
-                let corrected = e.sentence_context.to_lowercase()
-                    .replacen(&e.word.to_lowercase(), &e.suggestion, 1);
-                let errors = checker.check_sentence(&corrected);
-                if !errors.is_empty() {
-                    log!("VALIDATION GATE REJECTED: '{}' → '{}' ({} grammar errors in '{}')",
-                        e.word, e.suggestion, errors.len(), corrected);
-                    to_remove.push(i);
-                }
-            }
-        }
-
-        // Remove rejected suggestions in reverse order to preserve indices
-        for i in to_remove.into_iter().rev() {
-            self.writing_errors.remove(i);
-        }
-    }
-
-    /// Find spelling suggestion candidates and rank them with BERT sentence scoring.
-    /// 1. Collect candidates from all sources (fuzzy, prefix, compound, wordfreq)
-    /// 2. Score each by encoding the word and summing BERT logits at the masked position
-    /// 3. Tiebreaker: prefix match wins when BERT scores are close
-    fn trigram_suggestions(&mut self, word: &str, sentence_ctx: &str) -> Vec<(String, f32)> {
+    /// UNIFIED spelling suggestion pipeline. ALL spelling suggestions go through this function.
+    /// 1. Generate candidates from ALL sources (fuzzy, prefix, truncated fuzzy, compound, split, wordfreq)
+    /// 2. Filter: must be real dictionary word AND produce valid grammar in context
+    /// 3. Rank survivors by BERT (or ortho-only if BERT unavailable)
+    /// 4. Walk up to 50 candidates for grammar checking
+    /// 5. Fallback: BERT MLM predictions filtered by ortho similarity to misspelled word
+    fn find_spelling_suggestions(&mut self, word: &str, sentence_ctx: &str) -> Vec<(String, f32)> {
         let word_lower = word.to_lowercase();
         let word_trigrams = Self::trigrams(&word_lower);
         let word_first = word_lower.chars().next().unwrap_or(' ');
 
-        // ── Collect unique candidates from all sources ──
+        // ── Phase 1: Collect candidates from all sources (immutable checker) ──
         let mut candidates: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut edit_distances: HashMap<String, u32> = HashMap::new();
-        let mut add = |w: String, seen: &mut std::collections::HashSet<String>| {
-            let wl = w.to_lowercase();
-            if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
-                // Pre-filter: need trigram overlap or same first letter
-                let w_trigrams = Self::trigrams(&wl);
-                let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-                if common > 0 || wl.chars().next().unwrap_or(' ') == word_first {
-                    return Some(wl);
-                }
-            }
-            None
-        };
 
-        // Source 1: Fuzzy Levenshtein matches (distance 2)
-        if let Some(checker) = &self.checker {
-            let fuzzy = checker.fuzzy_lookup(&word_lower, 2);
-            eprintln!("Forslag: fuzzy(2) returned {} matches for '{}'", fuzzy.len(), word_lower);
-            for (w, dist) in fuzzy {
+        {
+            let checker = match &self.checker {
+                Some(c) => c,
+                None => return Vec::new(),
+            };
+
+            // Source 1: Fuzzy Levenshtein matches (distance 2)
+            for (w, dist) in checker.fuzzy_lookup(&word_lower, 2) {
                 let wl = w.to_lowercase();
-                edit_distances.insert(wl, dist);
-                if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                if wl == word_lower || wl.len() < 2 { continue; }
+                edit_distances.insert(wl.clone(), dist);
+                if seen.insert(wl.clone()) { candidates.push(wl); }
             }
-        }
 
-        // Source 2: Prefix lookup (missing-letter typos: "fotbal" → "fotball")
-        let mut prefix_matches: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Some(checker) = &self.checker {
+            // Source 2: Prefix lookup (missing-letter typos: "fotbal" → "fotball")
             for w in checker.prefix_lookup(&word_lower, 20) {
                 let wl = w.to_lowercase();
                 let extra = wl.len() as i32 - word_lower.len() as i32;
                 if extra >= 1 && extra <= 3 {
-                    prefix_matches.insert(wl.clone());
-                    // Prefix match = insertion of extra chars, edit distance = extra chars
                     edit_distances.entry(wl.clone()).or_insert(extra as u32);
-                    if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                    if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                        candidates.push(wl);
+                    }
                 }
             }
-        }
 
-        // Source 3: Prefix with last char removed (typo in final position)
-        if word_lower.len() >= 3 {
-            let shorter = &word_lower[..word_lower.len()-1];
-            if let Some(checker) = &self.checker {
+            // Source 3: Prefix with last char removed (typo in final position)
+            let char_count = word_lower.chars().count();
+            if char_count >= 3 {
+                let end_byte = word_lower.char_indices().rev().next().map(|(i, _)| i).unwrap_or(0);
+                let shorter = &word_lower[..end_byte];
                 for w in checker.prefix_lookup(shorter, 20) {
                     let wl = w.to_lowercase();
-                    // Approximate edit distance: removed 1 char + added extra
                     let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
-                    edit_distances.entry(wl).or_insert(diff);
-                    if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                    edit_distances.entry(wl.clone()).or_insert(diff);
+                    if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                        candidates.push(wl);
+                    }
                 }
             }
-        }
 
-        // Source 4: Fuzzy on truncated word (strip 1-2 trailing chars then fuzzy)
-        // Catches cases like "skrierl" → strip 'l' → fuzzy("skrier",2) → finds "skriver"
-        if let Some(checker) = &self.checker {
+            // Source 4: Truncated fuzzy (strip 1-2 trailing chars then fuzzy)
             for strip in 1..=2u32 {
                 let chars: Vec<char> = word_lower.chars().collect();
                 if chars.len() <= 3 + strip as usize { continue; }
                 let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
-                let fuzzy = checker.fuzzy_lookup(&truncated, 2);
-                for (w, dist) in fuzzy {
+                for (w, dist) in checker.fuzzy_lookup(&truncated, 2) {
                     let wl = w.to_lowercase();
                     edit_distances.entry(wl.clone()).or_insert(dist + strip);
-                    if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                    if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                        candidates.push(wl);
+                    }
                 }
             }
-        }
 
-        // Source 5: Wordfreq — common words with trigram overlap
+            // Source 5: Compound suggestion
+            if let Some(compound) = checker.suggest_compound(&word_lower) {
+                let cl = compound.to_lowercase();
+                if seen.insert(cl.clone()) { candidates.push(cl); }
+            }
+
+            // Source 6: Split function word ("tilbutikken" → "til butikken")
+            if let Some(split) = try_split_function_word(&word_lower, checker) {
+                let sl = split.to_lowercase();
+                if seen.insert(sl.clone()) { candidates.push(sl); }
+            }
+        } // checker borrow dropped
+
+        // Source 7: Wordfreq — common words with trigram overlap
         if let Some(wf) = &self.wordfreq {
             for (w, _freq) in wf.iter() {
                 let wl = w.to_lowercase();
@@ -1724,9 +1672,9 @@ impl ContextApp {
             }
         }
 
-        eprintln!("Forslag: {} raw candidates for '{}'", candidates.len(), word_lower);
+        log!("find_spelling_suggestions: {} raw candidates for '{}'", candidates.len(), word_lower);
 
-        // ── Step 1: Rank candidates by orthographic similarity, keep top 30 ──
+        // ── Phase 2: Ortho score all candidates ──
         let mut ortho_scored: Vec<(String, f32)> = Vec::new();
         for w in &candidates {
             let w_trigrams = Self::trigrams(w);
@@ -1745,93 +1693,97 @@ impl ContextApp {
                 Some(3) => 0.45,
                 _ => 0.0,
             };
-            let ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+            let mut ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+            // First-char bonus: misspellings usually preserve the initial letter
+            if w.chars().next() == Some(word_first) {
+                ortho_sim += 0.15;
+            }
             ortho_scored.push((w.clone(), ortho_sim));
         }
         ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        // ── Step 2: Score each candidate with BERT × ortho_sim ──
-        let sentence_lower = sentence_ctx.to_lowercase();
-        let masked_context = if let Some(pos) = sentence_lower.find(&word_lower) {
-            let before = &sentence_ctx[..pos];
-            let after = &sentence_ctx[pos + word_lower.len()..];
-            format!("{}<mask>{}", before.trim_end(), after)
-        } else {
-            format!("{} <mask>", sentence_ctx)
-        };
-        eprintln!("Forslag: masked context = '{}'", masked_context);
 
-        let mut scored: Vec<(String, f32)> = Vec::new();
+        // ── Phase 3: MLM fallback via BERT worker (async) ──
+        // MLM forward is sent to the worker. If Phase 4 finds no grammar-valid candidates,
+        // Phase 5 will use the MLM predictions when they arrive. For now, we skip MLM
+        // fallback in the synchronous path — it's handled async via pending_spelling_bert.
+        let mut mlm_fallback_candidates: Vec<(String, f32)> = Vec::new();
 
-        if let Some(model_arc) = &self.model {
-            let mut model = model_arc.lock().unwrap();
-            if let Ok((logits, _ms)) = model.single_forward(&masked_context) {
-                for (w, ortho) in &ortho_scored {
-                    let bert_score = if let Ok(enc) = model.tokenizer.encode(w.as_str(), false) {
-                        let ids = enc.get_ids();
-                        if ids.is_empty() { 0.0 }
-                        else {
-                            let raw = logits.get(ids[0] as usize).copied().unwrap_or(0.0);
-                            if ids.len() > 1 { raw * 0.9 } else { raw }
-                        }
-                    } else { 0.0 };
-                    scored.push((w.clone(), bert_score.max(0.0) * ortho));
+        // Send MlmForward request to worker if available (results handled async)
+        if let Some(worker) = &mut self.bert_worker {
+            let masked_context = if let Some(pos) = sentence_ctx.to_lowercase().find(&word_lower) {
+                let before = &sentence_ctx[..pos];
+                let after = &sentence_ctx[pos + word_lower.len()..];
+                format!("{} <mask>{}", before.trim_end(), after)
+            } else {
+                format!("{} <mask>", sentence_ctx)
+            };
+            let _mlm_id = worker.send(|id| bert_worker::BertRequest::MlmForward {
+                id, masked_text: masked_context, top_k: 100,
+            });
+            // MLM results will be picked up in poll_bert_responses() if needed
+        }
+
+        log!("find_spelling_suggestions: top 5 ortho for '{}': {:?}", word_lower,
+            ortho_scored.iter().take(5).collect::<Vec<_>>());
+
+        // ── Phase 4: Dictionary + Grammar filter (walk up to 100 by ortho score) ──
+        let mut passing: Vec<(String, f32)> = Vec::new();
+        {
+            let checker = match &mut self.checker {
+                Some(c) => c,
+                None => return ortho_scored, // no checker available, return unfiltered
+            };
+
+            let mut checked = 0;
+            for (candidate, score) in &ortho_scored {
+                if checked >= 100 { break; }
+
+                // Skip hyphenated candidates when misspelled word has no hyphen
+                if !word_lower.contains('-') && candidate.contains('-') {
+                    continue;
+                }
+
+                // Dictionary check: every word in the candidate must exist
+                let words: Vec<&str> = candidate.split_whitespace().collect();
+                if words.iter().any(|w| !checker.has_word(w)) {
+                    continue;
+                }
+
+                checked += 1;
+
+                // Grammar check: substitute candidate into sentence and verify
+                let corrected = sentence_ctx.to_lowercase()
+                    .replacen(&word_lower, candidate, 1);
+                let errors = checker.check_sentence(&corrected);
+                if errors.is_empty() {
+                    passing.push((candidate.clone(), *score));
+                } else {
+                    log!("  rejected '{}': {} grammar errors", candidate, errors.len());
                 }
             }
         }
 
-        // If no BERT model, fall back to ortho-only scoring
-        if scored.is_empty() {
-            for (w, ortho) in &ortho_scored {
-                scored.push((w.clone(), *ortho));
+        // ── Phase 6: Send async BERT sentence re-ranking (results come via poll_bert_responses) ──
+        // Return first grammar-valid candidate immediately. BERT worker will re-rank async.
+        if passing.len() > 1 {
+            if let Some(worker) = &mut self.bert_worker {
+                let sentence_lower = sentence_ctx.to_lowercase();
+                let sentences: Vec<String> = passing.iter().take(30)
+                    .map(|(candidate, _)| sentence_lower.replacen(&word_lower, candidate, 1))
+                    .collect();
+                let request_id = worker.send(|id| bert_worker::BertRequest::SentenceScoreBatch { id, sentences });
+                self.pending_spelling_bert.push(PendingSpellingBert {
+                    request_id,
+                    error_idx_word: word_lower.clone(),
+                    error_doc_offset: 0, // will be set by caller
+                    candidates: passing.iter().take(30).cloned().collect(),
+                });
+                log!("  sent {} candidates for BERT sentence re-ranking (id={})", passing.len().min(30), request_id);
             }
         }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        eprintln!("Forslag: top BERT×trigram for '{}': {:?}", word_lower,
-            scored.iter().take(5).collect::<Vec<_>>());
-
-        scored.truncate(10);
-        scored
-    }
-
-    /// Score a sentence using BERT pseudo-log-likelihood.
-    /// For each word position, mask it and check how well BERT predicts the actual word.
-    fn bert_sentence_score(&mut self, sentence: &str) -> f32 {
-        let words: Vec<&str> = sentence.split_whitespace().collect();
-        if words.is_empty() { return f32::NEG_INFINITY; }
-
-        let model_arc = match &self.model {
-            Some(m) => m,
-            None => return 0.0,
-        };
-        let mut model = match model_arc.try_lock() {
-            Ok(m) => m,
-            Err(_) => return 0.0, // model busy (background forward) — skip scoring
-        };
-
-        let mut total_score: f32 = 0.0;
-        for i in 0..words.len() {
-            // Build masked sentence
-            let masked: String = words.iter().enumerate()
-                .map(|(j, w)| if j == i { "<mask>" } else { *w })
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            if let Ok((logits, _)) = model.single_forward(&masked) {
-                // Look up the actual word's token and get its logit
-                let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
-                // Try with Ġ prefix (word-initial BPE token)
-                let token_with_g = format!("Ġ{}", word_clean.to_lowercase());
-                let token_id = model.tokenizer.token_to_id(&token_with_g)
-                    .or_else(|| model.tokenizer.token_to_id(&word_clean.to_lowercase()));
-                if let Some(tid) = token_id {
-                    total_score += logits[tid as usize];
-                }
-            }
-        }
-        // Normalize by word count to avoid bias toward longer sentences
-        total_score / words.len() as f32
+        log!("find_spelling_suggestions: {} grammar-valid for '{}'", passing.len(), word_lower);
+        passing
     }
 
     /// Generate candidate corrections for a sentence with grammar errors,
@@ -1958,24 +1910,27 @@ impl ContextApp {
         };
 
         if valid_candidates.is_empty() {
-            eprintln!("  No grammatically valid candidates found");
+            log!("  No grammatically valid candidates found");
             return Vec::new();
         }
 
-        // Score valid candidates with BERT
-        eprintln!("  Scoring {} valid candidates with BERT...", valid_candidates.len());
-        let mut scored: Vec<(String, String, String, f32)> = valid_candidates.into_iter()
-            .map(|(c, e, r)| {
-                let score = self.bert_sentence_score(&c);
-                eprintln!("    {:.1}: '{}'", score, c);
-                (c, e, r, score)
-            })
-            .collect();
+        // Use first valid candidate immediately. If multiple candidates, send async BERT re-ranking.
+        if valid_candidates.len() > 1 {
+            if let Some(worker) = &mut self.bert_worker {
+                let sentences: Vec<String> = valid_candidates.iter().map(|(c, _, _)| c.clone()).collect();
+                let request_id = worker.send(|id| bert_worker::BertRequest::SentenceScoreBatch { id, sentences });
+                self.pending_grammar_bert.push(PendingGrammarBert {
+                    request_id,
+                    sentence_context: sentence.to_string(),
+                    doc_offset: 0, // set by caller
+                    candidates: valid_candidates.clone(),
+                });
+                log!("  Grammar: sent {} candidates for BERT ranking (id={})", valid_candidates.len(), request_id);
+            }
+        }
 
-        // Sort by BERT score — best correction wins regardless of type
-        scored.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(1);
-        scored
+        log!("  Grammar correction (first valid): '{}'", valid_candidates[0].0);
+        vec![(valid_candidates[0].0.clone(), valid_candidates[0].1.clone(), valid_candidates[0].2.clone(), 1.0)]
     }
 
     fn trigrams(word: &str) -> Vec<String> {
@@ -2098,31 +2053,8 @@ impl ContextApp {
                     }
                 }
 
-                // Fallback to BERT if Prolog found nothing
-                if sentences.is_empty() {
-                    if let Some(model_arc) = &self.model {
-                        let verb_fn: Option<Box<dyn Fn(&str) -> bool>> = match &self.checker {
-                            Some(AnyChecker::Swi(c)) => {
-                                let analyzer = c.analyzer().clone();
-                                Some(Box::new(move |word: &str| -> bool {
-                                    nostos_cognio::punctuation::is_finite_verb_mtag(&analyzer, word)
-                                }))
-                            }
-                            _ => None,
-                        };
-
-                        let verb_ref: Option<&dyn Fn(&str) -> bool> = verb_fn.as_deref();
-                        let mut model = model_arc.lock().unwrap();
-                        match nostos_cognio::punctuation::split_into_sentences_with_verbs(&mut *model, &doc_text, 10.0, verb_ref) {
-                            Ok(predicted) => {
-                                sentences = predicted;
-                            }
-                            Err(e) => {
-                                eprintln!("Grammar: BERT punctuation prediction failed: {}", e);
-                            }
-                        }
-                    }
-                }
+                // BERT sentence splitting skipped — Prolog handles most cases.
+                // (BERT model is owned by worker thread, not accessible here)
                 self.prolog_checked_hashes.insert(doc_h);
             }
         }
@@ -2320,10 +2252,20 @@ impl ContextApp {
             self.validate_consonant_checks();
 
             // Grammar: skip the sentence the user is currently editing
-            if let Some(cursor_off) = self.context.cursor_doc_offset {
-                let sent_end = *doc_offset + trimmed.chars().count();
-                if cursor_off >= *doc_offset && cursor_off <= sent_end {
-                    continue;
+            // BUT only skip if cursor is in the MIDDLE of the sentence, not at the end
+            // (at the end = user just finished typing, sentence is complete)
+            if !is_major_change && old_sentence_count > 0 {
+                if let Some(cursor_off) = self.context.cursor_doc_offset {
+                    let sent_end = *doc_offset + trimmed.chars().count();
+                    if cursor_off >= *doc_offset && cursor_off < sent_end {
+                        // Cursor is inside the sentence (not at the very end)
+                        // Only skip if the sentence doesn't end with sentence-final punctuation
+                        let ends_with_punct = trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?');
+                        if !ends_with_punct {
+                            log!("  SKIP (cursor in sentence): '{}' cursor={} range={}..{}", trunc(trimmed, 60), cursor_off, doc_offset, sent_end);
+                            continue;
+                        }
+                    }
                 }
             }
 
@@ -2584,8 +2526,11 @@ impl ContextApp {
             });
             let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
 
-            if let (Some(model_arc), Some(pi)) = (&self.model, &self.prefix_index) {
-                let mut model = model_arc.lock().unwrap();
+            #[allow(unreachable_code)]
+            if false {
+                // Legacy complete_word path disabled — BERT model owned by worker thread
+                let model: &mut Model = unreachable!();
+                let pi = self.prefix_index.as_ref().unwrap();
                 let ctx = {
                     let sentence = &self.context.sentence;
                     let sentence_ctx = sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end();
@@ -3001,6 +2946,11 @@ impl eframe::App for ContextApp {
                 r
             };
             if ok {
+                // Update cached text so rescan doesn't use stale version
+                if let Some(new_text) = self.manager.read_full_document() {
+                    log!("ACTION replace: '{}' → '{}' | text after: {:?}", find, replace, new_text);
+                    self.last_doc_text = new_text;
+                }
                 // Remove the fixed error from the error list
                 let find_lower = find.to_lowercase();
                 self.writing_errors.retain(|e| {
@@ -3084,14 +3034,25 @@ impl eframe::App for ContextApp {
             while let Ok(item) = rx.try_recv() {
                 match item {
                     StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
-                        self.model = model;
+                        if let Some(m) = model {
+                            self.bert_worker = Some(bert_worker::spawn_bert_worker(
+                                m,
+                                build_bpe_completions,
+                                build_mtag_completions,
+                                build_right_completions,
+                            ));
+                            self.bert_ready = true;
+                        }
                         self.prefix_index = prefix_index;
                         self.baselines = baselines;
                         self.wordfreq = wordfreq;
                         self.embedding_store = embedding_store;
                         self.load_errors.extend(errors);
                         self.startup_done.push("NorBERT4".into());
-                        eprintln!("Startup: NorBERT4 completer ready");
+                        // Force rescan — spelling was skipped while BERT was loading
+                        self.last_doc_hash = 0;
+                        self.clean_sentence_hashes.clear();
+                        log!("Startup: NorBERT4 completer ready (bert_worker spawned)");
                     }
                 }
             }
@@ -3272,9 +3233,8 @@ impl eframe::App for ContextApp {
             let errors_before = self.writing_errors.len();
             self.update_grammar_errors();
             self.prune_resolved_errors();
-            // Upgrade and validate suggestions found by update_grammar_errors
+            // Upgrade spelling suggestions when BERT becomes available
             self.upgrade_spelling_suggestions();
-            self.validate_all_suggestions();
             if self.writing_errors.len() != errors_before {
                 self.sync_error_underlines();
             }
@@ -3327,7 +3287,6 @@ impl eframe::App for ContextApp {
                         }
                     }
                 }
-                self.process_deferred_consonant_bert();
                 self.validate_consonant_checks();
                 // Sentence boundary: run grammar check
                 self.run_grammar_check();
@@ -3340,8 +3299,7 @@ impl eframe::App for ContextApp {
                 // Only process grammar queue when no background forward in flight (avoids model mutex contention)
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
-                self.validate_all_suggestions();
-                if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
+                if !self.grammar_queue.is_empty() && true /* no contention — bert worker owns model */ {
                     self.process_grammar_queue();
                 }
                 self.sync_error_underlines();
@@ -3368,14 +3326,13 @@ impl eframe::App for ContextApp {
                 // Word boundary work: prune, upgrade, drain grammar queue
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
-                self.validate_all_suggestions();
-                if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
+                if !self.grammar_queue.is_empty() && true /* no contention — bert worker owns model */ {
                     self.process_grammar_queue();
                 }
                 self.sync_error_underlines();
             }
 
-            // Background completion: debounce + dispatch full completion + poll results
+            // Background completion: debounce + dispatch via BERT worker
             if let Some(masked) = &self.context.masked_sentence.clone() {
                 let prefix = extract_prefix(&self.context.word);
                 let prefix_lower = prefix.to_lowercase();
@@ -3395,10 +3352,9 @@ impl eframe::App for ContextApp {
 
                 // Dispatch after 300ms idle
                 if needs_completion
-                    && self.completion_rx.is_none()
                     && self.last_context_change.elapsed() >= Duration::from_millis(300)
                 {
-                    if let Some(model_arc) = &self.model {
+                    if let Some(worker) = &mut self.bert_worker {
                         // Pre-fetch on main thread (fast, uses checker)
                         let matches: Vec<(u32, String)> = self.prefix_index.as_ref()
                             .and_then(|pi| pi.get(&prefix_lower))
@@ -3411,8 +3367,6 @@ impl eframe::App for ContextApp {
                         };
                         let nearby_words: std::collections::HashSet<String> = {
                             let before_mask = masked.split("<mask>").next().unwrap_or("");
-                            // Only look at current sentence (after last sentence boundary)
-                            // to avoid filtering words that appear in prior context sentences
                             let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
                                 .map(|i| i + 1).unwrap_or(0);
                             let current_sent = &before_mask[sent_start..];
@@ -3421,14 +3375,7 @@ impl eframe::App for ContextApp {
                                 .filter(|w| w.len() > 1)
                                 .collect()
                         };
-                        let wordfreq_clone = self.wordfreq.clone();
-                        let model_clone = model_arc.clone();
-                        let cancel = self.completion_cancel.clone();
-                        cancel.store(false, std::sync::atomic::Ordering::Release);
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        // Trim masked text to ~3 sentences around <mask> to keep forward fast
-                        // (full doc context makes BERT 25x slower: 512 tokens vs ~30 tokens)
-                        // Keep 3 sentence boundaries = current sentence + 2 previous for context
+                        // Trim masked text to ~3 sentences around <mask>
                         let masked_trimmed = {
                             let parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
                             let before = parts[0];
@@ -3440,15 +3387,11 @@ impl eframe::App for ContextApp {
                                 for i in (0..bytes.len()).rev() {
                                     if bytes[i] == b'.' || bytes[i] == b'!' || bytes[i] == b'?' {
                                         cuts += 1;
-                                        if cuts >= 3 {
-                                            start = i + 1;
-                                            break;
-                                        }
+                                        if cuts >= 3 { start = i + 1; break; }
                                     }
                                 }
                                 before[start..].trim_start()
                             };
-                            // Keep first sentence after mask
                             let trimmed_after = {
                                 if let Some(pos) = after.find(|c: char| ".!?".contains(c)) {
                                     &after[..=pos]
@@ -3458,123 +3401,38 @@ impl eframe::App for ContextApp {
                             };
                             format!("{}<mask>{}", trimmed_before, trimmed_after)
                         };
-                        let masked_clone = masked_trimmed;
-                        let prefix_lower_clone = prefix_lower.clone();
-                        let key_clone = cache_key.clone();
                         let capitalize = prefix.chars().next().map_or(false, |c| c.is_uppercase());
+                        let cancel = self.completion_cancel.clone();
+                        cancel.store(false, std::sync::atomic::Ordering::Release);
 
-                        std::thread::spawn(move || {
-                            let t_start = std::time::Instant::now();
-                            let mut model = model_clone.lock().unwrap();
-                            if cancel.load(std::sync::atomic::Ordering::Acquire) { return; }
-
-                            // single_forward → logits (trimmed context for speed)
-                            eprintln!("BERT context: {} chars", masked_clone.len());
-                            let logits = match model.single_forward(&masked_clone) {
-                                Ok((l, _)) => l,
-                                Err(e) => { eprintln!("Background forward error: {}", e); return; }
-                            };
-                            if cancel.load(std::sync::atomic::Ordering::Acquire) { return; }
-
-                            // Build left completions
-                            let left = if matches.is_empty() && !prefix_lower_clone.is_empty() {
-                                build_mtag_completions(&mut model, &masked_clone, &mtag_candidates, &logits, capitalize, &cancel)
-                            } else if !prefix_lower_clone.is_empty() {
-                                build_bpe_completions(&mut model, &masked_clone, &prefix_lower_clone, &matches, &logits, wordfreq_clone.as_deref(), &nearby_words, capitalize, &cancel)
-                            } else {
-                                vec![]
-                            };
-                            if cancel.load(std::sync::atomic::Ordering::Acquire) { return; }
-
-                            // Build right completions
-                            let left_words: std::collections::HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
-                            let right = build_right_completions(&model, &logits, wordfreq_clone.as_deref(), &nearby_words, &left_words);
-
-                            let elapsed = t_start.elapsed().as_millis();
-                            eprintln!("Background completion in {}ms: left=[{}] right=[{}]", elapsed,
-                                left.iter().take(5).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
-                                right.iter().take(5).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-
-                            if !cancel.load(std::sync::atomic::Ordering::Acquire) {
-                                let _ = tx.send((key_clone, left, right));
-                            }
+                        let wf = self.wordfreq.clone();
+                        let key_clone = cache_key.clone();
+                        worker.send(|id| bert_worker::BertRequest::Completion {
+                            id,
+                            masked_text: masked_trimmed,
+                            prefix_lower: prefix_lower.clone(),
+                            matches,
+                            mtag_candidates,
+                            nearby_words,
+                            wordfreq: wf,
+                            capitalize,
+                            cancel,
+                            cache_key: key_clone,
                         });
-
-                        self.completion_rx = Some(rx);
                         ctx.request_repaint_after(Duration::from_millis(50));
                     }
-                } else if needs_completion && self.completion_rx.is_none() {
+                } else if needs_completion {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
-
-            // Poll background completion results
-            if let Some(rx) = &self.completion_rx {
-                match rx.try_recv() {
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        // Background thread exited without sending (cancelled)
-                        eprintln!("Background completion cancelled (sender dropped)");
-                        self.completion_rx = None;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        // Still running — check again soon
-                        ctx.request_repaint_after(Duration::from_millis(50));
-                    }
-                    Ok((key, left, right)) => {
-                    eprintln!("Background completion received: {} left, {} right", left.len(), right.len());
-                    // Apply grammar filter on main thread (checker isn't Send)
-                    if self.grammar_completion {
-                        if let Some(checker) = &mut self.checker {
-                            let masked = self.context.masked_sentence.as_deref().unwrap_or("");
-                            let before_mask = masked.split("<mask>").next().unwrap_or("");
-                            let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
-                                .map(|i| i + 1).unwrap_or(0);
-                            let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
-                            let prefix = extract_prefix(&self.context.word);
-                            // Pre-filter: remove words not in mtag dictionary (e.g. "sports")
-                            // Grammar checker can't validate unknown words
-                            let left_filtered: Vec<Completion> = left.into_iter()
-                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
-                                .collect();
-                            let right_filtered: Vec<Completion> = right.into_iter()
-                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
-                                .collect();
-                            let mut check_fn = |sentence: &str| -> GrammarCheckResult {
-                                let errors = checker.check_sentence(sentence);
-                                GrammarCheckResult {
-                                    ok: errors.is_empty(),
-                                    suggestions: errors.iter()
-                                        .filter(|e| !e.suggestion.is_empty())
-                                        .map(|e| e.suggestion.clone())
-                                        .collect(),
-                                }
-                            };
-                            self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
-                            self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
-                        } else {
-                            self.completions = left.into_iter().take(5).collect();
-                            self.open_completions = right.into_iter().take(5).collect();
-                        }
-                    } else {
-                        self.completions = left.into_iter().take(5).collect();
-                        self.open_completions = right.into_iter().take(5).collect();
-                    }
-                    self.last_completed_prefix = key;
-                    self.completion_rx = None;
-                    }
-                }
-            }
         }
 
-        // Idle grammar queue + deferred consonant processing
-        // Runs every frame (not just at word boundaries) so queue drains even when user stops typing
-        if !self.grammar_queue.is_empty() && self.completion_rx.is_none() {
+        // Poll ALL BERT worker responses (completions + sentence scoring + MLM)
+        self.poll_bert_responses(&ctx);
+
+        // Idle grammar queue processing
+        if !self.grammar_queue.is_empty() {
             self.process_grammar_queue();
-        }
-        if !self.deferred_consonant_bert.is_empty() {
-            self.process_deferred_consonant_bert();
-            self.validate_consonant_checks();
-            self.sync_error_underlines();
         }
 
         // Phase 1: Ctrl+Space while Word has focus → enter selection mode
@@ -4433,36 +4291,13 @@ impl eframe::App for ContextApp {
                             "suggest" => {
                                 let word = self.writing_errors[idx].word.clone();
                                 let sentence_ctx = self.writing_errors[idx].sentence_context.clone();
-                                let existing = self.writing_errors[idx].suggestion.clone();
-                                let mut suggestions = self.trigram_suggestions(&word, &sentence_ctx);
-                                // Boost existing suggestion (compound/confirmed) to top
-                                if !existing.is_empty() {
-                                    let et = Self::trigrams(&existing.to_lowercase());
-                                    let wt = Self::trigrams(&word.to_lowercase());
-                                    let common = wt.iter().filter(|t| et.contains(t)).count();
-                                    let total = wt.len().max(et.len()).max(1);
-                                    let sim = common as f32 / total as f32;
-                                    let boost_score = 2.0 + sim;
-                                    if let Some(pos) = suggestions.iter().position(|(w, _)| w == &existing) {
-                                        suggestions[pos].1 = suggestions[pos].1.max(boost_score);
-                                    } else {
-                                        suggestions.push((existing.clone(), boost_score));
-                                    }
-                                    suggestions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                                }
-                                // Grammar-filter: substitute each candidate into the sentence and check
-                                if let Some(checker) = &mut self.checker {
-                                    suggestions.retain(|(candidate, _score)| {
-                                        let test_sentence = sentence_ctx.to_lowercase()
-                                            .replacen(&word.to_lowercase(), candidate, 1);
-                                        let errors = checker.check_sentence(&test_sentence);
-                                        errors.is_empty()
-                                    });
-                                }
+                                // Use unified pipeline — all suggestions are grammar-verified
+                                let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
                                 self.suggestion_window = Some((word, suggestions));
                             }
                             "ignore" => {
                                 let error = &self.writing_errors[idx];
+                                log!("ACTION ignore: word='{}' rule='{}'", error.word, error.rule_name);
                                 if matches!(error.category, ErrorCategory::Spelling) {
                                     self.ignored_words.insert(error.word.clone());
                                 }
@@ -5105,10 +4940,69 @@ fn main() -> eframe::Result {
         }
     }
 
+    /// Test helper: block until all pending BERT worker responses are received.
+    fn drain_bert_responses(app: &mut ContextApp) {
+        // Wait up to 30s for all pending responses
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while (!app.pending_spelling_bert.is_empty()
+            || !app.pending_grammar_bert.is_empty()
+            || !app.pending_consonant_bert.is_empty())
+            && Instant::now() < deadline
+        {
+            // Collect one response at a time to avoid borrow issues
+            let resp = app.bert_worker.as_mut().and_then(|w| w.try_recv());
+            match resp {
+                Some(bert_worker::BertResponse::SentenceScoreBatch { id, scores }) => {
+                    if let Some(idx) = app.pending_spelling_bert.iter().position(|p| p.request_id == id) {
+                        let pending = app.pending_spelling_bert.remove(idx);
+                        app.handle_spelling_bert_response(pending, &scores);
+                    } else if let Some(idx) = app.pending_grammar_bert.iter().position(|p| p.request_id == id) {
+                        let pending = app.pending_grammar_bert.remove(idx);
+                        app.handle_grammar_bert_response(pending, &scores);
+                    } else if let Some(idx) = app.pending_consonant_bert.iter().position(|p| p.request_id == id) {
+                        let pending = app.pending_consonant_bert.remove(idx);
+                        app.handle_consonant_bert_response(pending, &scores);
+                    }
+                }
+                Some(bert_worker::BertResponse::MlmForward { .. }) => {}
+                Some(bert_worker::BertResponse::Completion { .. }) => {}
+                None => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
     // Console spelling test mode — exercises exact same code as GUI
     if std::env::args().any(|a| a == "--test-spelling") {
         eprintln!("=== Spelling test mode ===");
         let mut app = ContextApp::new(true, true, 2, false);
+        // Wait for startup (BERT model loading) to complete
+        if let Some(rx) = app.startup_rx.take() {
+            eprintln!("Waiting for BERT model to load...");
+            while let Ok(item) = rx.recv() {
+                match item {
+                    StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
+                        if let Some(m) = model {
+                            app.bert_worker = Some(bert_worker::spawn_bert_worker(
+                                m, build_bpe_completions, build_mtag_completions, build_right_completions,
+                            ));
+                            app.bert_ready = true;
+                            eprintln!("BERT worker spawned");
+                        }
+                        app.prefix_index = prefix_index;
+                        app.baselines = baselines;
+                        app.wordfreq = wordfreq;
+                        app.embedding_store = embedding_store;
+                        app.load_errors.extend(errors);
+                    }
+                }
+            }
+        }
+        if !app.bert_ready {
+            eprintln!("ERROR: BERT model not loaded!");
+            std::process::exit(1);
+        }
         let mut pass = 0;
         let mut fail = 0;
 
@@ -5123,12 +5017,15 @@ fn main() -> eframe::Result {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
-            app.deferred_consonant_bert.clear();
+            app.pending_consonant_bert.clear();
+            app.pending_spelling_bert.clear();
             app.check_spelling(word, sentence, 0);
-            app.process_deferred_consonant_bert();
+            // Drain BERT worker responses (async consonant + spelling re-ranking)
+            drain_bert_responses(&mut app);
             app.validate_consonant_checks();
             app.upgrade_spelling_suggestions();
-            app.validate_all_suggestions();
+            // Drain again for any spelling upgrade requests
+            drain_bert_responses(&mut app);
             let suggestion = app.writing_errors.first()
                 .map(|e| e.suggestion.as_str()).unwrap_or("(none)");
             let ok = suggestion == *expected;
@@ -5148,9 +5045,10 @@ fn main() -> eframe::Result {
             app.last_spell_checked_word.clear();
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
-            app.deferred_consonant_bert.clear();
+            app.pending_consonant_bert.clear();
             app.check_spelling(word, sentence, 0);
-            app.process_deferred_consonant_bert();
+            // Drain BERT worker responses for consonant scoring
+            drain_bert_responses(&mut app);
             eprintln!("  '{}': pending={}", word, app.pending_consonant_checks.len());
             app.validate_consonant_checks();
             let got = app.writing_errors.first()

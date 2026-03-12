@@ -62,8 +62,10 @@ fn score_candidates(
     }
 
     // Source 3: Prefix with last char removed
-    if word_lower.len() >= 3 {
-        let shorter = &word_lower[..word_lower.len() - 1];
+    let char_count = word_lower.chars().count();
+    if char_count >= 3 {
+        let end_byte = word_lower.char_indices().rev().next().map(|(i, _)| i).unwrap_or(0);
+        let shorter = &word_lower[..end_byte];
         for w in checker.prefix_lookup(shorter, 20) {
             let wl = w.to_lowercase();
             let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
@@ -98,16 +100,9 @@ fn score_candidates(
         }
     }
 
-    // Build masked context (same as app: glued, trim_end before)
+    // Score all candidates by orthographic similarity only
+    // First-token BERT is unreliable — sentence-level BERT re-ranking handles context
     let sentence_lower = sentence.to_lowercase();
-    let masked = if let Some(pos) = sentence_lower.find(&word_lower) {
-        let before = &sentence[..pos];
-        let after = &sentence[pos + word_lower.len()..];
-        format!("{}<mask>{}", before.trim_end(), after)
-    } else {
-        format!("{} <mask>", sentence)
-    };
-    // Step 1: Score all candidates by orthographic similarity, take top-N
     let mut ortho_scored: Vec<(String, f32)> = Vec::new();
     for w in &candidates {
         let w_tri = trigrams(w);
@@ -126,71 +121,39 @@ fn score_candidates(
             Some(3) => 0.45,
             _ => 0.0,
         };
-        let ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+        let mut ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+        // First-char bonus: misspellings usually preserve the initial letter
+        if w.chars().next() == Some(word_first) {
+            ortho_sim += 0.15;
+        }
         ortho_scored.push((w.clone(), ortho_sim));
     }
     ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    println!("  Masked: '{}'", masked);
     println!("  Candidates: {}", candidates.len());
     let expected_lower = expected.to_lowercase();
-    if candidates.contains(&expected_lower) {
+    let expected_alts: Vec<&str> = expected.split('|').collect();
+    let expected_in_pool = expected_alts.iter().any(|alt| candidates.contains(&alt.to_lowercase()));
+    if expected_in_pool {
         println!("  ✓ '{}' IS in candidate pool", expected);
     } else {
         println!("  ✗ '{}' NOT in candidate pool!", expected);
     }
 
-    // Step 2: Score with BERT × ortho_sim
-    let mut scored: Vec<(String, f32)> = Vec::new();
-    if let Ok((logits, _ms)) = model.single_forward(&masked) {
-        for w in &candidates {
-            let bert_score = if let Ok(enc) = model.tokenizer.encode(w.as_str(), false) {
-                let ids = enc.get_ids();
-                if ids.is_empty() {
-                    0.0
-                } else {
-                    let raw = logits.get(ids[0] as usize).copied().unwrap_or(0.0);
-                    if ids.len() > 1 { raw * 0.9 } else { raw }
-                }
-            } else {
-                0.0
-            };
-
-            let w_tri = trigrams(w);
-            let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
-            let max_t = word_trigrams.len().max(w_tri.len()).max(1);
-            let trigram_sim = common as f32 / max_t as f32;
-
-            let prefix_len = word_lower.chars().zip(w.chars())
-                .take_while(|(a, b)| a == b).count();
-            let max_len = word_lower.chars().count().max(w.chars().count()).max(1);
-            let prefix_sim = prefix_len as f32 / max_len as f32;
-
-            let edit_sim = match edit_distances.get(w.as_str()) {
-                Some(1) => 0.85,
-                Some(2) => 0.65,
-                Some(3) => 0.45,
-                _ => 0.0,
-            };
-            let ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
-
-            let score = bert_score.max(0.0) * ortho_sim;
-            scored.push((w.clone(), score));
+    // Debug: show where expected word ranks in ortho
+    for alt in &expected_alts {
+        if let Some(pos) = ortho_scored.iter().position(|(w, _)| *w == alt.to_lowercase()) {
+            let (_, s) = &ortho_scored[pos];
+            println!("  DEBUG ortho: '{}' at rank #{} score={:.3}", alt, pos + 1, s);
         }
     }
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-    // Debug: show where expected word ranks
-    if let Some(pos) = scored.iter().position(|(w, _)| *w == expected.to_lowercase()) {
-        let (_, s) = &scored[pos];
-        println!("  DEBUG: '{}' at rank #{} score={:.3}", expected, pos + 1, s);
-    } else {
-        println!("  DEBUG: '{}' not in scored list!", expected);
-    }
-
-    // Grammar filter (same as app: pick first that passes)
+    // Grammar filter (same as app: walk up to 50 candidates by ortho score)
     let mut passing: Vec<(String, f32)> = Vec::new();
-    for (candidate, score) in scored.iter().take(25) {
+    for (candidate, score) in ortho_scored.iter().take(100) {
+        // Skip hyphenated candidates when misspelled word has no hyphen
+        if !word_lower.contains('-') && candidate.contains('-') {
+            continue;
+        }
         if !checker.has_word(candidate) { continue; }
         let corrected = sentence.to_lowercase().replacen(&word_lower, candidate, 1);
         let errors = checker.check_sentence(&corrected);
@@ -200,7 +163,66 @@ fn score_candidates(
         }
     }
 
-    if !passing.is_empty() { passing } else { scored }
+    // Re-rank top grammar-valid candidates with sentence-level BERT scoring.
+    // Multiply by ortho_sim so words that look nothing like the misspelling don't win.
+    if passing.len() > 1 {
+        let sentence_lower = sentence.to_lowercase();
+        let mut rescored: Vec<(String, f32)> = Vec::new();
+        for (candidate, _) in passing.iter().take(30) {
+            let corrected = sentence_lower.replacen(&word_lower, candidate, 1);
+            let sent_score = bert_sentence_score(model, &corrected);
+            // Compute ortho_sim for weighting
+            let w_tri = trigrams(candidate);
+            let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
+            let max_t = word_trigrams.len().max(w_tri.len()).max(1);
+            let trigram_sim = common as f32 / max_t as f32;
+            let prefix_len = word_lower.chars().zip(candidate.chars())
+                .take_while(|(a, b)| a == b).count();
+            let max_len = word_lower.chars().count().max(candidate.chars().count()).max(1);
+            let prefix_sim = prefix_len as f32 / max_len as f32;
+            let edit_sim = edit_distances.get(candidate.as_str())
+                .map(|d| match d { 1 => 0.85_f32, 2 => 0.65, 3 => 0.45, _ => 0.0 })
+                .unwrap_or(0.0);
+            let mut ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+            if candidate.chars().next() == Some(word_first) {
+                ortho_sim += 0.15;
+            }
+            // Use sqrt(ortho) to soften the penalty — let BERT have more influence
+            let final_score = sent_score * ortho_sim.sqrt();
+            println!("  sentence-score: '{}' → {:.3} × sqrt(ortho {:.2}) = {:.3}", candidate, sent_score, ortho_sim, final_score);
+            rescored.push((candidate.clone(), final_score));
+        }
+        rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        passing = rescored;
+    }
+
+    if !passing.is_empty() { passing } else { ortho_scored }
+}
+
+/// Score a sentence using BERT pseudo-log-likelihood (same as main.rs bert_sentence_score).
+/// Masks each word, checks how well BERT predicts the actual word.
+fn bert_sentence_score(model: &mut Model, sentence: &str) -> f32 {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    if words.is_empty() { return f32::NEG_INFINITY; }
+
+    let mut total_score: f32 = 0.0;
+    for i in 0..words.len() {
+        let masked: String = words.iter().enumerate()
+            .map(|(j, w)| if j == i { "<mask>" } else { *w })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if let Ok((logits, _)) = model.single_forward(&masked) {
+            let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
+            let token_with_g = format!("Ġ{}", word_clean.to_lowercase());
+            let token_id = model.tokenizer.token_to_id(&token_with_g)
+                .or_else(|| model.tokenizer.token_to_id(&word_clean.to_lowercase()));
+            if let Some(tid) = token_id {
+                total_score += logits[tid as usize];
+            }
+        }
+    }
+    total_score / words.len() as f32
 }
 
 /// Same logic as main.rs try_split_function_word
@@ -285,6 +307,10 @@ fn main() {
         ("Katten sitterr på stolen.", "sitterr", "sitter"),
         ("Han spiller fotballl.", "fotballl", "fotball"),
         ("Jeg skal skrierl.", "skrierl", "skrive|skrives"),
+        // BERT must rank "brus" over "bakrus" in context
+        ("Barna fikk boller og bbrus.", "bbrus", "brus"),
+        // BERT must rank "godterier" over "lotterier" in context
+        ("Barna fikk gåtterier.", "gåtterier", "godterier|godteri"),
     ];
 
     let mut pass = 0;
