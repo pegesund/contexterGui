@@ -7,6 +7,14 @@ use super::{CursorContext, RawCursorText, TextBridge, build_context};
 use std::path::PathBuf;
 use std::time::Instant;
 
+fn log_browser(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = crate::LOG_FILE.lock() {
+        let _ = writeln!(f, "{}", msg);
+        let _ = f.flush();
+    }
+}
+
 fn data_path() -> PathBuf {
     std::env::temp_dir().join("norsktale-browser.json")
 }
@@ -196,6 +204,8 @@ impl TextBridge for BrowserBridge {
     fn find_and_replace_in_context_at(&self, find: &str, replace: &str, context: &str, char_offset: usize) -> bool {
         let text = self.last_text.borrow().clone();
         if text.is_empty() { return false; }
+        log_browser(&format!("REPLACE: find='{}' replace='{}' char_offset={}", find, replace, char_offset));
+        log_browser(&format!("  cached text ({} chars): '{}'", text.chars().count(), &text[..text.len().min(200)]));
         // Use the char_offset to find the exact position
         let byte_offset = char_to_byte_offset(&text, char_offset);
         let find_lower = find.to_lowercase();
@@ -211,17 +221,23 @@ impl TextBridge for BrowserBridge {
             let abs_byte_pos = search_start + rel_byte_pos;
             let start = text[..abs_byte_pos].chars().count();
             let end = start + find.chars().count();
+            log_browser(&format!("  FOUND at char {}..{}, sending replace JSON", start, end));
+            log_browser(&format!("  text BEFORE replace: '{}'", &text[..text.len().min(200)]));
             let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
                 r#"{{"action":"replace","start":{},"end":{},"text":"{}"}}"#,
                 start, end, escaped
             );
+            log_browser(&format!("  reply JSON: {}", json));
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
+                let new_text = self.last_text.borrow().clone();
+                log_browser(&format!("  text AFTER replace: '{}'", &new_text[..new_text.len().min(200)]));
                 return true;
             }
             return false;
         }
+        log_browser("  NOT FOUND near offset, falling back to context search");
         // Fallback to context-based search
         self.find_and_replace_in_context(find, replace, context)
     }
@@ -252,7 +268,15 @@ impl TextBridge for BrowserBridge {
             after: after.to_string(),
         };
 
-        Some(build_context(&raw, caret))
+        let mut ctx = build_context(&raw, caret);
+        ctx.cursor_doc_offset = Some(cursor_start);
+        Some(ctx)
+    }
+
+    fn read_full_document(&self) -> Option<String> {
+        // Re-read file to get latest text
+        let (text, _, _, _) = self.read_data_file()?;
+        if text.is_empty() { None } else { Some(text) }
     }
 }
 

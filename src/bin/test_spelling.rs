@@ -19,9 +19,10 @@ fn trigrams(word: &str) -> Vec<String> {
 /// Score candidates using the same algorithm as main.rs trigram_suggestions()
 fn score_candidates(
     model: &mut Model,
-    checker: &mut nostos_cognio::grammar::GrammarChecker,
+    checker: &mut nostos_cognio::grammar::swipl_checker::SwiGrammarChecker,
     sentence: &str,
     word: &str,
+    expected: &str,
 ) -> Vec<(String, f32)> {
     let word_lower = word.to_lowercase();
     let word_trigrams = trigrams(&word_lower);
@@ -77,6 +78,26 @@ fn score_candidates(
         }
     }
 
+    // Source 4: Fuzzy on truncated word (strip 1-2 trailing chars then fuzzy)
+    // Catches "skrierl" → strip 'l' → fuzzy("skrier",2) → finds "skrive", "skriver"
+    for strip in 1..=2u32 {
+        let chars: Vec<char> = word_lower.chars().collect();
+        if chars.len() <= 3 + strip as usize { continue; }
+        let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
+        let fuzzy = checker.fuzzy_lookup(&truncated, 2);
+        for (w, dist) in fuzzy {
+            let wl = w.to_lowercase();
+            edit_distances.entry(wl.clone()).or_insert(dist + strip);
+            if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                let w_tri = trigrams(&wl);
+                let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
+                if common > 0 || wl.chars().next().unwrap_or(' ') == word_first {
+                    candidates.push(wl);
+                }
+            }
+        }
+    }
+
     // Build masked context (same as app: glued, trim_end before)
     let sentence_lower = sentence.to_lowercase();
     let masked = if let Some(pos) = sentence_lower.find(&word_lower) {
@@ -86,10 +107,39 @@ fn score_candidates(
     } else {
         format!("{} <mask>", sentence)
     };
+    // Step 1: Score all candidates by orthographic similarity, take top-N
+    let mut ortho_scored: Vec<(String, f32)> = Vec::new();
+    for w in &candidates {
+        let w_tri = trigrams(w);
+        let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
+        let max_t = word_trigrams.len().max(w_tri.len()).max(1);
+        let trigram_sim = common as f32 / max_t as f32;
+
+        let prefix_len = word_lower.chars().zip(w.chars())
+            .take_while(|(a, b)| a == b).count();
+        let max_len = word_lower.chars().count().max(w.chars().count()).max(1);
+        let prefix_sim = prefix_len as f32 / max_len as f32;
+
+        let edit_sim = match edit_distances.get(w.as_str()) {
+            Some(1) => 0.85,
+            Some(2) => 0.65,
+            Some(3) => 0.45,
+            _ => 0.0,
+        };
+        let ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+        ortho_scored.push((w.clone(), ortho_sim));
+    }
+    ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     println!("  Masked: '{}'", masked);
     println!("  Candidates: {}", candidates.len());
+    let expected_lower = expected.to_lowercase();
+    if candidates.contains(&expected_lower) {
+        println!("  ✓ '{}' IS in candidate pool", expected);
+    } else {
+        println!("  ✗ '{}' NOT in candidate pool!", expected);
+    }
 
-    // Score with BERT
+    // Step 2: Score with BERT × ortho_sim
     let mut scored: Vec<(String, f32)> = Vec::new();
     if let Ok((logits, _ms)) = model.single_forward(&masked) {
         for w in &candidates {
@@ -99,45 +149,52 @@ fn score_candidates(
                     0.0
                 } else {
                     let raw = logits.get(ids[0] as usize).copied().unwrap_or(0.0);
-                    // Discount multi-token candidates (same as app)
                     if ids.len() > 1 { raw * 0.9 } else { raw }
                 }
             } else {
                 0.0
             };
 
-            let w_trigrams = trigrams(w);
-            let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-            let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
+            let w_tri = trigrams(w);
+            let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
+            let max_t = word_trigrams.len().max(w_tri.len()).max(1);
             let trigram_sim = common as f32 / max_t as f32;
 
-            let edit_sim = match edit_distances.get(w) {
+            let prefix_len = word_lower.chars().zip(w.chars())
+                .take_while(|(a, b)| a == b).count();
+            let max_len = word_lower.chars().count().max(w.chars().count()).max(1);
+            let prefix_sim = prefix_len as f32 / max_len as f32;
+
+            let edit_sim = match edit_distances.get(w.as_str()) {
                 Some(1) => 0.85,
                 Some(2) => 0.65,
+                Some(3) => 0.45,
                 _ => 0.0,
             };
-            let ortho_sim = trigram_sim.max(edit_sim);
+            let ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
 
-            let prefix_bonus = if prefix_matches.contains(w) {
-                let extra = w.len() as f32 - word_lower.len() as f32;
-                if extra <= 1.0 { 1.5 } else if extra <= 2.0 { 1.2 } else { 1.1 }
-            } else {
-                1.0
-            };
-
-            let score = bert_score.max(0.0) * ortho_sim * prefix_bonus;
+            let score = bert_score.max(0.0) * ortho_sim;
             scored.push((w.clone(), score));
         }
     }
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
+    // Debug: show where expected word ranks
+    if let Some(pos) = scored.iter().position(|(w, _)| *w == expected.to_lowercase()) {
+        let (_, s) = &scored[pos];
+        println!("  DEBUG: '{}' at rank #{} score={:.3}", expected, pos + 1, s);
+    } else {
+        println!("  DEBUG: '{}' not in scored list!", expected);
+    }
+
     // Grammar filter (same as app: pick first that passes)
     let mut passing: Vec<(String, f32)> = Vec::new();
-    for (candidate, score) in scored.iter().take(8) {
+    for (candidate, score) in scored.iter().take(25) {
         if !checker.has_word(candidate) { continue; }
         let corrected = sentence.to_lowercase().replacen(&word_lower, candidate, 1);
         let errors = checker.check_sentence(&corrected);
+        println!("  grammar: '{}' score={:.3} → {} errors", candidate, score, errors.len());
         if errors.is_empty() {
             passing.push((candidate.clone(), *score));
         }
@@ -147,7 +204,7 @@ fn score_candidates(
 }
 
 /// Same logic as main.rs try_split_function_word
-fn try_split_function_word(word: &str, checker: &nostos_cognio::grammar::GrammarChecker) -> Option<String> {
+fn try_split_function_word(word: &str, checker: &nostos_cognio::grammar::swipl_checker::SwiGrammarChecker) -> Option<String> {
     const FUNCTION_WORDS: &[&str] = &[
         "gjennom", "mellom", "under", "etter", "langs", "rundt",
         "foran", "bortover", "innover", "utover",
@@ -200,11 +257,22 @@ fn main() {
     println!("Loaded. Vocab: {}", model.vocab_size());
 
     let dict_path = base.join("../../rustSpell/mtag-rs/data/fullform_bm.mfst");
-    let mut checker = nostos_cognio::grammar::GrammarChecker::new(
+    let grammar_rules_path = base.join("../../syntaxer/grammar_rules.pl");
+    let syntaxer_dir = base.join("../../syntaxer");
+    let swipl_dll = "C:/Program Files/swipl/bin/libswipl.dll";
+    let mut checker = nostos_cognio::grammar::swipl_checker::SwiGrammarChecker::new(
+        swipl_dll,
         dict_path.to_str().unwrap(),
-        "",
+        grammar_rules_path.to_str().unwrap(),
+        syntaxer_dir.to_str().unwrap(),
     )
-    .expect("Failed to load dictionary");
+    .expect("Failed to load SWI grammar checker");
+
+    // Debug: check readings for problematic words
+    for w in &["skrier", "skrive", "skriver", "skrie", "strier"] {
+        let token = checker.analyze_word(w);
+        println!("  readings('{}'): {:?}", w, token);
+    }
 
     // (sentence, misspelled_word, expected_top1_correction)
     // Tests verify the BERT contextual scoring algorithm picks the right word.
@@ -216,6 +284,7 @@ fn main() {
         ("Vi skal reise til Bergern.", "bergern", "bergen"),
         ("Katten sitterr på stolen.", "sitterr", "sitter"),
         ("Han spiller fotballl.", "fotballl", "fotball"),
+        ("Jeg skal skrierl.", "skrierl", "skrive|skrives"),
     ];
 
     let mut pass = 0;
@@ -226,16 +295,17 @@ fn main() {
         println!("Test: '{}' → expected '{}'", misspelled, expected);
         println!("Sentence: '{}'", sentence);
 
-        let results = score_candidates(&mut model, &mut checker, sentence, misspelled);
+        let results = score_candidates(&mut model, &mut checker, sentence, misspelled, expected);
 
+        let expected_alts: Vec<&str> = expected.split('|').collect();
         println!("  Top 5:");
         for (i, (w, s)) in results.iter().take(5).enumerate() {
-            let marker = if w == expected { " ✓" } else { "" };
+            let marker = if expected_alts.contains(&w.as_str()) { " ✓" } else { "" };
             println!("    #{}: '{}' score={:.3}{}", i + 1, w, s, marker);
         }
 
         if let Some((top, _)) = results.first() {
-            if top == expected {
+            if expected_alts.contains(&top.as_str()) {
                 println!("  PASS");
                 pass += 1;
             } else {

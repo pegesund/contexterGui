@@ -52,26 +52,42 @@
         el.focus();
         const sel = window.getSelection();
         const range = document.createRange();
-        // Walk text nodes to find start/end offsets
-        // Gmail nests contenteditable divs — walk from the DEEPEST editable ancestor
-        let walkRoot = el;
-        // If el is a large container, try to find the actual editable div with text
-        // Gmail compose: div[contenteditable] > div > br/text
+        // Walk ALL nodes to find start/end offsets.
+        // innerText adds \n for block elements (div, br, p) — we must count those too
+        // so our char positions match the innerText positions sent by the app.
         let charCount = 0;
-        const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
         let startNode = null, startOfs = 0, endNode = null, endOfs = 0;
-        while (walker.nextNode()) {
-          const node = walker.currentNode;
-          const nodeLen = node.textContent.length;
-          if (!startNode && charCount + nodeLen >= start) {
-            startNode = node; startOfs = start - charCount;
+        const blockTags = new Set(["DIV","P","BR","LI","TR","BLOCKQUOTE","H1","H2","H3","H4","H5","H6"]);
+
+        function walkNodes(parent) {
+          for (let child = parent.firstChild; child; child = child.nextSibling) {
+            if (startNode && endNode) return;
+            if (child.nodeType === Node.TEXT_NODE) {
+              const nodeLen = child.textContent.length;
+              if (!startNode && charCount + nodeLen >= start) {
+                startNode = child; startOfs = start - charCount;
+              }
+              if (!endNode && charCount + nodeLen >= end) {
+                endNode = child; endOfs = end - charCount;
+              }
+              charCount += nodeLen;
+            } else if (child.nodeType === Node.ELEMENT_NODE) {
+              if (child.tagName === "BR") {
+                // BR contributes \n to innerText
+                charCount += 1;
+              } else {
+                // Block elements add \n before their content (except first child)
+                const isBlock = blockTags.has(child.tagName);
+                if (isBlock && child !== parent.firstElementChild) {
+                  charCount += 1; // \n from block boundary
+                }
+                walkNodes(child);
+              }
+            }
           }
-          if (!endNode && charCount + nodeLen >= end) {
-            endNode = node; endOfs = end - charCount;
-          }
-          charCount += nodeLen;
-          if (startNode && endNode) break;
         }
+        walkNodes(el);
+
         console.log("NorskTale CE: totalChars:", charCount, "start:", start, "end:", end,
           "startNode:", !!startNode, "endNode:", !!endNode,
           "text:", JSON.stringify(el.innerText?.substring(0, 100)));

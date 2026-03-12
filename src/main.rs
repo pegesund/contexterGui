@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
+pub(crate) static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
     let path = std::env::temp_dir().join("acatts-rust.log");
     eprintln!("Logging to: {}", path.display());
     let f = std::fs::OpenOptions::new()
@@ -1543,7 +1543,7 @@ impl ContextApp {
                 // Collect all grammar-passing candidates (not just first)
                 let mut passing: Vec<(String, f32)> = Vec::new();
                 if let Some(checker) = &mut self.checker {
-                    for (candidate, score) in suggestions.iter().take(8) {
+                    for (candidate, score) in suggestions.iter().take(25) {
                         // Candidate must be a real dictionary word
                         if !checker.has_word(candidate) {
                             log!("Spelling grammar-check: '{}' — not in dictionary, skipping", candidate);
@@ -1694,7 +1694,23 @@ impl ContextApp {
             }
         }
 
-        // Source 4: Wordfreq — common words with trigram overlap
+        // Source 4: Fuzzy on truncated word (strip 1-2 trailing chars then fuzzy)
+        // Catches cases like "skrierl" → strip 'l' → fuzzy("skrier",2) → finds "skriver"
+        if let Some(checker) = &self.checker {
+            for strip in 1..=2u32 {
+                let chars: Vec<char> = word_lower.chars().collect();
+                if chars.len() <= 3 + strip as usize { continue; }
+                let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
+                let fuzzy = checker.fuzzy_lookup(&truncated, 2);
+                for (w, dist) in fuzzy {
+                    let wl = w.to_lowercase();
+                    edit_distances.entry(wl.clone()).or_insert(dist + strip);
+                    if let Some(wl) = add(w, &mut seen) { candidates.push(wl); }
+                }
+            }
+        }
+
+        // Source 5: Wordfreq — common words with trigram overlap
         if let Some(wf) = &self.wordfreq {
             for (w, _freq) in wf.iter() {
                 let wl = w.to_lowercase();
@@ -1708,10 +1724,32 @@ impl ContextApp {
             }
         }
 
-        eprintln!("Forslag: {} candidates for '{}'", candidates.len(), word_lower);
+        eprintln!("Forslag: {} raw candidates for '{}'", candidates.len(), word_lower);
 
-        // ── Score each candidate with BERT ──
-        // Build masked context: replace the misspelled word with <mask>
+        // ── Step 1: Rank candidates by orthographic similarity, keep top 30 ──
+        let mut ortho_scored: Vec<(String, f32)> = Vec::new();
+        for w in &candidates {
+            let w_trigrams = Self::trigrams(w);
+            let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
+            let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
+            let trigram_sim = common as f32 / max_t as f32;
+
+            let prefix_len = word_lower.chars().zip(w.chars())
+                .take_while(|(a, b)| a == b).count();
+            let max_len = word_lower.chars().count().max(w.chars().count()).max(1);
+            let prefix_sim = prefix_len as f32 / max_len as f32;
+
+            let edit_sim = match edit_distances.get(w.as_str()) {
+                Some(1) => 0.85,
+                Some(2) => 0.65,
+                Some(3) => 0.45,
+                _ => 0.0,
+            };
+            let ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
+            ortho_scored.push((w.clone(), ortho_sim));
+        }
+        ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // ── Step 2: Score each candidate with BERT × ortho_sim ──
         let sentence_lower = sentence_ctx.to_lowercase();
         let masked_context = if let Some(pos) = sentence_lower.find(&word_lower) {
             let before = &sentence_ctx[..pos];
@@ -1727,59 +1765,24 @@ impl ContextApp {
         if let Some(model_arc) = &self.model {
             let mut model = model_arc.lock().unwrap();
             if let Ok((logits, _ms)) = model.single_forward(&masked_context) {
-                // Score = BERT logit score × trigram similarity
-                // BERT ensures contextual fit, trigram ensures orthographic closeness
-                for w in &candidates {
+                for (w, ortho) in &ortho_scored {
                     let bert_score = if let Ok(enc) = model.tokenizer.encode(w.as_str(), false) {
                         let ids = enc.get_ids();
                         if ids.is_empty() { 0.0 }
                         else {
-                            // Use FIRST token only: MLM predicts one token at mask position.
                             let raw = logits.get(ids[0] as usize).copied().unwrap_or(0.0);
-                            // Discount multi-token candidates: their first token is a common
-                            // subword prefix (e.g. "vann" for "vannete") whose logit is inflated.
-                            // Single-token candidates (e.g. "vannet") have a direct, reliable score.
                             if ids.len() > 1 { raw * 0.9 } else { raw }
                         }
                     } else { 0.0 };
-
-                    let w_trigrams = Self::trigrams(w);
-                    let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-                    let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
-                    let trigram_sim = common as f32 / max_t as f32;
-
-                    // Orthographic similarity: combine trigram and edit distance
-                    // Edit distance is more reliable for transpositions/insertions
-                    // dist 1 → 0.85, dist 2 → 0.65, unknown → use trigram only
-                    let edit_sim = match edit_distances.get(w) {
-                        Some(1) => 0.85,
-                        Some(2) => 0.65,
-                        _ => 0.0,
-                    };
-                    // Take the best of trigram or edit-distance similarity
-                    let ortho_sim = trigram_sim.max(edit_sim);
-
-                    // Prefix match bonus: the fewer extra chars, the stronger the signal
-                    let prefix_bonus = if prefix_matches.contains(w) {
-                        let extra = w.len() as f32 - word_lower.len() as f32;
-                        if extra <= 1.0 { 1.5 } else if extra <= 2.0 { 1.2 } else { 1.1 }
-                    } else { 1.0 };
-
-                    // Combined: BERT × orthographic similarity × prefix bonus
-                    let score = bert_score.max(0.0) * ortho_sim * prefix_bonus;
-
-                    scored.push((w.clone(), score));
+                    scored.push((w.clone(), bert_score.max(0.0) * ortho));
                 }
             }
         }
 
-        // If no BERT model, fall back to trigram-only scoring
+        // If no BERT model, fall back to ortho-only scoring
         if scored.is_empty() {
-            for w in &candidates {
-                let w_trigrams = Self::trigrams(w);
-                let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-                let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
-                scored.push((w.clone(), common as f32 / max_t as f32));
+            for (w, ortho) in &ortho_scored {
+                scored.push((w.clone(), *ortho));
             }
         }
 
@@ -2061,6 +2064,8 @@ impl ContextApp {
         if doc_hash == self.last_doc_hash {
             return;
         }
+        log!("Doc hash changed ({} → {}), rescanning {} chars", self.last_doc_hash, doc_hash, doc_text.len());
+        log!("  Full doc text: '{}'", trunc(&doc_text, 300));
         self.last_doc_hash = doc_hash;
 
         // Count sentences to detect paste (large change) vs fix (small change)
@@ -2196,6 +2201,12 @@ impl ContextApp {
         };
 
         // --- Step 0: Re-map existing errors to new offsets, remove stale ones ---
+        log!("  Step 0: re-mapping {} errors to {} sentences", self.writing_errors.len(), new_sentences.len());
+        for e in &self.writing_errors {
+            if !e.ignored {
+                log!("    error: '{}' in '{}' off={}", trunc(&e.word, 20), trunc(&e.sentence_context, 40), e.doc_offset);
+            }
+        }
         {
             let mut available_offsets: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
             for (s, off) in &new_sentences {
@@ -2276,12 +2287,19 @@ impl ContextApp {
         }
 
         // --- Step 2: Check each sentence — skip already-known ones, only scan new ---
+        // Clear spell-check dedup so words get re-checked with correct sentence/offset
+        self.last_spell_checked_word.clear();
+        log!("  {} sentences to process, {} existing errors:", new_sentences.len(), self.writing_errors.len());
+        for (s, off) in &new_sentences {
+            log!("    [off={}] '{}'", off, trunc(s, 80));
+        }
         let mut queue: Vec<(String, usize)> = Vec::new();
         for (trimmed, doc_offset) in &new_sentences {
             let sent_h = hash_str(trimmed);
 
             // Already seen this sentence text? Position updated in Step 0, skip entirely.
             if self.clean_sentence_hashes.contains(&sent_h) {
+                log!("  SKIP (clean hash): '{}'", trunc(trimmed, 60));
                 continue;
             }
             // Also skip if this occurrence already has errors recorded (re-mapped in Step 0)
@@ -2289,17 +2307,10 @@ impl ContextApp {
                 e.sentence_context == *trimmed && e.doc_offset == *doc_offset && !e.ignored
             });
             if has_errors {
+                log!("  SKIP (has errors): '{}'", trunc(trimmed, 60));
                 continue;
             }
-            // Skip the sentence the user is currently editing (cursor is inside it)
-            if let Some(cursor_off) = self.context.cursor_doc_offset {
-                let sent_end = *doc_offset + trimmed.chars().count();
-                if cursor_off >= *doc_offset && cursor_off <= sent_end {
-                    continue;
-                }
-            }
-
-            // New sentence — run spelling + queue for grammar
+            // Spelling: check ALL words immediately, even in the current sentence
             for word in trimmed.split_whitespace() {
                 let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
                 if !clean.is_empty() {
@@ -2307,6 +2318,14 @@ impl ContextApp {
                 }
             }
             self.validate_consonant_checks();
+
+            // Grammar: skip the sentence the user is currently editing
+            if let Some(cursor_off) = self.context.cursor_doc_offset {
+                let sent_end = *doc_offset + trimmed.chars().count();
+                if cursor_off >= *doc_offset && cursor_off <= sent_end {
+                    continue;
+                }
+            }
 
             let has_spelling_errors = self.writing_errors.iter().any(|e| {
                 e.sentence_context == *trimmed
@@ -2485,11 +2504,11 @@ impl ContextApp {
                 e.underlined = false;
             } else if !e.ignored && !e.underlined && e.word_doc_start < e.word_doc_end {
                 // New error — apply underline
-                log!("Underline: marking {}..{} rule={} expl='{}'",
-                    e.word_doc_start, e.word_doc_end, e.rule_name, trunc(&e.explanation, 50));
-                if self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end) {
-                    e.underlined = true;
-                }
+                let marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end);
+                log!("Underline: marking {}..{} rule={} expl='{}' ok={}",
+                    e.word_doc_start, e.word_doc_end, e.rule_name, trunc(&e.explanation, 50), marked);
+                // Mark as underlined even if bridge doesn't support it (prevents spam)
+                e.underlined = true;
             }
         }
     }
@@ -2835,6 +2854,13 @@ fn split_sentences_with_offsets(text: &str) -> Vec<(String, usize)> {
             start_byte = pos;
         }
     }
+    // Include trailing text without punctuation (e.g. user still typing)
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() && trimmed.split_whitespace().count() >= 2 {
+        let leading_ws = current.len() - current.trim_start().len();
+        let char_offset = text[..start_byte + leading_ws].chars().count();
+        sentences.push((trimmed, char_offset));
+    }
     sentences
 }
 
@@ -2983,6 +3009,8 @@ impl eframe::App for ContextApp {
                 log!("  Removed error '{}' from list", find);
                 // Document changed — reset doc hash so next poll re-scans
                 self.last_doc_hash = 0;
+                // Clear clean hashes so ALL sentences get re-checked after fix
+                self.clean_sentence_hashes.clear();
                 // Clear grammar queue — document changed, stale sentences
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3003,28 +3031,21 @@ impl eframe::App for ContextApp {
                         mark_prolog(trimmed, &mut self.prolog_checked_hashes);
                     }
                 }
-                // Remove the fixed error (underline already cleared above)
+                // Remove the fixed error
                 let find_lower = find.to_lowercase();
-                let mut removed_one = false;
                 self.writing_errors.retain(|e| {
-                    if removed_one { return true; }
-                    if (e.word.to_lowercase() == find_lower || e.sentence_context.to_lowercase() == find_lower)
-                        && e.doc_offset == doc_offset
-                    {
-                        removed_one = true;
-                        return false;
-                    }
-                    true
+                    !(e.word.to_lowercase() == find_lower && e.doc_offset == doc_offset)
                 });
-                // Also remove the OLD sentence from clean hashes so it gets rescanned
-                // (the corrected sentence text will be picked up on next poll)
+                // Force rescan so Step 0 re-maps remaining errors to new offsets
+                self.last_doc_hash = 0;
                 self.clean_sentence_hashes.remove(&hash_str(&context));
                 let stripped_ctx = context.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
                 if !stripped_ctx.is_empty() && stripped_ctx != context {
                     self.clean_sentence_hashes.remove(&hash_str(stripped_ctx));
                 }
-                log!("Fix applied: underline cleared, sentence '{}' will be rescanned",
-                    trunc(&context, 50));
+                self.grammar_queue.clear();
+                self.grammar_scanning = false;
+                log!("Fix applied: '{}' removed, rescan triggered", find);
             }
         }
 
@@ -3245,6 +3266,17 @@ impl eframe::App for ContextApp {
 
                     self.context = new_ctx;
                 }
+            }
+
+            // Always try to scan for errors — doc hash check makes this cheap when unchanged
+            let errors_before = self.writing_errors.len();
+            self.update_grammar_errors();
+            self.prune_resolved_errors();
+            // Upgrade and validate suggestions found by update_grammar_errors
+            self.upgrade_spelling_suggestions();
+            self.validate_all_suggestions();
+            if self.writing_errors.len() != errors_before {
+                self.sync_error_underlines();
             }
 
             // Sync document sentences for topic-aware completion
