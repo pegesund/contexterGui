@@ -1289,10 +1289,17 @@ impl ContextApp {
         let best = suggestions.first().map(|(w, _)| w.clone()).unwrap_or_default();
         let rule = "stavefeil_bert";
 
+        // If BERT re-ranking is pending, hold back the suggestion until BERT confirms it.
+        // Show the underline (flag the error) but don't display a potentially wrong suggestion.
+        let has_pending_bert = self.pending_spelling_bert.last()
+            .map(|p| p.error_idx_word == clean.to_lowercase())
+            .unwrap_or(false);
+        let shown_suggestion = if has_pending_bert { String::new() } else { best.clone() };
+
         self.writing_errors.push(WritingError {
             category: ErrorCategory::Spelling,
             word: clean.clone(),
-            suggestion: best.clone(),
+            suggestion: shown_suggestion,
             explanation: format!("«{}» finnes ikke i ordboken.", clean),
             rule_name: rule.to_string(),
             sentence_context: sentence_ctx.to_string(),
@@ -1302,7 +1309,7 @@ impl ContextApp {
             word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
         });
         if !best.is_empty() {
-            log!("Spelling: '{}' → '{}' (unified pipeline)", clean, best);
+            log!("Spelling: '{}' → '{}' (unified pipeline, bert_pending={})", clean, best, has_pending_bert);
         } else {
             log!("Spelling: '{}' not found, no valid suggestion", clean);
         }
