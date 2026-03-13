@@ -154,16 +154,16 @@ impl TextBridge for BrowserBridge {
     fn find_and_replace(&self, find: &str, replace: &str) -> bool {
         let text = self.last_text.borrow().clone();
         if text.is_empty() { return false; }
-        // Find the word (case-insensitive) and get its char offset
         let text_lower = text.to_lowercase();
         let find_lower = find.to_lowercase();
         if let Some(byte_pos) = text_lower.find(&find_lower) {
             let start = text[..byte_pos].chars().count();
             let end = start + find.chars().count();
-            let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_text = replace.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_find = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","start":{},"end":{},"text":"{}"}}"#,
-                start, end, escaped
+                r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+                start, end, escaped_text, escaped_find
             );
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
@@ -176,22 +176,20 @@ impl TextBridge for BrowserBridge {
     fn find_and_replace_in_context(&self, find: &str, replace: &str, context: &str) -> bool {
         let text = self.last_text.borrow().clone();
         if text.is_empty() { return false; }
-        // Find the context sentence in the text, then find the word within it
         let text_lower = text.to_lowercase();
         let ctx_lower = context.to_lowercase();
-        // Try to locate the context (sentence) in the document
         let ctx_byte_start = text_lower.find(&ctx_lower).unwrap_or(0);
         let find_lower = find.to_lowercase();
-        // Search for the word within the context region
         let search_region = &text_lower[ctx_byte_start..];
         if let Some(rel_byte_pos) = search_region.find(&find_lower) {
             let abs_byte_pos = ctx_byte_start + rel_byte_pos;
             let start = text[..abs_byte_pos].chars().count();
             let end = start + find.chars().count();
-            let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_text = replace.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_find = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","start":{},"end":{},"text":"{}"}}"#,
-                start, end, escaped
+                r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+                start, end, escaped_text, escaped_find
             );
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
@@ -256,6 +254,8 @@ impl TextBridge for BrowserBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
+        // Only return data if the file is fresh (< 10s old)
+        if !self.is_available() { return None; }
         let (text, cursor_start, _cursor_end, caret) = self.read_data_file()?;
         if text.is_empty() { return None; }
 

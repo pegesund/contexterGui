@@ -241,6 +241,8 @@ struct BridgeManager {
     active_idx: usize,
     /// PID of the last app we successfully read text from (to avoid switching to terminals etc.)
     last_user_pid: u32,
+    /// True when the last user-focused app was a browser — NEVER activate Word COM in this state
+    last_user_was_browser: bool,
     /// Last successfully read context (returned when our window is foreground)
     last_context: Option<CursorContext>,
     /// Set when bridge switches — main loop should clear stale errors
@@ -264,11 +266,27 @@ impl BridgeManager {
         // Browser bridge (via Chrome/Edge extension) — highest priority for browser textareas
         bridges.push(Box::new(bridge::browser::BrowserBridge::new()));
 
+        // If the browser data file exists and is recent, assume user was in a browser.
+        // This prevents Word COM from being read on the very first frame before
+        // foreground detection has a chance to set the flag.
+        let browser_file_exists = {
+            let path = std::env::temp_dir().join("norsktale-browser.json");
+            std::fs::metadata(&path).ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .map(|age| age.as_secs() < 120) // file modified in last 2 minutes
+                .unwrap_or(false)
+        };
+        if browser_file_exists {
+            log!("Browser data file found (< 2min old) — defaulting to browser mode");
+        }
+
         BridgeManager {
             bridges,
             last_check: Instant::now(),
             active_idx: 0,
             last_user_pid: 0,
+            last_user_was_browser: browser_file_exists,
             last_context: None,
             bridge_switched: false,
         }
@@ -294,36 +312,81 @@ impl BridgeManager {
         // last known user app (user is just looking at our UI, caret is still
         // in the other app).
         #[cfg(target_os = "windows")]
-        let (fg_hwnd_raw, fg_pid, fg_title) = {
+        let (fg_hwnd_raw, fg_pid, fg_title, fg_exe) = {
             use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
+            use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
             let fg = unsafe { GetForegroundWindow() };
             let mut pid = 0u32;
             unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)); }
             let mut buf = [0u16; 128];
             let len = unsafe { GetWindowTextW(fg, &mut buf) };
             let title = String::from_utf16_lossy(&buf[..len as usize]);
-            (fg.0 as isize, pid, title)
+            // Get process executable name
+            let exe = if pid > 0 {
+                if let Ok(handle) = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+                    let mut exe_buf = [0u16; 260];
+                    let mut exe_len = exe_buf.len() as u32;
+                    if unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(exe_buf.as_mut_ptr()), &mut exe_len) }.is_ok() {
+                        let full = String::from_utf16_lossy(&exe_buf[..exe_len as usize]);
+                        full.rsplit('\\').next().unwrap_or("").to_lowercase()
+                    } else { String::new() }
+                } else { String::new() }
+            } else { String::new() };
+            (fg.0 as isize, pid, title, exe)
         };
         #[cfg(not(target_os = "windows"))]
-        let (fg_hwnd_raw, fg_pid, fg_title) = (0isize, 0u32, String::new());
+        let (fg_hwnd_raw, fg_pid, fg_title, fg_exe) = (0isize, 0u32, String::new(), String::new());
 
         let our_pid = std::process::id();
         let our_window_focused = fg_pid == our_pid;
-        let word_is_foreground = fg_title.contains("Word") || fg_title.contains(".docx") || fg_title.contains(".doc");
+        let word_is_foreground = fg_exe == "winword.exe"
+            || fg_title.contains(".docx") || fg_title.contains(".doc ");
 
-        // Log periodically
-        static LAST_FOCUS_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let now_t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        if now_t > LAST_FOCUS_LOG.load(std::sync::atomic::Ordering::Relaxed) + 3 {
-            LAST_FOCUS_LOG.store(now_t, std::sync::atomic::Ordering::Relaxed);
-            log!("FG: '{}' pid={} our={} word={} last_user={}", trunc(&fg_title, 40), fg_pid, our_window_focused, word_is_foreground, self.last_user_pid);
+        // Detect browser by process name — reliable regardless of window title
+        let is_browser = matches!(fg_exe.as_str(),
+            "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe");
+
+        // Log every focus change (not just every 3 seconds)
+        static LAST_FG_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let prev_fg = LAST_FG_PID.load(std::sync::atomic::Ordering::Relaxed);
+        if fg_pid != prev_fg {
+            LAST_FG_PID.store(fg_pid, std::sync::atomic::Ordering::Relaxed);
+            log!("FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}", trunc(&fg_title, 40), fg_pid, fg_exe, our_window_focused, word_is_foreground, is_browser, self.last_user_pid);
         }
 
-        // Our window is foreground — keep using saved bridge. No re-detection.
+        // Our window is foreground — check if Browser bridge has fresh data first,
+        // then fall back to current bridge.
+        // CRITICAL: If last user app was a browser, NEVER activate Word COM.
         if our_window_focused {
             let active_name = self.bridges.get(self.active_idx).map(|b| b.name()).unwrap_or("");
-            // Word COM and Browser can re-read (COM calls / file reads work without focus)
-            if active_name == "Word COM" || active_name == "Browser" {
+
+            // Check if Browser bridge has fresh data (always try this first)
+            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
+                if self.bridges[browser_idx].is_available() {
+                    if let Some(ctx) = self.bridges[browser_idx].read_context() {
+                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                            if active_name != "Browser" {
+                                log!("Our window focused but Browser has fresh data — switching {} → Browser", active_name);
+                            }
+                            if self.active_idx != browser_idx {
+                                self.bridge_switched = true;
+                            }
+                            self.active_idx = browser_idx;
+                            self.last_context = Some(ctx.clone());
+                            return Some(ctx);
+                        }
+                    }
+                }
+            }
+
+            // If last user app was a browser, do NOT fall through to Word COM.
+            // The user was in a browser — only Browser bridge is valid.
+            if self.last_user_was_browser {
+                return self.last_context.clone();
+            }
+
+            // Only re-read Word COM if user was actually in Word last
+            if active_name == "Word COM" {
                 if let Some(ctx) = self.bridges[self.active_idx].read_context() {
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
@@ -332,49 +395,90 @@ impl BridgeManager {
             return self.last_context.clone();
         }
 
-        // Detect which bridge to use based on foreground window type.
-        // One bridge per window type — no fallthrough.
-        let is_browser = fg_title.contains("Edge") || fg_title.contains("Chrome")
-            || fg_title.contains("Firefox") || fg_title.contains("Brave")
-            || fg_title.contains("gmail") || fg_title.contains("Inbox");
-
-        let target_bridge = if word_is_foreground {
-            "Word COM"
-        } else if is_browser {
-            "Browser"
-        } else {
-            "Accessibility"
-        };
-
-        // Set foreground HWND for accessibility
-        #[cfg(target_os = "windows")]
-        {
-            for bridge in self.bridges.iter() {
-                if bridge.name() == "Accessibility" {
-                    bridge.set_fg_hwnd(fg_hwnd_raw);
-                }
-            }
+        // Only activate for supported programs: Word, Edge, Chrome, Notepad
+        let is_notepad = fg_exe == "notepad.exe";
+        let is_supported = word_is_foreground || is_browser || is_notepad;
+        if !is_supported {
+            return self.last_context.clone();
         }
 
-        // Try the one bridge that matches the foreground window
-        for (i, bridge) in self.bridges.iter().enumerate() {
-            if bridge.name() == target_bridge {
-                if let Some(ctx) = bridge.read_context() {
+        // --- BROWSER: ONLY use Browser bridge. No fallbacks. Ever. ---
+        if is_browser {
+            self.last_user_was_browser = true;
+            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
+                if let Some(ctx) = self.bridges[browser_idx].read_context() {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                        if self.active_idx != i {
-                            log!("Bridge switch: {} → {}", self.bridges[self.active_idx].name(), target_bridge);
+                        if self.active_idx != browser_idx {
+                            log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
                             self.bridge_switched = true;
                         }
-                        self.active_idx = i;
+                        self.active_idx = browser_idx;
                         self.last_user_pid = fg_pid;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
                     }
                 }
-                break;
+                // Browser bridge has no data — just return last context. NO fallback.
+                return self.last_context.clone();
+            }
+            // No Browser bridge exists — return last context. NO fallback.
+            return self.last_context.clone();
+        }
+
+        // --- WORD ---
+        if word_is_foreground {
+            self.last_user_was_browser = false;
+            for (i, bridge) in self.bridges.iter().enumerate() {
+                if bridge.name() == "Word COM" {
+                    if let Some(ctx) = bridge.read_context() {
+                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                            if self.active_idx != i {
+                                log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
+                                self.bridge_switched = true;
+                            }
+                            self.active_idx = i;
+                            self.last_user_pid = fg_pid;
+                            self.last_context = Some(ctx.clone());
+                            return Some(ctx);
+                        }
+                    }
+                    break;
+                }
+            }
+            return self.last_context.clone();
+        }
+
+        // --- NOTEPAD: uses Accessibility bridge ---
+        if is_notepad {
+            self.last_user_was_browser = false;
+            #[cfg(target_os = "windows")]
+            {
+                for bridge in self.bridges.iter() {
+                    if bridge.name() == "Accessibility" {
+                        bridge.set_fg_hwnd(fg_hwnd_raw);
+                    }
+                }
+            }
+            for (i, bridge) in self.bridges.iter().enumerate() {
+                if bridge.name() == "Accessibility" {
+                    if let Some(ctx) = bridge.read_context() {
+                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                            if self.active_idx != i {
+                                log!("Bridge switch: {} → Accessibility", self.bridges[self.active_idx].name());
+                                self.bridge_switched = true;
+                            }
+                            self.active_idx = i;
+                            self.last_user_pid = fg_pid;
+                            self.last_context = Some(ctx.clone());
+                            return Some(ctx);
+                        }
+                    }
+                    break;
+                }
             }
         }
-        None
+
+        self.last_context.clone()
     }
 
     fn active_bridge(&self) -> Option<&dyn TextBridge> {
@@ -382,40 +486,55 @@ impl BridgeManager {
     }
 
     fn active_bridge_name(&self) -> &str {
-        self.active_bridge().map(|b| b.name()).unwrap_or("none")
+        self.effective_bridge().map(|b| b.name()).unwrap_or("none")
     }
 
     #[allow(dead_code)]
     fn replace_word(&self, new_text: &str) -> bool {
-        let bridge_name = self.active_bridge().map(|b| b.name()).unwrap_or("none");
+        let bridge_name = self.effective_bridge().map(|b| b.name()).unwrap_or("none");
         log!("replace_word('{}') via bridge '{}' (idx={})", new_text, bridge_name, self.active_idx);
-        let result = self.active_bridge().map(|b| b.replace_word(new_text)).unwrap_or(false);
+        let result = self.effective_bridge().map(|b| b.replace_word(new_text)).unwrap_or(false);
         log!("replace_word result: {}", result);
         result
     }
 
+    fn effective_bridge(&self) -> Option<&dyn TextBridge> {
+        if self.last_user_was_browser {
+            self.bridges.iter().find(|b| b.name() == "Browser").map(|b| b.as_ref())
+        } else {
+            self.bridges.get(self.active_idx).map(|b| b.as_ref())
+        }
+    }
+
     fn find_and_replace(&self, find: &str, replace: &str) -> bool {
-        self.active_bridge().map(|b| b.find_and_replace(find, replace)).unwrap_or(false)
+        self.effective_bridge().map(|b| b.find_and_replace(find, replace)).unwrap_or(false)
     }
 
     fn find_and_replace_in_context(&self, find: &str, replace: &str, context: &str) -> bool {
-        self.active_bridge().map(|b| b.find_and_replace_in_context(find, replace, context)).unwrap_or(false)
+        self.effective_bridge().map(|b| b.find_and_replace_in_context(find, replace, context)).unwrap_or(false)
     }
 
     fn find_and_replace_in_context_at(&self, find: &str, replace: &str, context: &str, char_offset: usize) -> bool {
-        self.active_bridge().map(|b| b.find_and_replace_in_context_at(find, replace, context, char_offset)).unwrap_or(false)
+        self.effective_bridge().map(|b| b.find_and_replace_in_context_at(find, replace, context, char_offset)).unwrap_or(false)
     }
 
     fn read_document_context(&self) -> Option<String> {
-        self.active_bridge().and_then(|b| b.read_document_context())
+        self.effective_bridge().and_then(|b| b.read_document_context())
     }
 
     fn read_full_document(&self) -> Option<String> {
-        self.active_bridge().and_then(|b| b.read_full_document())
+        // When last user app was a browser, ONLY read from Browser bridge
+        if self.last_user_was_browser {
+            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
+                return self.bridges[browser_idx].read_full_document();
+            }
+            return None;
+        }
+        self.effective_bridge().and_then(|b| b.read_full_document())
     }
 
     fn select_range(&self, char_start: usize, char_end: usize) -> bool {
-        self.active_bridge().map(|b| b.select_range(char_start, char_end)).unwrap_or(false)
+        self.effective_bridge().map(|b| b.select_range(char_start, char_end)).unwrap_or(false)
     }
 
     fn set_target_hwnd(&self, hwnd: isize) {
@@ -425,15 +544,15 @@ impl BridgeManager {
     }
 
     fn mark_error_underline(&self, char_start: usize, char_end: usize) -> bool {
-        self.active_bridge().map(|b| b.mark_error_underline(char_start, char_end)).unwrap_or(false)
+        self.effective_bridge().map(|b| b.mark_error_underline(char_start, char_end)).unwrap_or(false)
     }
 
     fn clear_error_underline(&self, char_start: usize, char_end: usize) -> bool {
-        self.active_bridge().map(|b| b.clear_error_underline(char_start, char_end)).unwrap_or(false)
+        self.effective_bridge().map(|b| b.clear_error_underline(char_start, char_end)).unwrap_or(false)
     }
 
     fn clear_all_error_underlines(&self) -> bool {
-        self.active_bridge().map(|b| b.clear_all_error_underlines()).unwrap_or(false)
+        self.effective_bridge().map(|b| b.clear_all_error_underlines()).unwrap_or(false)
     }
 }
 
@@ -566,6 +685,7 @@ struct ContextApp {
     /// Error index to scroll to when cursor clicks on an underlined word
     focused_error_idx: Option<usize>,
     focused_error_set_time: Instant,
+    focused_error_scroll_done: bool,
     /// Error index pinned to top of list (persists until explicitly cleared)
     // Error list (spelling + grammar)
     writing_errors: Vec<WritingError>,
@@ -583,6 +703,8 @@ struct ContextApp {
     prolog_checked_hashes: std::collections::HashSet<u64>,
     /// Hashes of sentences grammar-checked and found clean (no errors)
     clean_sentence_hashes: std::collections::HashSet<u64>,
+    /// Pending spelling work: (word, sentence_ctx, doc_offset) — checked incrementally
+    spelling_queue: Vec<(String, String, usize)>,
     /// Pending grammar work: sentences still to check (incremental, one per frame)
     grammar_queue: Vec<(String, usize)>,
     /// Total sentences when grammar scan started (for progress bar)
@@ -1036,6 +1158,7 @@ impl ContextApp {
             show_debug_tab,
             focused_error_idx: None,
             focused_error_set_time: Instant::now() - Duration::from_secs(10),
+            focused_error_scroll_done: false,
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
@@ -1044,6 +1167,7 @@ impl ContextApp {
             last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
             clean_sentence_hashes: std::collections::HashSet::new(),
+            spelling_queue: Vec::new(),
             grammar_queue: Vec::new(),
             grammar_queue_total: 0,
             grammar_scanning: false,
@@ -1329,7 +1453,14 @@ impl ContextApp {
             Some(c) => c,
             None => return,
         };
+        let budget_start = std::time::Instant::now();
+        let mut deferred: Vec<WritingError> = Vec::new();
         for mut candidate in pending {
+            // Time budget: defer remaining candidates to next frame
+            if budget_start.elapsed().as_millis() > 15 {
+                deferred.push(candidate);
+                continue;
+            }
             // Already flagged for this sentence occurrence?
             if self.writing_errors.iter().any(|e| e.sentence_context == candidate.sentence_context && e.doc_offset == candidate.doc_offset && !e.ignored) {
                 continue;
@@ -1358,6 +1489,10 @@ impl ContextApp {
             } else {
                 log!("consonant rejected: '{}' → '{}' (grammar worse)", orig_word, variant_word);
             }
+        }
+        // Re-queue deferred candidates for next frame
+        if !deferred.is_empty() {
+            self.pending_consonant_checks.extend(deferred);
         }
     }
 
@@ -1413,9 +1548,11 @@ impl ContextApp {
                             let prefix = extract_prefix(&self.context.word);
                             let left_filtered: Vec<Completion> = left.into_iter()
                                 .filter(|c| checker.has_word(&c.word.to_lowercase()))
+                                .take(8) // Limit to avoid freezing from grammar_filter's check_sentence calls
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
                                 .filter(|c| checker.has_word(&c.word.to_lowercase()))
+                                .take(8)
                                 .collect();
                             let mut check_fn = |sentence: &str| -> GrammarCheckResult {
                                 let errors = checker.check_sentence(sentence);
@@ -1571,7 +1708,8 @@ impl ContextApp {
             .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
             .collect();
 
-        for (idx, word, sentence_ctx) in to_upgrade {
+        // Process only 1 upgrade per frame to keep GUI responsive
+        if let Some((idx, word, sentence_ctx)) = to_upgrade.into_iter().next() {
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
                 log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, best, score);
@@ -1743,7 +1881,7 @@ impl ContextApp {
 
             let mut checked = 0;
             for (candidate, score) in &ortho_scored {
-                if checked >= 100 { break; }
+                if checked >= 8 { break; } // keep low to avoid GUI freeze
 
                 // Skip hyphenated candidates when misspelled word has no hyphen
                 if !word_lower.contains('-') && candidate.contains('-') {
@@ -2037,10 +2175,15 @@ impl ContextApp {
         let is_major_change = (new_sentence_count as isize - old_sentence_count as isize).unsigned_abs() > 2;
 
         if is_major_change {
-            // Paste/delete — clean hashes are kept (same sentence text = same grammar result,
-            // regardless of position). No need to rescan sentences already known clean.
-            log!("Major doc change: {} → {} sentences (keeping {} clean hashes)",
-                old_sentence_count, new_sentence_count, self.clean_sentence_hashes.len());
+            // Major change (window switch, paste, etc.) — clear all stale state
+            log!("Major doc change: {} → {} sentences, clearing all queues + clean hashes",
+                old_sentence_count, new_sentence_count);
+            self.writing_errors.clear();
+            self.spelling_queue.clear();
+            self.pending_spelling_bert.clear();
+            self.grammar_queue.clear();
+            self.grammar_queue_total = 0;
+            self.clean_sentence_hashes.clear();
         }
 
         let mut sentences = split_sentences(&doc_text);
@@ -2068,16 +2211,22 @@ impl ContextApp {
 
         // Also check each punctuated sentence for internal boundaries
         // e.g. "Jeg spiller fotball jeg går tur." — has final period but missing internal one
+        // Time-budgeted: process max 10ms of Prolog splits per frame to avoid freezing.
+        // Unprocessed sentences pass through without splitting — they'll be split next frame.
         if let Some(checker) = &mut self.checker {
+            let split_start = std::time::Instant::now();
             let mut expanded: Vec<String> = Vec::new();
             for sent in &sentences {
                 let sent_h = hash_str(sent);
                 if self.prolog_checked_hashes.contains(&sent_h) {
-                    // Already checked for sub-splitting — just pass through
                     expanded.push(sent.clone());
                     continue;
                 }
-                // Strip trailing punctuation for Prolog analysis
+                // Time budget exceeded — pass remaining sentences through without Prolog splitting
+                if split_start.elapsed().as_millis() > 10 {
+                    expanded.push(sent.clone());
+                    continue;
+                }
                 let stripped = sent.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
                 if stripped.split_whitespace().count() >= 4 {
                     log!("Prolog sub-split attempt: '{}' ({} words)", trunc(&stripped, 60), stripped.split_whitespace().count());
@@ -2236,27 +2385,31 @@ impl ContextApp {
         for (trimmed, doc_offset) in &new_sentences {
             let sent_h = hash_str(trimmed);
 
-            // Already seen this sentence text? Position updated in Step 0, skip entirely.
-            if self.clean_sentence_hashes.contains(&sent_h) {
-                log!("  SKIP (clean hash): '{}'", trunc(trimmed, 60));
-                continue;
-            }
             // Also skip if this occurrence already has errors recorded (re-mapped in Step 0)
             let has_errors = self.writing_errors.iter().any(|e| {
                 e.sentence_context == *trimmed && e.doc_offset == *doc_offset && !e.ignored
             });
+
+            // Spelling: ALWAYS queue words, even for "clean" sentences.
+            // A sentence can be grammatically clean but still have spelling errors.
+            if !has_errors {
+                for word in trimmed.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
+                    if !clean.is_empty() {
+                        self.spelling_queue.push((clean.to_string(), trimmed.clone(), *doc_offset));
+                    }
+                }
+            }
+
+            // Grammar: skip if already checked and clean
+            if self.clean_sentence_hashes.contains(&sent_h) {
+                log!("  SKIP (clean hash, spelling queued): '{}'", trunc(trimmed, 60));
+                continue;
+            }
             if has_errors {
                 log!("  SKIP (has errors): '{}'", trunc(trimmed, 60));
                 continue;
             }
-            // Spelling: check ALL words immediately, even in the current sentence
-            for word in trimmed.split_whitespace() {
-                let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
-                if !clean.is_empty() {
-                    self.check_spelling(clean, trimmed, *doc_offset);
-                }
-            }
-            self.validate_consonant_checks();
 
             // Grammar: skip the sentence the user is currently editing
             // BUT only skip if cursor is in the MIDDLE of the sentence, not at the end
@@ -2300,9 +2453,26 @@ impl ContextApp {
         }
     }
 
-    /// Process ONE sentence from the grammar queue per call.
-    /// This keeps the UI responsive — each call does ~5-50ms of work.
+    /// Process a few words from the spelling queue per call.
+    /// Keeps UI responsive when many words need checking (e.g. English text).
+    fn process_spelling_queue(&mut self) {
+        let mut processed = 0;
+        while let Some((word, sentence_ctx, doc_offset)) = self.spelling_queue.first().cloned() {
+            self.spelling_queue.remove(0);
+            self.check_spelling(&word, &sentence_ctx, doc_offset);
+            processed += 1;
+            if processed >= 1 { break; } // max 1 word per frame — keeps GUI responsive
+        }
+        if processed > 0 {
+            self.validate_consonant_checks();
+        }
+    }
+
+    /// Process sentences from the grammar queue with a time budget.
+    /// Each sentence is ~2-5ms (single Prolog check, no re-validation).
     fn process_grammar_queue(&mut self) {
+        let frame_start = std::time::Instant::now();
+        while frame_start.elapsed().as_millis() < 15 {
         let (trimmed, doc_offset) = match self.grammar_queue.first() {
             Some(item) => item.clone(),
             None => {
@@ -2344,72 +2514,49 @@ impl ContextApp {
             log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
         }
 
-        // Score candidates with BERT (only runs when Prolog found errors)
-        let corrections = self.best_sentence_corrections(&trimmed, &errors);
-
-        if corrections.is_empty() {
-            // No BERT-scored correction — fall back to direct grammar suggestions
-            let errors_with_suggestions: Vec<_> = errors.iter()
-                .filter(|e| !e.suggestion.is_empty())
-                .collect();
-            if !errors_with_suggestions.is_empty() {
-                for (i, ge) in errors_with_suggestions.iter().enumerate() {
-                    let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
-                    let corrected = replace_word_at_position(&trimmed, &ge.word, first_alt);
-                    if corrected.trim() == trimmed.trim() {
-                        continue;
-                    }
-                    log!("  Direct grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
-                    self.writing_errors.push(WritingError {
-                        category: ErrorCategory::Grammar,
-                        word: trimmed.to_string(),
-                        suggestion: corrected,
-                        explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
-                        rule_name: ge.rule_name.clone(),
-                        sentence_context: trimmed.to_string(),
-                        doc_offset,
-                        position: i,
-                        ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-                    });
+        // Use direct Prolog suggestions — fast path, no per-candidate re-validation.
+        // BERT re-ranking happens async via pending_grammar_bert if multiple candidates.
+        let errors_with_suggestions: Vec<_> = errors.iter()
+            .filter(|e| !e.suggestion.is_empty())
+            .collect();
+        if !errors_with_suggestions.is_empty() {
+            for (i, ge) in errors_with_suggestions.iter().enumerate() {
+                let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
+                let corrected = replace_word_at_position(&trimmed, &ge.word, first_alt);
+                if corrected.trim() == trimmed.trim() {
+                    continue;
                 }
-            } else {
-                let first = &errors[0];
-                log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
+                log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
                     word: trimmed.to_string(),
-                    suggestion: String::new(),
-                    explanation: first.explanation.clone(),
-                    rule_name: first.rule_name.clone(),
+                    suggestion: corrected,
+                    explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
+                    rule_name: ge.rule_name.clone(),
                     sentence_context: trimmed.to_string(),
                     doc_offset,
-                    position: 0,
+                    position: i,
                     ignored: false,
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                 });
             }
-        }
-
-        for (i, (corrected, explanation, rule_name, score)) in corrections.iter().enumerate() {
-            if corrected.trim() == trimmed.trim() {
-                log!("  Skipping no-op correction: '{}'", corrected);
-                continue;
-            }
-            log!("  Correction #{}: ({:.1}) '{}' -> '{}' [{}]", i+1, score, &trimmed, corrected, rule_name);
+        } else {
+            let first = &errors[0];
+            log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
             self.writing_errors.push(WritingError {
                 category: ErrorCategory::Grammar,
                 word: trimmed.to_string(),
-                suggestion: corrected.clone(),
-                explanation: explanation.clone(),
-                rule_name: rule_name.clone(),
+                suggestion: String::new(),
+                explanation: first.explanation.clone(),
+                rule_name: first.rule_name.clone(),
                 sentence_context: trimmed.to_string(),
                 doc_offset,
-                position: i,
+                position: 0,
                 ignored: false,
                 word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
             });
         }
+        } // end while (time budget loop)
     }
 
     /// Sync red wavy underlines in Word with current writing errors.
@@ -3147,18 +3294,32 @@ impl eframe::App for ContextApp {
             self.last_poll = Instant::now();
 
             if let Some(new_ctx) = self.manager.read_context() {
-                // Clear stale errors when switching between bridges
+                // Clear ALL stale state when switching between bridges
                 if self.manager.bridge_switched {
                     self.manager.bridge_switched = false;
-                    log!("Bridge switched — clearing {} stale errors", self.writing_errors.len());
+                    log!("Bridge switched — clearing {} errors, {} spelling queue, {} pending BERT, {} grammar queue",
+                        self.writing_errors.len(), self.spelling_queue.len(),
+                        self.pending_spelling_bert.len(), self.grammar_queue.len());
                     self.writing_errors.clear();
+                    self.spelling_queue.clear();
+                    self.pending_spelling_bert.clear();
+                    self.pending_grammar_bert.clear();
+                    self.pending_consonant_bert.clear();
+                    self.grammar_queue.clear();
+                    self.grammar_queue_total = 0;
+                    self.clean_sentence_hashes.clear();
+                    self.last_doc_hash = 0;
+                    self.last_sentence_count = 0;
                 }
                 #[cfg(target_os = "windows")]
                 let fg = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
                 };
-                if new_ctx.caret_pos.is_some() {
-                    self.last_caret_pos = new_ctx.caret_pos;
+                // Only update caret position if valid (not 0,0 which means unknown)
+                if let Some((x, y)) = new_ctx.caret_pos {
+                    if x != 0 || y != 0 {
+                        self.last_caret_pos = Some((x, y));
+                    }
                 }
                 // Only update context if we got something useful — don't overwrite
                 // good context with empty when our own window is focused
@@ -3216,6 +3377,9 @@ impl eframe::App for ContextApp {
                                     e.word_doc_start, e.word_doc_end, e.rule_name);
                             }
                             self.selected_tab = 1; // Always switch to Grammatikk
+                            if self.focused_error_idx != Some(idx) {
+                                self.focused_error_scroll_done = false;
+                            }
                             self.focused_error_idx = Some(idx);
                             // Clear old pins, pin the clicked error
                             for e in &mut self.writing_errors { e.pinned = false; }
@@ -3287,6 +3451,7 @@ impl eframe::App for ContextApp {
                         if self.writing_errors.len() > errors_before {
                             self.selected_tab = 1;
                             let new_idx = self.writing_errors.len() - 1;
+                            self.focused_error_scroll_done = false;
                             self.focused_error_idx = Some(new_idx);
                             for e in &mut self.writing_errors { e.pinned = false; }
                             self.writing_errors[new_idx].pinned = true;
@@ -3306,6 +3471,9 @@ impl eframe::App for ContextApp {
                 // Only process grammar queue when no background forward in flight (avoids model mutex contention)
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
+                if !self.spelling_queue.is_empty() {
+                    self.process_spelling_queue();
+                }
                 if !self.grammar_queue.is_empty() && true /* no contention — bert worker owns model */ {
                     self.process_grammar_queue();
                 }
@@ -3333,6 +3501,9 @@ impl eframe::App for ContextApp {
                 // Word boundary work: prune, upgrade, drain grammar queue
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
+                if !self.spelling_queue.is_empty() {
+                    self.process_spelling_queue();
+                }
                 if !self.grammar_queue.is_empty() && true /* no contention — bert worker owns model */ {
                     self.process_grammar_queue();
                 }
@@ -3437,7 +3608,10 @@ impl eframe::App for ContextApp {
         // Poll ALL BERT worker responses (completions + sentence scoring + MLM)
         self.poll_bert_responses(&ctx);
 
-        // Idle grammar queue processing
+        // Idle spelling + grammar queue processing
+        if !self.spelling_queue.is_empty() {
+            self.process_spelling_queue();
+        }
         if !self.grammar_queue.is_empty() {
             self.process_grammar_queue();
         }
@@ -4260,14 +4434,16 @@ impl eframe::App for ContextApp {
                                 );
                             }
                         });
-                        if is_focused {
+                        if is_focused && !self.focused_error_scroll_done {
                             frame_resp.response.scroll_to_me(Some(egui::Align::Center));
+                            self.focused_error_scroll_done = true;
                         }
                     }
                     }); // end ScrollArea
 
                     // Handle actions after rendering
                     if let Some((idx, act)) = action {
+                        log!("ACTION received: act='{}' idx={}", act, idx);
                         // Clear pin when user acts on any error
                         if matches!(act, "fix" | "ignore" | "ignore_group") {
                             self.writing_errors[idx].pinned = false;

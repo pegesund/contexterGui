@@ -46,13 +46,12 @@ chrome.runtime.onConnect.addListener((port) => {
   if (tabId) contentPorts.set(tabId, port);
 
   port.onMessage.addListener((msg) => {
-    if (msg.type === "textUpdate") {
-      lastActiveTabId = tabId;
-      connectNative();
-      if (nativePort) {
-        msg.tabId = tabId;
-        nativePort.postMessage(msg);
-      }
+    lastActiveTabId = tabId;
+    connectNative();
+    if (nativePort) {
+      // Forward ALL messages (textUpdate + log) to native host
+      if (msg.type === "textUpdate") msg.tabId = tabId;
+      try { nativePort.postMessage(msg); } catch(e) {}
     }
   });
 

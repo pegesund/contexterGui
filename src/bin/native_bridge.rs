@@ -86,6 +86,35 @@ fn main() {
     loop {
         match read_message() {
             Ok(msg) => {
+                let msg_str = String::from_utf8_lossy(&msg);
+
+                // Handle log messages from content script
+                if msg_str.contains("\"type\":\"log\"") {
+                    if let Some(i) = msg_str.find("\"message\":\"") {
+                        let s = &msg_str[i+11..];
+                        let end = s.find('"').unwrap_or(s.len());
+                        log(&format!("JS: {}", &s[..end]));
+                    }
+                    // Don't write log messages to the data file
+                    let ack = br#"{"status":"ok"}"#;
+                    if let Ok(mut out) = stdout.lock() {
+                        if write_message_locked(&mut *out, ack).is_err() { break; }
+                    }
+                    continue;
+                }
+
+                // Log what we receive: URL and first 80 chars of text
+                let url = msg_str.find("\"url\":\"").map(|i| {
+                    let s = &msg_str[i+7..];
+                    s.find('"').map(|e| &s[..e]).unwrap_or("")
+                }).unwrap_or("");
+                let text_preview = msg_str.find("\"text\":\"").map(|i| {
+                    let s = &msg_str[i+8..];
+                    let end = s.find('"').unwrap_or(80).min(80);
+                    &s[..end]
+                }).unwrap_or("");
+                log(&format!("RECV url={} text='{}'", url, text_preview));
+
                 if let Err(e) = std::fs::write(data_path(), &msg) {
                     log(&format!("Failed to write data file: {}", e));
                 }
