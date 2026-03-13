@@ -1,10 +1,11 @@
-// NorskTale content script v7 — no sidebar, no Apps Script
-// Google Docs: text from canvas hook (gdocs-inject.js), replace via insertReplacementText
+// NorskTale content script v8 — active cursor required
+// Google Docs: text from canvas hook (gdocs-inject.js), replace via postMessage
 // Other sites: textarea/contenteditable direct
+// RULE: NEVER send text unless user has a blinking cursor in an editable element.
 
 (function() {
   "use strict";
-  console.log("NorskTale content.js v7 loaded");
+  console.log("NorskTale content.js v8 loaded");
 
   function norsktaleLog(msg) {
     console.log("NorskTale: " + msg);
@@ -34,26 +35,71 @@
     return location.hostname === "docs.google.com" && location.pathname.startsWith("/document/");
   }
 
-  // --- Google Docs: receive text from canvas hook ---
-  document.addEventListener("norsktale-gdocs-text", function(e) {
-    const data = e.detail;
-    if (!data || !data.text) return;
+  // ========================================================================
+  // ACTIVE CURSOR CHECK — the ONE gate for ALL text sending.
+  // Returns the editable element with cursor, or null if no active cursor.
+  // "Active cursor" means: user has clicked into an editable element and
+  // there is a blinking caret / text selection inside it.
+  // ========================================================================
+  function getElementWithActiveCursor() {
+    if (!document.hasFocus()) return null;
+
+    const el = document.activeElement;
+    if (!el) return null;
+
+    // Textarea or text input: cursor exists if selectionStart is a number
+    if (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text")) {
+      if (typeof el.selectionStart === "number") return el;
+      return null;
+    }
+
+    // ContentEditable: cursor exists if window.getSelection() has a range
+    // AND that range is inside the editable element
+    if (el.isContentEditable) {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return null;
+      const range = sel.getRangeAt(0);
+      if (el.contains(range.startContainer)) return el;
+      return null;
+    }
+
+    // Not an editable element — no cursor
+    return null;
+  }
+
+  // --- Google Docs: read text from DOM element written by gdocs-inject.js ---
+  // gdocs-inject.js (MAIN world) writes to #norsktale-data.
+  // Content.js (ISOLATED world) polls it. DOM is shared between worlds.
+  let lastDataVersion = "";
+  function pollGDocsData() {
+    if (!isGoogleDocs()) return;
+    const el = document.getElementById("norsktale-data");
+    if (!el) return;
+    const text = el.getAttribute("data-text");
+    const cursor = parseInt(el.getAttribute("data-cursor") || "0", 10);
+    if (!text) return;
+    const version = text + "|" + cursor;
+    if (version === lastDataVersion) return;
+    lastDataVersion = version;
+    const data = { text: text, cursorStart: cursor, cursorEnd: cursor };
     lastGDocsText = data;
-    const key = data.text + "|" + data.cursorStart;
+    const key = text + "|" + cursor;
     if (key === lastSent) return;
     lastSent = key;
-    norsktaleLog("GDOCS canvas text: " + data.text.length + " chars");
+    norsktaleLog("GDOCS canvas text: " + text.length + " chars");
     if (!port) connectPort();
     if (port) {
       try {
         port.postMessage({
-          type: "textUpdate", text: data.text,
-          cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
+          type: "textUpdate", text: text,
+          cursorStart: cursor, cursorEnd: cursor,
           caretX: 0, caretY: 0, url: window.location.href
         });
       } catch (e) { port = null; }
     }
-  });
+  }
+  // Poll every 500ms for GDocs data
+  setInterval(pollGDocsData, 500);
 
   // --- Replace handler ---
   function handleResponse(msg) {
@@ -61,22 +107,26 @@
     norsktaleLog("REPLACE: find='" + (msg.expected||"") + "' text='" + (msg.text||"") + "'");
 
     if (isGoogleDocs()) {
-      // Send replace request to gdocs-inject.js (MAIN world) via CustomEvent
+      // Send replace request to gdocs-inject.js (MAIN world) via postMessage
       const findText = msg.expected || "";
       const replaceText = msg.text || "";
       if (!findText) {
         norsktaleLog("REPLACE FAILED: no expected text");
         return;
       }
-      document.dispatchEvent(new CustomEvent("norsktale-gdocs-replace", {
-        detail: { find: findText, replace: replaceText, charOffset: msg.start || 0 }
-      }));
-      // Listen for result
-      document.addEventListener("norsktale-gdocs-replace-result", function handler(e) {
-        document.removeEventListener("norsktale-gdocs-replace-result", handler);
-        norsktaleLog("REPLACE result: " + JSON.stringify(e.detail));
-        lastSent = ""; // force re-read after replace
-      });
+      // Send replace request via DOM element (shared between worlds)
+      let replEl = document.getElementById("norsktale-replace");
+      if (!replEl) {
+        replEl = document.createElement("div");
+        replEl.id = "norsktale-replace";
+        replEl.style.display = "none";
+        document.documentElement.appendChild(replEl);
+      }
+      replEl.setAttribute("data-find", findText);
+      replEl.setAttribute("data-replace", replaceText);
+      replEl.setAttribute("data-offset", String(msg.start || 0));
+      replEl.setAttribute("data-pending", "true");
+      lastSent = ""; // force re-read after replace
       return;
     }
 
@@ -171,10 +221,10 @@
     return null;
   }
 
+  // --- sendUpdate: ONLY sends if active cursor exists ---
   function sendUpdate() {
-    if (!document.hasFocus()) return;
-    if (isGoogleDocs()) return;
-    const el = document.activeElement;
+    if (isGoogleDocs()) return; // GDocs handled via postMessage from gdocs-inject.js
+    const el = getElementWithActiveCursor();
     if (!el) return;
     const data = getTextAndCursor(el);
     if (!data || !data.text) return;
@@ -202,12 +252,17 @@
   document.addEventListener("click", () => setTimeout(sendUpdate, 50), true);
   document.addEventListener("keyup", sendUpdate, true);
 
-  // Heartbeat
+  // Clear stale text when page loses focus
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) lastGDocsText = null;
+  }, true);
+
+  // Heartbeat — keeps native bridge alive, only sends text with active cursor
   setInterval(() => {
-    if (!document.hasFocus()) return;
-    if (isGoogleDocs() && lastGDocsText) {
-      if (!port) connectPort();
-      if (port) {
+    if (!port) connectPort();
+    if (isGoogleDocs()) {
+      // GDocs: only resend if page has focus AND we have text from canvas hook
+      if (document.hasFocus() && port && lastGDocsText) {
         try {
           port.postMessage({
             type: "textUpdate", text: lastGDocsText.text,
@@ -215,14 +270,16 @@
             caretX: 0, caretY: 0, url: window.location.href
           });
         } catch (e) { port = null; }
+      } else if (port) {
+        try { port.postMessage({ type: "keepalive" }); } catch(e) { port = null; }
       }
       return;
     }
-    const el = activeElement || lastTextElement || document.activeElement;
+    // Non-GDocs: ONLY send if active cursor exists
+    const el = getElementWithActiveCursor();
     if (!el) return;
     const data = getTextAndCursor(el);
     if (!data || !data.text) return;
-    if (!port) connectPort();
     if (port) {
       try {
         port.postMessage({

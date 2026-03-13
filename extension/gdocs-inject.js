@@ -152,12 +152,19 @@
 
     fullText = deduplicateText(fullText);
 
+    // ONLY emit if user has an active cursor in the document.
+    // Check 1: document must have focus
+    if (!document.hasFocus()) return;
+    // Check 2: the docs editing iframe must exist and be active
+    const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
+    if (!iframe) return;
+
     if (fullText === lastEmittedText) return;
     lastEmittedText = fullText;
 
-    // Cursor position from caret element
+    // Try to find cursor position from caret element (best effort)
     let cursorIndex = fullText.length;
-    const caret = document.querySelector("#kix-current-user-cursor-caret, .kix-cursor-caret");
+    const caret = document.querySelector(".kix-cursor-caret, #kix-current-user-cursor-caret, [class*='kix-cursor']");
     if (caret) {
       const caretRect = caret.getBoundingClientRect();
       if (caretRect.height > 0) {
@@ -165,9 +172,18 @@
       }
     }
 
-    document.dispatchEvent(new CustomEvent("norsktale-gdocs-text", {
-      detail: { text: fullText, cursorStart: cursorIndex, cursorEnd: cursorIndex }
-    }));
+    // Cross-world communication via DOM element (postMessage and CustomEvent.detail
+    // do NOT cross MAIN→ISOLATED world boundary in MV3)
+    let el = document.getElementById("norsktale-data");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "norsktale-data";
+      el.style.display = "none";
+      document.documentElement.appendChild(el);
+    }
+    el.setAttribute("data-text", fullText);
+    el.setAttribute("data-cursor", String(cursorIndex));
+    el.dispatchEvent(new Event("norsktale-update", { bubbles: false }));
   }
 
   // Find character index in the full text at a given viewport point
@@ -278,65 +294,84 @@
     return null;
   }
 
-  // Click at a position in the editor (trusted-like mouse event)
-  function clickAt(x, y, shiftKey) {
+  // Click at a position in the editor
+  function clickAt(x, y, opts_extra) {
     const editor = getEditor();
     if (!editor) return;
-    const opts = { bubbles: true, cancelable: true, button: 0,
-                   clientX: x, clientY: y, shiftKey: !!shiftKey, composed: true };
+    const opts = Object.assign({ bubbles: true, cancelable: true, button: 0,
+                   clientX: x, clientY: y, composed: true }, opts_extra || {});
     editor.dispatchEvent(new MouseEvent("mousedown", opts));
     editor.dispatchEvent(new MouseEvent("mouseup", opts));
   }
 
-  // Type text into Google Docs via the hidden iframe's execCommand
+  // Double-click at a position (selects word in Google Docs)
+  function doubleClickAt(x, y) {
+    const editor = getEditor();
+    if (!editor) return;
+    const opts = { bubbles: true, cancelable: true, button: 0,
+                   clientX: x, clientY: y, detail: 2, composed: true };
+    editor.dispatchEvent(new MouseEvent("mousedown", opts));
+    editor.dispatchEvent(new MouseEvent("mouseup", opts));
+    editor.dispatchEvent(new MouseEvent("dblclick", opts));
+  }
+
+  // Type text into Google Docs by simulating a paste event.
+  // Google Docs has its own paste handler that reads clipboardData —
+  // this works even with synthetic (untrusted) events.
   function typeText(text) {
     const doc = getIframeDoc();
     if (!doc) return false;
-    // Try execCommand first (works in many browsers for Google Docs)
     const el = doc.querySelector("[contenteditable=true]");
-    if (el) {
-      el.focus();
-      if (doc.execCommand("insertText", false, text)) {
-        return true;
-      }
-    }
-    return false;
+    if (!el) return false;
+    el.focus();
+
+    const dt = new DataTransfer();
+    dt.setData("text/plain", text);
+    const pasteEvent = new ClipboardEvent("paste", {
+      clipboardData: dt,
+      bubbles: true,
+      cancelable: true
+    });
+    el.dispatchEvent(pasteEvent);
+    return true;
   }
 
-  // Handle replace requests from content.js
-  document.addEventListener("norsktale-gdocs-replace", function(e) {
-    const { find, replace, charOffset } = e.detail;
+  // Poll for replace requests from content.js (via DOM element)
+  setInterval(() => {
+    const replEl = document.getElementById("norsktale-replace");
+    if (!replEl || replEl.getAttribute("data-pending") !== "true") return;
+    replEl.setAttribute("data-pending", "false");
+    const find = replEl.getAttribute("data-find");
+    const replace = replEl.getAttribute("data-replace");
+    const charOffset = parseInt(replEl.getAttribute("data-offset") || "0", 10);
+    doReplace(find, replace, charOffset, replEl);
+  }, 100);
+
+  function doReplace(find, replace, charOffset, replEl) {
     console.log("NorskTale gdocs-inject: replace '" + find + "' → '" + replace + "'");
 
     const coords = findWordCoords(find, charOffset);
     if (!coords) {
       console.log("NorskTale gdocs-inject: word not found in canvas text");
-      document.dispatchEvent(new CustomEvent("norsktale-gdocs-replace-result", {
-        detail: { ok: false, reason: "word not found" }
-      }));
+      if (replEl) { replEl.setAttribute("data-result", "false"); replEl.dispatchEvent(new Event("norsktale-replace-done")); }
       return;
     }
 
-    console.log("NorskTale gdocs-inject: clicking " + coords.startX.toFixed(0) + "," +
+    // Click at start, shift-click at end (pull endX back 2px to avoid trailing space)
+    console.log("NorskTale gdocs-inject: select " + coords.startX.toFixed(0) + "," +
                 coords.startY.toFixed(0) + " → " + coords.endX.toFixed(0) + "," + coords.endY.toFixed(0));
+    clickAt(coords.startX, coords.startY);
 
-    // Step 1: Click at start to place cursor
-    clickAt(coords.startX, coords.startY, false);
-
-    // Step 2: Shift+click at end to select the text
     setTimeout(() => {
-      clickAt(coords.endX, coords.endY, true);
+      clickAt(coords.endX - 2, coords.endY, { shiftKey: true });
 
-      // Step 3: Type replacement (replaces selection)
       setTimeout(() => {
         const ok = typeText(replace);
         console.log("NorskTale gdocs-inject: typeText result: " + ok);
-        document.dispatchEvent(new CustomEvent("norsktale-gdocs-replace-result", {
-          detail: { ok: ok }
-        }));
+        if (replEl) { replEl.setAttribute("data-result", String(ok)); replEl.dispatchEvent(new Event("norsktale-replace-done")); }
       }, 150);
     }, 150);
-  });
+  }
 
   // Periodic re-emit
   setInterval(() => {

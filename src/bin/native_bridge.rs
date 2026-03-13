@@ -59,6 +59,23 @@ fn main() {
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
+    // Immediately send any pending reply from a previous session
+    // (e.g., Rust wrote reply while bridge was dead, keepalive reconnected us)
+    {
+        let reply = reply_path();
+        if reply.exists() {
+            if let Ok(data) = std::fs::read(&reply) {
+                let _ = std::fs::remove_file(&reply);
+                if !data.is_empty() {
+                    log(&format!("Startup: sending pending reply: {}", String::from_utf8_lossy(&data)));
+                    if let Ok(mut out) = stdout.lock() {
+                        let _ = write_message_locked(&mut *out, &data);
+                    }
+                }
+            }
+        }
+    }
+
     // Reply checker thread — polls for reply file every 50ms
     let stdout2 = stdout.clone();
     let alive2 = alive.clone();
@@ -87,6 +104,15 @@ fn main() {
         match read_message() {
             Ok(msg) => {
                 let msg_str = String::from_utf8_lossy(&msg);
+
+                // Handle keepalive pings (just ack, don't write to file)
+                if msg_str.contains("\"type\":\"keepalive\"") {
+                    let ack = br#"{"status":"ok"}"#;
+                    if let Ok(mut out) = stdout.lock() {
+                        if write_message_locked(&mut *out, ack).is_err() { break; }
+                    }
+                    continue;
+                }
 
                 // Handle log messages from content script
                 if msg_str.contains("\"type\":\"log\"") {

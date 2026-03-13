@@ -9,20 +9,18 @@ function connectNative() {
   if (nativePort) return;
   try {
     nativePort = chrome.runtime.connectNative(NATIVE_HOST);
+    console.log("NorskTale: native host connected");
     nativePort.onMessage.addListener((msg) => {
-      // Every response from native host could be a replace action or just an ack
+      // Forward replace actions to content script
       if (msg.action === "replace") {
-        console.log("NorskTale replace:", JSON.stringify(msg), "tabs:", [...contentPorts.keys()]);
-        // Send to the last active tab
+        console.log("NorskTale replace:", JSON.stringify(msg));
         if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
           try {
             contentPorts.get(lastActiveTabId).postMessage(msg);
-            console.log("Sent replace to tab", lastActiveTabId);
           } catch(e) {
             console.log("Failed to send to tab", lastActiveTabId, e);
           }
         } else {
-          // Fallback: send to all
           for (const [tabId, cPort] of contentPorts) {
             try { cPort.postMessage(msg); } catch(e) {}
           }
@@ -32,6 +30,10 @@ function connectNative() {
     nativePort.onDisconnect.addListener(() => {
       console.log("NorskTale native host disconnected:", chrome.runtime.lastError?.message);
       nativePort = null;
+      // Reconnect after short delay if we still have content ports
+      if (contentPorts.size > 0) {
+        setTimeout(connectNative, 500);
+      }
     });
   } catch (e) {
     console.error("NorskTale: failed to connect native host:", e);

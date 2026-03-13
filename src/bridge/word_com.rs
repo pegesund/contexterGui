@@ -411,21 +411,25 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
+        // ONLY read text if user has a visible blinking caret in the document.
+        // No caret = user hasn't clicked into the document = do NOT process.
         let caret_pos = self.caret_pos();
+        if caret_pos.is_none() {
+            return None;
+        }
         match self.get_raw_text() {
             Ok((raw, cursor_offset)) => {
                 let mut ctx = super::build_context(&raw, caret_pos);
                 ctx.cursor_doc_offset = Some(cursor_offset);
                 Some(ctx)
             }
-            Err(_) => Some(CursorContext {
-                caret_pos,
-                ..Default::default()
-            }),
+            Err(_) => None,
         }
     }
 
     fn read_document_context(&self) -> Option<String> {
+        // No blinking caret = no cursor = don't read
+        if self.caret_pos().is_none() { return None; }
         let app = self.get_app()?;
         let selection = app.get_dispatch("Selection").ok()?;
         let sel_range = selection.get_dispatch("Range").ok()?;
@@ -439,6 +443,8 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_full_document(&self) -> Option<String> {
+        // No blinking caret = no cursor = don't read
+        if self.caret_pos().is_none() { return None; }
         let app = self.get_app()?;
         let doc = app.get_dispatch("ActiveDocument").ok()?;
         let content = doc.get_dispatch("Content").ok()?;

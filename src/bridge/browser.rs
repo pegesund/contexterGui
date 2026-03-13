@@ -33,6 +33,8 @@ pub struct BrowserBridge {
 
 impl BrowserBridge {
     pub fn new() -> Self {
+        // Delete stale data file from previous session to avoid processing old text
+        let _ = std::fs::remove_file(data_path());
         BrowserBridge {
             last_modified: std::cell::Cell::new(0),
             last_text: std::cell::RefCell::new(String::new()),
@@ -242,20 +244,10 @@ impl TextBridge for BrowserBridge {
     }
 
     fn is_available(&self) -> bool {
-        // Available if the data file exists and was modified in the last 10 seconds
-        if let Ok(metadata) = std::fs::metadata(data_path()) {
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(age) = modified.elapsed() {
-                    return age.as_secs() < 10;
-                }
-            }
-        }
-        false
+        data_path().exists()
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        // Only return data if the file is fresh (< 10s old)
-        if !self.is_available() { return None; }
         let (text, cursor_start, _cursor_end, caret) = self.read_data_file()?;
         if text.is_empty() { return None; }
 

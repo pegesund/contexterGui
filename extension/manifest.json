@@ -6,7 +6,7 @@
   "permissions": ["nativeMessaging", "alarms"],
   "content_scripts": [
     {
-      "matches": ["*://docs.google.com/document/*"],
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
     },

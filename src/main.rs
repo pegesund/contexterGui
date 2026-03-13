@@ -354,44 +354,9 @@ impl BridgeManager {
             log!("FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}", trunc(&fg_title, 40), fg_pid, fg_exe, our_window_focused, word_is_foreground, is_browser, self.last_user_pid);
         }
 
-        // Our window is foreground — check if Browser bridge has fresh data first,
-        // then fall back to current bridge.
-        // CRITICAL: If last user app was a browser, NEVER activate Word COM.
+        // Our window is foreground — keep using whatever bridge was already active.
+        // NEVER switch bridges when our window is focused.
         if our_window_focused {
-            let active_name = self.bridges.get(self.active_idx).map(|b| b.name()).unwrap_or("");
-
-            // Check if Browser bridge has fresh data (always try this first)
-            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
-                if self.bridges[browser_idx].is_available() {
-                    if let Some(ctx) = self.bridges[browser_idx].read_context() {
-                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                            if active_name != "Browser" {
-                                log!("Our window focused but Browser has fresh data — switching {} → Browser", active_name);
-                            }
-                            if self.active_idx != browser_idx {
-                                self.bridge_switched = true;
-                            }
-                            self.active_idx = browser_idx;
-                            self.last_context = Some(ctx.clone());
-                            return Some(ctx);
-                        }
-                    }
-                }
-            }
-
-            // If last user app was a browser, do NOT fall through to Word COM.
-            // The user was in a browser — only Browser bridge is valid.
-            if self.last_user_was_browser {
-                return self.last_context.clone();
-            }
-
-            // Only re-read Word COM if user was actually in Word last
-            if active_name == "Word COM" {
-                if let Some(ctx) = self.bridges[self.active_idx].read_context() {
-                    self.last_context = Some(ctx.clone());
-                    return Some(ctx);
-                }
-            }
             return self.last_context.clone();
         }
 
@@ -2162,6 +2127,15 @@ impl ContextApp {
         // Quick check: if document hasn't changed at all, skip everything
         let doc_hash = hash_str(&doc_text);
         if doc_hash == self.last_doc_hash {
+            // Even if hash matches, prune errors whose text no longer exists in the doc
+            let doc_lower = doc_text.to_lowercase();
+            let before = self.writing_errors.len();
+            self.writing_errors.retain(|e| {
+                doc_lower.contains(&e.word.to_lowercase())
+            });
+            if self.writing_errors.len() != before {
+                log!("Pruned {} stale errors (text no longer in doc)", before - self.writing_errors.len());
+            }
             return;
         }
         log!("Doc hash changed ({} → {}), rescanning {} chars", self.last_doc_hash, doc_hash, doc_text.len());
@@ -2185,6 +2159,12 @@ impl ContextApp {
             self.grammar_queue_total = 0;
             self.clean_sentence_hashes.clear();
         }
+
+        // On any doc change, prune errors whose text is no longer in the document
+        let doc_lower = doc_text.to_lowercase();
+        self.writing_errors.retain(|e| {
+            doc_lower.contains(&e.word.to_lowercase())
+        });
 
         let mut sentences = split_sentences(&doc_text);
         // Track which original sentences were sub-split by Prolog
@@ -3309,7 +3289,9 @@ impl eframe::App for ContextApp {
                     self.grammar_queue_total = 0;
                     self.clean_sentence_hashes.clear();
                     self.last_doc_hash = 0;
-                    self.last_sentence_count = 0;
+                    // Do NOT reset last_sentence_count to 0 — that causes a
+                    // false "major doc change" on the very next read, which
+                    // clears the BERT queue before results arrive.
                 }
                 #[cfg(target_os = "windows")]
                 let fg = unsafe {
