@@ -3425,6 +3425,11 @@ impl eframe::App for ContextApp {
             self.sync_embeddings();
 
             let mid = is_mid_word(&self.context.word);
+            if !self.context.word.is_empty() || self.context.masked_sentence.is_some() {
+                log!("Context: word='{}' mid={} masked={}",
+                    self.context.word, mid,
+                    self.context.masked_sentence.as_deref().map(|m| &m[..m.len().min(80)]).unwrap_or("None"));
+            }
             if mid {
                 // Mid-word: mark prefix change for debouncing
                 // Only trigger run_completion for legacy path (no masked sentence)

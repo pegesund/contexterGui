@@ -343,6 +343,8 @@ impl TextBridge for BrowserBridge {
             after: after.to_string(),
         };
 
+        log_browser(&format!("read_context: cursor_start={} text_len={} before_len={} after_len={}",
+            cursor_start, text.len(), before.len(), after.len()));
         let mut ctx = build_context(&raw, caret);
         ctx.cursor_doc_offset = Some(cursor_start);
         Some(ctx)

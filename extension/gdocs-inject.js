@@ -8,6 +8,7 @@
 
   let annotatedText = null;
   let lastEmittedText = "";
+  let lastEmittedCursor = -1;
 
   // --- Annotate API initialization ---
   async function getAnnotatedText() {
@@ -43,20 +44,33 @@
       return;
     }
 
-    // Strip control characters (annotate API prepends \u0003 ETX)
-    fullText = fullText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
+    // Strip control characters (annotate API prepends \u0003 ETX) and trailing whitespace
+    fullText = fullText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trimEnd();
 
-    if (!fullText || fullText === lastEmittedText) return;
-    lastEmittedText = fullText;
+    if (!fullText) return;
 
-    // Get cursor position from selection
+    // Get cursor position — try annotate API first, fall back to DOM caret tracking
     let cursorIndex = fullText.length;
     try {
       const sel = at.getSelection();
-      if (sel && sel.length > 0) {
-        cursorIndex = sel[0].start || 0;
+      if (sel && sel.length > 0 && typeof sel[0].start === "number") {
+        cursorIndex = sel[0].start;
       }
     } catch (e) {}
+
+    // If annotate API returns end-of-text, try to find cursor from DOM caret element
+    if (cursorIndex >= fullText.length - 1 || cursorIndex <= 0) {
+      const domCursor = getDomCursorOffset(fullText);
+      console.log("NorskTale: DOM cursor fallback: " + domCursor + " (API was " + cursorIndex + ", textLen=" + fullText.length + ")");
+      if (domCursor >= 0) {
+        cursorIndex = domCursor;
+      }
+    }
+
+    // Skip if neither text nor cursor changed
+    if (fullText === lastEmittedText && cursorIndex === lastEmittedCursor) return;
+    lastEmittedText = fullText;
+    lastEmittedCursor = cursorIndex;
 
     // Cross-world communication via DOM element
     let el = document.getElementById("norsktale-data");
@@ -69,6 +83,75 @@
     el.setAttribute("data-text", fullText);
     el.setAttribute("data-cursor", String(cursorIndex));
     el.dispatchEvent(new Event("norsktale-update", { bubbles: false }));
+  }
+
+  // --- DOM-based cursor position detection ---
+  // Google Docs renders text in paragraphs (.kix-paragraphrenderer) with
+  // line chunks (.kix-lineview). The user's caret is a div .kix-cursor-caret.
+  // We find which paragraph the caret is in, get the text before the caret
+  // within that paragraph, then search for that text in the annotate API text
+  // to get the character offset.
+  function getDomCursorOffset(fullText) {
+    try {
+      // Find the current user's caret
+      const caret = document.querySelector(".kix-cursor-caret");
+      if (!caret) return -1;
+      const caretRect = caret.getBoundingClientRect();
+      if (caretRect.height === 0) return -1;
+
+      // Walk up to find the paragraph
+      let para = caret.closest(".kix-paragraphrenderer");
+      if (!para) return -1;
+
+      // Get all text spans in this paragraph, in order
+      const spans = para.querySelectorAll(".kix-wordhtmlgenerator-word-node");
+      if (!spans.length) return -1;
+
+      // Collect text before and at the caret position
+      let textBefore = "";
+      let caretX = caretRect.left;
+      for (const span of spans) {
+        const spanRect = span.getBoundingClientRect();
+        // Span is entirely before caret
+        if (spanRect.right <= caretX + 2) {
+          textBefore += span.textContent;
+        } else if (spanRect.left < caretX) {
+          // Caret is within this span — estimate char position
+          const spanText = span.textContent;
+          const spanWidth = spanRect.width;
+          if (spanWidth > 0 && spanText.length > 0) {
+            const ratio = (caretX - spanRect.left) / spanWidth;
+            const charIdx = Math.round(ratio * spanText.length);
+            textBefore += spanText.substring(0, charIdx);
+          }
+          break;
+        } else {
+          break;
+        }
+      }
+
+      // Now find this paragraph text in fullText to get the char offset
+      // Get the full paragraph text
+      let paraText = "";
+      for (const span of spans) {
+        paraText += span.textContent;
+      }
+      // Normalize whitespace for matching
+      const paraClean = paraText.replace(/\u00a0/g, " ").trim();
+      const fullClean = fullText.replace(/\u00a0/g, " ");
+
+      if (paraClean.length === 0) return -1;
+
+      // Find paragraph start in fullText
+      const paraStart = fullClean.indexOf(paraClean);
+      if (paraStart < 0) return -1;
+
+      // Cursor offset = paragraph start + text before caret within paragraph
+      const beforeClean = textBefore.replace(/\u00a0/g, " ");
+      return paraStart + beforeClean.length;
+    } catch (e) {
+      return -1;
+    }
   }
 
   // --- Replace via annotate API ---
