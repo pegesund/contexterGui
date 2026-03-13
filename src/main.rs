@@ -1357,8 +1357,9 @@ impl ContextApp {
         }
 
         // Word not found — unified suggestion pipeline
+        // Dedup: skip if this word already has a spelling error in this sentence
         if self.writing_errors.iter().any(|e| {
-            matches!(e.category, ErrorCategory::Spelling) && e.word == clean && e.doc_offset == doc_offset && !e.ignored
+            matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == clean && e.sentence_context == sentence_ctx && !e.ignored
         }) {
             return;
         }
@@ -1380,12 +1381,11 @@ impl ContextApp {
         let best = suggestions.first().map(|(w, _)| w.clone()).unwrap_or_default();
         let rule = "stavefeil_bert";
 
-        // If BERT re-ranking is pending, hold back the suggestion until BERT confirms it.
-        // Show the underline (flag the error) but don't display a potentially wrong suggestion.
+        // Show best orthographic suggestion immediately; BERT will re-rank and update later.
         let has_pending_bert = self.pending_spelling_bert.last()
             .map(|p| p.error_idx_word == clean.to_lowercase())
             .unwrap_or(false);
-        let shown_suggestion = if has_pending_bert { String::new() } else { best.clone() };
+        let shown_suggestion = best.clone();
 
         self.writing_errors.push(WritingError {
             category: ErrorCategory::Spelling,
