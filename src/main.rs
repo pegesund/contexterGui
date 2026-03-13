@@ -676,6 +676,8 @@ struct ContextApp {
     grammar_queue_total: usize,
     /// Whether a grammar scan is in progress (shows indicator in UI)
     grammar_scanning: bool,
+    /// Cooldown after a fix — don't prune errors until canvas has repainted with new text
+    /// Recently fixed words — don't re-detect these as errors (cleared when fresh text arrives from extension)
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
     pending_fix: Option<(String, String, String, usize)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
@@ -2130,11 +2132,22 @@ impl ContextApp {
             // Even if hash matches, prune errors whose text no longer exists in the doc
             let doc_lower = doc_text.to_lowercase();
             let before = self.writing_errors.len();
+            let mut pruned_contexts: Vec<String> = Vec::new();
             self.writing_errors.retain(|e| {
-                doc_lower.contains(&e.word.to_lowercase())
+                let keep = doc_lower.contains(&e.word.to_lowercase());
+                if !keep {
+                    pruned_contexts.push(e.sentence_context.clone());
+                }
+                keep
             });
             if self.writing_errors.len() != before {
                 log!("Pruned {} stale errors (text no longer in doc)", before - self.writing_errors.len());
+                // Clear sentence hashes for pruned errors so they get re-scanned
+                for ctx in &pruned_contexts {
+                    self.clean_sentence_hashes.remove(&hash_str(ctx));
+                }
+                // Force rescan by invalidating doc hash
+                self.last_doc_hash = 0;
             }
             return;
         }
@@ -2160,11 +2173,20 @@ impl ContextApp {
             self.clean_sentence_hashes.clear();
         }
 
-        // On any doc change, prune errors whose text is no longer in the document
-        let doc_lower = doc_text.to_lowercase();
-        self.writing_errors.retain(|e| {
-            doc_lower.contains(&e.word.to_lowercase())
-        });
+        {
+            // On any doc change, prune errors whose text is no longer in the document
+            // and clear sentence hashes so those sentences get re-scanned
+            let doc_lower = doc_text.to_lowercase();
+            let mut pruned_contexts2: Vec<String> = Vec::new();
+            self.writing_errors.retain(|e| {
+                let keep = doc_lower.contains(&e.word.to_lowercase());
+                if !keep { pruned_contexts2.push(e.sentence_context.clone()); }
+                keep
+            });
+            for ctx in &pruned_contexts2 {
+                self.clean_sentence_hashes.remove(&hash_str(ctx));
+            }
+        }
 
         let mut sentences = split_sentences(&doc_text);
         // Track which original sentences were sub-split by Prolog
@@ -2269,6 +2291,7 @@ impl ContextApp {
         };
 
         // --- Step 0: Re-map existing errors to new offsets, remove stale ones ---
+        let mut stale_sentences: Vec<String> = Vec::new();
         log!("  Step 0: re-mapping {} errors to {} sentences", self.writing_errors.len(), new_sentences.len());
         for e in &self.writing_errors {
             if !e.ignored {
@@ -2284,40 +2307,40 @@ impl ContextApp {
             for e in &mut self.writing_errors {
                 if e.ignored { continue; }
                 let key = e.sentence_context.clone();
+                // Try 1: exact sentence match with offset claiming (handles duplicate sentences)
                 if let Some(offsets) = available_offsets.get(&key) {
                     let already_claimed = claimed.entry(key.clone()).or_default();
                     if let Some(&off) = offsets.iter().find(|o| !already_claimed.contains(o)) {
                         e.doc_offset = off;
                         already_claimed.push(off);
-                    } else {
-                        e.ignored = true;
-                        log!("Removed stale error: '{}' (no matching position)", trunc(&e.word, 40));
+                        continue; // success
                     }
-                } else {
-                    // Sentence context changed — but if the error word still exists in the
-                    // document, try to find a new sentence that contains it (accessibility bridge
-                    // can produce different sentence boundaries on each read)
-                    let word_lower = e.word.to_lowercase();
-                    let mut relocated = false;
-                    for (s, off) in &new_sentences {
-                        if s.to_lowercase().contains(&word_lower) {
-                            let already_claimed = claimed.entry(s.clone()).or_default();
-                            if !already_claimed.contains(off) {
-                                e.sentence_context = s.clone();
-                                e.doc_offset = *off;
-                                already_claimed.push(*off);
-                                relocated = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !relocated {
-                        // Word truly gone from document
-                        e.ignored = true;
-                        log!("Removed stale error: '{}' (sentence gone)", trunc(&e.word, 40));
+                    // All offsets claimed — fall through to word search
+                }
+                // Try 2: find any new sentence containing this error word
+                let word_lower = e.word.to_lowercase();
+                let mut relocated = false;
+                for (s, off) in &new_sentences {
+                    if s.to_lowercase().contains(&word_lower) {
+                        log!("Relocated error '{}' to sentence '{}' off={}", trunc(&e.word, 20), trunc(s, 40), off);
+                        e.sentence_context = s.clone();
+                        e.doc_offset = *off;
+                        relocated = true;
+                        break;
                     }
                 }
+                if !relocated {
+                    let word_copy = e.word.clone();
+                    stale_sentences.push(e.sentence_context.clone());
+                    e.word.clear(); // mark for removal below
+                    log!("Stale error: '{}' (not found in any sentence) — will rescan", trunc(&word_copy, 40));
+                }
             }
+        }
+        // Remove errors marked for removal and clear their sentence hashes for rescan
+        self.writing_errors.retain(|e| !e.word.is_empty());
+        for ctx in &stale_sentences {
+            self.clean_sentence_hashes.remove(&hash_str(ctx));
         }
 
         // --- Step 1: Sentence boundary suggestions (shown first, highest priority) ---
@@ -2370,8 +2393,13 @@ impl ContextApp {
                 e.sentence_context == *trimmed && e.doc_offset == *doc_offset && !e.ignored
             });
 
-            // Spelling: ALWAYS queue words, even for "clean" sentences.
-            // A sentence can be grammatically clean but still have spelling errors.
+            // Skip sentences already checked and clean (both grammar AND spelling)
+            if self.clean_sentence_hashes.contains(&sent_h) {
+                log!("  SKIP (clean hash): '{}'", trunc(trimmed, 60));
+                continue;
+            }
+
+            // Spelling: queue words for sentences not yet known-clean
             if !has_errors {
                 for word in trimmed.split_whitespace() {
                     let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
@@ -2379,12 +2407,6 @@ impl ContextApp {
                         self.spelling_queue.push((clean.to_string(), trimmed.clone(), *doc_offset));
                     }
                 }
-            }
-
-            // Grammar: skip if already checked and clean
-            if self.clean_sentence_hashes.contains(&sent_h) {
-                log!("  SKIP (clean hash, spelling queued): '{}'", trunc(trimmed, 60));
-                continue;
             }
             if has_errors {
                 log!("  SKIP (has errors): '{}'", trunc(trimmed, 60));
@@ -3115,11 +3137,18 @@ impl eframe::App for ContextApp {
                         mark_prolog(trimmed, &mut self.prolog_checked_hashes);
                     }
                 }
-                // Remove the fixed error
+                // Remove the fixed error and adjust offsets of remaining errors
                 let find_lower = find.to_lowercase();
+                let len_delta = replace.chars().count() as isize - find.chars().count() as isize;
                 self.writing_errors.retain(|e| {
                     !(e.word.to_lowercase() == find_lower && e.doc_offset == doc_offset)
                 });
+                // Shift doc_offset of errors after the fix point
+                for e in &mut self.writing_errors {
+                    if e.doc_offset > doc_offset {
+                        e.doc_offset = (e.doc_offset as isize + len_delta).max(0) as usize;
+                    }
+                }
                 // Force rescan so Step 0 re-maps remaining errors to new offsets
                 self.last_doc_hash = 0;
                 self.clean_sentence_hashes.remove(&hash_str(&context));
@@ -3129,7 +3158,7 @@ impl eframe::App for ContextApp {
                 }
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
-                log!("Fix applied: '{}' removed, rescan triggered", find);
+                log!("Fix applied: '{}' removed, {} remaining errors offset-adjusted by {}", find, self.writing_errors.len(), len_delta);
             }
         }
 

@@ -22,6 +22,8 @@
   let lastTextElement = null;
   let lastGDocsText = null;
   let port = null;
+  let replaceInProgress = false; // true while GDocs replace is pending
+  let replaceStartTime = 0;
 
   function connectPort() {
     try {
@@ -73,6 +75,19 @@
   let lastDataVersion = "";
   function pollGDocsData() {
     if (!isGoogleDocs()) return;
+    // During replace: block until gdocs-inject confirms replacement (or timeout)
+    if (replaceInProgress) {
+      const el = document.getElementById("norsktale-data");
+      const done = el && el.getAttribute("data-replace-done") === "true";
+      const timedOut = Date.now() - replaceStartTime > 4000;
+      if (done || timedOut) {
+        norsktaleLog("Replace " + (done ? "confirmed" : "timed out") + " — resuming text updates");
+        replaceInProgress = false;
+        if (el) el.removeAttribute("data-replace-done");
+      } else {
+        return; // don't send stale text while replace is pending
+      }
+    }
     const el = document.getElementById("norsktale-data");
     if (!el) return;
     const text = el.getAttribute("data-text");
@@ -126,7 +141,10 @@
       replEl.setAttribute("data-replace", replaceText);
       replEl.setAttribute("data-offset", String(msg.start || 0));
       replEl.setAttribute("data-pending", "true");
+      replaceInProgress = true; // block text updates until replace confirmed
+      replaceStartTime = Date.now();
       lastSent = ""; // force re-read after replace
+      lastDataVersion = ""; // force re-read when fresh data arrives
       return;
     }
 
@@ -262,6 +280,11 @@
     if (!port) connectPort();
     if (isGoogleDocs()) {
       // GDocs: only resend if page has focus AND we have text from canvas hook
+      // Don't resend stale text during replace
+      if (replaceInProgress) {
+        if (port) { try { port.postMessage({ type: "keepalive" }); } catch(e) { port = null; } }
+        return;
+      }
       if (document.hasFocus() && port && lastGDocsText) {
         try {
           port.postMessage({

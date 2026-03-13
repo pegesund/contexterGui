@@ -29,6 +29,13 @@ pub struct BrowserBridge {
     last_cursor: std::cell::Cell<usize>,
     last_caret: std::cell::Cell<Option<(i32, i32)>>,
     last_read: std::cell::Cell<Option<Instant>>,
+    /// After sending a replace command, freeze reads from the file until fresh data arrives.
+    /// The file still contains pre-replace text; re-reading it would undo the cached fix.
+    replace_freeze_modified: std::cell::Cell<u64>,
+    /// The word being replaced — used to verify fresh data doesn't still contain it.
+    replace_old_word: std::cell::RefCell<String>,
+    /// When the freeze was activated — timeout after 5 seconds.
+    replace_freeze_time: std::cell::Cell<Option<Instant>>,
 }
 
 impl BrowserBridge {
@@ -41,6 +48,9 @@ impl BrowserBridge {
             last_cursor: std::cell::Cell::new(0),
             last_caret: std::cell::Cell::new(None),
             last_read: std::cell::Cell::new(None),
+            replace_freeze_modified: std::cell::Cell::new(0),
+            replace_old_word: std::cell::RefCell::new(String::new()),
+            replace_freeze_time: std::cell::Cell::new(None),
         }
     }
 
@@ -73,6 +83,53 @@ impl BrowserBridge {
             }
             return None;
         }
+
+        // After a replace, the file still contains pre-replace text until the
+        // extension writes fresh data. Skip re-reading stale file — use cached
+        // (post-replace) text instead.
+        let freeze = self.replace_freeze_modified.get();
+        let freeze_timed_out = freeze > 0 && self.replace_freeze_time.get()
+            .map(|t| t.elapsed().as_secs() >= 5)
+            .unwrap_or(false);
+        if freeze > 0 && freeze_timed_out {
+            log_browser("read_data_file: freeze timed out after 5s — accepting file data");
+            self.replace_freeze_modified.set(0);
+            self.replace_old_word.borrow_mut().clear();
+            self.replace_freeze_time.set(None);
+            // Fall through to read the file normally
+        } else if freeze > 0 && modified <= freeze {
+            let text = self.last_text.borrow().clone();
+            if !text.is_empty() {
+                let cursor = self.last_cursor.get();
+                return Some((text, cursor, cursor, self.last_caret.get()));
+            }
+            return None;
+        } else if freeze > 0 {
+            // File is newer than freeze — but verify the old word is actually gone.
+            let old_word = self.replace_old_word.borrow().clone();
+            if !old_word.is_empty() {
+                let content = std::fs::read_to_string(&path).ok();
+                if let Some(ref c) = content {
+                    if let Some(file_text) = extract_json_string(c, "text") {
+                        let file_lower = file_text.to_lowercase();
+                        if has_whole_word(&file_lower, &old_word) {
+                            log_browser(&format!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word));
+                            let text = self.last_text.borrow().clone();
+                            if !text.is_empty() {
+                                let cursor = self.last_cursor.get();
+                                return Some((text, cursor, cursor, self.last_caret.get()));
+                            }
+                            return None;
+                        }
+                    }
+                }
+            }
+            log_browser("read_data_file: fresh data confirmed (old word gone), clearing freeze");
+            self.replace_freeze_modified.set(0);
+            self.replace_old_word.borrow_mut().clear();
+            self.replace_freeze_time.set(None);
+        }
+
         self.last_modified.set(modified);
 
         let content = std::fs::read_to_string(&path).ok()?;
@@ -92,6 +149,21 @@ impl BrowserBridge {
         self.last_caret.set(caret);
 
         Some((text, cursor_start, cursor_end, caret))
+    }
+
+    /// Freeze file reads — the on-disk file still has pre-replace text.
+    /// Only allow reads again when fresh data arrives without the old word.
+    fn activate_replace_freeze(&self, old_word: &str) {
+        *self.replace_old_word.borrow_mut() = old_word.to_lowercase();
+        let modified = std::fs::metadata(data_path())
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        log_browser(&format!("activate_replace_freeze: frozen at modified={}, word='{}'", modified, old_word));
+        self.replace_freeze_modified.set(modified);
+        self.replace_freeze_time.set(Some(Instant::now()));
     }
 
     /// Update the cached text to reflect a replacement we just sent to the extension.
@@ -145,8 +217,10 @@ impl TextBridge for BrowserBridge {
             start, end, escaped
         );
         if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
-            // Update cached text so next read_context() sees the post-replacement text
+            // Extract the old word for freeze verification
+            let old_word: String = text.chars().skip(start).take(end - start).collect();
             self.update_cached_text(start, end, new_text);
+            self.activate_replace_freeze(&old_word);
             true
         } else {
             false
@@ -169,6 +243,7 @@ impl TextBridge for BrowserBridge {
             );
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
+                self.activate_replace_freeze(find);
                 return true;
             }
         }
@@ -195,6 +270,7 @@ impl TextBridge for BrowserBridge {
             );
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
+                self.activate_replace_freeze(find);
                 return true;
             }
         }
@@ -207,19 +283,24 @@ impl TextBridge for BrowserBridge {
         log_browser(&format!("REPLACE: find='{}' replace='{}' char_offset={}", find, replace, char_offset));
         log_browser(&format!("  cached text ({} chars): '{}'", text.chars().count(), &text[..text.len().min(200)]));
         // Use the char_offset to find the exact position
-        let byte_offset = char_to_byte_offset(&text, char_offset);
+        // Find ALL occurrences and pick the one closest to char_offset
+        let text_lower = text.to_lowercase();
         let find_lower = find.to_lowercase();
-        // Search near the offset (within ±200 bytes)
-        let search_start = byte_offset.saturating_sub(200).min(text.len());
-        let search_end = (byte_offset + 200).min(text.len());
-        // Ensure we're at char boundaries
-        let search_start = (0..=search_start).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
-        let search_end = (search_end..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
-        let region = &text[search_start..search_end];
-        let region_lower = region.to_lowercase();
-        if let Some(rel_byte_pos) = region_lower.find(&find_lower) {
-            let abs_byte_pos = search_start + rel_byte_pos;
-            let start = text[..abs_byte_pos].chars().count();
+        let mut best_match: Option<(usize, usize)> = None; // (char_start, distance)
+        let mut search_from = 0usize;
+        while let Some(byte_pos) = text_lower[search_from..].find(&find_lower) {
+            let abs_byte = search_from + byte_pos;
+            let char_start = text[..abs_byte].chars().count();
+            let dist = (char_start as isize - char_offset as isize).unsigned_abs();
+            if best_match.is_none() || dist < best_match.unwrap().1 {
+                best_match = Some((char_start, dist));
+            }
+            search_from = abs_byte + 1;
+            while search_from < text_lower.len() && !text_lower.is_char_boundary(search_from) {
+                search_from += 1;
+            }
+        }
+        if let Some((start, _dist)) = best_match {
             let end = start + find.chars().count();
             log_browser(&format!("  FOUND at char {}..{}, sending replace JSON", start, end));
             log_browser(&format!("  text BEFORE replace: '{}'", &text[..text.len().min(200)]));
@@ -232,6 +313,7 @@ impl TextBridge for BrowserBridge {
             log_browser(&format!("  reply JSON: {}", json));
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
+                self.activate_replace_freeze(find);
                 let new_text = self.last_text.borrow().clone();
                 log_browser(&format!("  text AFTER replace: '{}'", &new_text[..new_text.len().min(200)]));
                 return true;
@@ -304,6 +386,18 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
                     Some('r') => result.push('\r'),
                     Some('"') => result.push('"'),
                     Some('\\') => result.push('\\'),
+                    Some('u') => {
+                        // Parse \uXXXX unicode escape
+                        let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                            if let Some(ch) = char::from_u32(code) {
+                                if !ch.is_control() {
+                                    result.push(ch);
+                                }
+                                // Skip control characters silently
+                            }
+                        }
+                    }
                     Some(c) => { result.push('\\'); result.push(c); }
                     None => break,
                 }
@@ -324,4 +418,20 @@ fn extract_json_number(json: &str, key: &str) -> Option<usize> {
     let after_ws = after_colon.trim_start();
     let num_str: String = after_ws.chars().take_while(|c| c.is_ascii_digit()).collect();
     num_str.parse().ok()
+}
+
+/// Check if a whole word exists in text (not as substring of a longer word)
+fn has_whole_word(text: &str, word: &str) -> bool {
+    let mut pos = 0;
+    while let Some(idx) = text[pos..].find(word) {
+        let abs = pos + idx;
+        let before_ok = abs == 0 || !text[..abs].ends_with(|c: char| c.is_alphanumeric());
+        let after_pos = abs + word.len();
+        let after_ok = after_pos >= text.len() || !text[after_pos..].starts_with(|c: char| c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        pos = abs + 1;
+    }
+    false
 }
