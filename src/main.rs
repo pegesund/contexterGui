@@ -654,6 +654,8 @@ struct ContextApp {
     last_doc_text: String,
     /// Approximate doc length from masked_sentence — used only for change detection
     last_doc_approx_len: usize,
+    /// Word just replaced — reject doc text updates that still contain this word (stale)
+    last_replaced_word: Option<String>,
     /// Hash of last document text — skip entire update if doc unchanged
     last_doc_hash: u64,
     /// Number of sentences in last scan — detect paste vs fix
@@ -1126,6 +1128,7 @@ impl ContextApp {
             last_spell_checked_word: String::new(),
             last_doc_text: String::new(),
             last_doc_approx_len: 0,
+            last_replaced_word: None,
             last_doc_hash: 0,
             last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
@@ -2052,6 +2055,17 @@ impl ContextApp {
         (0..chars.len() - 2)
             .map(|i| chars[i..i+3].iter().collect())
             .collect()
+    }
+
+    /// Update last_doc_text, rejecting stale reads that still contain a just-replaced word.
+    fn try_update_doc_text(&mut self, doc: String) {
+        if let Some(ref old_word) = self.last_replaced_word {
+            if doc.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| w == old_word.as_str()) {
+                return; // stale — still has the old word
+            }
+            self.last_replaced_word = None;
+        }
+        self.last_doc_text = doc;
     }
 
     /// Remove errors whose word has been corrected in the document.
@@ -3100,6 +3114,7 @@ impl eframe::App for ContextApp {
                     new_text.push_str(&self.last_doc_text[end..]);
                     log!("ACTION replace: '{}' → '{}' | updated cached text", find, replace);
                     self.last_doc_text = new_text;
+                    self.last_replaced_word = Some(find.to_lowercase());
                 }
                 // Remove the fixed error from the error list
                 let find_lower = find.to_lowercase();
@@ -3318,7 +3333,7 @@ impl eframe::App for ContextApp {
                 }
                 // Update full doc text now — Word is confirmed foreground
                 if let Some(doc) = self.manager.read_full_document() {
-                    self.last_doc_text = doc;
+                    self.try_update_doc_text(doc);
                 }
                 #[cfg(target_os = "windows")]
                 let fg = unsafe {
@@ -3368,7 +3383,7 @@ impl eframe::App for ContextApp {
                         if self.manager.last_user_was_browser {
                             if let Some(doc) = self.manager.read_full_document() {
                                 if doc.len() > self.last_doc_text.len() / 2 {
-                                    self.last_doc_text = doc;
+                                    self.try_update_doc_text(doc);
                                 }
                             }
                         }
