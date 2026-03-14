@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod logging;
+
 mod bert_worker;
 mod bridge;
 mod grammar_actor;
@@ -12,25 +15,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-pub(crate) static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
-    let path = std::env::temp_dir().join("acatts-rust.log");
-    eprintln!("Logging to: {}", path.display());
-    let f = std::fs::OpenOptions::new()
-        .create(true).write(true).truncate(true)
-        .open(&path).expect("failed to open log file");
-    Mutex::new(f)
-});
-
-macro_rules! log {
-    ($($arg:tt)*) => {{
-        let msg = format!($($arg)*);
-        if let Ok(mut f) = LOG_FILE.lock() {
-            let _ = writeln!(f, "{}", msg);
-            let _ = f.flush();
-        }
-    }};
-}
 
 /// Truncate a string to at most `max` bytes, backing up to the nearest char boundary.
 fn trunc(s: &str, max: usize) -> &str {
@@ -498,8 +482,14 @@ impl BridgeManager {
         self.effective_bridge().and_then(|b| b.read_full_document())
     }
 
-    fn select_range(&self, char_start: usize, char_end: usize) -> bool {
-        self.effective_bridge().map(|b| b.select_range(char_start, char_end)).unwrap_or(false)
+    fn select_range(&self, char_start: usize, char_end: usize) -> Option<(i32, i32)> {
+        // Try all bridges — goto must work even when our window is foreground
+        for bridge in &self.bridges {
+            if let Some(pos) = bridge.select_range(char_start, char_end) {
+                return Some(pos);
+            }
+        }
+        None
     }
 
     fn set_target_hwnd(&self, hwnd: isize) {
@@ -591,6 +581,8 @@ struct ContextApp {
     poll_interval: Duration,
     follow_cursor: bool,
     last_caret_pos: Option<(i32, i32)>,
+    /// After goto, freeze window position for a few seconds so it doesn't jump back
+    goto_freeze_until: Option<Instant>,
     // Grammar checker (kept for main-thread dictionary lookups; SWI grammar ops go through actor)
     checker: Option<AnyChecker>,
     /// Direct analyzer reference for dictionary lookups (cloned from checker before actor takes it)
@@ -1086,6 +1078,7 @@ impl ContextApp {
             last_poll: Instant::now(),
             poll_interval: Duration::from_millis(300),
             follow_cursor: true,
+            goto_freeze_until: None,
             last_caret_pos: None,
             checker,
             analyzer: None,
@@ -3808,7 +3801,14 @@ impl eframe::App for ContextApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
 
-        if self.follow_cursor {
+        // Check if goto freeze has expired
+        if let Some(until) = self.goto_freeze_until {
+            if Instant::now() >= until {
+                self.goto_freeze_until = None;
+            }
+        }
+
+        if self.follow_cursor && self.goto_freeze_until.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size();
@@ -4064,7 +4064,7 @@ impl eframe::App for ContextApp {
 
                 // --- Right side: drag area, ⚙, ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = 42.0; // ⚙ + ✕
+                let right_w = 60.0; // ▁ + ⚙ + ✕
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
                     egui::pos2(remaining.max.x - right_w, remaining.max.y),
@@ -4072,6 +4072,13 @@ impl eframe::App for ContextApp {
                 let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // ▁ Minimize
+                if ui.add(egui::Label::new(
+                    egui::RichText::new("\u{2581}").size(14.0).color(inactive)
+                ).sense(egui::Sense::click())).on_hover_text("Minimer").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
                 // ⚙ Settings
@@ -4517,7 +4524,34 @@ impl eframe::App for ContextApp {
                                 let end = start + error.sentence_context.chars().count();
                                 log!("GOTO: selecting range {}..{} for '{}'", start, end,
                                     trunc(&error.sentence_context, 50));
-                                self.manager.select_range(start, end);
+                                match self.manager.select_range(start, end) {
+                                    Some((x, y)) => {
+                                        log!("GOTO: select_range returned ({}, {})", x, y);
+                                        if x != 0 || y != 0 {
+                                            self.last_caret_pos = Some((x, y));
+                                            self.follow_cursor = true;
+                                            // Freeze cursor-follow for 5s so window doesn't jump back
+                                            self.goto_freeze_until = Some(Instant::now() + Duration::from_secs(5));
+                                            // Force-move window to the selection position
+                                            let (screen_w, screen_h) = get_screen_size();
+                                            let win_h = 300.0_f32;
+                                            let win_w = 350.0_f32;
+                                            let pos_y = if (y as f32 + win_h) > screen_h {
+                                                y as f32 - win_h - 30.0
+                                            } else {
+                                                y as f32
+                                            };
+                                            let pos_x = (x as f32).min(screen_w - win_w).max(0.0);
+                                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                                                egui::pos2(pos_x, pos_y),
+                                            ));
+                                            log!("GOTO: moved window to ({}, {})", pos_x, pos_y);
+                                        }
+                                    }
+                                    None => {
+                                        log!("GOTO: select_range returned None");
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -5293,13 +5327,67 @@ fn main() -> eframe::Result {
         }
     }
 
+    fn make_pen_icon(size: u32) -> egui::IconData {
+        let mut rgba = vec![0u8; (size * size * 4) as usize];
+        let s = size as f32;
+
+        for y in 0..size {
+            for x in 0..size {
+                let fx = x as f32 / s;
+                let fy = y as f32 / s;
+                let idx = ((y * size + x) * 4) as usize;
+
+                // Pen body: rotated rectangle from top-right to bottom-left
+                // Line from (0.75, 0.1) to (0.2, 0.85) with thickness
+                let px = fx - 0.475;
+                let py = fy - 0.475;
+                // Rotate 45 degrees
+                let cos = 0.7071;
+                let sin = 0.7071;
+                let rx = px * cos + py * sin;
+                let ry = -px * sin + py * cos;
+
+                // Pen body (elongated rectangle — wide and long)
+                let in_body = rx.abs() < 0.14 && ry > -0.48 && ry < 0.28;
+                // Pen tip (triangle narrowing to point)
+                let tip_width = 0.14 * (1.0 - (ry - 0.28) / 0.20).max(0.0);
+                let in_tip = ry >= 0.28 && ry < 0.48 && rx.abs() < tip_width;
+                // Pen top (slightly wider grip area)
+                let in_grip = rx.abs() < 0.17 && ry > -0.48 && ry < -0.35;
+
+                if in_tip {
+                    // Gold/brass nib
+                    rgba[idx] = 200;
+                    rgba[idx + 1] = 160;
+                    rgba[idx + 2] = 40;
+                    rgba[idx + 3] = 255;
+                } else if in_grip {
+                    // Dark grip
+                    rgba[idx] = 60;
+                    rgba[idx + 1] = 60;
+                    rgba[idx + 2] = 80;
+                    rgba[idx + 3] = 255;
+                } else if in_body {
+                    // Blue pen body (NorskTale blue)
+                    rgba[idx] = 0;
+                    rgba[idx + 1] = 70;
+                    rgba[idx + 2] = 160;
+                    rgba[idx + 3] = 255;
+                }
+            }
+        }
+        egui::IconData { rgba, width: size, height: size }
+    }
+
+    let pen_icon = make_pen_icon(64);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 250.0])
             .with_always_on_top()
             .with_decorations(false)
             .with_title("NorskTale")
-            .with_close_button(false),  // prevent Alt+F4 and system close
+            .with_close_button(false)  // prevent Alt+F4 and system close
+            .with_icon(std::sync::Arc::new(pen_icon)),
         ..Default::default()
     };
 

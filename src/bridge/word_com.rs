@@ -115,6 +115,23 @@ unsafe fn extract_i32(v: &VARIANT) -> Result<i32> {
     }
 }
 
+/// Extract a numeric value from a VARIANT, handling VT_I4, VT_R4, and VT_R8.
+unsafe fn extract_numeric(v: &VARIANT) -> Result<f64> {
+    unsafe {
+        let vt = var_vt(v);
+        let data = (v as *const VARIANT as *const u8).add(8);
+        if vt == VT_I4.0 {
+            Ok(*(data as *const i32) as f64)
+        } else if vt == VT_R4.0 {
+            Ok(*(data as *const f32) as f64)
+        } else if vt == VT_R8.0 {
+            Ok(*(data as *const f64))
+        } else {
+            Err(Error::from_hresult(E_FAIL))
+        }
+    }
+}
+
 // --- IDispatch late-binding wrapper ---
 
 struct Dispatch(IDispatch);
@@ -451,17 +468,50 @@ impl TextBridge for WordComBridge {
         content.get_string("Text").ok()
     }
 
-    fn select_range(&self, char_start: usize, char_end: usize) -> bool {
-        (|| -> Result<bool> {
+    fn select_range(&self, char_start: usize, char_end: usize) -> Option<(i32, i32)> {
+        // Step 1: Select the range in Word (clamp to doc length)
+        let select_ok = (|| -> Result<()> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
             let doc = app.get_dispatch("ActiveDocument")?;
-            let range_v = doc.call("Range", &[make_i4(char_start as i32), make_i4(char_end as i32)])?;
+            let content = doc.get_dispatch("Content")?;
+            let doc_end = unsafe { extract_i32(&content.get("End")?) }.unwrap_or(99999) as usize;
+            let start = char_start.min(doc_end.saturating_sub(1));
+            let end = char_end.min(doc_end);
+            let range_v = doc.call("Range", &[make_i4(start as i32), make_i4(end as i32)])?;
             let range = unsafe { extract_dispatch(&range_v)? };
             range.call("Select", &[])?;
-            // Bring Word to foreground so the selection is visible
             app.call("Activate", &[])?;
-            Ok(true)
-        })().unwrap_or(false)
+            Ok(())
+        })();
+        if let Err(e) = select_ok {
+            log!("select_range: Select failed: {:?}", e);
+            return None;
+        }
+
+        // Step 2: Get screen position of the selection via GetGUIThreadInfo
+        // After Select+Activate, Word's thread has the caret at the selection
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+            let thread_id = GetWindowThreadProcessId(self.word_hwnd, None);
+            if thread_id == 0 { return None; }
+            let mut gui = GUITHREADINFO::default();
+            gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            if GetGUIThreadInfo(thread_id, &mut gui).is_ok() && gui.rcCaret.bottom > 0 {
+                // rcCaret is in client coordinates of the focused window
+                let mut pt = POINT { x: gui.rcCaret.left, y: gui.rcCaret.bottom };
+                let focus_hwnd = if gui.hwndFocus != HWND::default() { gui.hwndFocus } else { self.word_hwnd };
+                let _ = ClientToScreen(focus_hwnd, &mut pt);
+                log!("select_range: caret screen pos ({}, {})", pt.x, pt.y);
+                return Some((pt.x, pt.y + 5));
+            }
+            // Fallback: center of Word window
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(self.word_hwnd, &mut rect);
+            let cx = (rect.left + rect.right) / 2;
+            let cy = (rect.top + rect.bottom) / 2;
+            log!("select_range: using Word window center ({}, {})", cx, cy);
+            Some((cx, cy))
+        }
     }
 
     fn replace_word(&self, new_text: &str) -> bool {

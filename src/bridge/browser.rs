@@ -9,7 +9,7 @@ use std::time::Instant;
 
 fn log_browser(msg: &str) {
     use std::io::Write;
-    if let Ok(mut f) = crate::LOG_FILE.lock() {
+    if let Ok(mut f) = crate::logging::LOG_FILE.lock() {
         let _ = writeln!(f, "{}", msg);
         let _ = f.flush();
     }

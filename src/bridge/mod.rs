@@ -51,7 +51,8 @@ pub trait TextBridge {
     fn read_full_document(&self) -> Option<String> { None }
 
     /// Select/highlight a character range in the document (for navigating to errors).
-    fn select_range(&self, _char_start: usize, _char_end: usize) -> bool { false }
+    /// Returns optional (x, y) screen position of the selection.
+    fn select_range(&self, _char_start: usize, _char_end: usize) -> Option<(i32, i32)> { None }
 
     /// Set the target window handle for cross-process reads (no-op by default).
     fn set_target_hwnd(&self, _hwnd: isize) {}
