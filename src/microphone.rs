@@ -190,6 +190,12 @@ pub fn is_recording() -> bool {
     MIC_RECORDING.load(Ordering::Relaxed)
 }
 
+/// Force-clear the recording flag so the UI can close immediately.
+/// The background thread will finish on its own and send to a dropped channel.
+pub fn force_stop() {
+    MIC_RECORDING.store(false, Ordering::Relaxed);
+}
+
 /// Start recording from default microphone.
 /// Uses `streaming_engine` (base) for fast partial transcription during recording,
 /// and `final_engine` (medium-q5) for high-quality final transcription after stop.

@@ -707,12 +707,14 @@ struct ContextApp {
     mic_handle: Option<microphone::MicHandle>,
     mic_transcribing: bool,
     mic_result_text: Option<String>,
-    /// 0 = Rask (tiny only, ~75MB), 1 = Beste (base streaming + medium-q5 final)
+    /// 0 = Rask (tiny only, ~75MB), 1 = Beste (base streaming + medium-q5 final, ~690MB)
     whisper_mode: u8,
     /// Receiver for lazy-loaded whisper engines
     whisper_load_rx: Option<std::sync::mpsc::Receiver<WhisperLoadItem>>,
     /// True while whisper models are being loaded
     whisper_loading: bool,
+    /// Status message during whisper model loading
+    whisper_load_status: String,
     /// Start recording as soon as whisper finishes loading
     whisper_pending_record: bool,
     // Startup loading
@@ -1167,6 +1169,7 @@ impl ContextApp {
             whisper_mode: 1, // default: Beste (base+medium-q5)
             whisper_load_rx: None,
             whisper_loading: false,
+            whisper_load_status: String::new(),
             whisper_pending_record: false,
             startup_rx: Some(startup_rx),
             startup_done: Vec::new(),
@@ -3255,6 +3258,9 @@ impl eframe::App for ContextApp {
                     WhisperLoadItem::Final(Ok(engine)) => {
                         log!("Whisper: final model loaded");
                         self.whisper_engine = Some(Arc::new(Mutex::new(engine)));
+                        if self.whisper_mode == 1 {
+                            self.whisper_load_status = "Stor modell lastet (medium-q5)".into();
+                        }
                     }
                     WhisperLoadItem::Final(Err(e)) => {
                         log!("Whisper final model failed: {}", e);
@@ -3263,6 +3269,7 @@ impl eframe::App for ContextApp {
                     WhisperLoadItem::Streaming(Ok(engine)) => {
                         log!("Whisper: streaming model loaded");
                         self.whisper_streaming = Some(Arc::new(Mutex::new(engine)));
+                        self.whisper_load_status = "Hurtigmodell lastet (base), venter på stor modell...".into();
                     }
                     WhisperLoadItem::Streaming(Err(e)) => {
                         log!("Whisper streaming model failed: {}", e);
@@ -4030,6 +4037,11 @@ impl eframe::App for ContextApp {
                                 // Lazy-load whisper models, then auto-start recording
                                 self.whisper_loading = true;
                                 self.whisper_pending_record = true;
+                                self.whisper_load_status = if self.whisper_mode == 0 {
+                                    "Laster talemodell (tiny, 75 MB)...".into()
+                                } else {
+                                    "Laster talemodeller (base + medium-q5, 690 MB)...".into()
+                                };
                                 let (tx, rx) = std::sync::mpsc::channel();
                                 self.whisper_load_rx = Some(rx);
                                 let mode = self.whisper_mode;
@@ -4984,7 +4996,12 @@ impl eframe::App for ContextApp {
                                 if self.whisper_loading && !is_recording {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        ui.label(egui::RichText::new("Laster talemodell...").size(14.0)
+                                        let msg = if self.whisper_load_status.is_empty() {
+                                            "Laster talemodell...".to_string()
+                                        } else {
+                                            self.whisper_load_status.clone()
+                                        };
+                                        ui.label(egui::RichText::new(msg).size(14.0)
                                             .color(egui::Color32::from_rgb(80, 80, 140)));
                                     });
                                     ui.add_space(8.0);
@@ -5000,7 +5017,8 @@ impl eframe::App for ContextApp {
                                 } else if is_correcting {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        ui.label(egui::RichText::new("Korrigerer...").size(14.0)
+                                        let msg = if self.whisper_mode == 1 { "Forbedrer med stor modell..." } else { "Transkriberer..." };
+                                        ui.label(egui::RichText::new(msg).size(14.0)
                                             .color(egui::Color32::from_rgb(100, 80, 140)));
                                     });
                                     ui.add_space(8.0);
@@ -5020,9 +5038,9 @@ impl eframe::App for ContextApp {
                                     });
                                 });
 
-                                if !is_streaming {
-                                    ui.add_space(8.0);
-                                    ui.horizontal(|ui| {
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if !is_streaming {
                                         if ui.button(egui::RichText::new("Kopier").size(14.0)).clicked() {
                                             do_copy = true;
                                         }
@@ -5031,11 +5049,11 @@ impl eframe::App for ContextApp {
                                             tts::speak_word(&text_clone);
                                         }
                                         ui.add_space(8.0);
-                                        if ui.button(egui::RichText::new("Lukk").size(14.0)).clicked() {
-                                            do_close = true;
-                                        }
-                                    });
-                                }
+                                    }
+                                    if ui.button(egui::RichText::new("Lukk").size(14.0)).clicked() {
+                                        do_close = true;
+                                    }
+                                });
                             });
 
                         if vp_ctx.input(|i| i.viewport().close_requested()) {
@@ -5077,7 +5095,17 @@ impl eframe::App for ContextApp {
                     }
                 }
                 if do_close {
+                    // Stop recording if active
+                    if let Some(handle) = self.mic_handle.take() {
+                        handle.stop();
+                    }
+                    // Force-clear recording flag so popup closes immediately
+                    // (background thread may still be transcribing — it will finish silently)
+                    microphone::force_stop();
+                    self.mic_transcribing = false;
                     self.mic_result_text = None;
+                    self.whisper_loading = false;
+                    self.whisper_pending_record = false;
                 }
             }
 
