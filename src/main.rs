@@ -2050,14 +2050,9 @@ impl ContextApp {
 
     /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
-        // Only prune with a FRESH document read — stale cache causes false pruning
-        let doc_text = match self.manager.read_full_document() {
-            Some(t) => {
-                self.last_doc_text = t.clone();
-                t.to_lowercase()
-            }
-            None => return, // Can't read doc (our window focused) — skip pruning
-        };
+        // Use cached text — never read COM here (race condition causes garbled text)
+        if self.last_doc_text.is_empty() { return; }
+        let doc_text = self.last_doc_text.to_lowercase();
         // Clear underlines for errors that will be removed
         for e in &mut self.writing_errors {
             let should_remove = if e.ignored {
@@ -2109,15 +2104,9 @@ impl ContextApp {
         // Called on paste/cut/move only — not on every keystroke.
         // Queue processing happens at word boundaries in the main poll loop.
 
-        // Read document text and check all complete sentences
-        let doc_text = match self.manager.read_full_document() {
-            Some(t) => { self.last_doc_text = t.clone(); t }
-            None => {
-                // Can't read (our window focused?) — use cached text
-                if self.last_doc_text.is_empty() { return; }
-                self.last_doc_text.clone()
-            }
-        };
+        // Use cached document text — never read COM here (race condition causes garbled text)
+        // last_doc_text is updated in poll_context() when Word is confirmed foreground
+        let doc_text = if self.last_doc_text.is_empty() { return; } else { self.last_doc_text.clone() };
 
         // Quick check: if document hasn't changed at all, skip everything
         let doc_hash = hash_str(&doc_text);
@@ -3315,6 +3304,10 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
+                // Update full doc text now — Word is confirmed foreground
+                if let Some(doc) = self.manager.read_full_document() {
+                    self.last_doc_text = doc;
+                }
                 #[cfg(target_os = "windows")]
                 let fg = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
@@ -3359,11 +3352,11 @@ impl eframe::App for ContextApp {
                         let old_len = self.last_doc_text.len();
                         let new_len = doc_approx.len();
                         let big_change = old_len == 0 || (new_len as isize - old_len as isize).unsigned_abs() > 20;
-                        if doc_approx.len() > self.last_doc_text.len() / 2 {
-                            self.last_doc_text = doc_approx;
-                        }
                         if big_change {
-                            // Paste/cut/move detected — trigger full document grammar scan
+                            // Paste/cut/move detected — re-read via paragraphs and rescan
+                            if let Some(doc) = self.manager.read_full_document() {
+                                self.last_doc_text = doc;
+                            }
                             self.update_grammar_errors();
                             self.sync_error_underlines();
                         }
@@ -3418,11 +3411,6 @@ impl eframe::App for ContextApp {
             self.sync_embeddings();
 
             let mid = is_mid_word(&self.context.word);
-            if !self.context.word.is_empty() || self.context.masked_sentence.is_some() {
-                log!("Context: word='{}' mid={} masked={}",
-                    self.context.word, mid,
-                    self.context.masked_sentence.as_deref().map(|m| &m[..m.len().min(80)]).unwrap_or("None"));
-            }
             if mid {
                 // Mid-word: mark prefix change for debouncing
                 // Only trigger run_completion for legacy path (no masked sentence)

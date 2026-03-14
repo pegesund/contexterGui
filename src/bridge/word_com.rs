@@ -339,6 +339,17 @@ impl WordComBridge {
         }
     }
 
+    fn is_word_foreground(&self) -> bool {
+        unsafe {
+            let fg = GetForegroundWindow();
+            let mut fg_pid = 0u32;
+            GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+            let mut word_pid = 0u32;
+            GetWindowThreadProcessId(self.word_hwnd, Some(&mut word_pid));
+            fg_pid == word_pid
+        }
+    }
+
     /// Disable Word's built-in spell/grammar checking so our underlines don't conflict.
     pub fn disable_word_proofing(&self) -> bool {
         let result = (|| -> Result<bool> {
@@ -460,13 +471,29 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_full_document(&self) -> Option<String> {
-        // No blinking caret = no cursor = don't read
+        // NEVER read when Word is not the foreground window — COM returns garbled text
+        if !self.is_word_foreground() { return None; }
         if self.caret_pos().is_none() { return None; }
         let app = self.get_app()?;
         let doc = app.get_dispatch("ActiveDocument").ok()?;
-        let content = doc.get_dispatch("Content").ok()?;
-        content.get_string("Text").ok()
+        // Read paragraph by paragraph — Content.Text is unreliable (drops spaces)
+        let paragraphs = doc.get_dispatch("Paragraphs").ok()?;
+        let count = unsafe { extract_i32(&paragraphs.get("Count").ok()?).ok()? };
+        let mut result = String::new();
+        for i in 1..=count {
+            let para = unsafe { extract_dispatch(&paragraphs.call("Item", &[make_i4(i)]).ok()?).ok()? };
+            let range = para.get_dispatch("Range").ok()?;
+            let text = range.get_string("Text").unwrap_or_default();
+            // Paragraph text ends with \r or \r\n — trim and join with space
+            let text = text.trim_end_matches(['\r', '\n']);
+            if !result.is_empty() && !text.is_empty() {
+                result.push(' ');
+            }
+            result.push_str(text);
+        }
+        Some(result)
     }
+
 
     fn select_range(&self, char_start: usize, char_end: usize) -> Option<(i32, i32)> {
         // Step 1: Select the range in Word (clamp to doc length)
