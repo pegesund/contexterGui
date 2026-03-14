@@ -650,8 +650,10 @@ struct ContextApp {
     ignored_words: std::collections::HashSet<String>,
     /// Last word that was spell-checked (to avoid re-checking)
     last_spell_checked_word: String,
-    /// Previous document text — used to detect changes and skip re-checking unchanged sentences
+    /// Authoritative document text from paragraph reads — used for grammar/spelling/pruning
     last_doc_text: String,
+    /// Approximate doc length from masked_sentence — used only for change detection
+    last_doc_approx_len: usize,
     /// Hash of last document text — skip entire update if doc unchanged
     last_doc_hash: u64,
     /// Number of sentences in last scan — detect paste vs fix
@@ -1123,6 +1125,7 @@ impl ContextApp {
             ignored_words: std::collections::HashSet::new(),
             last_spell_checked_word: String::new(),
             last_doc_text: String::new(),
+            last_doc_approx_len: 0,
             last_doc_hash: 0,
             last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
@@ -1839,6 +1842,9 @@ impl ContextApp {
                 None => return ortho_scored, // no checker available, return unfiltered
             };
 
+            // Count errors in original sentence (with misspelled word) as baseline
+            let orig_error_count = checker.check_sentence(&sentence_ctx.to_lowercase()).len();
+
             let mut checked = 0;
             for (candidate, score) in &ortho_scored {
                 if checked >= 8 { break; } // keep low to avoid GUI freeze
@@ -1860,10 +1866,10 @@ impl ContextApp {
                 let corrected = sentence_ctx.to_lowercase()
                     .replacen(&word_lower, candidate, 1);
                 let errors = checker.check_sentence(&corrected);
-                if errors.is_empty() {
+                if errors.len() <= orig_error_count {
                     passing.push((candidate.clone(), *score));
                 } else {
-                    log!("  rejected '{}': {} grammar errors", candidate, errors.len());
+                    log!("  rejected '{}': {} grammar errors (orig had {})", candidate, errors.len(), orig_error_count);
                 }
             }
         }
@@ -3084,9 +3090,15 @@ impl eframe::App for ContextApp {
                 r
             };
             if ok {
-                // Update cached text so rescan doesn't use stale version
-                if let Some(new_text) = self.manager.read_full_document() {
-                    log!("ACTION replace: '{}' → '{}' | text after: {:?}", find, replace, new_text);
+                // Update cached text by applying replacement locally
+                // (don't re-read COM — Word returns stale text immediately after replace)
+                if let Some(pos) = self.last_doc_text.to_lowercase().find(&find.to_lowercase()) {
+                    let end = pos + find.len();
+                    let mut new_text = String::with_capacity(self.last_doc_text.len());
+                    new_text.push_str(&self.last_doc_text[..pos]);
+                    new_text.push_str(&replace);
+                    new_text.push_str(&self.last_doc_text[end..]);
+                    log!("ACTION replace: '{}' → '{}' | updated cached text", find, replace);
                     self.last_doc_text = new_text;
                 }
                 // Remove the fixed error from the error list
@@ -3345,18 +3357,16 @@ impl eframe::App for ContextApp {
                         self.grammar_queue.clear();
                         self.grammar_scanning = false;
                     }
-                    // Update doc text cache from masked sentence (strip <mask> to get real text)
                     // Detect paste/cut/move: large jump in text length triggers full doc scan
+                    // Uses approximate length from masked_sentence (never overwrites authoritative last_doc_text)
                     if let Some(ref masked) = new_ctx.masked_sentence {
-                        let doc_approx = masked.replace("<mask>", &new_ctx.word);
-                        let old_len = self.last_doc_text.len();
-                        let new_len = doc_approx.len();
-                        let big_change = old_len == 0 || (new_len as isize - old_len as isize).unsigned_abs() > 20;
+                        let approx_len = masked.len() - "<mask>".len() + new_ctx.word.len();
+                        let big_change = self.last_doc_approx_len == 0
+                            || (approx_len as isize - self.last_doc_approx_len as isize).unsigned_abs() > 20;
+                        self.last_doc_approx_len = approx_len;
                         if big_change {
-                            // Paste/cut/move detected — re-read via paragraphs and rescan
-                            if let Some(doc) = self.manager.read_full_document() {
-                                self.last_doc_text = doc;
-                            }
+                            // Paste/cut/move detected — paragraph read already happened above,
+                            // just trigger grammar rescan
                             self.update_grammar_errors();
                             self.sync_error_underlines();
                         }
@@ -3604,6 +3614,8 @@ impl eframe::App for ContextApp {
 
         // Poll ALL BERT worker responses (completions + sentence scoring + MLM)
         self.poll_bert_responses(&ctx);
+        // Validate any consonant checks that arrived from BERT
+        self.validate_consonant_checks();
 
         // Idle spelling + grammar queue processing
         if !self.spelling_queue.is_empty() {

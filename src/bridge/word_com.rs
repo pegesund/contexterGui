@@ -471,27 +471,12 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_full_document(&self) -> Option<String> {
-        // NEVER read when Word is not the foreground window — COM returns garbled text
-        if !self.is_word_foreground() { return None; }
         if self.caret_pos().is_none() { return None; }
         let app = self.get_app()?;
         let doc = app.get_dispatch("ActiveDocument").ok()?;
-        // Read paragraph by paragraph — Content.Text is unreliable (drops spaces)
-        let paragraphs = doc.get_dispatch("Paragraphs").ok()?;
-        let count = unsafe { extract_i32(&paragraphs.get("Count").ok()?).ok()? };
-        let mut result = String::new();
-        for i in 1..=count {
-            let para = unsafe { extract_dispatch(&paragraphs.call("Item", &[make_i4(i)]).ok()?).ok()? };
-            let range = para.get_dispatch("Range").ok()?;
-            let text = range.get_string("Text").unwrap_or_default();
-            // Paragraph text ends with \r or \r\n — trim and join with space
-            let text = text.trim_end_matches(['\r', '\n']);
-            if !result.is_empty() && !text.is_empty() {
-                result.push(' ');
-            }
-            result.push_str(text);
-        }
-        Some(result)
+        let content = doc.get_dispatch("Content").ok()?;
+        let text = content.get_string("Text").ok()?;
+        Some(text.replace('\r', " "))
     }
 
 
@@ -704,7 +689,8 @@ impl TextBridge for WordComBridge {
             let content = doc.get_dispatch("Content")?;
             let doc_text = content.get_string("Text")?;
 
-            let doc_lower = doc_text.to_lowercase();
+            // Normalize \r to space for searching (sentence_context uses spaces)
+            let doc_lower = doc_text.replace('\r', " ").to_lowercase();
             let ctx_lower = sentence_context.to_lowercase();
 
             // Find the sentence near the known char offset
