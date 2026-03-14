@@ -68,6 +68,25 @@ pub trait TextBridge {
 
     /// Clear ALL error underlines in the document (cleanup on exit).
     fn clear_all_error_underlines(&self) -> bool { false }
+
+    // ── Per-bridge error scanning behavior ──
+    // Each bridge controls WHEN spelling/grammar checks run.
+    // Default: always check (safe for Word COM, Accessibility).
+    // Browser overrides to skip while typing at end of document.
+
+    /// Should this word be skipped for spelling checks?
+    /// Called for each word during document scanning.
+    /// `cursor_off`: cursor position in document (char offset)
+    /// `word_start`/`word_end`: word position in document (char offsets)
+    /// `doc_char_len`: total document length in chars
+    fn should_skip_word_spelling(&self, _cursor_off: usize, _word_start: usize, _word_end: usize, _doc_char_len: usize, _word_at_cursor: &str) -> bool { false }
+
+    /// Should this sentence be skipped for grammar checks?
+    /// `cursor_off`: cursor position in document (char offset)
+    /// `sent_start`/`sent_end`: sentence position in document (char offsets)
+    /// `ends_with_punct`: whether the sentence ends with .!?
+    /// `doc_char_len`: total document length in chars
+    fn should_skip_sentence_grammar(&self, _cursor_off: usize, _sent_start: usize, _sent_end: usize, _ends_with_punct: bool, _doc_char_len: usize, _word_at_cursor: &str) -> bool { false }
 }
 
 #[cfg(target_os = "windows")]

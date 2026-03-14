@@ -216,17 +216,65 @@
     }
   }
 
+  // --- Mirror div technique to get textarea cursor pixel position ---
+  // Convert viewport-relative coordinates to physical screen pixels.
+  // Word COM uses ClientToScreen (physical pixels), so browser must match.
+  function viewportToScreen(vpX, vpY) {
+    const dpr = window.devicePixelRatio || 1;
+    const chromeHeight = window.outerHeight - window.innerHeight;
+    return {
+      x: Math.round((window.screenX + vpX) * dpr),
+      y: Math.round((window.screenY + chromeHeight + vpY + 25) * dpr)
+    };
+  }
+
+  function getTextareaCursorXY(el) {
+    const mirror = document.createElement("div");
+    const style = window.getComputedStyle(el);
+    for (const prop of [
+      "fontFamily","fontSize","fontWeight","fontStyle","letterSpacing","wordSpacing",
+      "lineHeight","textTransform","paddingTop","paddingRight","paddingBottom","paddingLeft",
+      "borderTopWidth","borderRightWidth","borderBottomWidth","borderLeftWidth",
+      "boxSizing","width","whiteSpace","wordWrap","overflowWrap","tabSize"
+    ]) {
+      mirror.style[prop] = style[prop];
+    }
+    mirror.style.position = "absolute";
+    mirror.style.left = "-9999px";
+    mirror.style.top = "0";
+    mirror.style.whiteSpace = "pre-wrap";
+    mirror.style.wordWrap = "break-word";
+    mirror.style.visibility = "hidden";
+    mirror.style.overflow = "hidden";
+    const textBefore = el.value.substring(0, el.selectionStart);
+    mirror.textContent = textBefore;
+    const marker = document.createElement("span");
+    marker.textContent = "|";
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const rect = el.getBoundingClientRect();
+    const markerRect = marker.getBoundingClientRect();
+    const mirrorRect = mirror.getBoundingClientRect();
+    // Viewport-relative cursor position within textarea
+    const vpX = rect.left + (markerRect.left - mirrorRect.left) - el.scrollLeft;
+    const vpY = rect.top + (markerRect.top - mirrorRect.top) - el.scrollTop;
+    document.body.removeChild(mirror);
+    return viewportToScreen(vpX, vpY);
+  }
+
   // --- Non-GDocs: textarea/contenteditable monitoring ---
   function getTextAndCursor(el) {
     if (isGoogleDocs()) return null;
     if (!el) return null;
     if (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text")) {
-      return { text: el.value, cursorStart: el.selectionStart, cursorEnd: el.selectionEnd, caretX: 0, caretY: 0 };
+      const pos = getTextareaCursorXY(el);
+      return { text: el.value, cursorStart: el.selectionStart, cursorEnd: el.selectionEnd, caretX: pos.x, caretY: pos.y };
     }
     if (el.isContentEditable) {
       const sel = window.getSelection();
       const text = el.innerText;
       let cursorStart = 0, cursorEnd = 0;
+      let caretX = 0, caretY = 0;
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0);
         const preRange = document.createRange();
@@ -235,8 +283,14 @@
         cursorStart = preRange.toString().length;
         preRange.setEnd(range.endContainer, range.endOffset);
         cursorEnd = preRange.toString().length;
+        const caretRect = range.getBoundingClientRect();
+        if (caretRect && caretRect.height > 0) {
+          const screenPos = viewportToScreen(caretRect.left, caretRect.bottom);
+          caretX = screenPos.x;
+          caretY = screenPos.y;
+        }
       }
-      return { text, cursorStart, cursorEnd, caretX: 0, caretY: 0 };
+      return { text, cursorStart, cursorEnd, caretX, caretY };
     }
     return null;
   }

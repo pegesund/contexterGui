@@ -355,6 +355,23 @@ impl TextBridge for BrowserBridge {
         let (text, _, _, _) = self.read_data_file()?;
         if text.is_empty() { None } else { Some(text) }
     }
+
+    /// Browser/textarea: skip the word at cursor if user is typing at end of document.
+    /// When editing in the middle (cursor not at end), always check — user changed existing text.
+    fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, doc_char_len: usize, word_at_cursor: &str) -> bool {
+        // Only skip if cursor is at the very end of the document AND mid-word
+        let at_end = cursor_off >= doc_char_len.saturating_sub(1);
+        let mid_word = !word_at_cursor.is_empty() && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        at_end && mid_word && cursor_off >= word_start && cursor_off <= word_end
+    }
+
+    /// Browser/textarea: skip grammar for the sentence at cursor if typing at end of an unpunctuated sentence.
+    /// Punctuated sentences (user typed . ! ?) are always checked.
+    fn should_skip_sentence_grammar(&self, cursor_off: usize, sent_start: usize, sent_end: usize, ends_with_punct: bool, doc_char_len: usize, word_at_cursor: &str) -> bool {
+        let at_end = cursor_off >= doc_char_len.saturating_sub(1);
+        let mid_word = !word_at_cursor.is_empty() && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        at_end && mid_word && !ends_with_punct && cursor_off >= sent_start && cursor_off <= sent_end
+    }
 }
 
 /// Convert a character offset to a byte offset in a UTF-8 string

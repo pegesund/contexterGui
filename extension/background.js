@@ -2,7 +2,7 @@
 
 const NATIVE_HOST = "com.norsktale.bridge";
 let nativePort = null;
-let contentPorts = new Map(); // tabId -> port
+let contentPorts = new Map(); // tabId -> [port, port, ...] (multiple frames per tab)
 let lastActiveTabId = null;
 
 function connectNative() {
@@ -15,14 +15,14 @@ function connectNative() {
       if (msg.action === "replace") {
         console.log("NorskTale replace:", JSON.stringify(msg));
         if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
-          try {
-            contentPorts.get(lastActiveTabId).postMessage(msg);
-          } catch(e) {
-            console.log("Failed to send to tab", lastActiveTabId, e);
+          for (const cPort of contentPorts.get(lastActiveTabId)) {
+            try { cPort.postMessage(msg); } catch(e) {}
           }
         } else {
-          for (const [tabId, cPort] of contentPorts) {
-            try { cPort.postMessage(msg); } catch(e) {}
+          for (const [tabId, ports] of contentPorts) {
+            for (const cPort of ports) {
+              try { cPort.postMessage(msg); } catch(e) {}
+            }
           }
         }
       }
@@ -45,7 +45,10 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "norsktale-content") return;
 
   const tabId = port.sender?.tab?.id;
-  if (tabId) contentPorts.set(tabId, port);
+  if (tabId) {
+    if (!contentPorts.has(tabId)) contentPorts.set(tabId, []);
+    contentPorts.get(tabId).push(port);
+  }
 
   port.onMessage.addListener((msg) => {
     lastActiveTabId = tabId;
@@ -58,7 +61,11 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 
   port.onDisconnect.addListener(() => {
-    if (tabId) contentPorts.delete(tabId);
+    if (tabId && contentPorts.has(tabId)) {
+      const ports = contentPorts.get(tabId).filter(p => p !== port);
+      if (ports.length === 0) contentPorts.delete(tabId);
+      else contentPorts.set(tabId, ports);
+    }
   });
 });
 

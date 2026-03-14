@@ -509,6 +509,14 @@ impl BridgeManager {
     fn clear_all_error_underlines(&self) -> bool {
         self.effective_bridge().map(|b| b.clear_all_error_underlines()).unwrap_or(false)
     }
+
+    fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, doc_char_len: usize, word_at_cursor: &str) -> bool {
+        self.effective_bridge().map(|b| b.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, word_at_cursor)).unwrap_or(false)
+    }
+
+    fn should_skip_sentence_grammar(&self, cursor_off: usize, sent_start: usize, sent_end: usize, ends_with_punct: bool, doc_char_len: usize, word_at_cursor: &str) -> bool {
+        self.effective_bridge().map(|b| b.should_skip_sentence_grammar(cursor_off, sent_start, sent_end, ends_with_punct, doc_char_len, word_at_cursor)).unwrap_or(false)
+    }
 }
 
 // --- Detect if cursor is mid-word or at a word boundary ---
@@ -2320,13 +2328,16 @@ impl ContextApp {
                     // All offsets claimed — fall through to word search
                 }
                 // Try 2: find any new sentence containing this error word
+                // But if the sentence changed, the error may no longer be valid — mark stale
                 let word_lower = e.word.to_lowercase();
                 let mut relocated = false;
                 for (s, off) in &new_sentences {
                     if s.to_lowercase().contains(&word_lower) {
-                        log!("Relocated error '{}' to sentence '{}' off={}", trunc(&e.word, 20), trunc(s, 40), off);
-                        e.sentence_context = s.clone();
-                        e.doc_offset = *off;
+                        log!("Relocated error '{}' to sentence '{}' off={} — clearing hash for rescan", trunc(&e.word, 20), trunc(s, 40), off);
+                        // Sentence changed — error may be stale. Remove it and force rescan.
+                        stale_sentences.push(e.sentence_context.clone());
+                        stale_sentences.push(s.clone());
+                        e.word.clear(); // mark for removal
                         relocated = true;
                         break;
                     }
@@ -2401,13 +2412,23 @@ impl ContextApp {
                 continue;
             }
 
+            let cursor_off = self.context.cursor_doc_offset.unwrap_or(0);
+            let doc_char_len = doc_text.chars().count();
+
             // Spelling: queue words for sentences not yet known-clean
+            // Bridge decides whether to skip the word at cursor
             if !has_errors {
+                let mut char_pos = *doc_offset;
                 for word in trimmed.split_whitespace() {
                     let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
-                    if !clean.is_empty() {
-                        self.spelling_queue.push((clean.to_string(), trimmed.clone(), *doc_offset));
+                    let word_start = char_pos;
+                    let word_end = char_pos + word.chars().count();
+                    char_pos = word_end + 1; // +1 for the space
+                    if clean.is_empty() { continue; }
+                    if self.manager.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, &self.context.word) {
+                        continue;
                     }
+                    self.spelling_queue.push((clean.to_string(), trimmed.clone(), *doc_offset));
                 }
             }
             if has_errors {
@@ -2415,21 +2436,13 @@ impl ContextApp {
                 continue;
             }
 
-            // Grammar: skip the sentence the user is currently editing
-            // BUT only skip if cursor is in the MIDDLE of the sentence, not at the end
-            // (at the end = user just finished typing, sentence is complete)
+            // Grammar: bridge decides whether to skip this sentence
             if !is_major_change && old_sentence_count > 0 {
-                if let Some(cursor_off) = self.context.cursor_doc_offset {
-                    let sent_end = *doc_offset + trimmed.chars().count();
-                    if cursor_off >= *doc_offset && cursor_off < sent_end {
-                        // Cursor is inside the sentence (not at the very end)
-                        // Only skip if the sentence doesn't end with sentence-final punctuation
-                        let ends_with_punct = trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?');
-                        if !ends_with_punct {
-                            log!("  SKIP (cursor in sentence): '{}' cursor={} range={}..{}", trunc(trimmed, 60), cursor_off, doc_offset, sent_end);
-                            continue;
-                        }
-                    }
+                let sent_end = *doc_offset + trimmed.chars().count();
+                let ends_with_punct = trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?');
+                if self.manager.should_skip_sentence_grammar(cursor_off, *doc_offset, sent_end, ends_with_punct, doc_char_len, &self.context.word) {
+                    log!("  SKIP (bridge): '{}' cursor={} range={}..{}", trunc(trimmed, 60), cursor_off, doc_offset, sent_end);
+                    continue;
                 }
             }
 
