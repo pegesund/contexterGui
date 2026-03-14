@@ -92,8 +92,10 @@
     if (!el) return;
     const text = el.getAttribute("data-text");
     const cursor = parseInt(el.getAttribute("data-cursor") || "0", 10);
+    const caretX = parseInt(el.getAttribute("data-caret-x") || "0", 10);
+    const caretY = parseInt(el.getAttribute("data-caret-y") || "0", 10);
     if (!text) return;
-    const version = text + "|" + cursor;
+    const version = text + "|" + cursor + "|" + caretX + "|" + caretY;
     if (version === lastDataVersion) return;
     lastDataVersion = version;
     const data = { text: text, cursorStart: cursor, cursorEnd: cursor };
@@ -101,14 +103,14 @@
     const key = text + "|" + cursor;
     if (key === lastSent) return;
     lastSent = key;
-    norsktaleLog("GDOCS canvas text: " + text.length + " chars");
+    norsktaleLog("GDOCS canvas text: " + text.length + " chars, caret=(" + caretX + "," + caretY + ")");
     if (!port) connectPort();
     if (port) {
       try {
         port.postMessage({
           type: "textUpdate", text: text,
           cursorStart: cursor, cursorEnd: cursor,
-          caretX: 0, caretY: 0, url: window.location.href
+          caretX: caretX, caretY: caretY, url: window.location.href
         });
       } catch (e) { port = null; }
     }

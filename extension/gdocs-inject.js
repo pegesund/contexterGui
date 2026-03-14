@@ -80,8 +80,24 @@
       el.style.display = "none";
       document.documentElement.appendChild(el);
     }
+    // Get caret screen position for window-follows-cursor
+    let caretScreenX = 0, caretScreenY = 0;
+    try {
+      const caret = document.querySelector(".kix-cursor-caret");
+      if (caret) {
+        const r = caret.getBoundingClientRect();
+        if (r.height > 0) {
+          const chromeHeight = window.outerHeight - window.innerHeight;
+          caretScreenX = Math.round(window.screenX + r.left);
+          caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
+        }
+      }
+    } catch (e) {}
+
     el.setAttribute("data-text", fullText);
     el.setAttribute("data-cursor", String(cursorIndex));
+    el.setAttribute("data-caret-x", String(caretScreenX));
+    el.setAttribute("data-caret-y", String(caretScreenY));
     el.dispatchEvent(new Event("norsktale-update", { bubbles: false }));
   }
 
