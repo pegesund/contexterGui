@@ -3358,15 +3358,22 @@ impl eframe::App for ContextApp {
                         self.grammar_scanning = false;
                     }
                     // Detect paste/cut/move: large jump in text length triggers full doc scan
-                    // Uses approximate length from masked_sentence (never overwrites authoritative last_doc_text)
                     if let Some(ref masked) = new_ctx.masked_sentence {
                         let approx_len = masked.len() - "<mask>".len() + new_ctx.word.len();
                         let big_change = self.last_doc_approx_len == 0
                             || (approx_len as isize - self.last_doc_approx_len as isize).unsigned_abs() > 20;
                         self.last_doc_approx_len = approx_len;
+                        // For browser: read clean text from extension file
+                        // (masked_sentence glues <mask> to prefix — not valid doc text)
+                        if self.manager.last_user_was_browser {
+                            if let Some(doc) = self.manager.read_full_document() {
+                                if doc.len() > self.last_doc_text.len() / 2 {
+                                    self.last_doc_text = doc;
+                                }
+                            }
+                        }
                         if big_change {
-                            // Paste/cut/move detected — paragraph read already happened above,
-                            // just trigger grammar rescan
+                            // Paste/cut/move detected — trigger grammar rescan
                             self.update_grammar_errors();
                             self.sync_error_underlines();
                         }
