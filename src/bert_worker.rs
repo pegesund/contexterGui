@@ -19,6 +19,7 @@ pub enum BertRequest {
         prefix_lower: String,
         matches: Vec<(u32, String)>,
         mtag_candidates: Vec<String>,
+        mtag_valid: HashSet<String>,
         nearby_words: HashSet<String>,
         wordfreq: Option<Arc<HashMap<String, u64>>>,
         capitalize: bool,
@@ -89,7 +90,7 @@ impl BertWorkerHandle {
 /// Spawn the BERT worker thread. Takes ownership of the Model.
 pub fn spawn_bert_worker(
     model: Model,
-    build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
+    build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
     build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
 ) -> BertWorkerHandle {
@@ -114,7 +115,7 @@ fn worker_loop(
     mut model: Model,
     rx: mpsc::Receiver<BertRequest>,
     tx: mpsc::Sender<BertResponse>,
-    build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
+    build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
     build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
 ) {
@@ -122,7 +123,7 @@ fn worker_loop(
         match req {
             BertRequest::Completion {
                 id, masked_text, prefix_lower, matches, mtag_candidates,
-                nearby_words, wordfreq, capitalize, cancel, cache_key,
+                mtag_valid, nearby_words, wordfreq, capitalize, cancel, cache_key,
             } => {
                 if cancel.load(Ordering::Acquire) { continue; }
 
@@ -135,7 +136,7 @@ fn worker_loop(
                 let left = if matches.is_empty() && !prefix_lower.is_empty() {
                     build_mtag(&mut model, &masked_text, &mtag_candidates, &logits, capitalize, &cancel)
                 } else if !prefix_lower.is_empty() {
-                    build_bpe(&mut model, &masked_text, &prefix_lower, &matches, &logits, wordfreq.as_deref(), &nearby_words, capitalize, &cancel)
+                    build_bpe(&mut model, &masked_text, &prefix_lower, &matches, &logits, wordfreq.as_deref(), &nearby_words, &mtag_valid, capitalize, &cancel)
                 } else {
                     vec![]
                 };

@@ -733,6 +733,7 @@ fn build_bpe_completions(
     logits: &[f32],
     wordfreq: Option<&HashMap<String, u64>>,
     nearby_words: &std::collections::HashSet<String>,
+    mtag_valid: &std::collections::HashSet<String>,
     capitalize: bool,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Vec<Completion> {
@@ -741,6 +742,7 @@ fn build_bpe_completions(
     let is_valid = |w: &str| -> bool {
         let key = w.to_lowercase();
         if nearby_words.contains(&key) { return false; }
+        if mtag_valid.contains(&key) { return true; }
         wordfreq.map_or(true, |wf| wf.contains_key(&key))
     };
     let cap = |s: &str| -> String {
@@ -3634,12 +3636,18 @@ impl eframe::App for ContextApp {
 
                         let wf = self.wordfreq.clone();
                         let key_clone = cache_key.clone();
+                        // Pre-fetch mtag valid words for this prefix (fast lookup on main thread)
+                        let mtag_valid: std::collections::HashSet<String> = self.checker.as_ref()
+                            .map(|c| c.prefix_lookup(&prefix_lower, 100)
+                                .into_iter().map(|w| w.to_lowercase()).collect())
+                            .unwrap_or_default();
                         worker.send(|id| bert_worker::BertRequest::Completion {
                             id,
                             masked_text: masked_trimmed,
                             prefix_lower: prefix_lower.clone(),
                             matches,
                             mtag_candidates,
+                            mtag_valid,
                             nearby_words,
                             wordfreq: wf,
                             capitalize,
