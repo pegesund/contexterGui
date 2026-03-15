@@ -44,8 +44,9 @@
       return;
     }
 
-    // Strip control characters (annotate API prepends \u0003 ETX) and trailing whitespace
-    fullText = fullText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trimEnd();
+    // Strip control characters (annotate API prepends \u0003 ETX)
+    // Do NOT trimEnd — trailing space after a word is needed to detect word completion
+    fullText = fullText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
 
     if (!fullText) return;
 
