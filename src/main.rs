@@ -1210,7 +1210,7 @@ impl ContextApp {
             onnx_path.to_str().unwrap(),
             tokenizer_path.to_str().unwrap(),
         )?;
-        eprintln!("NorBERT4 loaded. Vocab: {}", model.vocab_size());
+        eprintln!("NorBERT4 loaded. Vocab: {}, backend: {}", model.vocab_size(), model.backend_name());
 
         eprintln!("Building prefix index...");
         let pi = prefix_index::build_prefix_index(&model.tokenizer);
