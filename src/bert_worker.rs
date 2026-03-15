@@ -1,5 +1,10 @@
 //! BERT worker thread — owns the Model exclusively, processes requests via channels.
 //! Eliminates all lock contention between background completion, spelling, and grammar scoring.
+//!
+//! Uses existing nostos-cognio functions:
+//! - score_spelling() for spelling re-ranking (batched_forward)
+//! - single_forward() for completion logits
+//! NEVER rewrite these functions here.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,12 +12,13 @@ use std::sync::{mpsc, Arc};
 
 use nostos_cognio::complete::Completion;
 use nostos_cognio::model::Model;
+use nostos_cognio::spelling;
 
 pub type RequestId = u64;
 
 /// Requests sent to the BERT worker thread
 pub enum BertRequest {
-    /// Word completion (replaces the spawned background thread)
+    /// Word completion
     Completion {
         id: RequestId,
         masked_text: String,
@@ -27,16 +33,16 @@ pub enum BertRequest {
         cache_key: String,
     },
 
-    /// Score a batch of sentences using pseudo-log-likelihood.
-    /// Returns one score per sentence. Used by spelling re-ranking,
-    /// grammar correction scoring, and consonant confusion.
-    SentenceScoreBatch {
+    /// Score spelling candidates using score_spelling() (batched_forward).
+    /// Replaces the old SentenceScoreBatch which used a slow single_forward loop.
+    SpellingScore {
         id: RequestId,
-        sentences: Vec<String>,
+        context_before: String,
+        context_after: String,
+        candidates: Vec<String>,
     },
 
     /// MLM forward pass: get top token predictions at <mask> position.
-    /// Used by spelling MLM fallback.
     MlmForward {
         id: RequestId,
         masked_text: String,
@@ -53,9 +59,10 @@ pub enum BertResponse {
         right: Vec<Completion>,
     },
 
-    SentenceScoreBatch {
+    /// Spelling scores — scored_candidates sorted best-first
+    SpellingScore {
         id: RequestId,
-        scores: Vec<f32>,
+        scored_candidates: Vec<(String, f32)>,
     },
 
     MlmForward {
@@ -88,8 +95,10 @@ impl BertWorkerHandle {
 }
 
 /// Spawn the BERT worker thread. Takes ownership of the Model.
+/// `repaint_ctx` is used to wake up the GUI when results are ready.
 pub fn spawn_bert_worker(
     model: Model,
+    repaint_ctx: egui::Context,
     build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
     build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
@@ -100,7 +109,7 @@ pub fn spawn_bert_worker(
     std::thread::Builder::new()
         .name("bert-worker".to_string())
         .spawn(move || {
-            worker_loop(model, req_rx, resp_tx, build_bpe, build_mtag, build_right);
+            worker_loop(model, repaint_ctx, req_rx, resp_tx, build_bpe, build_mtag, build_right);
         })
         .expect("Failed to spawn BERT worker thread");
 
@@ -113,6 +122,7 @@ pub fn spawn_bert_worker(
 
 fn worker_loop(
     mut model: Model,
+    repaint_ctx: egui::Context,
     rx: mpsc::Receiver<BertRequest>,
     tx: mpsc::Sender<BertResponse>,
     build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
@@ -147,47 +157,26 @@ fn worker_loop(
                 let right = build_right(&model, &logits, wordfreq.as_deref(), &nearby_words, &left_words);
 
                 let _ = tx.send(BertResponse::Completion { id, cache_key, left, right });
+                repaint_ctx.request_repaint();
             }
 
-            BertRequest::SentenceScoreBatch { id, sentences } => {
-                let scores: Vec<f32> = sentences.iter()
-                    .map(|s| sentence_score_impl(&mut model, s))
-                    .collect();
-                let _ = tx.send(BertResponse::SentenceScoreBatch { id, scores });
+            BertRequest::SpellingScore { id, context_before, context_after, candidates } => {
+                // Use the existing score_spelling() from nostos-cognio — batched_forward, ~24ms
+                let scored = match spelling::score_spelling(&mut model, &context_before, &context_after, &candidates) {
+                    Ok(result) => result.scored_candidates,
+                    Err(_) => Vec::new(),
+                };
+                let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
+                repaint_ctx.request_repaint();
             }
 
             BertRequest::MlmForward { id, masked_text, top_k } => {
                 let predictions = mlm_forward_impl(&mut model, &masked_text, top_k);
                 let _ = tx.send(BertResponse::MlmForward { id, predictions });
+                repaint_ctx.request_repaint();
             }
         }
     }
-}
-
-/// Score a sentence using BERT pseudo-log-likelihood.
-/// For each word, mask it and check how well BERT predicts the actual word.
-fn sentence_score_impl(model: &mut Model, sentence: &str) -> f32 {
-    let words: Vec<&str> = sentence.split_whitespace().collect();
-    if words.is_empty() { return f32::NEG_INFINITY; }
-
-    let mut total_score: f32 = 0.0;
-    for i in 0..words.len() {
-        let masked: String = words.iter().enumerate()
-            .map(|(j, w)| if j == i { "<mask>" } else { *w })
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        if let Ok((logits, _)) = model.single_forward(&masked) {
-            let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
-            let token_with_g = format!("Ġ{}", word_clean.to_lowercase());
-            let token_id = model.tokenizer.token_to_id(&token_with_g)
-                .or_else(|| model.tokenizer.token_to_id(&word_clean.to_lowercase()));
-            if let Some(tid) = token_id {
-                total_score += logits[tid as usize];
-            }
-        }
-    }
-    total_score / words.len() as f32
 }
 
 /// MLM forward pass: get top-k token predictions at <mask> position.

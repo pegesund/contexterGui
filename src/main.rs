@@ -6,6 +6,7 @@ mod bridge;
 mod grammar_actor;
 mod microphone;
 mod ocr;
+mod platform;
 mod tts;
 
 use bridge::{CursorContext, TextBridge};
@@ -193,27 +194,23 @@ fn find_word_doc_range(error_word: &str, sentence_ctx: &str, doc_offset: usize) 
 // --- Data paths ---
 
 fn data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contexter-repo/training-data")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contexter-repo/training-data")
 }
 
 fn dict_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rustSpell/mtag-rs/data/fullform_bm.mfst")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rustSpell/mtag-rs/data/fullform_bm.mfst")
 }
 
 fn compound_data_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/compound_data.pl")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/compound_data.pl")
 }
 
 fn grammar_rules_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/grammar_rules.pl")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/grammar_rules.pl")
 }
 
 fn syntaxer_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer")
-}
-
-fn swipl_dll_path() -> &'static str {
-    "C:/Program Files/swipl/bin/libswipl.dll"
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer")
 }
 
 // --- Bridge manager: picks the best available bridge ---
@@ -231,22 +228,13 @@ struct BridgeManager {
     last_context: Option<CursorContext>,
     /// Set when bridge switches — main loop should clear stale errors
     bridge_switched: bool,
+    /// Platform abstraction for OS-specific services
+    platform: Box<dyn platform::PlatformServices>,
 }
 
 impl BridgeManager {
-    fn new() -> Self {
-        let mut bridges: Vec<Box<dyn TextBridge>> = Vec::new();
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(word) = bridge::word_com::WordComBridge::try_connect() {
-                log!("Word COM bridge connected");
-                let ok = word.disable_word_proofing();
-                log!("Word proofing disabled: {}", ok);
-                bridges.push(Box::new(word));
-            }
-            bridges.push(Box::new(bridge::accessibility_win::AccessibilityBridge::new()));
-        }
+    fn new(platform: Box<dyn platform::PlatformServices>) -> Self {
+        let mut bridges: Vec<Box<dyn TextBridge>> = bridge::create_bridges();
         // Browser bridge (via Chrome/Edge extension) — highest priority for browser textareas
         bridges.push(Box::new(bridge::browser::BrowserBridge::new()));
 
@@ -273,69 +261,61 @@ impl BridgeManager {
             last_user_was_browser: browser_file_exists,
             last_context: None,
             bridge_switched: false,
+            platform,
         }
     }
 
     fn read_context(&mut self) -> Option<CursorContext> {
-        #[cfg(target_os = "windows")]
         if self.last_check.elapsed() > Duration::from_secs(5) {
             self.last_check = Instant::now();
-            let has_word = self.bridges.iter().any(|b| b.name() == "Word COM");
+            let has_word = self.bridges.iter().any(|b| b.name().contains("Word"));
             if !has_word {
-                if let Some(word) = bridge::word_com::WordComBridge::try_connect() {
-                    log!("Word COM bridge connected (late)");
-                    let ok = word.disable_word_proofing();
-                    log!("Word proofing disabled (late): {}", ok);
-                    self.bridges.insert(0, Box::new(word));
+                for new_bridge in bridge::try_connect_word_bridge() {
+                    log!("{} bridge connected (late)", new_bridge.name());
+                    self.bridges.insert(0, new_bridge);
                 }
             }
         }
 
-        // Use GetForegroundWindow() to detect which app the user clicked on.
+        // Detect which app the user clicked on via platform abstraction.
         // When our own always-on-top window is foreground, keep reading from the
         // last known user app (user is just looking at our UI, caret is still
         // in the other app).
-        #[cfg(target_os = "windows")]
-        let (fg_hwnd_raw, fg_pid, fg_title, fg_exe) = {
-            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
-            use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
-            let fg = unsafe { GetForegroundWindow() };
-            let mut pid = 0u32;
-            unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)); }
-            let mut buf = [0u16; 128];
-            let len = unsafe { GetWindowTextW(fg, &mut buf) };
-            let title = String::from_utf16_lossy(&buf[..len as usize]);
-            // Get process executable name
-            let exe = if pid > 0 {
-                if let Ok(handle) = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-                    let mut exe_buf = [0u16; 260];
-                    let mut exe_len = exe_buf.len() as u32;
-                    if unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(exe_buf.as_mut_ptr()), &mut exe_len) }.is_ok() {
-                        let full = String::from_utf16_lossy(&exe_buf[..exe_len as usize]);
-                        full.rsplit('\\').next().unwrap_or("").to_lowercase()
-                    } else { String::new() }
-                } else { String::new() }
-            } else { String::new() };
-            (fg.0 as isize, pid, title, exe)
-        };
-        #[cfg(not(target_os = "windows"))]
-        let (fg_hwnd_raw, fg_pid, fg_title, fg_exe) = (0isize, 0u32, String::new(), String::new());
-
-        let our_pid = std::process::id();
-        let our_window_focused = fg_pid == our_pid;
-        let word_is_foreground = fg_exe == "winword.exe"
-            || fg_title.contains(".docx") || fg_title.contains(".doc ");
-
-        // Detect browser by process name — reliable regardless of window title
-        let is_browser = matches!(fg_exe.as_str(),
-            "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe");
+        let fg = self.platform.foreground_app();
+        let fg_hwnd_raw = fg.handle;
+        let fg_pid = fg.pid;
+        let fg_title = fg.title.clone();
+        let app_kind = self.platform.classify_app(&fg);
+        let our_window_focused = app_kind == platform::AppKind::OurApp;
+        let word_is_foreground = app_kind == platform::AppKind::Word;
+        let is_browser = app_kind == platform::AppKind::Browser;
 
         // Log every focus change (not just every 3 seconds)
         static LAST_FG_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let prev_fg = LAST_FG_PID.load(std::sync::atomic::Ordering::Relaxed);
         if fg_pid != prev_fg {
             LAST_FG_PID.store(fg_pid, std::sync::atomic::Ordering::Relaxed);
-            log!("FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}", trunc(&fg_title, 40), fg_pid, fg_exe, our_window_focused, word_is_foreground, is_browser, self.last_user_pid);
+            log!("FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}", trunc(&fg_title, 40), fg_pid, fg.exe_name, our_window_focused, word_is_foreground, is_browser, self.last_user_pid);
+        }
+
+        // Word Add-in bridge is data-driven (HTTP POST), not foreground-driven.
+        // Check it first — if it has fresh data, use it regardless of foreground.
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name() == "Word Add-in" {
+                if let Some(ctx) = bridge.read_context() {
+                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                        if self.active_idx != i {
+                            log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
+                            self.bridge_switched = true;
+                        }
+                        self.active_idx = i;
+                        self.last_user_pid = fg_pid;
+                        self.last_context = Some(ctx.clone());
+                        return Some(ctx);
+                    }
+                }
+                break;
+            }
         }
 
         // Our window is foreground — keep using whatever bridge was already active.
@@ -345,7 +325,7 @@ impl BridgeManager {
         }
 
         // Only activate for supported programs: Word, Edge, Chrome, Notepad
-        let is_notepad = fg_exe == "notepad.exe";
+        let is_notepad = app_kind == platform::AppKind::Notepad;
         let is_supported = word_is_foreground || is_browser || is_notepad;
         if !is_supported {
             return self.last_context.clone();
@@ -378,7 +358,7 @@ impl BridgeManager {
         if word_is_foreground {
             self.last_user_was_browser = false;
             for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name() == "Word COM" {
+                if bridge.name().contains("Word") {
                     if let Some(ctx) = bridge.read_context() {
                         if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                             if self.active_idx != i {
@@ -400,12 +380,9 @@ impl BridgeManager {
         // --- NOTEPAD: uses Accessibility bridge ---
         if is_notepad {
             self.last_user_was_browser = false;
-            #[cfg(target_os = "windows")]
-            {
-                for bridge in self.bridges.iter() {
-                    if bridge.name() == "Accessibility" {
-                        bridge.set_fg_hwnd(fg_hwnd_raw);
-                    }
+            for bridge in self.bridges.iter() {
+                if bridge.name() == "Accessibility" {
+                    bridge.set_fg_hwnd(fg_hwnd_raw);
                 }
             }
             for (i, bridge) in self.bridges.iter().enumerate() {
@@ -637,7 +614,9 @@ struct ContextApp {
     selected_completion: Option<usize>,
     selection_mode: bool,
     /// Target app's HWND to return focus to (Word, Notepad, etc.)
-    word_hwnd: Option<isize>,
+    app_handle: Option<isize>,
+    /// Platform abstraction for OS-specific services
+    platform: Box<dyn platform::PlatformServices>,
     /// Track Ctrl+Space held to prevent repeated activation
     ctrl_space_held: bool,
     /// Which column is selected: 0=left (completions), 1=right (open_completions)
@@ -1014,49 +993,23 @@ fn build_right_completions(
 
 impl ContextApp {
     fn new(grammar_completion: bool, use_swipl: bool, quality: u8, show_debug_tab: bool) -> Self {
-        #[cfg(target_os = "windows")]
-        unsafe {
-            use windows::Win32::System::Com::*;
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
-        }
+        let platform = platform::create_platform();
+        platform.init_runtime();
 
         let mut load_errors = Vec::new();
 
-        // Grammar checker must load on main thread (SWI-Prolog requires it)
-        let checker: Option<AnyChecker> = if use_swipl {
-            match Self::load_swipl_checker() {
-                Ok(c) => {
-                    eprintln!("SWI-Prolog grammar checker loaded");
-                    Some(AnyChecker::Swi(c))
-                }
-                Err(e) => {
-                    let msg = format!("SWI-Prolog: {}", e);
-                    eprintln!("{}", msg);
-                    load_errors.push(msg);
-                    match Self::load_checker() {
-                        Ok(c) => {
-                            eprintln!("Fallback: neorusticus loaded ({} clauses)", c.clause_count());
-                            Some(AnyChecker::Neo(c))
-                        }
-                        Err(e2) => {
-                            load_errors.push(format!("Grammar: {}", e2));
-                            None
-                        }
-                    }
-                }
+        // Load dictionary (analyzer) on main thread for fast lookups.
+        // SWI-Prolog grammar checker loads on the grammar actor thread (later).
+        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&dict_path()) {
+            Ok(a) => {
+                eprintln!("Loaded dictionary with {} entries", a.dict_size());
+                Some(std::sync::Arc::new(a))
             }
-        } else {
-            match Self::load_checker() {
-                Ok(c) => {
-                    eprintln!("GrammarChecker loaded ({} clauses)", c.clause_count());
-                    Some(AnyChecker::Neo(c))
-                }
-                Err(e) => {
-                    let msg = format!("Grammar: {}", e);
-                    eprintln!("{}", msg);
-                    load_errors.push(msg);
-                    None
-                }
+            Err(e) => {
+                let msg = format!("Dictionary: {}", e);
+                eprintln!("{}", msg);
+                load_errors.push(msg);
+                None
             }
         };
 
@@ -1097,15 +1050,15 @@ impl ContextApp {
         drop(startup_tx);
 
         ContextApp {
-            manager: BridgeManager::new(),
+            manager: BridgeManager::new(platform::create_platform()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
             poll_interval: Duration::from_millis(300),
             follow_cursor: true,
             goto_freeze_until: None,
             last_caret_pos: None,
-            checker,
-            analyzer: None,
+            checker: None,
+            analyzer,
             grammar_actor: None,
             grammar_errors: Vec::new(),
             last_checked_sentence: String::new(),
@@ -1134,7 +1087,8 @@ impl ContextApp {
             pending_completion: false,
             selected_completion: None,
             selection_mode: false,
-            word_hwnd: None,
+            app_handle: None,
+            platform,
             ctrl_space_held: false,
             selected_column: 0,
             load_errors,
@@ -1196,9 +1150,9 @@ impl ContextApp {
         GrammarChecker::new(dict_path().to_str().unwrap(), &compound_data)
     }
 
-    fn load_swipl_checker() -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
+    fn load_swipl_checker(swipl_path: &str) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
         SwiGrammarChecker::new(
-            swipl_dll_path(),
+            swipl_path,
             dict_path().to_str().unwrap(),
             grammar_rules_path().to_str().unwrap(),
             syntaxer_dir().to_str().unwrap(),
@@ -1246,13 +1200,8 @@ impl ContextApp {
         }
         self.last_checked_sentence = sentence.clone();
 
-        if let Some(checker) = &mut self.checker {
-            let t = Instant::now();
-            self.grammar_errors = checker.check_sentence(&sentence);
-            if !self.grammar_errors.is_empty() {
-                eprintln!("Grammar: {} errors in {:.0}ms", self.grammar_errors.len(), t.elapsed().as_secs_f64() * 1000.0);
-            }
-        }
+        // Grammar checking happens via the actor/queue path, not this synchronous path.
+        // (checker has been moved to the grammar actor)
     }
 
     /// Check spelling of a word. `sentence_ctx` is the sentence it appears in.
@@ -1307,12 +1256,12 @@ impl ContextApp {
         let original_found;
 
         {
-            let checker = match &self.checker {
-                Some(c) => c,
+            let analyzer = match &self.analyzer {
+                Some(a) => a,
                 None => return,
             };
 
-            found = checker.has_word(&clean);
+            found = analyzer.has_word(&clean);
             if !found {
                 log!("spell: '{}' NOT in dict (sentence: '{}')", clean, trunc(sentence_ctx, 50));
             }
@@ -1326,18 +1275,30 @@ impl ContextApp {
                 } else {
                     None
                 };
-                alt.filter(|a| checker.has_word(a))
+                alt.filter(|a| analyzer.has_word(a))
             } else {
                 None
             };
 
             // Consonant confusion: find valid alternatives with shared POS
             consonant_alts = if found && clean.len() >= 4 {
-                let orig_pos = checker.pos_set(&clean);
+                let orig_pos = {
+                    let mut pos = std::collections::HashSet::new();
+                    if let Some(readings) = analyzer.dict_lookup(&clean) {
+                        for r in &readings { pos.insert(r.pos.to_string()); }
+                    }
+                    pos
+                };
                 consonant_variants(&clean).into_iter()
                     .filter(|v| {
-                        if !checker.has_word(v) { return false; }
-                        let v_pos = checker.pos_set(v);
+                        if !analyzer.has_word(v) { return false; }
+                        let v_pos = {
+                            let mut pos = std::collections::HashSet::new();
+                            if let Some(readings) = analyzer.dict_lookup(v) {
+                                for r in &readings { pos.insert(r.pos.to_string()); }
+                            }
+                            pos
+                        };
                         let shared = orig_pos.intersection(&v_pos).count() > 0;
                         if !shared {
                             log!("  consonant skip '{}' → '{}' (no shared POS: {:?} vs {:?})", clean, v, orig_pos, v_pos);
@@ -1349,8 +1310,8 @@ impl ContextApp {
                 Vec::new()
             };
 
-            original_found = if !found { checker.has_word(word.trim()) } else { false };
-        } // checker borrow dropped
+            original_found = if !found { analyzer.has_word(word.trim()) } else { false };
+        } // analyzer borrow dropped
 
         // Phase 2: BERT scoring via worker (async) + writing errors
         if found {
@@ -1436,10 +1397,8 @@ impl ContextApp {
             return;
         }
         let pending = std::mem::take(&mut self.pending_consonant_checks);
-        let checker = match &mut self.checker {
-            Some(c) => c,
-            None => return,
-        };
+        // checker has been moved to grammar actor; consonant validation
+        // that requires check_sentence is skipped. Accept all BERT-preferred candidates.
         let budget_start = std::time::Instant::now();
         let mut deferred: Vec<WritingError> = Vec::new();
         for mut candidate in pending {
@@ -1460,22 +1419,15 @@ impl ContextApp {
                 continue;
             };
 
-            // Grammar check original sentence vs corrected sentence
-            let orig_errors = checker.check_sentence(&candidate.word);
-            let variant_errors = checker.check_sentence(&candidate.suggestion);
-            log!("consonant grammar validate: '{}' → '{}' | orig_errors={}, variant_errors={}",
-                orig_word, variant_word, orig_errors.len(), variant_errors.len());
+            // Grammar check skipped (checker moved to actor). Accept BERT-preferred candidates.
+            log!("consonant validate (no grammar): '{}' → '{}'", orig_word, variant_word);
 
             // Clean up rule_name for display
             candidate.rule_name = "consonant_confusion".to_string();
 
-            if variant_errors.len() <= orig_errors.len() {
-                // BERT already decided the variant is better — accept unless grammar gets worse
-                log!("consonant confirmed: '{}' → '{}' (BERT preferred, grammar ok)", orig_word, variant_word);
-                self.writing_errors.push(candidate);
-            } else {
-                log!("consonant rejected: '{}' → '{}' (grammar worse)", orig_word, variant_word);
-            }
+            // BERT already decided the variant is better — accept it
+            log!("consonant confirmed: '{}' → '{}' (BERT preferred)", orig_word, variant_word);
+            self.writing_errors.push(candidate);
         }
         // Re-queue deferred candidates for next frame
         if !deferred.is_empty() {
@@ -1494,13 +1446,20 @@ impl ContextApp {
             Some(w) => w,
             None => return,
         };
-        // Build sentences: [original, variant1_sentence, variant2_sentence, ...]
-        let mut sentences = vec![sentence_ctx.to_string()];
-        for v in &variants {
-            sentences.push(sentence_ctx.replacen(word, v, 1));
-        }
+        // Extract context_before/context_after around the word
+        let word_lower = word.to_lowercase();
+        let sentence_lower = sentence_ctx.to_lowercase();
+        let word_pos = sentence_lower.find(&word_lower);
+        let (context_before, context_after) = if let Some(pos) = word_pos {
+            (sentence_ctx[..pos].trim_end().to_string(), sentence_ctx[pos + word_lower.len()..].trim_start().to_string())
+        } else {
+            (sentence_ctx.to_string(), String::new())
+        };
+        // Include original word + variants as candidates
+        let mut candidates = vec![word.to_string()];
+        candidates.extend(variants.iter().cloned());
         log!("consonant BERT send: '{}' variants={:?}", word, variants);
-        let request_id = worker.send(|id| bert_worker::BertRequest::SentenceScoreBatch { id, sentences });
+        let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates });
         self.pending_consonant_bert.push(PendingConsonantBert {
             request_id,
             word: word.to_string(),
@@ -1526,39 +1485,23 @@ impl ContextApp {
                     log!("BERT completion received: {} left, {} right", left.len(), right.len());
                     // Apply grammar filter on main thread (checker isn't Send)
                     if self.grammar_completion {
-                        if let Some(checker) = &mut self.checker {
-                            let masked = self.context.masked_sentence.as_deref().unwrap_or("");
-                            let before_mask = masked.split("<mask>").next().unwrap_or("");
-                            let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
-                                .map(|i| i + 1).unwrap_or(0);
-                            let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
-                            let prefix = extract_prefix(&self.context.word);
+                        if let Some(analyzer) = &self.analyzer {
+                            // Dictionary-filter completions using analyzer
                             let left_filtered: Vec<Completion> = left.into_iter()
-                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
-                                .take(8) // Limit to avoid freezing from grammar_filter's check_sentence calls
+                                .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
+                                .take(5)
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
-                                .filter(|c| checker.has_word(&c.word.to_lowercase()))
-                                .take(8)
+                                .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
+                                .take(5)
                                 .collect();
-                            let mut check_fn = |sentence: &str| -> GrammarCheckResult {
-                                let errors = checker.check_sentence(sentence);
-                                GrammarCheckResult {
-                                    ok: errors.is_empty(),
-                                    suggestions: errors.iter()
-                                        .filter(|e| !e.suggestion.is_empty())
-                                        .map(|e| e.suggestion.clone())
-                                        .collect(),
-                                }
-                            };
-                            eprintln!("grammar_filter input (left): [{}]",
+                            // Grammar filter skipped (checker moved to actor)
+                            eprintln!("completions (dict-filtered): [{}]",
                                 left_filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                            self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
-                            eprintln!("grammar_filter output: [{}]",
-                                self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                            eprintln!("open_completions: [{}]",
-                                self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                            self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
+                            eprintln!("open_completions (dict-filtered): [{}]",
+                                right_filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                            self.completions = left_filtered;
+                            self.open_completions = right_filtered;
                         } else {
                             self.completions = left.into_iter().take(5).collect();
                             self.open_completions = right.into_iter().take(5).collect();
@@ -1570,16 +1513,16 @@ impl ContextApp {
                     self.last_completed_prefix = cache_key;
                 }
 
-                bert_worker::BertResponse::SentenceScoreBatch { id, scores } => {
+                bert_worker::BertResponse::SpellingScore { id, scored_candidates } => {
                     if let Some(idx) = self.pending_spelling_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_spelling_bert.remove(idx);
-                        self.handle_spelling_bert_response(pending, &scores);
+                        self.handle_spelling_bert_response(pending, &scored_candidates);
                     } else if let Some(idx) = self.pending_grammar_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_grammar_bert.remove(idx);
-                        self.handle_grammar_bert_response(pending, &scores);
+                        self.handle_grammar_bert_response(pending, &scored_candidates);
                     } else if let Some(idx) = self.pending_consonant_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_consonant_bert.remove(idx);
-                        self.handle_consonant_bert_response(pending, &scores);
+                        self.handle_consonant_bert_response(pending, &scored_candidates);
                     }
                 }
 
@@ -1588,26 +1531,34 @@ impl ContextApp {
                 }
             }
         }
-        // Request repaint if there are pending requests
+        // Request repaint so new results are rendered.
+        // Always schedule periodic repaints — egui may sleep when our window
+        // is not focused (e.g. user is typing in Word), but we still need to
+        // poll for BERT responses and update the UI.
         if !self.pending_spelling_bert.is_empty()
             || !self.pending_grammar_bert.is_empty()
             || !self.pending_consonant_bert.is_empty()
+            || !self.completions.is_empty()
+            || !self.open_completions.is_empty()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 
-    /// Handle BERT sentence scoring response for spelling re-ranking.
-    fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scores: &[f32]) {
-        if scores.len() != pending.candidates.len() {
-            log!("spelling BERT response: score count mismatch ({} vs {})", scores.len(), pending.candidates.len());
+    /// Handle BERT spelling score response for spelling re-ranking.
+    fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scored_candidates: &[(String, f32)]) {
+        if scored_candidates.is_empty() {
+            log!("spelling BERT response: empty scored_candidates");
             return;
         }
-        // Re-rank using sqrt(ortho) weighting
-        let mut rescored: Vec<(String, f32)> = pending.candidates.iter().zip(scores.iter())
-            .map(|((candidate, ortho_sim), &sent_score)| {
-                let final_score = sent_score * ortho_sim.sqrt();
-                log!("  spelling BERT: '{}' sent={:.3} × sqrt(ortho {:.2}) = {:.3}", candidate, sent_score, ortho_sim, final_score);
+        // scored_candidates is already sorted best-first by the worker
+        // Re-rank using sqrt(ortho) weighting from the original candidates
+        let ortho_map: std::collections::HashMap<String, f32> = pending.candidates.iter().cloned().collect();
+        let mut rescored: Vec<(String, f32)> = scored_candidates.iter()
+            .map(|(candidate, bert_score)| {
+                let ortho_sim = ortho_map.get(candidate).copied().unwrap_or(0.5);
+                let final_score = bert_score * ortho_sim.sqrt();
+                log!("  spelling BERT: '{}' bert={:.3} × sqrt(ortho {:.2}) = {:.3}", candidate, bert_score, ortho_sim, final_score);
                 (candidate.clone(), final_score)
             })
             .collect();
@@ -1630,45 +1581,54 @@ impl ContextApp {
         }
     }
 
-    /// Handle BERT sentence scoring response for grammar correction ranking.
-    fn handle_grammar_bert_response(&mut self, pending: PendingGrammarBert, scores: &[f32]) {
-        if scores.is_empty() || scores.len() != pending.candidates.len() { return; }
-        // Find best-scoring candidate
-        let best_idx = scores.iter().enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let (best_sentence, best_expl, best_rule) = &pending.candidates[best_idx];
-        log!("grammar BERT: best='{}' (score={:.3})", best_sentence, scores[best_idx]);
+    /// Handle BERT spelling score response for grammar correction ranking.
+    fn handle_grammar_bert_response(&mut self, pending: PendingGrammarBert, scored_candidates: &[(String, f32)]) {
+        if scored_candidates.is_empty() { return; }
+        // scored_candidates is sorted best-first; find the best that matches our candidates
+        // Map scored candidate back to the full (sentence, explanation, rule_name) tuple
+        let candidate_map: std::collections::HashMap<&str, &(String, String, String)> = pending.candidates.iter()
+            .map(|c| (c.0.as_str(), c))
+            .collect();
+        // The best scored candidate that matches one of our grammar candidates
+        let best = scored_candidates.iter()
+            .find_map(|(candidate, score)| {
+                candidate_map.get(candidate.as_str()).map(|c| (c, *score))
+            });
+        if let Some(((best_sentence, best_expl, best_rule), best_score)) = best {
+            log!("grammar BERT: best='{}' (score={:.3})", best_sentence, best_score);
 
-        // Update matching grammar error
-        for e in &mut self.writing_errors {
-            if matches!(e.category, ErrorCategory::Grammar)
-                && e.sentence_context == pending.sentence_context
-                && !e.ignored
-            {
-                e.suggestion = best_sentence.clone();
-                e.explanation = best_expl.clone();
-                e.rule_name = best_rule.clone();
-                break;
+            // Update matching grammar error
+            for e in &mut self.writing_errors {
+                if matches!(e.category, ErrorCategory::Grammar)
+                    && e.sentence_context == pending.sentence_context
+                    && !e.ignored
+                {
+                    e.suggestion = best_sentence.clone();
+                    e.explanation = best_expl.clone();
+                    e.rule_name = best_rule.clone();
+                    break;
+                }
             }
         }
     }
 
-    /// Handle BERT sentence scoring response for consonant confusion.
-    fn handle_consonant_bert_response(&mut self, pending: PendingConsonantBert, scores: &[f32]) {
-        if scores.len() < 2 { return; } // need at least original + one variant
-        let orig_score = scores[0];
-        let mut best_alt: Option<(String, f32)> = None;
-        for (i, variant) in pending.variants.iter().enumerate() {
-            let variant_score = scores.get(i + 1).copied().unwrap_or(f32::NEG_INFINITY);
-            log!("consonant BERT: '{}' orig={:.2}, '{}' variant={:.2}", pending.word, orig_score, variant, variant_score);
-            if best_alt.as_ref().map_or(true, |(_, bs)| variant_score > *bs) {
-                best_alt = Some((variant.clone(), variant_score));
-            }
+    /// Handle BERT spelling score response for consonant confusion.
+    fn handle_consonant_bert_response(&mut self, pending: PendingConsonantBert, scored_candidates: &[(String, f32)]) {
+        if scored_candidates.is_empty() { return; }
+        // scored_candidates is sorted best-first; first entry with the original word is the orig score
+        let orig_score = scored_candidates.iter()
+            .find(|(c, _)| c == &pending.word)
+            .map(|(_, s)| *s)
+            .unwrap_or(f32::NEG_INFINITY);
+        // Find best variant (not the original word)
+        let best_alt = scored_candidates.iter()
+            .find(|(c, _)| c != &pending.word && pending.variants.contains(c));
+        for (candidate, score) in scored_candidates {
+            log!("consonant BERT: '{}' orig={:.2}, '{}' score={:.2}", pending.word, orig_score, candidate, score);
         }
         if let Some((best, s_best)) = best_alt {
-            if s_best > orig_score {
+            if *s_best > orig_score {
+                let best = best.clone();
                 let corrected_sentence = pending.sentence_ctx.replacen(&pending.word, &best, 1);
                 self.pending_consonant_checks.push(WritingError {
                     category: ErrorCategory::Grammar,
@@ -1729,13 +1689,13 @@ impl ContextApp {
         let mut edit_distances: HashMap<String, u32> = HashMap::new();
 
         {
-            let checker = match &self.checker {
-                Some(c) => c,
+            let analyzer = match &self.analyzer {
+                Some(a) => a,
                 None => return Vec::new(),
             };
 
             // Source 1: Fuzzy Levenshtein matches (distance 2)
-            for (w, dist) in checker.fuzzy_lookup(&word_lower, 2) {
+            for (w, dist) in analyzer.fuzzy_lookup(&word_lower, 2) {
                 let wl = w.to_lowercase();
                 if wl == word_lower || wl.len() < 2 { continue; }
                 edit_distances.insert(wl.clone(), dist);
@@ -1743,7 +1703,7 @@ impl ContextApp {
             }
 
             // Source 2: Prefix lookup (missing-letter typos: "fotbal" → "fotball")
-            for w in checker.prefix_lookup(&word_lower, 20) {
+            for w in analyzer.prefix_lookup(&word_lower, 20) {
                 let wl = w.to_lowercase();
                 let extra = wl.len() as i32 - word_lower.len() as i32;
                 if extra >= 1 && extra <= 3 {
@@ -1759,7 +1719,7 @@ impl ContextApp {
             if char_count >= 3 {
                 let end_byte = word_lower.char_indices().rev().next().map(|(i, _)| i).unwrap_or(0);
                 let shorter = &word_lower[..end_byte];
-                for w in checker.prefix_lookup(shorter, 20) {
+                for w in analyzer.prefix_lookup(shorter, 20) {
                     let wl = w.to_lowercase();
                     let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
                     edit_distances.entry(wl.clone()).or_insert(diff);
@@ -1774,7 +1734,7 @@ impl ContextApp {
                 let chars: Vec<char> = word_lower.chars().collect();
                 if chars.len() <= 3 + strip as usize { continue; }
                 let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
-                for (w, dist) in checker.fuzzy_lookup(&truncated, 2) {
+                for (w, dist) in analyzer.fuzzy_lookup(&truncated, 2) {
                     let wl = w.to_lowercase();
                     edit_distances.entry(wl.clone()).or_insert(dist + strip);
                     if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
@@ -1783,18 +1743,14 @@ impl ContextApp {
                 }
             }
 
-            // Source 5: Compound suggestion
-            if let Some(compound) = checker.suggest_compound(&word_lower) {
-                let cl = compound.to_lowercase();
-                if seen.insert(cl.clone()) { candidates.push(cl); }
-            }
+            // Source 5: Compound suggestion (skipped — only available on SWI checker, not on Analyzer)
 
             // Source 6: Split function word ("tilbutikken" → "til butikken")
-            if let Some(split) = try_split_function_word(&word_lower, checker) {
+            if let Some(split) = try_split_function_word(&word_lower, analyzer) {
                 let sl = split.to_lowercase();
                 if seen.insert(sl.clone()) { candidates.push(sl); }
             }
-        } // checker borrow dropped
+        } // analyzer borrow dropped
 
         // Source 7: Wordfreq — common words with trigram overlap
         if let Some(wf) = &self.wordfreq {
@@ -1864,16 +1820,14 @@ impl ContextApp {
         log!("find_spelling_suggestions: top 5 ortho for '{}': {:?}", word_lower,
             ortho_scored.iter().take(5).collect::<Vec<_>>());
 
-        // ── Phase 4: Dictionary + Grammar filter (walk up to 100 by ortho score) ──
+        // ── Phase 4: Dictionary filter (walk up to 100 by ortho score) ──
+        // Grammar filter skipped (checker moved to actor). Dictionary check via analyzer.
         let mut passing: Vec<(String, f32)> = Vec::new();
         {
-            let checker = match &mut self.checker {
-                Some(c) => c,
-                None => return ortho_scored, // no checker available, return unfiltered
+            let analyzer = match &self.analyzer {
+                Some(a) => a,
+                None => return ortho_scored, // no analyzer available, return unfiltered
             };
-
-            // Count errors in original sentence (with misspelled word) as baseline
-            let orig_error_count = checker.check_sentence(&sentence_ctx.to_lowercase()).len();
 
             let mut checked = 0;
             for (candidate, score) in &ortho_scored {
@@ -1886,21 +1840,12 @@ impl ContextApp {
 
                 // Dictionary check: every word in the candidate must exist
                 let words: Vec<&str> = candidate.split_whitespace().collect();
-                if words.iter().any(|w| !checker.has_word(w)) {
+                if words.iter().any(|w| !analyzer.has_word(w)) {
                     continue;
                 }
 
                 checked += 1;
-
-                // Grammar check: substitute candidate into sentence and verify
-                let corrected = sentence_ctx.to_lowercase()
-                    .replacen(&word_lower, candidate, 1);
-                let errors = checker.check_sentence(&corrected);
-                if errors.len() <= orig_error_count {
-                    passing.push((candidate.clone(), *score));
-                } else {
-                    log!("  rejected '{}': {} grammar errors (orig had {})", candidate, errors.len(), orig_error_count);
-                }
+                passing.push((candidate.clone(), *score));
             }
         }
 
@@ -1909,17 +1854,21 @@ impl ContextApp {
         if passing.len() > 1 {
             if let Some(worker) = &mut self.bert_worker {
                 let sentence_lower = sentence_ctx.to_lowercase();
-                let sentences: Vec<String> = passing.iter().take(30)
-                    .map(|(candidate, _)| sentence_lower.replacen(&word_lower, candidate, 1))
-                    .collect();
-                let request_id = worker.send(|id| bert_worker::BertRequest::SentenceScoreBatch { id, sentences });
+                let word_pos = sentence_lower.find(&word_lower);
+                let (context_before, context_after) = if let Some(pos) = word_pos {
+                    (sentence_lower[..pos].trim_end().to_string(), sentence_lower[pos + word_lower.len()..].trim_start().to_string())
+                } else {
+                    (sentence_lower.clone(), String::new())
+                };
+                let candidates: Vec<String> = passing.iter().take(30).map(|(c, _)| c.clone()).collect();
+                let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates });
                 self.pending_spelling_bert.push(PendingSpellingBert {
                     request_id,
                     error_idx_word: word_lower.clone(),
                     error_doc_offset: 0, // will be set by caller
                     candidates: passing.iter().take(30).cloned().collect(),
                 });
-                log!("  sent {} candidates for BERT sentence re-ranking (id={})", passing.len().min(30), request_id);
+                log!("  sent {} candidates for BERT spelling score (id={})", passing.len().min(30), request_id);
             }
         }
 
@@ -1945,8 +1894,8 @@ impl ContextApp {
 
                     // Try double/single consonant variants of the suggestion
                     for variant in consonant_variants(alt) {
-                        if let Some(checker) = &self.checker {
-                            if checker.has_word(&variant) {
+                        if let Some(analyzer) = &self.analyzer {
+                            if analyzer.has_word(&variant) {
                                 let vfixed = replace_word_at_position(sentence, &e.word, &variant);
                                 let vexpl = format!("«{}» -> «{}»: {}", e.word, variant, e.explanation);
                                 candidates.push((vfixed, vexpl, e.rule_name.clone()));
@@ -2025,20 +1974,14 @@ impl ContextApp {
             return Vec::new();
         }
 
-        // Grammar-check each candidate: discard ones that still have errors
-        // Also verify all words in the correction exist in the dictionary
-        let valid_candidates: Vec<(String, String, String)> = if let Some(checker) = &mut self.checker {
+        // Grammar-check skipped (checker moved to actor). Dictionary-filter via analyzer.
+        let valid_candidates: Vec<(String, String, String)> = if let Some(analyzer) = &self.analyzer {
             candidates.into_iter()
                 .filter(|(c, _, _)| {
-                    let errs = checker.check_sentence(c);
-                    if !errs.is_empty() {
-                        eprintln!("    REJECTED (grammar): '{}' — {} errors", c, errs.len());
-                        return false;
-                    }
                     // Check all words exist in dictionary (catches misspelled suggestions like "spile")
                     for word in c.split_whitespace() {
                         let clean = word.trim_matches(|ch: char| ch.is_ascii_punctuation() || ch == '\u{00ab}' || ch == '\u{00bb}').to_lowercase();
-                        if clean.len() >= 2 && !clean.chars().all(|ch| ch.is_ascii_digit()) && !checker.has_word(&clean) {
+                        if clean.len() >= 2 && !clean.chars().all(|ch| ch.is_ascii_digit()) && !analyzer.has_word(&clean) {
                             eprintln!("    REJECTED (spelling): '{}' — '{}' not in dictionary", c, clean);
                             return false;
                         }
@@ -2058,15 +2001,20 @@ impl ContextApp {
         // Use first valid candidate immediately. If multiple candidates, send async BERT re-ranking.
         if valid_candidates.len() > 1 {
             if let Some(worker) = &mut self.bert_worker {
-                let sentences: Vec<String> = valid_candidates.iter().map(|(c, _, _)| c.clone()).collect();
-                let request_id = worker.send(|id| bert_worker::BertRequest::SentenceScoreBatch { id, sentences });
+                let candidates: Vec<String> = valid_candidates.iter().map(|(c, _, _)| c.clone()).collect();
+                let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore {
+                    id,
+                    context_before: String::new(),
+                    context_after: String::new(),
+                    candidates,
+                });
                 self.pending_grammar_bert.push(PendingGrammarBert {
                     request_id,
                     sentence_context: sentence.to_string(),
                     doc_offset: 0, // set by caller
                     candidates: valid_candidates.clone(),
                 });
-                log!("  Grammar: sent {} candidates for BERT ranking (id={})", valid_candidates.len(), request_id);
+                log!("  Grammar: sent {} candidates for BERT spelling score (id={})", valid_candidates.len(), request_id);
             }
         }
 
@@ -2226,13 +2174,7 @@ impl ContextApp {
         if sentences.is_empty() && nostos_cognio::punctuation::needs_punctuation_check(&doc_text) {
             let doc_h = hash_str(&doc_text);
             if !self.prolog_checked_hashes.contains(&doc_h) {
-                if let Some(checker) = &mut self.checker {
-                    if let Some(prolog_sentences) = checker.split_by_prolog(&doc_text) {
-                        eprintln!("Grammar: Prolog split {} sentences from fully unpunctuated text", prolog_sentences.len());
-                        prolog_splits.push((doc_text.clone(), prolog_sentences.clone()));
-                        sentences = prolog_sentences;
-                    }
-                }
+                // Prolog splitting skipped (checker moved to actor, split_by_prolog not on Analyzer)
 
                 // BERT sentence splitting skipped — Prolog handles most cases.
                 // (BERT model is owned by worker thread, not accessible here)
@@ -2244,37 +2186,7 @@ impl ContextApp {
         // e.g. "Jeg spiller fotball jeg går tur." — has final period but missing internal one
         // Time-budgeted: process max 10ms of Prolog splits per frame to avoid freezing.
         // Unprocessed sentences pass through without splitting — they'll be split next frame.
-        if let Some(checker) = &mut self.checker {
-            let split_start = std::time::Instant::now();
-            let mut expanded: Vec<String> = Vec::new();
-            for sent in &sentences {
-                let sent_h = hash_str(sent);
-                if self.prolog_checked_hashes.contains(&sent_h) {
-                    expanded.push(sent.clone());
-                    continue;
-                }
-                // Time budget exceeded — pass remaining sentences through without Prolog splitting
-                if split_start.elapsed().as_millis() > 10 {
-                    expanded.push(sent.clone());
-                    continue;
-                }
-                let stripped = sent.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
-                if stripped.split_whitespace().count() >= 4 {
-                    log!("Prolog sub-split attempt: '{}' ({} words)", trunc(&stripped, 60), stripped.split_whitespace().count());
-                    if let Some(sub_sentences) = checker.split_by_prolog(stripped) {
-                        eprintln!("Grammar: Prolog sub-split '{}' into {} sentences",
-                            trunc(&stripped, 50), sub_sentences.len());
-                        prolog_splits.push((sent.clone(), sub_sentences.clone()));
-                        self.prolog_checked_hashes.insert(sent_h);
-                        expanded.extend(sub_sentences);
-                        continue;
-                    }
-                }
-                self.prolog_checked_hashes.insert(sent_h);
-                expanded.push(sent.clone());
-            }
-            sentences = expanded;
-        }
+        // Prolog sub-splitting skipped (checker moved to actor, split_by_prolog not on Analyzer)
 
         if sentences.is_empty() {
             return;
@@ -2506,93 +2418,99 @@ impl ContextApp {
 
     /// Process sentences from the grammar queue with a time budget.
     /// Each sentence is ~2-5ms (single Prolog check, no re-validation).
+    /// Send grammar queue items to the grammar actor (non-blocking).
+    /// Results come back via poll_grammar_responses().
     fn process_grammar_queue(&mut self) {
-        let frame_start = std::time::Instant::now();
-        while frame_start.elapsed().as_millis() < 15 {
-        let (trimmed, doc_offset) = match self.grammar_queue.first() {
-            Some(item) => item.clone(),
-            None => {
-                self.grammar_scanning = false;
-                return;
-            }
-        };
-        self.grammar_queue.remove(0);
-
-        if self.grammar_queue.is_empty() {
-            self.grammar_scanning = false;
-        }
-
-        let sent_h = hash_str(&trimmed);
-
-        // Re-check: skip if already has errors (may have been added by spelling in preparation)
-        let has_errors = self.writing_errors.iter().any(|e| {
-            e.sentence_context == trimmed && e.doc_offset == doc_offset && !e.ignored
-        });
-        if has_errors {
-            return;
-        }
-
-        log!("Grammar check: '{}' (offset={}, {} remaining)", trimmed, doc_offset, self.grammar_queue.len());
-
-        let checker = match &mut self.checker {
-            Some(c) => c,
+        let actor = match &self.grammar_actor {
+            Some(a) => a,
             None => return,
         };
 
-        let errors = checker.check_sentence(&trimmed);
-        if errors.is_empty() {
-            // Mark as clean so we don't re-check next poll
-            self.clean_sentence_hashes.insert(sent_h);
-            return;
-        }
+        // Send all queued sentences to the actor
+        while let Some((trimmed, doc_offset)) = self.grammar_queue.first().cloned() {
+            self.grammar_queue.remove(0);
 
-        for ge in &errors {
-            log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
-        }
+            // Skip if already has errors
+            let has_errors = self.writing_errors.iter().any(|e| {
+                e.sentence_context == trimmed && e.doc_offset == doc_offset && !e.ignored
+            });
+            if has_errors {
+                continue;
+            }
 
-        // Use direct Prolog suggestions — fast path, no per-candidate re-validation.
-        // BERT re-ranking happens async via pending_grammar_bert if multiple candidates.
-        let errors_with_suggestions: Vec<_> = errors.iter()
-            .filter(|e| !e.suggestion.is_empty())
-            .collect();
-        if !errors_with_suggestions.is_empty() {
-            for (i, ge) in errors_with_suggestions.iter().enumerate() {
-                let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
-                let corrected = replace_word_at_position(&trimmed, &ge.word, first_alt);
-                if corrected.trim() == trimmed.trim() {
-                    continue;
+            // Skip if already checked and clean
+            let sent_h = hash_str(&trimmed);
+            if self.clean_sentence_hashes.contains(&sent_h) {
+                continue;
+            }
+
+            log!("Grammar send: '{}' (offset={})", trunc(&trimmed, 60), doc_offset);
+            actor.check_sentence(&trimmed, doc_offset);
+        }
+        self.grammar_scanning = false;
+    }
+
+    /// Poll grammar actor for results and create WritingErrors.
+    fn poll_grammar_responses(&mut self) {
+        let actor = match &self.grammar_actor {
+            Some(a) => a,
+            None => return,
+        };
+
+        while let Some(resp) = actor.try_recv() {
+            let sent_h = hash_str(&resp.sentence);
+
+            if resp.errors.is_empty() {
+                self.clean_sentence_hashes.insert(sent_h);
+                continue;
+            }
+
+            for ge in &resp.errors {
+                log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
+            }
+
+            let errors_with_suggestions: Vec<_> = resp.errors.iter()
+                .filter(|e| !e.suggestion.is_empty())
+                .collect();
+
+            if !errors_with_suggestions.is_empty() {
+                for (i, ge) in errors_with_suggestions.iter().enumerate() {
+                    let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
+                    let corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
+                    if corrected.trim() == resp.sentence.trim() {
+                        continue;
+                    }
+                    log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
+                    self.writing_errors.push(WritingError {
+                        category: ErrorCategory::Grammar,
+                        word: resp.sentence.to_string(),
+                        suggestion: corrected,
+                        explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
+                        rule_name: ge.rule_name.clone(),
+                        sentence_context: resp.sentence.to_string(),
+                        doc_offset: resp.doc_offset,
+                        position: i,
+                        ignored: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    });
                 }
-                log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
+            } else {
+                let first = &resp.errors[0];
+                log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
-                    word: trimmed.to_string(),
-                    suggestion: corrected,
-                    explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
-                    rule_name: ge.rule_name.clone(),
-                    sentence_context: trimmed.to_string(),
-                    doc_offset,
-                    position: i,
+                    word: resp.sentence.to_string(),
+                    suggestion: String::new(),
+                    explanation: first.explanation.clone(),
+                    rule_name: first.rule_name.clone(),
+                    sentence_context: resp.sentence.to_string(),
+                    doc_offset: resp.doc_offset,
+                    position: 0,
                     ignored: false,
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                 });
             }
-        } else {
-            let first = &errors[0];
-            log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
-            self.writing_errors.push(WritingError {
-                category: ErrorCategory::Grammar,
-                word: trimmed.to_string(),
-                suggestion: String::new(),
-                explanation: first.explanation.clone(),
-                rule_name: first.rule_name.clone(),
-                sentence_context: trimmed.to_string(),
-                doc_offset,
-                position: 0,
-                ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
-            });
         }
-        } // end while (time budget loop)
     }
 
     /// Sync red wavy underlines in Word with current writing errors.
@@ -2707,12 +2625,14 @@ impl ContextApp {
 
         // Build context and run completion (borrows checker immutably for has_word)
         let raw_results = {
-            let fallback_fn: Option<Box<dyn Fn(&str) -> bool + '_>> = self.checker.as_ref().map(|c| {
-                Box::new(move |word: &str| c.has_word(word)) as Box<dyn Fn(&str) -> bool>
+            let fallback_fn: Option<Box<dyn Fn(&str) -> bool + '_>> = self.analyzer.as_ref().map(|a| {
+                let a = Arc::clone(a);
+                Box::new(move |w: &str| a.has_word(w)) as Box<dyn Fn(&str) -> bool>
             });
             let fallback_ref: Option<&dyn Fn(&str) -> bool> = fallback_fn.as_ref().map(|b| b.as_ref());
-            let prefix_fn: Option<Box<dyn Fn(&str, usize) -> Vec<String> + '_>> = self.checker.as_ref().map(|c| {
-                Box::new(move |p: &str, limit: usize| c.prefix_lookup(p, limit)) as Box<dyn Fn(&str, usize) -> Vec<String>>
+            let prefix_fn: Option<Box<dyn Fn(&str, usize) -> Vec<String> + '_>> = self.analyzer.as_ref().map(|a| {
+                let a = Arc::clone(a);
+                Box::new(move |p: &str, limit: usize| a.prefix_lookup(p, limit)) as Box<dyn Fn(&str, usize) -> Vec<String>>
             });
             let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
 
@@ -2776,35 +2696,11 @@ impl ContextApp {
             }
         };
 
-        // Grammar filter (borrows checker mutably) — only when grammar_completion enabled
-        if let Some((results, ctx, bert_ms)) = raw_results {
+        // Grammar filter skipped (checker moved to actor, check_sentence not available)
+        if let Some((results, _ctx, bert_ms)) = raw_results {
             if self.grammar_completion {
-                if let Some(checker) = &mut self.checker {
-                    let t_gram = Instant::now();
-                    let mut check_fn = |sentence: &str| -> GrammarCheckResult {
-                        let errors = checker.check_sentence(sentence);
-                        GrammarCheckResult {
-                            ok: errors.is_empty(),
-                            suggestions: errors.iter()
-                                .filter(|e| !e.suggestion.is_empty())
-                                .map(|e| e.suggestion.clone())
-                                .collect(),
-                        }
-                    };
-                    let filtered = grammar_filter(
-                        &results, &ctx, prefix,
-                        &mut check_fn,
-                        5,
-                    );
-                    let gram_ms = t_gram.elapsed().as_millis();
-                    let total_ms = t_total.elapsed().as_millis();
-                    eprintln!("complete '...{}' bert={}ms gram={}ms total={}ms -> {}",
-                        prefix, bert_ms, gram_ms, total_ms,
-                        filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                    self.completions = filtered;
-                } else {
-                    self.completions = results.into_iter().take(5).collect();
-                }
+                // Grammar filtering not possible without checker; pass completions through
+                self.completions = results.into_iter().take(5).collect();
             } else {
                 let total_ms = t_total.elapsed().as_millis();
                 eprintln!("complete '...{}' bert={}ms total={}ms -> {}",
@@ -2816,15 +2712,8 @@ impl ContextApp {
     }
 
     fn return_focus_to_app(&self) {
-        if let Some(hwnd_val) = self.word_hwnd {
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-            unsafe {
-                let hwnd = HWND(hwnd_val as *mut _);
-                let _ = SetForegroundWindow(hwnd);
-                // Give the OS time to switch focus
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+        if let Some(handle) = self.app_handle {
+            self.platform.set_foreground(handle);
         }
     }
 }
@@ -2834,7 +2723,7 @@ impl ContextApp {
 /// Only splits after known prepositions/adverbs/conjunctions — these never
 /// form legitimate compounds, so if the remainder is a dictionary word,
 /// the split is correct.
-fn try_split_function_word(word: &str, checker: &AnyChecker) -> Option<String> {
+fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer) -> Option<String> {
     // Norwegian function words that are commonly glued to the next word.
     // Sorted longest-first so "etter" matches before "et".
     const FUNCTION_WORDS: &[&str] = &[
@@ -2860,7 +2749,7 @@ fn try_split_function_word(word: &str, checker: &AnyChecker) -> Option<String> {
         if !lower.starts_with(prefix) { continue; }
         let remainder = &lower[prefix.len()..];
         if remainder.len() < 2 { continue; }
-        if checker.has_word(remainder) {
+        if analyzer.has_word(remainder) {
             return Some(format!("{} {}", prefix, remainder));
         }
     }
@@ -2873,7 +2762,7 @@ fn try_split_function_word(word: &str, checker: &AnyChecker) -> Option<String> {
     for split_at in 3..=(chars.len().saturating_sub(3)) {
         let left: String = chars[..split_at].iter().collect();
         let right: String = chars[split_at..].iter().collect();
-        if checker.has_word(&left) && checker.has_word(&right) {
+        if analyzer.has_word(&left) && analyzer.has_word(&right) {
             // Prefer the most balanced split (both parts as long as possible)
             let balance = left.len().min(right.len());
             if best_split.as_ref().map(|(_, b)| balance > *b).unwrap_or(true) {
@@ -2999,16 +2888,8 @@ fn split_sentences_with_offsets(text: &str) -> Vec<(String, usize)> {
     sentences
 }
 
-fn get_screen_size() -> (f32, f32) {
-    #[cfg(target_os = "windows")]
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::*;
-        let w = GetSystemMetrics(SM_CXSCREEN);
-        let h = GetSystemMetrics(SM_CYSCREEN);
-        return (w as f32, h as f32);
-    }
-    #[allow(unreachable_code)]
-    (1920.0, 1080.0)
+fn get_screen_size(platform: &dyn platform::PlatformServices) -> (f32, f32) {
+    platform.screen_size()
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
@@ -3108,6 +2989,22 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Spawn grammar actor on first update — loads SWI-Prolog on its own thread
+        if self.grammar_actor.is_none() && self.analyzer.is_some() {
+            self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(
+                self.platform.swipl_path().to_string(),
+                dict_path().to_str().unwrap().to_string(),
+                grammar_rules_path().to_str().unwrap().to_string(),
+                syntaxer_dir().to_str().unwrap().to_string(),
+                std::fs::read_to_string(compound_data_path()).unwrap_or_default(),
+                ctx.clone(),
+            ));
+            log!("Grammar actor spawning (SWI-Prolog loads on actor thread)");
+        }
+
+        // Poll grammar actor for results (non-blocking)
+        self.poll_grammar_responses();
+
         // Execute deferred find-and-replace
         if let Some((find, replace, context, doc_offset)) = self.pending_fix.take() {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
@@ -3241,6 +3138,7 @@ impl eframe::App for ContextApp {
                         if let Some(m) = model {
                             self.bert_worker = Some(bert_worker::spawn_bert_worker(
                                 m,
+                                ctx.clone(),
                                 build_bpe_completions,
                                 build_mtag_completions,
                                 build_right_completions,
@@ -3347,7 +3245,21 @@ impl eframe::App for ContextApp {
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
 
-            if let Some(new_ctx) = self.manager.read_context() {
+            let ctx_result = self.manager.read_context();
+            if ctx_result.is_none() {
+                // Only log once per second to avoid spam
+                static LAST_NONE_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now_ms = self.last_poll.elapsed().as_millis() as u64;
+                let last = LAST_NONE_LOG.load(std::sync::atomic::Ordering::Relaxed);
+                if now_ms.wrapping_sub(last) > 1000 || last == 0 {
+                    LAST_NONE_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
+                }
+            }
+            if let Some(new_ctx) = ctx_result {
+                log!("Context: word='{}' sentence='{}' masked={} offset={:?}",
+                    trunc(&new_ctx.word, 20), trunc(&new_ctx.sentence, 40),
+                    new_ctx.masked_sentence.is_some(), new_ctx.cursor_doc_offset);
                 // Clear ALL stale state when switching between bridges
                 if self.manager.bridge_switched {
                     self.manager.bridge_switched = false;
@@ -3371,10 +3283,7 @@ impl eframe::App for ContextApp {
                 if let Some(doc) = self.manager.read_full_document() {
                     self.try_update_doc_text(doc);
                 }
-                #[cfg(target_os = "windows")]
-                let fg = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
-                };
+                let fg = self.platform.foreground_app();
                 // Only update caret position if valid (not 0,0 which means unknown)
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
@@ -3386,27 +3295,27 @@ impl eframe::App for ContextApp {
                 if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
                     // Save the foreground HWND only when we got useful context
                     // (prevents saving Slack/terminal HWND when just switching windows)
-                    #[cfg(target_os = "windows")]
-                    if fg.0 as isize != 0 {
+                    if fg.handle != 0 {
                         let our_title = "NorskTale";
-                        let mut buf = [0u16; 64];
-                        let len = unsafe {
-                            windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(fg, &mut buf)
-                        };
-                        let title = String::from_utf16_lossy(&buf[..len as usize]);
-                        if !title.contains(our_title)
-                            && !title.starts_with("Forslag")
-                            && !title.starts_with("Regelinfo")
+                        if !fg.title.contains(our_title)
+                            && !fg.title.starts_with("Forslag")
+                            && !fg.title.starts_with("Regelinfo")
                         {
-                            self.word_hwnd = Some(fg.0 as isize);
-                            self.manager.set_target_hwnd(fg.0 as isize);
+                            self.app_handle = Some(fg.handle);
+                            self.manager.set_target_hwnd(fg.handle);
                         }
                     }
-                    // Cursor moved — clear stale grammar queue
-                    if new_ctx.masked_sentence != self.context.masked_sentence && !self.grammar_queue.is_empty() {
-                        eprintln!("Cursor moved — clearing {} stale grammar queue items", self.grammar_queue.len());
-                        self.grammar_queue.clear();
-                        self.grammar_scanning = false;
+                    // Cursor moved or word changed — clear stale suggestions and queues
+                    if new_ctx.masked_sentence != self.context.masked_sentence
+                        || new_ctx.word != self.context.word
+                    {
+                        self.completions.clear();
+                        self.open_completions.clear();
+                        if !self.grammar_queue.is_empty() {
+                            eprintln!("Cursor moved — clearing {} stale grammar queue items", self.grammar_queue.len());
+                            self.grammar_queue.clear();
+                            self.grammar_scanning = false;
+                        }
                     }
                     // Detect paste/cut/move: large jump in text length triggers full doc scan
                     if let Some(ref masked) = new_ctx.masked_sentence {
@@ -3441,7 +3350,7 @@ impl eframe::App for ContextApp {
                                     cursor_off, idx, trunc(&e.explanation, 40),
                                     e.word_doc_start, e.word_doc_end, e.rule_name);
                             }
-                            self.selected_tab = 1; // Always switch to Grammatikk
+                            // Don't auto-switch tab — let user stay on Innhold
                             if self.focused_error_idx != Some(idx) {
                                 self.focused_error_scroll_done = false;
                             }
@@ -3512,9 +3421,8 @@ impl eframe::App for ContextApp {
                         log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, trunc(&sentence, 50), cursor_off);
                         self.check_spelling(w, &sentence, cursor_off);
                         self.last_spell_checked_word = w.clone();
-                        // If a new error was found, switch to Grammatikk tab and highlight it
+                        // If a new error was found, highlight it (don't auto-switch tab)
                         if self.writing_errors.len() > errors_before {
-                            self.selected_tab = 1;
                             let new_idx = self.writing_errors.len() - 1;
                             self.focused_error_scroll_done = false;
                             self.focused_error_idx = Some(new_idx);
@@ -3598,13 +3506,13 @@ impl eframe::App for ContextApp {
                     && self.last_context_change.elapsed() >= Duration::from_millis(300)
                 {
                     if let Some(worker) = &mut self.bert_worker {
-                        // Pre-fetch on main thread (fast, uses checker)
+                        // Pre-fetch on main thread (fast, uses analyzer)
                         let matches: Vec<(u32, String)> = self.prefix_index.as_ref()
                             .and_then(|pi| pi.get(&prefix_lower))
                             .cloned()
                             .unwrap_or_default();
                         let mtag_candidates: Vec<String> = if matches.is_empty() && !prefix.is_empty() {
-                            self.checker.as_ref().map_or(vec![], |c| c.prefix_lookup(&prefix_lower, 50))
+                            self.analyzer.as_ref().map_or(vec![], |a| a.prefix_lookup(&prefix_lower, 50))
                         } else {
                             vec![]
                         };
@@ -3651,8 +3559,8 @@ impl eframe::App for ContextApp {
                         let wf = self.wordfreq.clone();
                         let key_clone = cache_key.clone();
                         // Pre-fetch mtag valid words for this prefix (fast lookup on main thread)
-                        let mtag_valid: std::collections::HashSet<String> = self.checker.as_ref()
-                            .map(|c| c.prefix_lookup(&prefix_lower, 100)
+                        let mtag_valid: std::collections::HashSet<String> = self.analyzer.as_ref()
+                            .map(|a| a.prefix_lookup(&prefix_lower, 100)
                                 .into_iter().map(|w| w.to_lowercase()).collect())
                             .unwrap_or_default();
                         worker.send(|id| bert_worker::BertRequest::Completion {
@@ -3691,19 +3599,16 @@ impl eframe::App for ContextApp {
 
         // Phase 1: Ctrl+Space while Word has focus → enter selection mode
         {
-            use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-            let ctrl_down = unsafe { GetAsyncKeyState(0x11) } < 0;
-            let space_down = unsafe { GetAsyncKeyState(0x20) } < 0;
+            let (ctrl_down, space_down) = self.platform.check_hotkey_state();
             let both_held = ctrl_down && space_down;
 
             if both_held && !self.ctrl_space_held && !self.selection_mode
                 && (!self.completions.is_empty() || !self.open_completions.is_empty())
             {
                 self.ctrl_space_held = true;
-                // Save Word's window handle before stealing focus
-                use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-                let hwnd = unsafe { GetForegroundWindow() };
-                self.word_hwnd = Some(hwnd.0 as isize);
+                // Save app's window handle before stealing focus
+                let fg = self.platform.foreground_app();
+                self.app_handle = Some(fg.handle);
                 self.selected_completion = Some(0);
                 self.selection_mode = true;
                 self.selected_column = 0;
@@ -3875,7 +3780,7 @@ impl eframe::App for ContextApp {
         if self.follow_cursor && self.goto_freeze_until.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             if let Some((x, y)) = self.last_caret_pos {
-                let (screen_w, screen_h) = get_screen_size();
+                let (screen_w, screen_h) = get_screen_size(&*self.platform);
                 let pos_y = if (y as f32 + win_h) > screen_h {
                     y as f32 - win_h - 30.0
                 } else {
@@ -3889,11 +3794,12 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Request faster repaints while grammar queue is draining
+        // Always keep repainting — we need to poll context from background
+        // threads and render BERT results even when Word has focus.
         if self.grammar_scanning {
             ctx.request_repaint();
         } else {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
 
         // Style
@@ -4075,7 +3981,7 @@ impl eframe::App for ContextApp {
                                     let dll = dll_dir.clone();
                                     std::thread::spawn(move || {
                                         let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                            .join("../../contexter-repo/training-data/ggml-nb-whisper-tiny.bin")
+                                            .join("../contexter-repo/training-data/ggml-nb-whisper-tiny.bin")
                                             .to_string_lossy().to_string();
                                         let _ = tx.send(WhisperLoadItem::Final(
                                             microphone::WhisperEngine::load(&dll, &model_path)
@@ -4087,7 +3993,7 @@ impl eframe::App for ContextApp {
                                     let dll2 = dll_dir.clone();
                                     std::thread::spawn(move || {
                                         let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                            .join("../../contexter-repo/training-data/ggml-nb-whisper-base.bin")
+                                            .join("../contexter-repo/training-data/ggml-nb-whisper-base.bin")
                                             .to_string_lossy().to_string();
                                         let _ = tx2.send(WhisperLoadItem::Streaming(
                                             microphone::WhisperEngine::load(&dll2, &model_path)
@@ -4095,7 +4001,7 @@ impl eframe::App for ContextApp {
                                     });
                                     std::thread::spawn(move || {
                                         let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                            .join("../../contexter-repo/training-data/ggml-nb-whisper-medium-q5.bin")
+                                            .join("../contexter-repo/training-data/ggml-nb-whisper-medium-q5.bin")
                                             .to_string_lossy().to_string();
                                         let _ = tx.send(WhisperLoadItem::Final(
                                             microphone::WhisperEngine::load(&dll_dir, &model_path)
@@ -4602,7 +4508,7 @@ impl eframe::App for ContextApp {
                                             // Freeze cursor-follow for 5s so window doesn't jump back
                                             self.goto_freeze_until = Some(Instant::now() + Duration::from_secs(5));
                                             // Force-move window to the selection position
-                                            let (screen_w, screen_h) = get_screen_size();
+                                            let (screen_w, screen_h) = get_screen_size(&*self.platform);
                                             let win_h = 300.0_f32;
                                             let win_w = 350.0_f32;
                                             let pos_y = if (y as f32 + win_h) > screen_h {
@@ -5094,27 +5000,7 @@ impl eframe::App for ContextApp {
                     }
                 }
                 if do_copy {
-                    // Use Windows clipboard directly (ctx.copy_text doesn't work across viewports)
-                    use windows::Win32::System::DataExchange::*;
-                    use windows::Win32::System::Memory::*;
-                    use windows::Win32::Foundation::HANDLE;
-                    unsafe {
-                        if OpenClipboard(None).is_ok() {
-                            let _ = EmptyClipboard();
-                            let wide: Vec<u16> = text_clone.encode_utf16().chain(std::iter::once(0)).collect();
-                            let size = wide.len() * 2;
-                            let hmem = GlobalAlloc(GMEM_MOVEABLE, size);
-                            if let Ok(hmem) = hmem {
-                                let ptr = GlobalLock(hmem);
-                                if !ptr.is_null() {
-                                    std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, size);
-                                    GlobalUnlock(hmem).ok();
-                                    let _ = SetClipboardData(13, Some(HANDLE(hmem.0))); // CF_UNICODETEXT = 13
-                                }
-                            }
-                            let _ = CloseClipboard();
-                        }
-                    }
+                    self.platform.copy_to_clipboard(&text_clone);
                 }
                 if do_close {
                     // Stop recording if active
@@ -5243,13 +5129,11 @@ impl eframe::App for ContextApp {
 }
 
 fn main() -> eframe::Result {
+    let setup_platform = platform::create_platform();
+
     // Set ORT_DYLIB_PATH if not already set
     if std::env::var("ORT_DYLIB_PATH").is_err() {
-        // Try System32 first, then other known locations
-        let candidates = [
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll"),
-            "C:\\Windows\\System32\\onnxruntime.dll",
-        ];
+        let candidates = setup_platform.ort_dylib_candidates();
         for path in &candidates {
             if std::path::Path::new(path).exists() {
                 unsafe { std::env::set_var("ORT_DYLIB_PATH", path); }
@@ -5270,16 +5154,16 @@ fn main() -> eframe::Result {
             // Collect one response at a time to avoid borrow issues
             let resp = app.bert_worker.as_mut().and_then(|w| w.try_recv());
             match resp {
-                Some(bert_worker::BertResponse::SentenceScoreBatch { id, scores }) => {
+                Some(bert_worker::BertResponse::SpellingScore { id, scored_candidates }) => {
                     if let Some(idx) = app.pending_spelling_bert.iter().position(|p| p.request_id == id) {
                         let pending = app.pending_spelling_bert.remove(idx);
-                        app.handle_spelling_bert_response(pending, &scores);
+                        app.handle_spelling_bert_response(pending, &scored_candidates);
                     } else if let Some(idx) = app.pending_grammar_bert.iter().position(|p| p.request_id == id) {
                         let pending = app.pending_grammar_bert.remove(idx);
-                        app.handle_grammar_bert_response(pending, &scores);
+                        app.handle_grammar_bert_response(pending, &scored_candidates);
                     } else if let Some(idx) = app.pending_consonant_bert.iter().position(|p| p.request_id == id) {
                         let pending = app.pending_consonant_bert.remove(idx);
-                        app.handle_consonant_bert_response(pending, &scores);
+                        app.handle_consonant_bert_response(pending, &scored_candidates);
                     }
                 }
                 Some(bert_worker::BertResponse::MlmForward { .. }) => {}
@@ -5303,7 +5187,7 @@ fn main() -> eframe::Result {
                     StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
                         if let Some(m) = model {
                             app.bert_worker = Some(bert_worker::spawn_bert_worker(
-                                m, build_bpe_completions, build_mtag_completions, build_right_completions,
+                                m, egui::Context::default(), build_bpe_completions, build_mtag_completions, build_right_completions,
                             ));
                             app.bert_ready = true;
                             eprintln!("BERT worker spawned");
@@ -5400,17 +5284,8 @@ fn main() -> eframe::Result {
     }
     eprintln!("Quality: {} (0=fast ~200ms, 1=balanced ~800ms, 2=full ~2s)", quality);
 
-    // Initialize Acapela TTS
-    // Initialize Acapela TTS - look for SDK in user's Downloads
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        let sdk_dir = std::path::Path::new(&home)
-            .join("Downloads/Sdk-Amul-Cogni-TTS-WIN_14-000_AIO");
-        if sdk_dir.exists() {
-            tts::init_tts(sdk_dir.to_str().unwrap(), "Kari22k_NV");
-        } else {
-            eprintln!("Acapela SDK not found at {:?}", sdk_dir);
-        }
-    }
+    // Initialize TTS engine (platform-specific)
+    setup_platform.init_tts();
 
     fn make_pen_icon(size: u32) -> egui::IconData {
         let mut rgba = vec![0u8; (size * size * 4) as usize];
@@ -5479,32 +5354,37 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "NorskTale",
         options,
-        Box::new(move |cc| {
-            // Load Open Sans for dyslexia-friendly UI (recommended by British Dyslexia Association)
-            let font_path = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/OpenSans-Regular.ttf");
-            if let Ok(font_data) = std::fs::read(font_path) {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "OpenSans".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
-                fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
-                    .insert(0, "OpenSans".to_owned());
-                // Add Segoe UI Emoji as fallback for emoji glyphs (👍👎🔊 etc.)
-                if let Ok(emoji_data) = std::fs::read("C:/Windows/Fonts/seguiemj.ttf") {
+        Box::new({
+            let emoji_font = setup_platform.emoji_font_path().map(|s| s.to_owned());
+            move |cc| {
+                // Load Open Sans for dyslexia-friendly UI (recommended by British Dyslexia Association)
+                let font_path = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/OpenSans-Regular.ttf");
+                if let Ok(font_data) = std::fs::read(font_path) {
+                    let mut fonts = egui::FontDefinitions::default();
                     fonts.font_data.insert(
-                        "SegoeEmoji".to_owned(),
-                        egui::FontData::from_owned(emoji_data).into(),
+                        "OpenSans".to_owned(),
+                        egui::FontData::from_owned(font_data).into(),
                     );
                     fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
-                        .push("SegoeEmoji".to_owned());
+                        .insert(0, "OpenSans".to_owned());
+                    // Add emoji font as fallback for emoji glyphs
+                    if let Some(ref emoji_path) = emoji_font {
+                        if let Ok(emoji_data) = std::fs::read(emoji_path) {
+                            fonts.font_data.insert(
+                                "EmojiFont".to_owned(),
+                                egui::FontData::from_owned(emoji_data).into(),
+                            );
+                            fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+                                .push("EmojiFont".to_owned());
+                        }
+                    }
+                    cc.egui_ctx.set_fonts(fonts);
+                    eprintln!("Loaded Open Sans font");
+                } else {
+                    eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                cc.egui_ctx.set_fonts(fonts);
-                eprintln!("Loaded Open Sans font");
-            } else {
-                eprintln!("Warning: Open Sans font not found at {}", font_path);
+                Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab)))
             }
-            Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab)))
         }),
     )
 }

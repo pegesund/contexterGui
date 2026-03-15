@@ -95,13 +95,59 @@ pub mod word_com;
 #[cfg(target_os = "windows")]
 pub mod accessibility_win;
 
+pub mod word_addin;
+
 pub mod browser;
 
 // Future:
 // #[cfg(target_os = "macos")]
-// pub mod word_applescript;
-// #[cfg(target_os = "macos")]
 // pub mod accessibility_mac;
+
+/// Create platform-specific bridges (excluding Browser, which is added separately).
+pub fn create_bridges() -> Vec<Box<dyn TextBridge>> {
+    let mut bridges: Vec<Box<dyn TextBridge>> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(word) = word_com::WordComBridge::try_connect() {
+            crate::log!("Word COM bridge connected");
+            let ok = word.disable_word_proofing();
+            crate::log!("Word proofing disabled: {}", ok);
+            bridges.push(Box::new(word));
+        }
+        bridges.push(Box::new(accessibility_win::AccessibilityBridge::new()));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Word Add-in bridge: HTTP server that Word's JS add-in connects to.
+        // Always start — the add-in connects when it's ready.
+        let addin_bridge = word_addin::WordAddinBridge::new();
+        crate::log!("Word Add-in bridge started (HTTP port {})", 52525);
+        bridges.push(Box::new(addin_bridge));
+    }
+
+    bridges
+}
+
+/// Try to connect a Word bridge (for late connection when Word opens after app startup).
+pub fn try_connect_word_bridge() -> Vec<Box<dyn TextBridge>> {
+    let mut bridges: Vec<Box<dyn TextBridge>> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(word) = word_com::WordComBridge::try_connect() {
+            let ok = word.disable_word_proofing();
+            crate::log!("Word proofing disabled (late): {}", ok);
+            bridges.push(Box::new(word));
+        }
+    }
+
+    // On macOS, Word Add-in bridge is always running (HTTP server).
+    // No late connection needed — add-in connects when loaded.
+
+    bridges
+}
 
 // ── Shared text processing used by all bridges ──
 
