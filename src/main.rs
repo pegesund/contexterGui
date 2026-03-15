@@ -3465,9 +3465,15 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // Always try to scan for errors — doc hash check makes this cheap when unchanged
+            // IMPORTANT: Only scan for grammar/spelling errors when at a word boundary
+            // (after space/punctuation). NEVER scan while the user is mid-word — they
+            // haven't finished typing yet and partial words trigger false positives
+            // (e.g. "gøya" flagged while user is typing "gøyal").
+            // This rule has been accidentally broken many times — DO NOT REMOVE THIS CHECK.
             let errors_before = self.writing_errors.len();
-            self.update_grammar_errors();
+            if !is_mid_word(&self.context.word) {
+                self.update_grammar_errors();
+            }
             self.prune_resolved_errors();
             // Upgrade spelling suggestions when BERT becomes available
             self.upgrade_spelling_suggestions();
