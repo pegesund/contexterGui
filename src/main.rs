@@ -739,10 +739,18 @@ fn build_bpe_completions(
 ) -> Vec<Completion> {
     use std::sync::atomic::Ordering;
 
+    // Build set of single-token BPE words (these are direct token matches, not BPE-extended)
+    let single_token_words: std::collections::HashSet<String> = matches.iter()
+        .map(|(_, w)| w.to_lowercase())
+        .collect();
+
     let is_valid = |w: &str| -> bool {
         let key = w.to_lowercase();
         if nearby_words.contains(&key) { return false; }
-        if mtag_valid.contains(&key) { return true; }
+        // For single-token matches (direct BPE tokens like "gøy"), use mtag to validate.
+        // For BPE-extended words (like "gøya" = "gøy" + "a"), only use wordfreq —
+        // mtag includes valid inflections that may be wrong in this context.
+        if single_token_words.contains(&key) && mtag_valid.contains(&key) { return true; }
         wordfreq.map_or(true, |wf| wf.contains_key(&key))
     };
     let cap = |s: &str| -> String {
@@ -1543,7 +1551,13 @@ impl ContextApp {
                                         .collect(),
                                 }
                             };
+                            eprintln!("grammar_filter input (left): [{}]",
+                                left_filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                             self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                            eprintln!("grammar_filter output: [{}]",
+                                self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                            eprintln!("open_completions: [{}]",
+                                self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                             self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
                         } else {
                             self.completions = left.into_iter().take(5).collect();
