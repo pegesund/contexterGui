@@ -167,6 +167,15 @@ pub(crate) struct WritingError {
     pub(crate) underlined: bool,
     /// Pinned to top of error list (newly found at word boundary)
     pub(crate) pinned: bool,
+    /// Paragraph ID from Word Add-in (for error removal when sentence changes)
+    pub(crate) paragraph_id: String,
+}
+
+#[derive(Clone)]
+struct SpellingQueueItem {
+    word: String,
+    sentence_ctx: String,
+    paragraph_id: String,
 }
 
 /// Find a word within a sentence and return (doc_start, doc_end) in absolute char offsets.
@@ -650,9 +659,11 @@ struct ContextApp {
     /// Hashes of sentences already checked for Prolog sub-splitting (expensive, persists across doc changes)
     prolog_checked_hashes: std::collections::HashSet<u64>,
     /// Hashes of sentences grammar-checked and found clean (no errors)
-    clean_sentence_hashes: std::collections::HashSet<u64>,
-    /// Pending spelling work: (word, sentence_ctx, doc_offset) — checked incrementally
-    spelling_queue: Vec<(String, String, usize)>,
+    processed_sentence_hashes: std::collections::HashSet<u64>,
+    /// Track which sentence hashes belong to which paragraph (for cleanup on paragraph change/delete)
+    paragraph_sentence_hashes: HashMap<String, Vec<u64>>,
+    /// Pending spelling work — checked incrementally
+    spelling_queue: Vec<SpellingQueueItem>,
     /// Pending grammar work: sentences still to check (incremental, one per frame)
     grammar_queue: Vec<(String, usize)>,
     /// Total sentences when grammar scan started (for progress bar)
@@ -1106,7 +1117,8 @@ impl ContextApp {
             last_doc_hash: 0,
             last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
-            clean_sentence_hashes: std::collections::HashSet::new(),
+            processed_sentence_hashes: std::collections::HashSet::new(),
+            paragraph_sentence_hashes: HashMap::new(),
             spelling_queue: Vec::new(),
             grammar_queue: Vec::new(),
             grammar_queue_total: 0,
@@ -1205,7 +1217,7 @@ impl ContextApp {
     }
 
     /// Check spelling of a word. `sentence_ctx` is the sentence it appears in.
-    fn check_spelling(&mut self, word: &str, sentence_ctx: &str, doc_offset: usize) {
+    fn check_spelling(&mut self, word: &str, sentence_ctx: &str, paragraph_id: &str, doc_offset: usize) {
         let clean = word.trim().to_lowercase();
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
             return;
@@ -1243,7 +1255,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(),
                 });
             }
             return;
@@ -1338,9 +1350,9 @@ impl ContextApp {
         }
 
         // Word not found — unified suggestion pipeline
-        // Dedup: skip if this word already has a spelling error in this sentence
+        // Dedup: skip if this word already has a spelling error in this paragraph
         if self.writing_errors.iter().any(|e| {
-            matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == clean && e.sentence_context == sentence_ctx && !e.ignored
+            matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == clean && e.paragraph_id == paragraph_id && !e.ignored
         }) {
             return;
         }
@@ -1378,7 +1390,7 @@ impl ContextApp {
             doc_offset,
             position: 0,
             ignored: false,
-            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(),
         });
         if !best.is_empty() {
             log!("Spelling: '{}' → '{}' (unified pipeline, bert_pending={})", clean, best, has_pending_bert);
@@ -1640,7 +1652,7 @@ impl ContextApp {
                     doc_offset: pending.doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(),
                 });
             }
         }
@@ -2034,6 +2046,10 @@ impl ContextApp {
 
     /// Update last_doc_text, rejecting stale reads that still contain a just-replaced word.
     fn try_update_doc_text(&mut self, doc: String) {
+        // Skip when Word Add-in is active — error management handled by add-in
+        if self.manager.bridges.iter().any(|b| b.name() == "Word Add-in") {
+            return;
+        }
         if let Some(ref old_word) = self.last_replaced_word {
             if doc.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| w == old_word.as_str()) {
                 return; // stale — still has the old word
@@ -2096,6 +2112,12 @@ impl ContextApp {
     /// This is fast (no SWI/BERT calls) and runs every poll when document changes.
     /// The actual per-sentence grammar checking happens incrementally in process_grammar_queue().
     fn update_grammar_errors(&mut self) {
+        // When Word Add-in is active, sentence detection and error management
+        // is handled by the add-in (process_addin_changed_paragraphs).
+        // Skip the old full-doc scanning approach.
+        if self.manager.bridges.iter().any(|b| b.name() == "Word Add-in") {
+            return;
+        }
         // Called on paste/cut/move only — not on every keystroke.
         // Queue processing happens at word boundaries in the main poll loop.
 
@@ -2106,23 +2128,10 @@ impl ContextApp {
         // Quick check: if document hasn't changed at all, skip everything
         let doc_hash = hash_str(&doc_text);
         if doc_hash == self.last_doc_hash {
-            // Even if hash matches, prune errors whose text no longer exists in the doc
-            let doc_lower = doc_text.to_lowercase();
-            let before = self.writing_errors.len();
-            let mut pruned_contexts: Vec<String> = Vec::new();
-            self.writing_errors.retain(|e| {
-                let keep = doc_lower.contains(&e.word.to_lowercase());
-                if !keep {
-                    pruned_contexts.push(e.sentence_context.clone());
-                }
-                keep
-            });
-            if self.writing_errors.len() != before {
-                log!("Pruned {} stale errors (text no longer in doc)", before - self.writing_errors.len());
-                // Clear sentence hashes for pruned errors so they get re-scanned
-                for ctx in &pruned_contexts {
-                    self.clean_sentence_hashes.remove(&hash_str(ctx));
-                }
+            // Error removal is handled by the add-in's sentence change detection
+            // (process_addin_changed_paragraphs clears errors when a sentence changes).
+            // No pruning based on full doc text — the add-in bridge doesn't have it.
+            if false {
                 // Force rescan by invalidating doc hash
                 self.last_doc_hash = 0;
             }
@@ -2147,7 +2156,7 @@ impl ContextApp {
             self.pending_spelling_bert.clear();
             self.grammar_queue.clear();
             self.grammar_queue_total = 0;
-            self.clean_sentence_hashes.clear();
+            self.processed_sentence_hashes.clear();
         }
 
         {
@@ -2161,7 +2170,7 @@ impl ContextApp {
                 keep
             });
             for ctx in &pruned_contexts2 {
-                self.clean_sentence_hashes.remove(&hash_str(ctx));
+                self.processed_sentence_hashes.remove(&hash_str(ctx));
             }
         }
 
@@ -2284,7 +2293,7 @@ impl ContextApp {
         // Remove errors marked for removal and clear their sentence hashes for rescan
         self.writing_errors.retain(|e| !e.word.is_empty());
         for ctx in &stale_sentences {
-            self.clean_sentence_hashes.remove(&hash_str(ctx));
+            self.processed_sentence_hashes.remove(&hash_str(ctx));
         }
 
         // --- Step 1: Sentence boundary suggestions (shown first, highest priority) ---
@@ -2317,7 +2326,7 @@ impl ContextApp {
                 doc_offset: 0,
                 position: 0,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(),
             });
         }
 
@@ -2338,7 +2347,7 @@ impl ContextApp {
             });
 
             // Skip sentences already checked and clean (both grammar AND spelling)
-            if self.clean_sentence_hashes.contains(&sent_h) {
+            if self.processed_sentence_hashes.contains(&sent_h) {
                 log!("  SKIP (clean hash): '{}'", trunc(trimmed, 60));
                 continue;
             }
@@ -2359,7 +2368,7 @@ impl ContextApp {
                     if self.manager.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, &self.context.word) {
                         continue;
                     }
-                    self.spelling_queue.push((clean.to_string(), trimmed.clone(), *doc_offset));
+                    self.spelling_queue.push(SpellingQueueItem { word: clean.to_string(), sentence_ctx: trimmed.clone(), paragraph_id: String::new() });
                 }
             }
             if has_errors {
@@ -2405,9 +2414,9 @@ impl ContextApp {
     /// Keeps UI responsive when many words need checking (e.g. English text).
     fn process_spelling_queue(&mut self) {
         let mut processed = 0;
-        while let Some((word, sentence_ctx, doc_offset)) = self.spelling_queue.first().cloned() {
+        while let Some(item) = self.spelling_queue.first().cloned() {
             self.spelling_queue.remove(0);
-            self.check_spelling(&word, &sentence_ctx, doc_offset);
+            self.check_spelling(&item.word, &item.sentence_ctx, &item.paragraph_id, 0);
             processed += 1;
             if processed >= 1 { break; } // max 1 word per frame — keeps GUI responsive
         }
@@ -2416,8 +2425,124 @@ impl ContextApp {
         }
     }
 
-    /// Process sentences from the grammar queue with a time budget.
-    /// Each sentence is ~2-5ms (single Prolog check, no re-validation).
+    /// Drain changed paragraphs from Word Add-in, split into sentences, and send to grammar actor + spelling queue.
+    fn process_addin_changed_paragraphs(&mut self) {
+        let actor = match &self.grammar_actor {
+            Some(a) => a,
+            None => return,
+        };
+
+        // Check for reset (new document opened)
+        for bridge in &self.manager.bridges {
+            if bridge.take_reset() {
+                log!("Reset: clearing ALL state");
+                self.writing_errors.clear();
+                self.processed_sentence_hashes.clear();
+                self.paragraph_sentence_hashes.clear();
+                self.spelling_queue.clear();
+                self.grammar_queue.clear();
+                self.grammar_scanning = false;
+                self.grammar_errors.clear();
+                self.pending_spelling_bert.clear();
+                self.pending_grammar_bert.clear();
+                self.pending_consonant_bert.clear();
+                self.pending_consonant_checks.clear();
+                self.last_spell_checked_word.clear();
+                self.last_doc_text.clear();
+                self.last_doc_hash = 0;
+                self.last_doc_approx_len = 0;
+                self.last_sentence_count = 0;
+                self.prolog_checked_hashes.clear();
+                self.completions.clear();
+                self.open_completions.clear();
+                self.last_checked_sentence.clear();
+            }
+        }
+
+        // Drain from all bridges that support it
+        for bridge in &self.manager.bridges {
+            let changed = bridge.drain_changed_paragraphs();
+            for p in changed {
+                // Clear errors only for CHANGED sentences in this paragraph.
+                // Errors for unchanged (clean hash) sentences are kept.
+
+                log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
+
+                // Split paragraph into sentences
+                let sentences = split_sentences(&p.text);
+                let new_hashes: Vec<u64> = sentences.iter().map(|s| hash_str(s)).collect();
+
+                // Remove old sentence hashes for this paragraph from clean set
+                // and clear errors for sentences that no longer exist
+                if let Some(old_hashes) = self.paragraph_sentence_hashes.get(&p.paragraph_id) {
+                    for old_h in old_hashes {
+                        if !new_hashes.contains(old_h) {
+                            // Sentence no longer exists in this paragraph — remove hash + errors
+                            self.processed_sentence_hashes.remove(old_h);
+                        }
+                    }
+                }
+                // Clear errors for sentences that are no longer in the paragraph
+                let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
+                self.writing_errors.retain(|e| {
+                    if e.paragraph_id != p.paragraph_id { return true; }
+                    // Keep if sentence still exists in paragraph
+                    new_sentence_set.contains(&e.sentence_context.to_lowercase())
+                });
+
+                // Check each sentence: skip if already processed (hash unchanged)
+                for sentence_text in &sentences {
+                    let sent_h = hash_str(sentence_text);
+                    if self.processed_sentence_hashes.contains(&sent_h) {
+                        continue; // Already processed, skip
+                    }
+
+                    // This sentence changed — clear its errors
+                    let sentence_lower = sentence_text.to_lowercase();
+                    self.writing_errors.retain(|e| {
+                        !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
+                    });
+
+                    // Grammar check (async via actor)
+                    actor.check_sentence(sentence_text, 0, &p.paragraph_id, 0);
+
+                    // Spelling: queue each word
+                    for word in sentence_text.split_whitespace() {
+                        let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
+                        if clean.is_empty() || clean.len() < 2 { continue; }
+                        self.spelling_queue.push(SpellingQueueItem { word: clean.to_string(), sentence_ctx: sentence_text.clone(), paragraph_id: p.paragraph_id.clone() });
+                    }
+                }
+
+                // Store new sentence hashes for this paragraph
+                self.paragraph_sentence_hashes.insert(p.paragraph_id.clone(), new_hashes);
+            }
+        }
+
+        // Handle deleted paragraphs
+        for bridge in &self.manager.bridges {
+            let deleted = bridge.drain_deleted_paragraphs();
+            for para_id in deleted {
+                let before = self.writing_errors.len();
+                self.writing_errors.retain(|e| e.paragraph_id != para_id);
+                if self.writing_errors.len() < before {
+                    log!("Cleared {} errors for deleted para={}", before - self.writing_errors.len(), trunc(&para_id, 10));
+                }
+                // Remove sentence hashes for deleted paragraph
+                if let Some(hashes) = self.paragraph_sentence_hashes.remove(&para_id) {
+                    for h in hashes {
+                        self.processed_sentence_hashes.remove(&h);
+                    }
+                }
+            }
+        }
+
+        // Process spelling queue (1 word per call, same as Windows)
+        if !self.spelling_queue.is_empty() {
+            self.process_spelling_queue();
+        }
+    }
+
     /// Send grammar queue items to the grammar actor (non-blocking).
     /// Results come back via poll_grammar_responses().
     fn process_grammar_queue(&mut self) {
@@ -2440,12 +2565,12 @@ impl ContextApp {
 
             // Skip if already checked and clean
             let sent_h = hash_str(&trimmed);
-            if self.clean_sentence_hashes.contains(&sent_h) {
+            if self.processed_sentence_hashes.contains(&sent_h) {
                 continue;
             }
 
             log!("Grammar send: '{}' (offset={})", trunc(&trimmed, 60), doc_offset);
-            actor.check_sentence(&trimmed, doc_offset);
+            actor.check_sentence(&trimmed, doc_offset, "", 0);
         }
         self.grammar_scanning = false;
     }
@@ -2459,10 +2584,10 @@ impl ContextApp {
 
         while let Some(resp) = actor.try_recv() {
             let sent_h = hash_str(&resp.sentence);
+            self.processed_sentence_hashes.insert(sent_h); // Mark ALL sentences as processed
 
             if resp.errors.is_empty() {
-                self.clean_sentence_hashes.insert(sent_h);
-                continue;
+                continue; // No errors to add
             }
 
             for ge in &resp.errors {
@@ -2491,7 +2616,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: i,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                     });
                 }
             } else {
@@ -2507,7 +2632,7 @@ impl ContextApp {
                     doc_offset: resp.doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                 });
             }
         }
@@ -3005,6 +3130,9 @@ impl eframe::App for ContextApp {
         // Poll grammar actor for results (non-blocking)
         self.poll_grammar_responses();
 
+        // Drain changed paragraphs from Word Add-in and send to grammar actor
+        self.process_addin_changed_paragraphs();
+
         // Execute deferred find-and-replace
         if let Some((find, replace, context, doc_offset)) = self.pending_fix.take() {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
@@ -3054,7 +3182,7 @@ impl eframe::App for ContextApp {
                 // Document changed — reset doc hash so next poll re-scans
                 self.last_doc_hash = 0;
                 // Clear clean hashes so ALL sentences get re-checked after fix
-                self.clean_sentence_hashes.clear();
+                self.processed_sentence_hashes.clear();
                 // Clear grammar queue — document changed, stale sentences
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3089,10 +3217,10 @@ impl eframe::App for ContextApp {
                 }
                 // Force rescan so Step 0 re-maps remaining errors to new offsets
                 self.last_doc_hash = 0;
-                self.clean_sentence_hashes.remove(&hash_str(&context));
+                self.processed_sentence_hashes.remove(&hash_str(&context));
                 let stripped_ctx = context.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
                 if !stripped_ctx.is_empty() && stripped_ctx != context {
-                    self.clean_sentence_hashes.remove(&hash_str(stripped_ctx));
+                    self.processed_sentence_hashes.remove(&hash_str(stripped_ctx));
                 }
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3153,7 +3281,7 @@ impl eframe::App for ContextApp {
                         self.startup_done.push("NorBERT4".into());
                         // Force rescan — spelling was skipped while BERT was loading
                         self.last_doc_hash = 0;
-                        self.clean_sentence_hashes.clear();
+                        self.processed_sentence_hashes.clear();
                         log!("Startup: NorBERT4 completer ready (bert_worker spawned)");
                     }
                 }
@@ -3273,7 +3401,7 @@ impl eframe::App for ContextApp {
                     self.pending_consonant_bert.clear();
                     self.grammar_queue.clear();
                     self.grammar_queue_total = 0;
-                    self.clean_sentence_hashes.clear();
+                    self.processed_sentence_hashes.clear();
                     self.last_doc_hash = 0;
                     // Do NOT reset last_sentence_count to 0 — that causes a
                     // false "major doc change" on the very next read, which
@@ -3419,7 +3547,10 @@ impl eframe::App for ContextApp {
                     if *w != self.last_spell_checked_word {
                         let errors_before = self.writing_errors.len();
                         log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, trunc(&sentence, 50), cursor_off);
-                        self.check_spelling(w, &sentence, cursor_off);
+                        {
+                            let para_id = self.context.paragraph_id.clone();
+                            self.check_spelling(w, &sentence, &para_id, 0);
+                        }
                         self.last_spell_checked_word = w.clone();
                         // If a new error was found, highlight it (don't auto-switch tab)
                         if self.writing_errors.len() > errors_before {
@@ -3463,7 +3594,10 @@ impl eframe::App for ContextApp {
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        self.check_spelling(w, &sentence, cursor_off);
+                        {
+                            let para_id = self.context.paragraph_id.clone();
+                            self.check_spelling(w, &sentence, &para_id, 0);
+                        }
                     }
                 }
                 self.validate_consonant_checks();
@@ -5221,7 +5355,7 @@ fn main() -> eframe::Result {
             app.pending_consonant_checks.clear();
             app.pending_consonant_bert.clear();
             app.pending_spelling_bert.clear();
-            app.check_spelling(word, sentence, 0);
+            app.check_spelling(word, sentence, "", 0);
             // Drain BERT worker responses (async consonant + spelling re-ranking)
             drain_bert_responses(&mut app);
             app.validate_consonant_checks();
@@ -5248,7 +5382,7 @@ fn main() -> eframe::Result {
             app.writing_errors.clear();
             app.pending_consonant_checks.clear();
             app.pending_consonant_bert.clear();
-            app.check_spelling(word, sentence, 0);
+            app.check_spelling(word, sentence, "", 0);
             // Drain BERT worker responses for consonant scoring
             drain_bert_responses(&mut app);
             eprintln!("  '{}': pending={}", word, app.pending_consonant_checks.len());

@@ -17,12 +17,16 @@ use crate::AnyChecker;
 pub struct GrammarCheckRequest {
     pub sentence: String,
     pub doc_offset: usize,
+    pub paragraph_id: String,
+    pub sentence_index: usize,
 }
 
 /// Result sent back from the grammar actor
 pub struct GrammarCheckResponse {
     pub sentence: String,
     pub doc_offset: usize,
+    pub paragraph_id: String,
+    pub sentence_index: usize,
     pub errors: Vec<GrammarError>,
 }
 
@@ -34,10 +38,12 @@ pub struct GrammarActorHandle {
 
 impl GrammarActorHandle {
     /// Send a sentence for checking (non-blocking)
-    pub fn check_sentence(&self, sentence: &str, doc_offset: usize) {
+    pub fn check_sentence(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize) {
         let _ = self.sender.send(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,
+            paragraph_id: paragraph_id.to_string(),
+            sentence_index,
         });
     }
 
@@ -65,6 +71,8 @@ pub fn spawn_grammar_actor(
                 let _ = resp_tx.send(GrammarCheckResponse {
                     sentence: req.sentence,
                     doc_offset: req.doc_offset,
+                    paragraph_id: req.paragraph_id,
+                    sentence_index: req.sentence_index,
                     errors,
                 });
                 repaint_ctx.request_repaint();
@@ -126,6 +134,8 @@ pub fn spawn_grammar_actor_with_loader(
                 let _ = resp_tx.send(GrammarCheckResponse {
                     sentence: req.sentence,
                     doc_offset: req.doc_offset,
+                    paragraph_id: req.paragraph_id,
+                    sentence_index: req.sentence_index,
                     errors,
                 });
                 repaint_ctx.request_repaint();

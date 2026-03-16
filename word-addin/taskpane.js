@@ -1,17 +1,22 @@
 /* NorskTale Word Add-in bridge.
  *
  * ⚠️ DO NOT send full document text. NEVER hash full document.
- * Only send the current sentence. See plan for design rationale.
+ * Send changed PARAGRAPHS only. Rust side handles sentence splitting + hashing.
  *
  * Strategy:
  * - Typing: detect current sentence from paragraph, send sentence + word + cursor
- * - Cursor move: send sentence + word at new position
- * - Paste/undo: scan for changed sentence hashes, send only changed (TODO: step 5)
- * - Sentence split: detect period typed, send both new sentences (TODO: step 6)
+ * - Paragraph changed/added: send full paragraph text (Rust splits into sentences)
+ * - Paragraph deleted: send paragraph IDs (Rust clears errors)
+ * - Track: paragraphMap[uniqueLocalId] = hash of paragraph text
  */
 
-const BRIDGE_URL = "https://localhost:3000";
+var BRIDGE_URL = "https://localhost:3000";
 var statusEl;
+var SENTENCE_DELIMITERS = /[.!?:]/;
+var lastSentKey = "";
+
+// Paragraph tracking: paragraphId -> hash of full paragraph text
+var paragraphMap = {};
 
 Office.onReady(function (info) {
     statusEl = document.getElementById("status");
@@ -24,8 +29,13 @@ Office.onReady(function (info) {
             onSelectionChanged
         );
 
-        // Poll for reply commands from Rust app
+        setStatus("Starter skanning...", "ok");
+        initialScan();
+
         setInterval(pollReplies, 100);
+
+        // Light check every 5s: if paragraph count changed, rescan
+        setInterval(checkParagraphCount, 5000);
     } else {
         setStatus("Ikke Word", "err");
     }
@@ -38,90 +48,239 @@ function setStatus(msg, cls) {
     }
 }
 
-// --- Step 1: Sentence detection ---
+// ── Hashing ──
 
-var SENTENCE_DELIMITERS = /[.!?:]/;
+function hashString(str) {
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < str.length; i++) {
+        hash ^= str.charCodeAt(i);
+        hash = (hash * 0x01000193) >>> 0;
+    }
+    return hash;
+}
 
-/**
- * Find the current sentence from paragraph text and cursor offset within it.
- * Returns { sentence, wordAtCursor, sentenceStartInPara }
- */
-function detectSentence(paraText, cursorOffsetInPara) {
-    // Find sentence start: scan backwards from cursor for delimiter
-    var sentStart = 0;
-    for (var i = cursorOffsetInPara - 1; i >= 0; i--) {
-        if (SENTENCE_DELIMITERS.test(paraText[i])) {
-            sentStart = i + 1;
-            // Skip whitespace after delimiter
-            while (sentStart < paraText.length && paraText[sentStart] === " ") {
-                sentStart++;
+// ── Initial scan: hash all paragraphs, send all to Rust ──
+
+function initialScan() {
+    // Clear all old errors on Rust side (new document or reload)
+    fetch(BRIDGE_URL + "/reset", { method: "POST" }).catch(function () {});
+    paragraphMap = {};
+
+    Word.run(function (ctx) {
+        var paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        return ctx.sync().then(function () {
+            var items = paragraphs.items;
+            for (var i = 0; i < items.length; i++) {
+                items[i].load("text,uniqueLocalId");
             }
-            break;
-        }
-    }
+            return ctx.sync().then(function () {
+                var changed = [];
+                for (var i = 0; i < items.length; i++) {
+                    var paraId = items[i].uniqueLocalId;
+                    var paraText = items[i].text;
+                    if (paraText.trim().length < 2) continue; // skip empty
+                    var h = hashString(paraText);
+                    paragraphMap[paraId] = h;
+                    changed.push({ paragraphId: paraId, text: paraText });
+                }
 
-    // Find sentence end: scan forwards from cursor for delimiter or end of para
-    var sentEnd = paraText.length;
-    for (var i = cursorOffsetInPara; i < paraText.length; i++) {
-        if (SENTENCE_DELIMITERS.test(paraText[i])) {
-            sentEnd = i + 1; // include the delimiter
-            break;
-        }
-    }
+                setStatus("Skannet " + items.length + " avsnitt, sender " + changed.length, "ok");
 
-    var sentence = paraText.substring(sentStart, sentEnd).trim();
+                if (changed.length > 0) {
+                    sendChangedParagraphs(changed);
+                }
 
-    // Find word at cursor
-    var wordStart = cursorOffsetInPara;
-    while (wordStart > 0 && isWordChar(paraText[wordStart - 1])) {
-        wordStart--;
-    }
-    var wordEnd = cursorOffsetInPara;
-    while (wordEnd < paraText.length && isWordChar(paraText[wordEnd])) {
-        wordEnd++;
-    }
-    var wordAtCursor = paraText.substring(wordStart, wordEnd);
-
-    return {
-        sentence: sentence,
-        wordAtCursor: wordAtCursor,
-        sentenceStartInPara: sentStart
-    };
+                registerParagraphEvents(ctx);
+                return ctx.sync();
+            });
+        });
+    }).catch(function (err) {
+        setStatus("Skann feilet: " + (err.message || String(err)), "err");
+    });
 }
 
-function isWordChar(ch) {
-    if (!ch) return false;
-    var code = ch.charCodeAt(0);
-    // a-z, A-Z, 0-9, æøåÆØÅ, hyphen, apostrophe
-    return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) ||
-           (code >= 48 && code <= 57) || ch === "-" || ch === "'" ||
-           ch === "æ" || ch === "ø" || ch === "å" ||
-           ch === "Æ" || ch === "Ø" || ch === "Å";
+// ── Paragraph events ──
+
+function registerParagraphEvents(ctx) {
+    ctx.document.onParagraphChanged.add(onParagraphChanged);
+    ctx.document.onParagraphAdded.add(onParagraphAdded);
+    ctx.document.onParagraphDeleted.add(onParagraphDeleted);
 }
 
-// --- Event handler ---
+function onParagraphChanged(event) {
+    Word.run(function (ctx) {
+        var ids = event.uniqueLocalIds;
+        if (!ids || ids.length === 0) return ctx.sync();
 
-var lastSentKey = "";
+        var paragraphs = [];
+        for (var i = 0; i < ids.length; i++) {
+            var para = ctx.document.getParagraphByUniqueLocalId(ids[i]);
+            para.load("text,uniqueLocalId");
+            paragraphs.push(para);
+        }
+        return ctx.sync().then(function () {
+            var changed = [];
+            for (var i = 0; i < paragraphs.length; i++) {
+                var paraId = paragraphs[i].uniqueLocalId;
+                var paraText = paragraphs[i].text;
+                var newHash = hashString(paraText);
+                var oldHash = paragraphMap[paraId];
+
+                if (oldHash !== newHash) {
+                    paragraphMap[paraId] = newHash;
+                    changed.push({ paragraphId: paraId, text: paraText });
+                }
+            }
+            if (changed.length > 0) {
+                sendChangedParagraphs(changed);
+            }
+        });
+    }).catch(function () {});
+}
+
+function onParagraphAdded(event) {
+    setStatus("Para added — rescanning...", "ok");
+    rescanAll();
+}
+
+function onParagraphDeleted(event) {
+    setStatus("Para deleted — rescanning...", "ok");
+    rescanAll();
+}
+
+/// Smart rescan: compare all current paragraphs against paragraphMap.
+/// Only sends changed/new paragraphs. Detects deleted paragraphs.
+function rescanAll() {
+    Word.run(function (ctx) {
+        var paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        return ctx.sync().then(function () {
+            var items = paragraphs.items;
+            for (var i = 0; i < items.length; i++) {
+                items[i].load("text,uniqueLocalId");
+            }
+            return ctx.sync().then(function () {
+                var changed = [];
+                var currentIds = {};
+                var deletedIds = [];
+
+                for (var i = 0; i < items.length; i++) {
+                    var paraId = items[i].uniqueLocalId;
+                    var paraText = items[i].text;
+                    currentIds[paraId] = true;
+
+                    if (paraText.trim().length < 2) {
+                        // Empty now — if it WAS in map, treat as deleted
+                        if (paragraphMap[paraId] !== undefined) {
+                            deletedIds.push(paraId);
+                            delete paragraphMap[paraId];
+                        }
+                        continue;
+                    }
+
+                    var newHash = hashString(paraText);
+                    var oldHash = paragraphMap[paraId];
+
+                    if (oldHash !== newHash) {
+                        // New or changed paragraph
+                        paragraphMap[paraId] = newHash;
+                        changed.push({ paragraphId: paraId, text: paraText });
+                    }
+                }
+
+                // Find deleted paragraphs (in paragraphMap but not in current doc)
+                for (var id in paragraphMap) {
+                    if (!currentIds[id]) {
+                        deletedIds.push(id);
+                        delete paragraphMap[id];
+                    }
+                }
+
+                var mapSize = Object.keys(paragraphMap).length;
+                setStatus("Rescan: " + changed.length + " endret, " + deletedIds.length + " slettet (doc=" + items.length + " map=" + mapSize + ")", "ok");
+
+                if (changed.length > 0) {
+                    sendChangedParagraphs(changed);
+                }
+                if (deletedIds.length > 0) {
+                    fetch(BRIDGE_URL + "/deleted", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ paragraphIds: deletedIds })
+                    }).catch(function () {});
+                }
+            });
+        });
+    }).catch(function () {});
+}
+
+// Light paragraph count check — only loads count, not text
+function checkParagraphCount() {
+    Word.run(function (ctx) {
+        var paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        return ctx.sync().then(function () {
+            var currentCount = paragraphs.items.length;
+            var knownCount = Object.keys(paragraphMap).length;
+            if (currentCount !== knownCount) {
+                rescanAll();
+            }
+        });
+    }).catch(function () {});
+}
+
+// Debounced rescan — waits 1 second after last trigger to avoid repeated rescans
+var rescanTimer = null;
+function scheduleRescan() {
+    if (rescanTimer) clearTimeout(rescanTimer);
+    rescanTimer = setTimeout(function () {
+        rescanTimer = null;
+        rescanAll();
+    }, 1000);
+}
+
+var totalSent = 0;
+function sendChangedParagraphs(changed) {
+    totalSent += changed.length;
+    fetch(BRIDGE_URL + "/changed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            type: "changed",
+            paragraphs: changed
+        })
+    }).then(function() {
+        setStatus("Sendt " + totalSent + " avsnitt", "ok");
+    }).catch(function (err) {
+        setStatus("Feil: " + (err.message || err), "err");
+    });
+}
+
+// ── Typing / cursor move ──
 
 function onSelectionChanged() {
     Word.run(function (ctx) {
         var sel = ctx.document.getSelection();
         var para = sel.paragraphs.getFirst();
-        // Get range from paragraph start to cursor to measure cursor offset in paragraph
         var paraRange = para.getRange("Start");
         var beforeCursor = paraRange.expandTo(sel.getRange("Start"));
         sel.load("start");
-        para.load("text");
+        para.load("text,uniqueLocalId");
         beforeCursor.load("text");
         return ctx.sync().then(function () {
             var paraText = para.text;
             var cursorInPara = beforeCursor.text.length;
-
             if (cursorInPara > paraText.length) cursorInPara = paraText.length;
+
+            // Check if current paragraph is unknown (new from paste) — trigger debounced rescan
+            var paraId = para.uniqueLocalId;
+            if (paragraphMap[paraId] === undefined) {
+                scheduleRescan();
+            }
 
             var result = detectSentence(paraText, cursorInPara);
 
-            // Dedup: don't send if nothing changed
             var key = result.sentence + "|" + result.wordAtCursor + "|" + sel.start;
             if (key === lastSentKey) return;
             lastSentKey = key;
@@ -136,7 +295,7 @@ function onSelectionChanged() {
                     sentence: result.sentence,
                     word: result.wordAtCursor,
                     cursorStart: sel.start,
-                    sentenceStart: sel.start - cursorInPara + result.sentenceStartInPara
+                    paragraphId: para.uniqueLocalId
                 })
             }).catch(function () {
                 setStatus("Kan ikke nå NorskTale-app", "err");
@@ -145,7 +304,45 @@ function onSelectionChanged() {
     }).catch(function () {});
 }
 
-// --- Reply polling (kept from before) ---
+function detectSentence(paraText, cursorOffsetInPara) {
+    var sentStart = 0;
+    for (var i = cursorOffsetInPara - 1; i >= 0; i--) {
+        if (SENTENCE_DELIMITERS.test(paraText[i])) {
+            sentStart = i + 1;
+            while (sentStart < paraText.length && paraText[sentStart] === " ") sentStart++;
+            break;
+        }
+    }
+
+    var sentEnd = paraText.length;
+    for (var i = cursorOffsetInPara; i < paraText.length; i++) {
+        if (SENTENCE_DELIMITERS.test(paraText[i])) {
+            sentEnd = i + 1;
+            break;
+        }
+    }
+
+    var sentence = paraText.substring(sentStart, sentEnd).trim();
+
+    var wordStart = cursorOffsetInPara;
+    while (wordStart > 0 && isWordChar(paraText[wordStart - 1])) wordStart--;
+    var wordEnd = cursorOffsetInPara;
+    while (wordEnd < paraText.length && isWordChar(paraText[wordEnd])) wordEnd++;
+    var wordAtCursor = paraText.substring(wordStart, wordEnd);
+
+    return { sentence: sentence, wordAtCursor: wordAtCursor };
+}
+
+function isWordChar(ch) {
+    if (!ch) return false;
+    var code = ch.charCodeAt(0);
+    return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) ||
+           (code >= 48 && code <= 57) || ch === "-" || ch === "'" ||
+           ch === "æ" || ch === "ø" || ch === "å" ||
+           ch === "Æ" || ch === "Ø" || ch === "Å";
+}
+
+// ── Reply polling ──
 
 function pollReplies() {
     fetch(BRIDGE_URL + "/reply")
@@ -153,7 +350,7 @@ function pollReplies() {
         .then(function (data) {
             if (!data || !data.action) return;
             if (data.action === "replace" && data.expected && data.text) {
-                doReplace(data.expected, data.text);
+                doReplace(data.expected, data.text, data.paragraphId);
             } else if (data.action === "replaceWord" && data.text) {
                 doReplaceCurrentWord(data.text);
             }
@@ -161,16 +358,28 @@ function pollReplies() {
         .catch(function () {});
 }
 
-function doReplace(expected, replacement) {
+function doReplace(expected, replacement, paragraphId) {
     Word.run(function (ctx) {
-        var results = ctx.document.body.search(expected, { matchCase: true });
-        results.load("items");
-        return ctx.sync().then(function () {
-            if (results.items.length > 0) {
-                results.items[0].insertText(replacement, "Replace");
-                return ctx.sync();
-            }
-        });
+        if (paragraphId) {
+            var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+            var results = para.search(expected, { matchCase: true });
+            results.load("items");
+            return ctx.sync().then(function () {
+                if (results.items.length > 0) {
+                    results.items[0].insertText(replacement, "Replace");
+                    return ctx.sync();
+                }
+            });
+        } else {
+            var results = ctx.document.body.search(expected, { matchCase: true });
+            results.load("items");
+            return ctx.sync().then(function () {
+                if (results.items.length > 0) {
+                    results.items[0].insertText(replacement, "Replace");
+                    return ctx.sync();
+                }
+            });
+        }
     }).catch(function () {});
 }
 

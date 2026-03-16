@@ -10,6 +10,8 @@ pub struct CursorContext {
     pub caret_pos: Option<(i32, i32)>,
     /// Character offset of the cursor in the document (for error range detection)
     pub cursor_doc_offset: Option<usize>,
+    /// Paragraph ID from Word Add-in (stable identifier for error tracking)
+    pub paragraph_id: String,
 }
 
 /// Abstraction for reading/writing text in the focused application.
@@ -87,6 +89,17 @@ pub trait TextBridge {
     /// `ends_with_punct`: whether the sentence ends with .!?
     /// `doc_char_len`: total document length in chars
     fn should_skip_sentence_grammar(&self, _cursor_off: usize, _sent_start: usize, _sent_end: usize, _ends_with_punct: bool, _doc_char_len: usize, _word_at_cursor: &str) -> bool { false }
+
+    /// Drain changed sentences detected by the bridge (e.g. Word Add-in paragraph events).
+    /// Default: empty (bridges that don't track sentence changes return nothing).
+    fn drain_changed_paragraphs(&self) -> Vec<word_addin::ChangedParagraph> { vec![] }
+
+    /// Drain deleted paragraph IDs detected by the bridge (e.g. Word Add-in paragraph delete events).
+    /// Default: empty (bridges that don't track paragraph deletions return nothing).
+    fn drain_deleted_paragraphs(&self) -> Vec<String> { vec![] }
+
+    /// Check if a reset was requested (new document opened). Default: false.
+    fn take_reset(&self) -> bool { false }
 }
 
 #[cfg(target_os = "windows")]
@@ -280,5 +293,6 @@ pub fn build_context(raw: &RawCursorText, caret_pos: Option<(i32, i32)>) -> Curs
         masked_sentence: masked,
         caret_pos,
         cursor_doc_offset: None,
+        paragraph_id: String::new(),
     }
 }

@@ -8,11 +8,11 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
-        if self.path == "/context":
+        if self.path in ("/context", "/changed", "/deleted", "/reset"):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             try:
-                req = urllib.request.Request(RUST_URL + "/context", data=body,
+                req = urllib.request.Request(RUST_URL + self.path, data=body,
                     headers={"Content-Type": "application/json"}, method="POST")
                 resp = urllib.request.urlopen(req, timeout=2)
                 result = resp.read()

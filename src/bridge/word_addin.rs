@@ -18,9 +18,25 @@ use std::time::{Duration, Instant};
 
 const PORT: u16 = 52525;
 
+/// A changed paragraph from the Word Add-in.
+/// Rust side splits into sentences and handles hashing.
+#[derive(Debug, Clone)]
+pub struct ChangedParagraph {
+    pub paragraph_id: String,
+    pub text: String,
+}
+
 pub struct WordAddinBridge {
     cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>>,
     reply_queue: Arc<Mutex<Vec<String>>>,
+    /// Reset flag — set when add-in sends /reset (new document or reload)
+    reset_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Changed sentences received from add-in (paragraph events).
+    /// Main thread picks these up for grammar checking.
+    changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>>,
+    /// Deleted paragraph IDs received from add-in.
+    /// Main thread drains these to remove errors for deleted paragraphs.
+    deleted_paragraphs: Arc<Mutex<Vec<String>>>,
 }
 
 impl WordAddinBridge {
@@ -30,9 +46,15 @@ impl WordAddinBridge {
         let cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>> =
             Arc::new(Mutex::new(None));
         let reply_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>> = Arc::new(Mutex::new(Vec::new()));
+        let deleted_paragraphs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let ctx_clone = Arc::clone(&cached_context);
         let reply_clone = Arc::clone(&reply_queue);
+        let changed_clone = Arc::clone(&changed_paragraphs);
+        let deleted_clone = Arc::clone(&deleted_paragraphs);
+        let reset_clone = Arc::clone(&reset_requested);
 
         std::thread::Builder::new()
             .name("word-addin-http".into())
@@ -52,10 +74,11 @@ impl WordAddinBridge {
                     if let Ok(stream) = stream {
                         let ctx = Arc::clone(&ctx_clone);
                         let reply = Arc::clone(&reply_clone);
-                        // Handle each request on a short-lived thread
-                        // (Word add-in sends ~2-10 requests/sec, this is fine)
+                        let changed = Arc::clone(&changed_clone);
+                        let deleted = Arc::clone(&deleted_clone);
+                        let reset = Arc::clone(&reset_clone);
                         std::thread::spawn(move || {
-                            handle_request(stream, &ctx, &reply);
+                            handle_request(stream, &ctx, &reply, &changed, &deleted, &reset);
                         });
                     }
                 }
@@ -65,6 +88,31 @@ impl WordAddinBridge {
         WordAddinBridge {
             cached_context,
             reply_queue,
+            reset_requested,
+            changed_paragraphs,
+            deleted_paragraphs,
+        }
+    }
+
+    /// Drain changed sentences received from add-in paragraph events.
+    /// Main thread calls this to get sentences for grammar checking.
+    pub fn drain_changed_paragraphs(&self) -> Vec<ChangedParagraph> {
+        if let Ok(mut lock) = self.changed_paragraphs.lock() {
+            std::mem::take(&mut *lock)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn take_reset(&self) -> bool {
+        self.reset_requested.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn drain_deleted_paragraphs(&self) -> Vec<String> {
+        if let Ok(mut lock) = self.deleted_paragraphs.lock() {
+            std::mem::take(&mut *lock)
+        } else {
+            Vec::new()
         }
     }
 
@@ -176,6 +224,18 @@ impl TextBridge for WordAddinBridge {
         self.push_reply(r#"{"action":"clearAllUnderlines"}"#.to_string());
         true
     }
+
+    fn drain_changed_paragraphs(&self) -> Vec<ChangedParagraph> {
+        self.drain_changed_paragraphs()
+    }
+
+    fn drain_deleted_paragraphs(&self) -> Vec<String> {
+        self.drain_deleted_paragraphs()
+    }
+
+    fn take_reset(&self) -> bool {
+        self.take_reset()
+    }
 }
 
 // ── HTTP handling ──
@@ -184,6 +244,9 @@ fn handle_request(
     mut stream: std::net::TcpStream,
     cached_context: &Arc<Mutex<Option<(CursorContext, Instant)>>>,
     reply_queue: &Arc<Mutex<Vec<String>>>,
+    changed_paragraphs: &Arc<Mutex<Vec<ChangedParagraph>>>,
+    deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
+    reset_requested: &Arc<std::sync::atomic::AtomicBool>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 
@@ -275,6 +338,45 @@ fn handle_request(
             let _ = stream.write_all(response.as_bytes());
         }
 
+        ("POST", "/changed") => {
+            // Parse changed sentences from paragraph events
+            if let Some(sentences) = parse_changed_json(&body) {
+                if let Ok(mut lock) = changed_paragraphs.lock() {
+                    lock.extend(sentences);
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
+                cors
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("POST", "/deleted") => {
+            // Parse deleted paragraph IDs: {"paragraphIds":["id1","id2"]}
+            if let Some(ids) = parse_deleted_json(&body) {
+                eprintln!("HTTP /deleted: {} paragraph IDs: {:?}", ids.len(), &ids[..ids.len().min(5)]);
+                if let Ok(mut lock) = deleted_paragraphs.lock() {
+                    lock.extend(ids);
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
+                cors
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("POST", "/reset") => {
+            reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("HTTP /reset: clearing all state");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
+                cors
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
         ("GET", "/ping") => {
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
@@ -296,6 +398,7 @@ fn parse_context_json(body: &str) -> Option<CursorContext> {
     let sentence = extract_json_string(body, "sentence").unwrap_or_default();
     let word = extract_json_string(body, "word").unwrap_or_default();
     let cursor_start = extract_json_number(body, "cursorStart").unwrap_or(0);
+    let paragraph_id = extract_json_string(body, "paragraphId").unwrap_or_default();
 
     // Build masked_sentence: replace the word with <mask> in the sentence.
     // The BERT completion pipeline requires this.
@@ -322,6 +425,7 @@ fn parse_context_json(body: &str) -> Option<CursorContext> {
         masked_sentence,
         caret_pos: None,
         cursor_doc_offset: Some(cursor_start),
+        paragraph_id,
     })
 }
 
@@ -382,4 +486,69 @@ fn escape_json(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Parse changed paragraphs from the add-in POST.
+/// JSON: { "type": "changed", "paragraphs": [{"paragraphId": "...", "text": "..."}] }
+fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
+    let arr_start = body.find("\"paragraphs\"")?;
+    let arr_body = &body[arr_start..];
+    let bracket_start = arr_body.find('[')?;
+    let bracket_end = arr_body.rfind(']')?;
+    let arr_content = &arr_body[bracket_start + 1..bracket_end];
+
+    let mut results = Vec::new();
+    let mut pos = 0;
+    while pos < arr_content.len() {
+        let obj_start = match arr_content[pos..].find('{') {
+            Some(s) => pos + s,
+            None => break,
+        };
+        let obj_end = match arr_content[obj_start..].find('}') {
+            Some(e) => obj_start + e + 1,
+            None => break,
+        };
+        let obj = &arr_content[obj_start..obj_end];
+
+        let paragraph_id = extract_json_string(obj, "paragraphId").unwrap_or_default();
+        let text = extract_json_string(obj, "text").unwrap_or_default();
+
+        if !text.is_empty() {
+            results.push(ChangedParagraph { paragraph_id, text });
+        }
+
+        pos = obj_end;
+    }
+
+    if results.is_empty() { None } else { Some(results) }
+}
+
+/// Parse deleted paragraph IDs from the add-in's POST.
+/// JSON: { "paragraphIds": ["id1", "id2"] }
+fn parse_deleted_json(body: &str) -> Option<Vec<String>> {
+    let arr_start = body.find("\"paragraphIds\"")?;
+    let arr_body = &body[arr_start..];
+    let bracket_start = arr_body.find('[')?;
+    let bracket_end = arr_body.rfind(']')?;
+    let arr_content = &arr_body[bracket_start + 1..bracket_end];
+
+    let mut results = Vec::new();
+    let mut pos = 0;
+    while pos < arr_content.len() {
+        let quote_start = match arr_content[pos..].find('"') {
+            Some(s) => pos + s,
+            None => break,
+        };
+        let quote_end = match arr_content[quote_start + 1..].find('"') {
+            Some(e) => quote_start + 1 + e,
+            None => break,
+        };
+        let id = &arr_content[quote_start + 1..quote_end];
+        if !id.is_empty() {
+            results.push(id.to_string());
+        }
+        pos = quote_end + 1;
+    }
+
+    if results.is_empty() { None } else { Some(results) }
 }
