@@ -3138,6 +3138,9 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Allow copying text from labels
+        ctx.style_mut(|s| s.interaction.selectable_labels = true);
+
         // Spawn grammar actor on first update — loads SWI-Prolog on its own thread
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
             self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(

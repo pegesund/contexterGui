@@ -14,6 +14,7 @@ var BRIDGE_URL = "https://localhost:3000";
 var statusEl;
 var SENTENCE_DELIMITERS = /[.!?:]/;
 var lastSentKey = "";
+var lastScanTime = 0;
 
 // Paragraph tracking: paragraphId -> hash of full paragraph text
 var paragraphMap = {};
@@ -28,6 +29,14 @@ Office.onReady(function (info) {
             Office.EventType.DocumentSelectionChanged,
             onSelectionChanged
         );
+
+        // Rescan when window gets focus (document switch between Word windows)
+        document.addEventListener("visibilitychange", function () {
+            if (!document.hidden) { initialScan(); }
+        });
+        window.addEventListener("focus", function () {
+            initialScan();
+        });
 
         setStatus("Starter skanning...", "ok");
         initialScan();
@@ -65,6 +74,7 @@ function initialScan() {
     // Clear all old errors on Rust side (new document or reload)
     fetch(BRIDGE_URL + "/reset", { method: "POST" }).catch(function () {});
     paragraphMap = {};
+    lastScanTime = Date.now();
 
     Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
@@ -230,6 +240,37 @@ function checkParagraphCount() {
     }).catch(function () {});
 }
 
+// Debounced document change check — detects if a new document was opened
+var docCheckTimer = null;
+function scheduleDocCheck() {
+    if (docCheckTimer) return; // already scheduled
+    docCheckTimer = setTimeout(function () {
+        docCheckTimer = null;
+        Word.run(function (ctx) {
+            var paragraphs = ctx.document.body.paragraphs;
+            paragraphs.load("items");
+            return ctx.sync().then(function () {
+                var items = paragraphs.items;
+                for (var i = 0; i < items.length; i++) {
+                    items[i].load("uniqueLocalId");
+                }
+                return ctx.sync().then(function () {
+                    // Count how many current paragraphs are known
+                    var known = 0;
+                    for (var i = 0; i < items.length; i++) {
+                        if (paragraphMap[items[i].uniqueLocalId] !== undefined) known++;
+                    }
+                    // If less than half are known, it's a new document
+                    if (items.length > 0 && known < items.length / 2) {
+                        setStatus("Nytt dokument — skanner...", "ok");
+                        initialScan();
+                    }
+                });
+            });
+        }).catch(function () {});
+    }, 500);
+}
+
 // Debounced rescan — waits 1 second after last trigger to avoid repeated rescans
 var rescanTimer = null;
 function scheduleRescan() {
@@ -272,6 +313,17 @@ function onSelectionChanged() {
             var paraText = para.text;
             var cursorInPara = beforeCursor.text.length;
             if (cursorInPara > paraText.length) cursorInPara = paraText.length;
+
+            // Periodic rescan: if enough time passed since last scan, rescan.
+            // This catches document switches — the other doc's add-in reset Rust,
+            // so our paragraphs are no longer known there.
+            var paraId = para.uniqueLocalId;
+            var now = Date.now();
+            if (now - lastScanTime > 10000) { // 10 seconds since last scan
+                lastScanTime = now;
+                initialScan();
+                return; // skip the rest, initialScan handles everything
+            }
 
             // Check if current paragraph is unknown (new from paste) — trigger debounced rescan
             var paraId = para.uniqueLocalId;
