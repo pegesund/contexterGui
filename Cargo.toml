@@ -10,6 +10,8 @@ anyhow = "1"
 libloading = "0.8"
 nostos-cognio = { path = "../contexter-repo/nostos-cognio" }
 mtag = { package = "mtag-rs", path = "../rustSpell/mtag-rs" }
+rustls = "0.23"
+rustls-pemfile = "2"
 cpal = "0.15"
 rubato = "0.14"
 hound = "3.5"

@@ -30,14 +30,6 @@ Office.onReady(function (info) {
             onSelectionChanged
         );
 
-        // Rescan when window gets focus (document switch between Word windows)
-        document.addEventListener("visibilitychange", function () {
-            if (!document.hidden) { initialScan(); }
-        });
-        window.addEventListener("focus", function () {
-            initialScan();
-        });
-
         setStatus("Starter skanning...", "ok");
         initialScan();
 
@@ -70,7 +62,10 @@ function hashString(str) {
 
 // ── Initial scan: hash all paragraphs, send all to Rust ──
 
+var scanInProgress = false;
 function initialScan() {
+    if (scanInProgress) return;
+    scanInProgress = true;
     // Clear all old errors on Rust side (new document or reload)
     fetch(BRIDGE_URL + "/reset", { method: "POST" }).catch(function () {});
     paragraphMap = {};
@@ -102,10 +97,12 @@ function initialScan() {
                 }
 
                 registerParagraphEvents(ctx);
+                scanInProgress = false;
                 return ctx.sync();
             });
         });
     }).catch(function (err) {
+        scanInProgress = false;
         setStatus("Skann feilet: " + (err.message || String(err)), "err");
     });
 }

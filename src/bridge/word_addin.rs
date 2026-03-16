@@ -1,11 +1,11 @@
-//! Word Add-in bridge via localhost HTTP.
+//! Word Add-in bridge via localhost HTTPS.
 //!
-//! A Word Add-in (JavaScript) runs inside Word's process and POSTs
-//! text context to a tiny HTTP server on localhost. This bridge
-//! implements TextBridge by reading cached context from those POSTs.
+//! Serves the Word Add-in static files (taskpane.html, taskpane.js) AND
+//! handles API requests — all over HTTPS on a single port.
+//! No Python proxy needed.
 //!
 //! Architecture:
-//!   Word Add-in → POST /context → HTTP thread → Arc<Mutex<CursorContext>>
+//!   Word Add-in → POST /context → HTTPS thread → Arc<Mutex<CursorContext>>
 //!   Rust main   → read_context() → reads cache (instant, never blocks)
 //!   Rust main   → replace_word() → pushes to reply queue
 //!   Word Add-in → GET /reply → pops from reply queue → applies in Word
@@ -15,8 +15,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
-const PORT: u16 = 52525;
+const PORT: u16 = 3000;
 
 /// A changed paragraph from the Word Add-in.
 /// Rust side splits into sentences and handles hashing.
@@ -57,28 +58,55 @@ impl WordAddinBridge {
         let reset_clone = Arc::clone(&reset_requested);
 
         std::thread::Builder::new()
-            .name("word-addin-http".into())
+            .name("word-addin-https".into())
             .spawn(move || {
+                // Load TLS certs from word-addin/ directory
+                let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
+                let cert_path = addin_dir.join("cert.pem");
+                let key_path = addin_dir.join("key.pem");
+
+                let tls_config = load_tls_config(&cert_path, &key_path);
+                let tls_acceptor = tls_config.map(|cfg| Arc::new(cfg));
+
+                if tls_acceptor.is_some() {
+                    eprintln!("Word Add-in HTTPS bridge listening on port {}", PORT);
+                } else {
+                    eprintln!("Word Add-in HTTP bridge (no TLS certs) on port {}", PORT);
+                }
+
                 let listener = match TcpListener::bind(format!("127.0.0.1:{}", PORT)) {
-                    Ok(l) => {
-                        eprintln!("Word Add-in HTTP bridge listening on port {}", PORT);
-                        l
-                    }
+                    Ok(l) => l,
                     Err(e) => {
                         eprintln!("Word Add-in: failed to bind port {}: {}", PORT, e);
                         return;
                     }
                 };
 
+                // Cache static files
+                let html = std::fs::read_to_string(addin_dir.join("taskpane.html")).unwrap_or_default();
+                let js = std::fs::read_to_string(addin_dir.join("taskpane.js")).unwrap_or_default();
+
                 for stream in listener.incoming() {
-                    if let Ok(stream) = stream {
+                    if let Ok(tcp_stream) = stream {
                         let ctx = Arc::clone(&ctx_clone);
                         let reply = Arc::clone(&reply_clone);
                         let changed = Arc::clone(&changed_clone);
                         let deleted = Arc::clone(&deleted_clone);
                         let reset = Arc::clone(&reset_clone);
+                        let tls = tls_acceptor.clone();
+                        let html = html.clone();
+                        let js = js.clone();
                         std::thread::spawn(move || {
-                            handle_request(stream, &ctx, &reply, &changed, &deleted, &reset);
+                            if let Some(tls_cfg) = tls {
+                                let acceptor = rustls::ServerConnection::new(tls_cfg);
+                                if let Ok(acceptor) = acceptor {
+                                    let mut tls_stream = rustls::StreamOwned::new(acceptor, tcp_stream);
+                                    handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &html, &js);
+                                }
+                            } else {
+                                let mut stream = tcp_stream;
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &html, &js);
+                            }
                         });
                     }
                 }
@@ -240,56 +268,61 @@ impl TextBridge for WordAddinBridge {
 
 // ── HTTP handling ──
 
-fn handle_request(
-    mut stream: std::net::TcpStream,
+fn handle_request_rw<S: Read + Write>(
+    stream: &mut S,
     cached_context: &Arc<Mutex<Option<(CursorContext, Instant)>>>,
     reply_queue: &Arc<Mutex<Vec<String>>>,
     changed_paragraphs: &Arc<Mutex<Vec<ChangedParagraph>>>,
     deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
     reset_requested: &Arc<std::sync::atomic::AtomicBool>,
+    static_html: &str,
+    static_js: &str,
 ) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-
-    let mut reader = BufReader::new(&stream);
-
-    // Read request line
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
+    // Read headers byte by byte until we find \r\n\r\n
+    let mut header_buf = Vec::with_capacity(4096);
+    let mut single = [0u8; 1];
+    loop {
+        match stream.read(&mut single) {
+            Ok(1) => {
+                header_buf.push(single[0]);
+                if header_buf.len() >= 4 && &header_buf[header_buf.len()-4..] == b"\r\n\r\n" {
+                    break;
+                }
+                if header_buf.len() > 8192 { return; } // too long
+            }
+            _ => return,
+        }
     }
+    let header_str = String::from_utf8_lossy(&header_buf).to_string();
 
-    // Parse method and path
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    // Parse request line
+    let first_line = header_str.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
         return;
     }
     let method = parts[0];
     let path = parts[1];
 
-    // Read headers to get Content-Length
-    let mut content_length: usize = 0;
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header).is_err() {
-            return;
-        }
-        let trimmed = header.trim();
-        if trimmed.is_empty() {
-            break; // End of headers
-        }
-        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
-            content_length = val.trim().parse().unwrap_or(0);
-        }
-        if let Some(val) = trimmed.strip_prefix("content-length:") {
-            content_length = val.trim().parse().unwrap_or(0);
-        }
-    }
+    // Parse Content-Length from headers
+    let content_length: usize = header_str.lines()
+        .find(|l| l.to_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
 
-    // Read body
+    // Read body based on Content-Length
     let body = if content_length > 0 {
-        let mut buf = vec![0u8; content_length];
-        let _ = reader.read_exact(&mut buf);
-        String::from_utf8_lossy(&buf).to_string()
+        let mut body_buf = vec![0u8; content_length];
+        let mut read = 0;
+        while read < content_length {
+            match stream.read(&mut body_buf[read..]) {
+                Ok(0) => break,
+                Ok(n) => read += n,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&body_buf[..read]).to_string()
     } else {
         String::new()
     };
@@ -385,11 +418,46 @@ fn handle_request(
             let _ = stream.write_all(response.as_bytes());
         }
 
+        ("GET", "/taskpane.html") | ("GET", "/") => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                cors, static_html.len(), static_html
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("GET", "/taskpane.js") => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                cors, static_js.len(), static_js
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
         _ => {
             let response = format!("HTTP/1.1 404 Not Found\r\n{}\r\n", cors);
             let _ = stream.write_all(response.as_bytes());
         }
     }
+}
+
+/// Load TLS config from cert/key PEM files. Returns None if files missing.
+fn load_tls_config(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<rustls::ServerConfig> {
+    let cert_file = std::fs::File::open(cert_path).ok()?;
+    let key_file = std::fs::File::open(key_path).ok()?;
+
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .filter_map(|r| r.ok())
+        .collect();
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+        .ok()??;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .ok()?;
+
+    Some(config)
 }
 
 /// Parse the JSON context from the Word Add-in POST body.
