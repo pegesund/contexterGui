@@ -69,6 +69,13 @@ impl AnyChecker {
         }
     }
 
+    fn check_sentence_full(&mut self, text: &str) -> nostos_cognio::grammar::types::CheckResult {
+        match self {
+            AnyChecker::Neo(c) => c.check_sentence_full(text),
+            AnyChecker::Swi(c) => c.check_sentence_full(text),
+        }
+    }
+
     fn fuzzy_lookup(&self, word: &str, max_distance: u32) -> Vec<(String, u32)> {
         match self {
             AnyChecker::Neo(c) => c.fuzzy_lookup(word, max_distance),
@@ -2506,12 +2513,7 @@ impl ContextApp {
                     // Grammar check (async via actor)
                     actor.check_sentence(sentence_text, 0, &p.paragraph_id, 0);
 
-                    // Spelling: queue each word
-                    for word in sentence_text.split_whitespace() {
-                        let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
-                        if clean.is_empty() || clean.len() < 2 { continue; }
-                        self.spelling_queue.push(SpellingQueueItem { word: clean.to_string(), sentence_ctx: sentence_text.clone(), paragraph_id: p.paragraph_id.clone() });
-                    }
+                    // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
                 }
 
                 // Store new sentence hashes for this paragraph
@@ -2586,51 +2588,73 @@ impl ContextApp {
             let sent_h = hash_str(&resp.sentence);
             self.processed_sentence_hashes.insert(sent_h); // Mark ALL sentences as processed
 
-            if resp.errors.is_empty() {
-                continue; // No errors to add
-            }
+            // Handle grammar errors
+            if !resp.errors.is_empty() {
+                for ge in &resp.errors {
+                    log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
+                }
 
-            for ge in &resp.errors {
-                log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
-            }
+                let errors_with_suggestions: Vec<_> = resp.errors.iter()
+                    .filter(|e| !e.suggestion.is_empty())
+                    .collect();
 
-            let errors_with_suggestions: Vec<_> = resp.errors.iter()
-                .filter(|e| !e.suggestion.is_empty())
-                .collect();
-
-            if !errors_with_suggestions.is_empty() {
-                for (i, ge) in errors_with_suggestions.iter().enumerate() {
-                    let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
-                    let corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
-                    if corrected.trim() == resp.sentence.trim() {
-                        continue;
+                if !errors_with_suggestions.is_empty() {
+                    for (i, ge) in errors_with_suggestions.iter().enumerate() {
+                        let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
+                        let corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
+                        if corrected.trim() == resp.sentence.trim() {
+                            continue;
+                        }
+                        log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
+                        self.writing_errors.push(WritingError {
+                            category: ErrorCategory::Grammar,
+                            word: resp.sentence.to_string(),
+                            suggestion: corrected,
+                            explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
+                            rule_name: ge.rule_name.clone(),
+                            sentence_context: resp.sentence.to_string(),
+                            doc_offset: resp.doc_offset,
+                            position: i,
+                            ignored: false,
+                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                        });
                     }
-                    log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
+                } else {
+                    let first = &resp.errors[0];
+                    log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
                     self.writing_errors.push(WritingError {
                         category: ErrorCategory::Grammar,
                         word: resp.sentence.to_string(),
-                        suggestion: corrected,
-                        explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
-                        rule_name: ge.rule_name.clone(),
+                        suggestion: String::new(),
+                        explanation: first.explanation.clone(),
+                        rule_name: first.rule_name.clone(),
                         sentence_context: resp.sentence.to_string(),
                         doc_offset: resp.doc_offset,
-                        position: i,
+                        position: 0,
                         ignored: false,
                         word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                     });
                 }
-            } else {
-                let first = &resp.errors[0];
-                log!("  Flagging without correction: '{}' ({})", first.word, first.rule_name);
+            }
+
+            // Handle unknown words (spelling errors) — from check_sentence_full
+            for unk in &resp.unknown_words {
+                let best = unk.spelling_suggestions.first().cloned().unwrap_or_default();
+                if best.is_empty() && unk.split_suggestions.is_empty() {
+                    // No suggestions at all — still flag as unknown
+                    log!("  Unknown word: '{}' (no suggestions)", unk.word);
+                } else {
+                    log!("  Spelling: '{}' → '{}' (from grammar checker)", unk.word, best);
+                }
                 self.writing_errors.push(WritingError {
-                    category: ErrorCategory::Grammar,
-                    word: resp.sentence.to_string(),
-                    suggestion: String::new(),
-                    explanation: first.explanation.clone(),
-                    rule_name: first.rule_name.clone(),
+                    category: ErrorCategory::Spelling,
+                    word: unk.word.clone(),
+                    suggestion: best,
+                    explanation: format!("«{}» finnes ikke i ordboken.", unk.word),
+                    rule_name: "stavefeil".to_string(),
                     sentence_context: resp.sentence.to_string(),
                     doc_offset: resp.doc_offset,
-                    position: 0,
+                    position: unk.position,
                     ignored: false,
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                 });

@@ -9,7 +9,7 @@
 
 use std::sync::mpsc;
 
-use nostos_cognio::grammar::types::GrammarError;
+use nostos_cognio::grammar::types::{GrammarError, UnknownWord, CompoundCandidate};
 
 use crate::AnyChecker;
 
@@ -21,13 +21,15 @@ pub struct GrammarCheckRequest {
     pub sentence_index: usize,
 }
 
-/// Result sent back from the grammar actor
+/// Result sent back from the grammar actor — full check_sentence_full output.
 pub struct GrammarCheckResponse {
     pub sentence: String,
     pub doc_offset: usize,
     pub paragraph_id: String,
     pub sentence_index: usize,
     pub errors: Vec<GrammarError>,
+    pub unknown_words: Vec<UnknownWord>,
+    pub compound_candidates: Vec<CompoundCandidate>,
 }
 
 /// Handle to communicate with the grammar actor
@@ -67,13 +69,15 @@ pub fn spawn_grammar_actor(
         .spawn(move || {
             let mut checker = checker;
             while let Ok(req) = req_rx.recv() {
-                let errors = checker.check_sentence(&req.sentence);
+                let result = checker.check_sentence_full(&req.sentence);
                 let _ = resp_tx.send(GrammarCheckResponse {
                     sentence: req.sentence,
                     doc_offset: req.doc_offset,
                     paragraph_id: req.paragraph_id,
                     sentence_index: req.sentence_index,
-                    errors,
+                    errors: result.errors,
+                    unknown_words: result.unknown_words,
+                    compound_candidates: result.compound_candidates,
                 });
                 repaint_ctx.request_repaint();
             }
@@ -130,13 +134,15 @@ pub fn spawn_grammar_actor_with_loader(
 
             let mut checker = checker;
             while let Ok(req) = req_rx.recv() {
-                let errors = checker.check_sentence(&req.sentence);
+                let result = checker.check_sentence_full(&req.sentence);
                 let _ = resp_tx.send(GrammarCheckResponse {
                     sentence: req.sentence,
                     doc_offset: req.doc_offset,
                     paragraph_id: req.paragraph_id,
                     sentence_index: req.sentence_index,
-                    errors,
+                    errors: result.errors,
+                    unknown_words: result.unknown_words,
+                    compound_candidates: result.compound_candidates,
                 });
                 repaint_ctx.request_repaint();
             }
