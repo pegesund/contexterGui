@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::path::PathBuf;
 
-const PORT: u16 = 3000;
+const PORT: u16 = 52525;
 
 /// A changed paragraph from the Word Add-in.
 /// Rust side splits into sentences and handles hashing.
@@ -65,7 +65,8 @@ impl WordAddinBridge {
                 let cert_path = addin_dir.join("cert.pem");
                 let key_path = addin_dir.join("key.pem");
 
-                let tls_config = load_tls_config(&cert_path, &key_path);
+                // Only use TLS on port 3000 (direct HTTPS). On other ports, use plain HTTP (behind proxy).
+                let tls_config = if PORT == 3000 { load_tls_config(&cert_path, &key_path) } else { None };
                 let tls_acceptor = tls_config.map(|cfg| Arc::new(cfg));
 
                 if tls_acceptor.is_some() {
