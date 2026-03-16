@@ -14,6 +14,9 @@ var BRIDGE_URL = "https://localhost:3000";
 var statusEl;
 var SENTENCE_DELIMITERS = /[.!?:]/;
 var lastSentKey = "";
+// Unique document identifier — URL for saved docs, random ID for unsaved
+var documentId = (Office.context && Office.context.document && Office.context.document.url)
+    || ("unsaved-" + Math.random().toString(36).substring(2, 10));
 
 // Paragraph tracking: paragraphId -> hash of full paragraph text
 var paragraphMap = {};
@@ -63,7 +66,12 @@ function hashString(str) {
 
 function initialScan() {
     // Clear all old errors on Rust side (new document or reload)
-    fetch(BRIDGE_URL + "/reset", { method: "POST" }).catch(function () {});
+    var docName = (Office.context.document && Office.context.document.url) || "unsaved";
+    fetch(BRIDGE_URL + "/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documentName: docName })
+    }).catch(function () {});
     paragraphMap = {};
 
     Word.run(function (ctx) {
@@ -295,8 +303,16 @@ function onSelectionChanged() {
                     sentence: result.sentence,
                     word: result.wordAtCursor,
                     cursorStart: sel.start,
-                    paragraphId: para.uniqueLocalId
+                    paragraphId: para.uniqueLocalId,
+                    documentName: (Office.context.document && Office.context.document.url) || ("doc-" + para.uniqueLocalId)
                 })
+            }).then(function (resp) {
+                return resp.json();
+            }).then(function (data) {
+                if (data && data.status === "rescan") {
+                    setStatus("Byttet dokument — skanner...", "ok");
+                    initialScan();
+                }
             }).catch(function () {
                 setStatus("Kan ikke nå NorskTale-app", "err");
             });

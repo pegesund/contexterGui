@@ -32,6 +32,8 @@ pub struct WordAddinBridge {
     reply_queue: Arc<Mutex<Vec<String>>>,
     /// Reset flag — set when add-in sends /reset (new document or reload)
     reset_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Current document name — used to detect document switches
+    current_doc_name: Arc<Mutex<String>>,
     /// Changed sentences received from add-in (paragraph events).
     /// Main thread picks these up for grammar checking.
     changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>>,
@@ -50,12 +52,14 @@ impl WordAddinBridge {
         let changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>> = Arc::new(Mutex::new(Vec::new()));
         let deleted_paragraphs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let current_doc_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
         let ctx_clone = Arc::clone(&cached_context);
         let reply_clone = Arc::clone(&reply_queue);
         let changed_clone = Arc::clone(&changed_paragraphs);
         let deleted_clone = Arc::clone(&deleted_paragraphs);
         let reset_clone = Arc::clone(&reset_requested);
+        let doc_name_clone = Arc::clone(&current_doc_name);
 
         std::thread::Builder::new()
             .name("word-addin-https".into())
@@ -94,6 +98,7 @@ impl WordAddinBridge {
                         let changed = Arc::clone(&changed_clone);
                         let deleted = Arc::clone(&deleted_clone);
                         let reset = Arc::clone(&reset_clone);
+                        let doc_name = Arc::clone(&doc_name_clone);
                         let tls = tls_acceptor.clone();
                         let html = html.clone();
                         let js = js.clone();
@@ -102,11 +107,11 @@ impl WordAddinBridge {
                                 let acceptor = rustls::ServerConnection::new(tls_cfg);
                                 if let Ok(acceptor) = acceptor {
                                     let mut tls_stream = rustls::StreamOwned::new(acceptor, tcp_stream);
-                                    handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &html, &js);
+                                    handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &html, &js);
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &html, &js);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &html, &js);
                             }
                         });
                     }
@@ -117,6 +122,7 @@ impl WordAddinBridge {
         WordAddinBridge {
             cached_context,
             reply_queue,
+            current_doc_name,
             reset_requested,
             changed_paragraphs,
             deleted_paragraphs,
@@ -276,6 +282,7 @@ fn handle_request_rw<S: Read + Write>(
     changed_paragraphs: &Arc<Mutex<Vec<ChangedParagraph>>>,
     deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
     reset_requested: &Arc<std::sync::atomic::AtomicBool>,
+    current_doc_name: &Arc<Mutex<String>>,
     static_html: &str,
     static_js: &str,
 ) {
@@ -340,15 +347,44 @@ fn handle_request_rw<S: Read + Write>(
 
     match (method, path) {
         ("POST", "/context") => {
+            // Check if document changed — compare documentName
+            let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
+            if doc_name.is_empty() {
+                crate::log!("CONTEXT: no documentName in body (len={})", body.len());
+            }
+            let needs_rescan = if !doc_name.is_empty() {
+                if let Ok(mut current) = current_doc_name.lock() {
+                    if !current.is_empty() && *current != doc_name {
+                        // Different non-empty name — real document switch
+                        crate::log!("DOC SWITCH: '{}' → '{}' — requesting rescan", *current, doc_name);
+                        *current = doc_name;
+                        true
+                    } else {
+                        if current.is_empty() {
+                            crate::log!("DOC NAME SET: '{}'", doc_name);
+                        }
+                        *current = doc_name;
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
             // Parse JSON body → CursorContext
             if let Some(ctx) = parse_context_json(&body) {
                 if let Ok(mut lock) = cached_context.lock() {
                     *lock = Some((ctx, Instant::now()));
                 }
             }
+
+            let status = if needs_rescan { "rescan" } else { "ok" };
+            let resp_body = format!("{{\"status\":\"{}\"}}", status);
             let response = format!(
-                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
-                cors
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                cors, resp_body.len(), resp_body
             );
             let _ = stream.write_all(response.as_bytes());
         }
@@ -403,6 +439,14 @@ fn handle_request_rw<S: Read + Write>(
 
         ("POST", "/reset") => {
             reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Store document name from reset so we know which doc is active
+            let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
+            if !doc_name.is_empty() {
+                if let Ok(mut current) = current_doc_name.lock() {
+                    crate::log!("RESET from doc: '{}'", doc_name);
+                    *current = doc_name;
+                }
+            }
             eprintln!("HTTP /reset: clearing all state");
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
