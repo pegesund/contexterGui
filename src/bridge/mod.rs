@@ -71,6 +71,12 @@ pub trait TextBridge {
     /// Clear ALL error underlines in the document (cleanup on exit).
     fn clear_all_error_underlines(&self) -> bool { false }
 
+    /// Mark a word with red wavy underline by searching within a paragraph.
+    fn underline_word(&self, _word: &str, _paragraph_id: &str) -> bool { false }
+
+    /// Clear underline from a word by searching within a paragraph.
+    fn clear_underline_word(&self, _word: &str, _paragraph_id: &str) -> bool { false }
+
     // ── Per-bridge error scanning behavior ──
     // Each bridge controls WHEN spelling/grammar checks run.
     // Default: always check (safe for Word COM, Accessibility).

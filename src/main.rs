@@ -2658,6 +2658,10 @@ impl ContextApp {
                     ignored: false,
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                 });
+                // Underline the error word in Word
+                if let Some(b) = self.manager.effective_bridge() {
+                    b.underline_word(&unk.word, &resp.paragraph_id);
+                }
             }
         }
     }
@@ -3493,19 +3497,24 @@ impl eframe::App for ContextApp {
                             self.sync_error_underlines();
                         }
                     }
-                    // Check if cursor is on an underlined error word → switch to Grammatikk tab
-                    if let Some(cursor_off) = new_ctx.cursor_doc_offset {
-                        let hit = self.writing_errors.iter().enumerate().find(|(_, e)| {
-                            !e.ignored && e.underlined
-                                && cursor_off >= e.word_doc_start && cursor_off <= e.word_doc_end
-                        });
+                    // Check if cursor is on an error word → activate in Grammatikk tab
+                    let cursor_word = new_ctx.word.to_lowercase();
+                    {
+                        let hit = if !cursor_word.is_empty() {
+                            // Match by word text (works with add-in where doc offsets aren't available)
+                            self.writing_errors.iter().enumerate().find(|(_, e)| {
+                                !e.ignored && e.word.to_lowercase() == cursor_word
+                            })
+                        } else {
+                            None
+                        };
                         if let Some((idx, e)) = hit {
                             if self.focused_error_idx != Some(idx) {
-                                log!("Click hit: cursor={} → error idx={} '{}' range={}..{} rule={}",
-                                    cursor_off, idx, trunc(&e.explanation, 40),
-                                    e.word_doc_start, e.word_doc_end, e.rule_name);
+                                log!("Click hit: word='{}' → error idx={} '{}' rule={}",
+                                    cursor_word, idx, trunc(&e.explanation, 40), e.rule_name);
                             }
-                            // Don't auto-switch tab — let user stay on Innhold
+                            // Switch to Grammatikk tab when clicking on an error word
+                            self.selected_tab = 1;
                             if self.focused_error_idx != Some(idx) {
                                 self.focused_error_scroll_done = false;
                             }
@@ -3516,9 +3525,7 @@ impl eframe::App for ContextApp {
                             self.focused_error_set_time = Instant::now();
                         } else {
                             if self.focused_error_idx.is_some() {
-                                // Don't clear if recently set (e.g. by word-boundary spell check)
                                 if self.focused_error_set_time.elapsed() > Duration::from_millis(500) {
-                                    log!("Click miss: cursor={} (no underlined error at this offset)", cursor_off);
                                     self.focused_error_idx = None;
                                 }
                             }

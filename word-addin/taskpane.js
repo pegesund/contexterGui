@@ -369,6 +369,10 @@ function pollReplies() {
                 doReplace(data.expected, data.text, data.paragraphId);
             } else if (data.action === "replaceWord" && data.text) {
                 doReplaceCurrentWord(data.text);
+            } else if (data.action === "underline" && data.word) {
+                doUnderline(data.word, data.paragraphId);
+            } else if (data.action === "clearUnderline" && data.word) {
+                doClearUnderline(data.word, data.paragraphId);
             }
         })
         .catch(function () {});
@@ -396,6 +400,45 @@ function doReplace(expected, replacement, paragraphId) {
                 }
             });
         }
+    }).catch(function () {});
+}
+
+function doUnderline(word, paragraphId) {
+    Word.run(function (ctx) {
+        var searchScope;
+        if (paragraphId) {
+            searchScope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+        } else {
+            searchScope = ctx.document.body;
+        }
+        var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
+        results.load("items/font");
+        return ctx.sync().then(function () {
+            for (var i = 0; i < results.items.length; i++) {
+                results.items[i].font.underline = "Wave";
+                results.items[i].font.underlineColor = "red";
+            }
+            return ctx.sync();
+        });
+    }).catch(function () {});
+}
+
+function doClearUnderline(word, paragraphId) {
+    Word.run(function (ctx) {
+        var searchScope;
+        if (paragraphId) {
+            searchScope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+        } else {
+            searchScope = ctx.document.body;
+        }
+        var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
+        results.load("items/font");
+        return ctx.sync().then(function () {
+            for (var i = 0; i < results.items.length; i++) {
+                results.items[i].font.underline = "None";
+            }
+            return ctx.sync();
+        });
     }).catch(function () {});
 }
 

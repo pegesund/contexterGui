@@ -260,6 +260,24 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
+    fn underline_word(&self, word: &str, paragraph_id: &str) -> bool {
+        let json = format!(
+            r#"{{"action":"underline","word":"{}","paragraphId":"{}"}}"#,
+            escape_json(word), escape_json(paragraph_id)
+        );
+        self.push_reply(json);
+        true
+    }
+
+    fn clear_underline_word(&self, word: &str, paragraph_id: &str) -> bool {
+        let json = format!(
+            r#"{{"action":"clearUnderline","word":"{}","paragraphId":"{}"}}"#,
+            escape_json(word), escape_json(paragraph_id)
+        );
+        self.push_reply(json);
+        true
+    }
+
     fn drain_changed_paragraphs(&self) -> Vec<ChangedParagraph> {
         self.drain_changed_paragraphs()
     }
