@@ -75,6 +75,12 @@ function initialScan() {
     paragraphMap = {};
 
     Word.run(function (ctx) {
+        // Disable Word's built-in proofing — NorskTale handles spelling/grammar
+        try {
+            var bodyRange = ctx.document.body.getRange();
+            bodyRange.hasNoProofing = true;
+        } catch(e) { /* ignore if not supported */ }
+
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
@@ -370,7 +376,7 @@ function pollReplies() {
             } else if (data.action === "replaceWord" && data.text) {
                 doReplaceCurrentWord(data.text);
             } else if (data.action === "underline" && data.word) {
-                doUnderline(data.word, data.paragraphId);
+                doUnderline(data.word, data.paragraphId, data.color || "red");
             } else if (data.action === "clearUnderline" && data.word) {
                 doClearUnderline(data.word, data.paragraphId);
             }
@@ -403,7 +409,7 @@ function doReplace(expected, replacement, paragraphId) {
     }).catch(function () {});
 }
 
-function doUnderline(word, paragraphId) {
+function doUnderline(word, paragraphId, color) {
     Word.run(function (ctx) {
         var searchScope;
         if (paragraphId) {
@@ -416,7 +422,7 @@ function doUnderline(word, paragraphId) {
         return ctx.sync().then(function () {
             for (var i = 0; i < results.items.length; i++) {
                 results.items[i].font.underline = "Wave";
-                results.items[i].font.underlineColor = "red";
+                try { results.items[i].font.underlineColor = color || "#FF0000"; } catch(e) {}
             }
             return ctx.sync();
         });

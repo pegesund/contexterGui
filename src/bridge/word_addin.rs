@@ -260,10 +260,10 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
-    fn underline_word(&self, word: &str, paragraph_id: &str) -> bool {
+    fn underline_word(&self, word: &str, paragraph_id: &str, color: &str) -> bool {
         let json = format!(
-            r#"{{"action":"underline","word":"{}","paragraphId":"{}"}}"#,
-            escape_json(word), escape_json(paragraph_id)
+            r#"{{"action":"underline","word":"{}","paragraphId":"{}","color":"{}"}}"#,
+            escape_json(word), escape_json(paragraph_id), escape_json(color)
         );
         self.push_reply(json);
         true

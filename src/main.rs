@@ -2618,6 +2618,10 @@ impl ContextApp {
                             ignored: false,
                             word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                         });
+                        // Blue underline for grammar errors
+                        if let Some(b) = self.manager.effective_bridge() {
+                            b.underline_word(&ge.word, &resp.paragraph_id, "#0000FF");
+                        }
                     }
                 } else {
                     let first = &resp.errors[0];
@@ -2660,7 +2664,7 @@ impl ContextApp {
                 });
                 // Underline the error word in Word
                 if let Some(b) = self.manager.effective_bridge() {
-                    b.underline_word(&unk.word, &resp.paragraph_id);
+                    b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
                 }
             }
         }
