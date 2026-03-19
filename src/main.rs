@@ -1236,12 +1236,47 @@ impl ContextApp {
             return;
         }
 
-        // Skip punctuation-only, numbers, or words without alphabetic characters
+        // Skip punctuation-only, numbers, or words containing digits
         if clean.chars().all(|c| c.is_ascii_punctuation() || c.is_ascii_digit()) {
             return;
         }
         if !clean.chars().any(|c| c.is_alphabetic()) {
             return;
+        }
+        if clean.chars().any(|c| c.is_ascii_digit()) {
+            return;
+        }
+        // Skip email addresses
+        if clean.contains('@') {
+            return;
+        }
+        // Split on slash and check each part separately (oppdrag/prosjekt → oppdrag, prosjekt)
+        if clean.contains('/') {
+            for part in clean.split('/') {
+                let part = part.trim();
+                if !part.is_empty() && part.len() >= 2 {
+                    self.check_spelling(part, sentence_ctx, paragraph_id, doc_offset);
+                }
+            }
+            return;
+        }
+
+        // Skip capitalized words — likely proper nouns (Tekna, Oslo, etc.)
+        if word.trim().chars().next().map_or(false, |c| c.is_uppercase()) {
+            return;
+        }
+        // Skip words with apostrophe/symbol + Norwegian ending (api'er, pdf'en)
+        {
+            let separators = ['\'', '\u{00b4}', '\u{2019}', '\u{2018}', '\u{0060}', '-'];
+            let split = clean.char_indices().find(|(_, c)| separators.contains(c));
+            if let Some((byte_pos, sep_char)) = split {
+                let before = &clean[..byte_pos];
+                let after = &clean[byte_pos + sep_char.len_utf8()..];
+                let endings = ["er", "en", "ene", "ens", "et", "ets", "a"];
+                if before.len() >= 2 && endings.contains(&after) {
+                    return;
+                }
+            }
         }
 
         // Common modal verb misspellings — BERT can't distinguish "vil" vs "ville" in context
@@ -1269,7 +1304,7 @@ impl ContextApp {
         }
 
         // Phase 1: Dictionary lookups (immutable borrow on checker)
-        let found;
+        let mut found;
         let kt_gt_valid_alt: Option<String>;
         let consonant_alts: Vec<String>;
         let original_found;
@@ -1282,7 +1317,27 @@ impl ContextApp {
 
             found = analyzer.has_word(&clean);
             if !found {
-                log!("spell: '{}' NOT in dict (sentence: '{}')", clean, trunc(sentence_ctx, 50));
+                // Check if it's a valid compound word (e.g. maskinlæringsalgoritmene)
+                // Try splitting at every position and check if both parts are known
+                for i in 3..clean.len().saturating_sub(2) {
+                    let left = &clean[..i];
+                    let right = &clean[i..];
+                    // Allow 's' binding letter: maskinlæring-s-algoritmene
+                    if analyzer.has_word(left) && analyzer.has_word(right) {
+                        found = true;
+                        break;
+                    }
+                    if right.starts_with('s') && right.len() > 3 {
+                        let right_after_s = &right[1..];
+                        if analyzer.has_word(left) && analyzer.has_word(right_after_s) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    log!("spell: '{}' NOT in dict (sentence: '{}')", clean, trunc(sentence_ctx, 50));
+                }
             }
 
             // kt/gt confusion: check if alt form exists

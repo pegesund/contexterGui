@@ -106,6 +106,27 @@ pub fn spawn_grammar_actor_with_loader(
     std::thread::Builder::new()
         .name("grammar-actor".into())
         .spawn(move || {
+            // SWI-Prolog's libswipl depends on @rpath/libgmp.10.dylib.
+            // libswipl's rpath includes @executable_path/../Frameworks,
+            // so we symlink libgmp there (one level up from the binary).
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let frameworks_dir = exe_dir.join("../Frameworks").canonicalize()
+                .unwrap_or_else(|_| {
+                    let d = exe_dir.join("../Frameworks");
+                    let _ = std::fs::create_dir_all(&d);
+                    d
+                });
+            let gmp_link = frameworks_dir.join("libgmp.10.dylib");
+            let gmp_source = std::path::Path::new("/Applications/SWI-Prolog.app/Contents/Frameworks/libgmp.10.dylib");
+            if !gmp_link.exists() && gmp_source.exists() {
+                let _ = std::fs::create_dir_all(&frameworks_dir);
+                let _ = std::os::unix::fs::symlink(gmp_source, &gmp_link);
+                eprintln!("Grammar actor: symlinked libgmp to {:?}", gmp_link);
+            }
+
             // Load checker on THIS thread so SWI-Prolog stays on one thread
             let checker: AnyChecker = match nostos_cognio::grammar::swipl_checker::SwiGrammarChecker::new(
                 &swipl_path,
@@ -118,17 +139,9 @@ pub fn spawn_grammar_actor_with_loader(
                     AnyChecker::Swi(c)
                 }
                 Err(e) => {
-                    eprintln!("Grammar actor: SWI-Prolog failed ({}), trying neorusticus", e);
-                    match nostos_cognio::grammar::GrammarChecker::new(&dict_path, &compound_data) {
-                        Ok(c) => {
-                            eprintln!("Grammar actor: neorusticus loaded ({} clauses)", c.clause_count());
-                            AnyChecker::Neo(c)
-                        }
-                        Err(e2) => {
-                            eprintln!("Grammar actor: no checker available: {}", e2);
-                            return;
-                        }
-                    }
+                    eprintln!("FATAL: Grammar actor: SWI-Prolog failed to load: {}", e);
+                    eprintln!("SWI-Prolog is required. No fallback.");
+                    panic!("SWI-Prolog failed to load: {}", e);
                 }
             };
 

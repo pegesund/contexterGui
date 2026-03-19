@@ -537,11 +537,20 @@ fn load_native_tls(cert_path: &std::path::Path, key_path: &std::path::Path) -> O
     Some(acceptor)
 }
 
+/// Clean Word special characters from text.
+/// Word uses \u{000b} (vertical tab) for soft line breaks (Shift+Enter).
+fn clean_word_text(s: &str) -> String {
+    s.replace('\u{000b}', " ")
+     .replace('\u{0007}', "")   // bell (table cells)
+     .replace('\u{000c}', " ")  // form feed (page break)
+     .replace('\u{000d}', " ")  // carriage return
+}
+
 /// Parse the JSON context from the Word Add-in POST body.
 /// The add-in sends: { type, sentence, word, cursorStart, sentenceStart }
 fn parse_context_json(body: &str) -> Option<CursorContext> {
-    let sentence = extract_json_string(body, "sentence").unwrap_or_default();
-    let word = extract_json_string(body, "word").unwrap_or_default();
+    let sentence = clean_word_text(&extract_json_string(body, "sentence").unwrap_or_default());
+    let word = clean_word_text(&extract_json_string(body, "word").unwrap_or_default());
     let cursor_start = extract_json_number(body, "cursorStart").unwrap_or(0);
     let paragraph_id = extract_json_string(body, "paragraphId").unwrap_or_default();
 
@@ -656,7 +665,7 @@ fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
         let obj = &arr_content[obj_start..obj_end];
 
         let paragraph_id = extract_json_string(obj, "paragraphId").unwrap_or_default();
-        let text = extract_json_string(obj, "text").unwrap_or_default();
+        let text = clean_word_text(&extract_json_string(obj, "text").unwrap_or_default());
 
         if !text.is_empty() {
             results.push(ChangedParagraph { paragraph_id, text });
