@@ -427,7 +427,9 @@ fn handle_request_rw<S: Read + Write>(
                 if q.is_empty() {
                     "{}".to_string()
                 } else {
-                    q.remove(0)
+                    let j = q.remove(0);
+                    log_to_file(&format!("REPLY sending: {}", &j[..j.len().min(200)]));
+                    j
                 }
             } else {
                 "{}".to_string()

@@ -81,6 +81,10 @@ pub fn spawn_grammar_actor(
                 });
                 repaint_ctx.request_repaint();
             }
+            // Channel closed (app exiting). Do NOT drop the checker —
+            // SWI-Prolog's thread-local cleanup causes a segfault.
+            std::mem::forget(checker);
+            loop { std::thread::park(); }
         })
         .expect("Failed to spawn grammar actor");
 
@@ -159,6 +163,10 @@ pub fn spawn_grammar_actor_with_loader(
                 });
                 repaint_ctx.request_repaint();
             }
+            // Channel closed (app exiting). Do NOT drop the checker —
+            // SWI-Prolog's thread-local cleanup causes a segfault.
+            std::mem::forget(checker);
+            loop { std::thread::park(); }
         })
         .expect("Failed to spawn grammar actor");
 

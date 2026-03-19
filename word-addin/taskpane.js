@@ -388,7 +388,7 @@ function doReplace(expected, replacement, paragraphId) {
     Word.run(function (ctx) {
         if (paragraphId) {
             var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
-            var results = para.search(expected, { matchCase: true });
+            var results = para.search(expected, { matchCase: false });
             results.load("items");
             return ctx.sync().then(function () {
                 if (results.items.length > 0) {
@@ -397,7 +397,7 @@ function doReplace(expected, replacement, paragraphId) {
                 }
             });
         } else {
-            var results = ctx.document.body.search(expected, { matchCase: true });
+            var results = ctx.document.body.search(expected, { matchCase: false });
             results.load("items");
             return ctx.sync().then(function () {
                 if (results.items.length > 0) {
