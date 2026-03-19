@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::path::PathBuf;
 
-const PORT: u16 = 52525;
+const PORT: u16 = 3000;
 
 /// A changed paragraph from the Word Add-in.
 /// Rust side splits into sentences and handles hashing.
@@ -66,15 +66,18 @@ impl WordAddinBridge {
             .spawn(move || {
                 // Load TLS certs from word-addin/ directory
                 let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
-                let cert_path = addin_dir.join("cert.pem");
+                let cert_path = addin_dir.join("fullchain.pem");
                 let key_path = addin_dir.join("key.pem");
 
-                // Only use TLS on port 3000 (direct HTTPS). On other ports, use plain HTTP (behind proxy).
-                let tls_config = if PORT == 3000 { load_tls_config(&cert_path, &key_path) } else { None };
-                let tls_acceptor = tls_config.map(|cfg| Arc::new(cfg));
+                // Build native-tls acceptor (uses macOS SecureTransport)
+                let tls_acceptor = if PORT == 3000 {
+                    load_native_tls(&cert_path, &key_path)
+                } else {
+                    None
+                };
 
                 if tls_acceptor.is_some() {
-                    eprintln!("Word Add-in HTTPS bridge listening on port {}", PORT);
+                    eprintln!("Word Add-in HTTPS bridge (native-tls) listening on port {}", PORT);
                 } else {
                     eprintln!("Word Add-in HTTP bridge (no TLS certs) on port {}", PORT);
                 }
@@ -91,8 +94,12 @@ impl WordAddinBridge {
                 let html = std::fs::read_to_string(addin_dir.join("taskpane.html")).unwrap_or_default();
                 let js = std::fs::read_to_string(addin_dir.join("taskpane.js")).unwrap_or_default();
 
+                let tls_acceptor = tls_acceptor.map(Arc::new);
+
                 for stream in listener.incoming() {
                     if let Ok(tcp_stream) = stream {
+                        let peer = tcp_stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+                        log_to_file(&format!("TCP connection from {}", peer));
                         let ctx = Arc::clone(&ctx_clone);
                         let reply = Arc::clone(&reply_clone);
                         let changed = Arc::clone(&changed_clone);
@@ -103,11 +110,15 @@ impl WordAddinBridge {
                         let html = html.clone();
                         let js = js.clone();
                         std::thread::spawn(move || {
-                            if let Some(tls_cfg) = tls {
-                                let acceptor = rustls::ServerConnection::new(tls_cfg);
-                                if let Ok(acceptor) = acceptor {
-                                    let mut tls_stream = rustls::StreamOwned::new(acceptor, tcp_stream);
-                                    handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &html, &js);
+                            if let Some(ref acceptor) = tls {
+                                match acceptor.accept(tcp_stream) {
+                                    Ok(mut tls_stream) => {
+                                        log_to_file("TLS handshake OK");
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &html, &js);
+                                    }
+                                    Err(e) => {
+                                        log_to_file(&format!("TLS accept FAILED: {}", e));
+                                    }
                                 }
                             } else {
                                 let mut stream = tcp_stream;
@@ -323,6 +334,7 @@ fn handle_request_rw<S: Read + Write>(
 
     // Parse request line
     let first_line = header_str.lines().next().unwrap_or("");
+    log_to_file(&format!("Request: {}", first_line));
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
         return;
@@ -362,6 +374,9 @@ fn handle_request_rw<S: Read + Write>(
         let _ = stream.write_all(response.as_bytes());
         return;
     }
+
+    // Strip query string from path
+    let path = path.split('?').next().unwrap_or(path);
 
     match (method, path) {
         ("POST", "/context") => {
@@ -504,23 +519,22 @@ fn handle_request_rw<S: Read + Write>(
     }
 }
 
-/// Load TLS config from cert/key PEM files. Returns None if files missing.
-fn load_tls_config(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<rustls::ServerConfig> {
-    let cert_file = std::fs::File::open(cert_path).ok()?;
-    let key_file = std::fs::File::open(key_path).ok()?;
+/// Load TLS identity from PEM cert+key files, build a native-tls acceptor.
+/// native-tls uses macOS SecureTransport — same TLS backend as Python's ssl module.
+fn load_native_tls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<native_tls::TlsAcceptor> {
+    let cert_pem = std::fs::read(cert_path).ok()?;
+    let key_pem = std::fs::read(key_path).ok()?;
 
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
-        .filter_map(|r| r.ok())
-        .collect();
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
-        .ok()??;
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
+    // native-tls on macOS needs PKCS#12 format — convert PEM cert+key to PKCS#12
+    let identity = native_tls::Identity::from_pkcs8(&cert_pem, &key_pem)
+        .map_err(|e| eprintln!("native-tls Identity error: {}", e))
         .ok()?;
 
-    Some(config)
+    let acceptor = native_tls::TlsAcceptor::new(identity)
+        .map_err(|e| eprintln!("native-tls Acceptor error: {}", e))
+        .ok()?;
+
+    Some(acceptor)
 }
 
 /// Parse the JSON context from the Word Add-in POST body.
@@ -682,4 +696,19 @@ fn parse_deleted_json(body: &str) -> Option<Vec<String>> {
     }
 
     if results.is_empty() { None } else { Some(results) }
+}
+
+fn log_to_file(msg: &str) {
+    use std::io::Write;
+    let path = "/tmp/word_addin_bridge.log";
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{} {}", chrono_now(), msg);
+    }
+}
+
+fn chrono_now() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", d.as_secs(), d.subsec_millis())
 }
