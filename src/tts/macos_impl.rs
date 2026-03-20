@@ -23,11 +23,26 @@ impl MacTtsEngine {
                 let voice = CURRENT_VOICE.get()
                     .map(|v| v.read().unwrap().clone())
                     .unwrap_or_else(|| "Nora".to_string());
-                let mut child = std::process::Command::new("say")
+                let child = std::process::Command::new("say")
                     .arg("-v").arg(&voice)
                     .arg(&word)
                     .spawn().ok();
-                if let Some(ref mut c) = child { let _ = c.wait(); }
+                if let Some(mut c) = child {
+                    // Poll for stop flag while say is running
+                    loop {
+                        if TTS_STOP.load(Ordering::Relaxed) {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                            break;
+                        }
+                        match c.try_wait() {
+                            Ok(Some(_)) => break,    // process finished
+                            Ok(None) => {}           // still running
+                            Err(_) => break,
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
                 TTS_SPEAKING.store(false, Ordering::Relaxed);
             }
         });

@@ -4255,6 +4255,28 @@ impl eframe::App for ContextApp {
                     }
                 }
 
+                // 🔊 Speak selection button
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("|").size(12.0).color(sep));
+                ui.add_space(2.0);
+                if !tts_speaking {
+                    if icon_button(ui, "\u{1F50A}", "Les opp markert tekst") {
+                        log!("Speak button clicked!");
+                        match self.platform.read_selected_text() {
+                            Some(text) => {
+                                let trimmed = text.trim();
+                                log!("Selected text: '{}'", &trimmed[..trimmed.len().min(80)]);
+                                if !trimmed.is_empty() {
+                                    tts::speak_word(trimmed);
+                                }
+                            }
+                            None => {
+                                log!("No selected text found");
+                            }
+                        }
+                    }
+                }
+
                 // Debug tab (if enabled)
                 if self.show_debug_tab {
                     ui.add_space(2.0);
@@ -5336,6 +5358,7 @@ impl eframe::App for ContextApp {
                         self.show_voice_window = true;
                     }
                 });
+
             }
 
             // === Tab: Debug (3) ===

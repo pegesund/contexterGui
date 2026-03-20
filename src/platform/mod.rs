@@ -83,6 +83,10 @@ pub trait PlatformServices: Send + Sync {
 
     /// Initialize TTS engine (platform-specific).
     fn init_tts(&self);
+
+    /// Read the currently selected text in the frontmost application.
+    /// Returns None if no text is selected or if accessibility access is denied.
+    fn read_selected_text(&self) -> Option<String> { None }
 }
 
 /// Construct the correct `PlatformServices` for the current OS.

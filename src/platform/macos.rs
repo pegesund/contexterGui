@@ -9,30 +9,53 @@ use std::time::{Duration, Instant};
 /// blocking the egui UI thread with `osascript` subprocess calls.
 pub struct MacPlatform {
     cached_fg: Arc<Mutex<(ForegroundApp, Instant)>>,
+    /// Last foreground app that was NOT our app — used for reading selected text
+    last_external_fg: Arc<Mutex<ForegroundApp>>,
+    /// Cached selected text from last external app — read while that app is still in focus
+    cached_selected_text: Arc<Mutex<Option<String>>>,
     screen: (f32, f32),
 }
 
 impl MacPlatform {
     pub fn new() -> Self {
         let cached_fg = Arc::new(Mutex::new((ForegroundApp::default(), Instant::now())));
+        let last_external_fg = Arc::new(Mutex::new(ForegroundApp::default()));
+        let cached_selected_text = Arc::new(Mutex::new(None));
 
         // Background thread polls foreground app every 200ms
         let fg_clone = Arc::clone(&cached_fg);
+        let ext_clone = Arc::clone(&last_external_fg);
+        let sel_clone = Arc::clone(&cached_selected_text);
         std::thread::Builder::new()
             .name("fg-poller".into())
-            .spawn(move || loop {
-                if let Some(app) = query_foreground_app() {
-                    if let Ok(mut lock) = fg_clone.lock() {
-                        *lock = (app, Instant::now());
+            .spawn(move || {
+                loop {
+                    if let Some(app) = query_foreground_app() {
+                        let is_our_app = app.exe_name == "acatts-rust"
+                            || app.exe_name == "norsktale"
+                            || app.title == "NorskTale";
+                        if !is_our_app {
+                            if let Ok(mut lock) = ext_clone.lock() {
+                                *lock = app.clone();
+                            }
+                            // Read selected text while external app still has focus
+                            let sel = read_selected_text_system_wide();
+                            if let Ok(mut lock) = sel_clone.lock() {
+                                *lock = sel;
+                            }
+                        }
+                        if let Ok(mut lock) = fg_clone.lock() {
+                            *lock = (app, Instant::now());
+                        }
                     }
+                    std::thread::sleep(Duration::from_millis(200));
                 }
-                std::thread::sleep(Duration::from_millis(200));
             })
             .expect("Failed to spawn foreground poller");
 
         let screen = query_screen_size().unwrap_or((1920.0, 1080.0));
 
-        MacPlatform { cached_fg, screen }
+        MacPlatform { cached_fg, last_external_fg, cached_selected_text, screen }
     }
 }
 
@@ -123,6 +146,15 @@ impl PlatformServices for MacPlatform {
         // macOS TTS uses `say` command — no init needed, always available
         crate::tts::init_tts("", "");
     }
+
+    fn read_selected_text(&self) -> Option<String> {
+        // Return the cached selected text (read by poller while external app had focus)
+        if let Ok(lock) = self.cached_selected_text.lock() {
+            lock.clone()
+        } else {
+            None
+        }
+    }
 }
 
 // ── Helpers (run on background thread) ──
@@ -165,6 +197,147 @@ fn query_foreground_app() -> Option<ForegroundApp> {
             exe_name: app_name.to_lowercase(),
         })
     } else {
+        None
+    }
+}
+
+/// Read selected text from a specific application by PID using macOS Accessibility API.
+/// If pid is 0, reads from the system-wide focused application.
+/// Requires Accessibility permission in System Settings > Privacy > Accessibility.
+fn read_selected_text_from_pid(pid: u32) -> Option<String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let app_element = if pid > 0 {
+            // Target a specific app by PID
+            AXUIElementCreateApplication(pid as i32)
+        } else {
+            // Fall back to system-wide focused app
+            let system_wide = AXUIElementCreateSystemWide();
+            let attr_focused_app = CFString::from_static_string("AXFocusedApplication");
+            let mut focused_app: CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyAttributeValue(
+                system_wide,
+                attr_focused_app.as_concrete_TypeRef() as _,
+                &mut focused_app,
+            );
+            CFRelease(system_wide as _);
+            if err != 0 || focused_app.is_null() {
+                return None;
+            }
+            focused_app as AXUIElementRef
+        };
+
+        // Get the focused UI element within that app
+        let attr_focused_elem = CFString::from_static_string("AXFocusedUIElement");
+        let mut focused_elem: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            app_element,
+            attr_focused_elem.as_concrete_TypeRef() as _,
+            &mut focused_elem,
+        );
+        CFRelease(app_element as _);
+        if err != 0 || focused_elem.is_null() {
+            return None;
+        }
+
+        // Get the selected text
+        let attr_selected = CFString::from_static_string("AXSelectedText");
+        let mut selected_text: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            focused_elem as AXUIElementRef,
+            attr_selected.as_concrete_TypeRef() as _,
+            &mut selected_text,
+        );
+        CFRelease(focused_elem);
+        if err != 0 || selected_text.is_null() {
+            return None;
+        }
+
+        // Convert CFStringRef to Rust String
+        let cf_str = CFString::wrap_under_create_rule(selected_text as _);
+        let result = cf_str.to_string();
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+}
+
+/// Read selected text from the currently focused app via AppleScript + System Events.
+/// Called from the poller thread while the external app still has focus.
+/// Uses System Events which has its own accessibility permissions.
+/// Read selected text from the currently focused app using the Accessibility C API.
+/// Supports both apps with AXSelectedText (Word, TextEdit) and apps using
+/// text markers (Safari). Called from the poller thread while external app has focus.
+fn read_selected_text_system_wide() -> Option<String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+
+        // Get focused application
+        let attr_focused_app = CFString::from_static_string("AXFocusedApplication");
+        let mut focused_app: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            system_wide, attr_focused_app.as_concrete_TypeRef() as _, &mut focused_app,
+        );
+        CFRelease(system_wide as _);
+        if err != 0 || focused_app.is_null() { return None; }
+
+        // Get focused UI element
+        let attr_focused_elem = CFString::from_static_string("AXFocusedUIElement");
+        let mut focused_elem: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            focused_app as AXUIElementRef, attr_focused_elem.as_concrete_TypeRef() as _, &mut focused_elem,
+        );
+        CFRelease(focused_app);
+        if err != 0 || focused_elem.is_null() { return None; }
+
+        let elem = focused_elem as AXUIElementRef;
+
+        // Try 1: AXSelectedText (works for Word, TextEdit, etc.)
+        let attr_selected = CFString::from_static_string("AXSelectedText");
+        let mut selected_text: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            elem, attr_selected.as_concrete_TypeRef() as _, &mut selected_text,
+        );
+        if err == 0 && !selected_text.is_null() {
+            let cf_str = CFString::wrap_under_create_rule(selected_text as _);
+            let result = cf_str.to_string();
+            CFRelease(focused_elem);
+            if !result.is_empty() { return Some(result); }
+            return None;
+        }
+
+        // Try 2: AXSelectedTextMarkerRange + AXStringForTextMarkerRange (Safari, web views)
+        let attr_marker_range = CFString::from_static_string("AXSelectedTextMarkerRange");
+        let mut marker_range: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            elem, attr_marker_range.as_concrete_TypeRef() as _, &mut marker_range,
+        );
+        if err == 0 && !marker_range.is_null() {
+            let attr_string_for_range = CFString::from_static_string("AXStringForTextMarkerRange");
+            let mut result_text: CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyParameterizedAttributeValue(
+                elem, attr_string_for_range.as_concrete_TypeRef() as _, marker_range, &mut result_text,
+            );
+            CFRelease(marker_range);
+            CFRelease(focused_elem);
+            if err == 0 && !result_text.is_null() {
+                let cf_str = CFString::wrap_under_create_rule(result_text as _);
+                let result = cf_str.to_string();
+                if !result.is_empty() { return Some(result); }
+            }
+            return None;
+        }
+
+        CFRelease(focused_elem);
         None
     }
 }
