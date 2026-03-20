@@ -33,6 +33,7 @@ dependencies = [
  "mtag-rs",
  "native-tls",
  "nostos-cognio",
+ "objc",
  "rubato",
  "rustls",
  "rustls-pemfile",

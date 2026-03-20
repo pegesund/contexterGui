@@ -20,6 +20,7 @@ hound = "3.5"
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility-sys = "0.1"
 core-foundation = "0.10"
+objc = "0.2"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"

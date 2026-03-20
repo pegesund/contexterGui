@@ -143,10 +143,142 @@ mod windows_impl {
 #[cfg(target_os = "windows")]
 pub use windows_impl::OcrClipboard;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+mod macos_impl {
+    use std::sync::mpsc;
+    use std::process::Command;
+
+    pub struct OcrClipboard {
+        pending_image: bool,
+        helper_path: String,
+        last_change_count: isize,
+    }
+
+    impl OcrClipboard {
+        pub fn new() -> Result<Self, String> {
+            // Find ocr_helper next to the binary
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_default();
+
+            // Try multiple locations
+            let candidates = vec![
+                exe_dir.join("ocr_helper").to_string_lossy().to_string(),
+                format!("{}/ocr_helper", env!("CARGO_MANIFEST_DIR")),
+            ];
+
+            let helper_path = candidates.into_iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .ok_or_else(|| "ocr_helper binary not found".to_string())?;
+
+            // Record current clipboard changeCount so we don't trigger on existing content
+            let count = pasteboard_change_count();
+            Ok(Self { pending_image: false, helper_path, last_change_count: count })
+        }
+
+        pub fn poll(&mut self) {
+            let count = pasteboard_change_count();
+            if count == self.last_change_count { return; }
+            self.last_change_count = count;
+
+            // Clipboard changed — check if it contains an image
+            if pasteboard_has_image() && !self.pending_image {
+                self.pending_image = true;
+            }
+        }
+
+        pub fn has_pending_image(&self) -> bool { self.pending_image }
+        pub fn dismiss(&mut self) { self.pending_image = false; }
+
+        pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
+            self.pending_image = false;
+
+            // Save clipboard image to temp file
+            let tmp_path = std::env::temp_dir().join("acatts_ocr_clipboard.png");
+            let save_script = format!(
+                r#"set imgData to the clipboard as «class PNGf»
+set filePath to POSIX file "{}"
+set fileRef to open for access filePath with write permission
+set eof fileRef to 0
+write imgData to fileRef
+close access fileRef"#,
+                tmp_path.display()
+            );
+            let save_result = Command::new("osascript")
+                .arg("-e")
+                .arg(&save_script)
+                .output()
+                .ok();
+
+            if save_result.map_or(true, |o| !o.status.success()) {
+                return None;
+            }
+
+            let helper = self.helper_path.clone();
+            let img_path = tmp_path.to_string_lossy().to_string();
+            let (tx, rx) = mpsc::channel();
+
+            std::thread::spawn(move || {
+                let result = Command::new(&helper)
+                    .arg(&img_path)
+                    .output();
+
+                let text = match result {
+                    Ok(out) if out.status.success() => {
+                        let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if t.is_empty() {
+                            Err("Ingen tekst funnet i bildet".into())
+                        } else {
+                            Ok(t)
+                        }
+                    }
+                    Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+                    Err(e) => Err(format!("OCR feilet: {}", e)),
+                };
+                let _ = tx.send(text);
+                // Clean up
+                let _ = std::fs::remove_file(&img_path);
+            });
+
+            Some(rx)
+        }
+    }
+
+    fn pasteboard_change_count() -> isize {
+        use objc::runtime::{Class, Object};
+        use objc::*;
+        unsafe {
+            let cls = Class::get("NSPasteboard").unwrap();
+            let pb: *mut Object = msg_send![cls, generalPasteboard];
+            let count: isize = msg_send![pb, changeCount];
+            count
+        }
+    }
+
+    fn pasteboard_has_image() -> bool {
+        use objc::runtime::{Class, Object};
+        use objc::*;
+        unsafe {
+            let cls = Class::get("NSPasteboard").unwrap();
+            let pb: *mut Object = msg_send![cls, generalPasteboard];
+            let types: *mut Object = msg_send![pb, types];
+            let png_type: *mut Object = msg_send![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
+            let tiff_type: *mut Object = msg_send![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
+            let has_png: bool = msg_send![types, containsObject: png_type];
+            let has_tiff: bool = msg_send![types, containsObject: tiff_type];
+            has_png || has_tiff
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use macos_impl::OcrClipboard;
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub struct OcrClipboard;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl OcrClipboard {
     pub fn new() -> Result<Self, String> { Err("OCR not available on this platform".into()) }
     pub fn poll(&mut self) {}

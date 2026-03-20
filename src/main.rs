@@ -698,6 +698,7 @@ struct ContextApp {
     ocr: Option<ocr::OcrClipboard>,
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     ocr_text: Option<String>,
+    ocr_copy_mode: bool, // true = copy to clipboard, false = speak
     // Microphone / Whisper
     whisper_engine: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,       // final model (medium-q5 or tiny)
     whisper_streaming: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,    // streaming model (base; None in tiny mode)
@@ -1147,6 +1148,7 @@ impl ContextApp {
             },
             ocr_receiver: None,
             ocr_text: None,
+            ocr_copy_mode: false,
             whisper_engine: None,
             whisper_streaming: None,
             mic_handle: None,
@@ -3340,7 +3342,11 @@ impl eframe::App for ContextApp {
                     Ok(text) => {
                         eprintln!("OCR complete: {} chars", text.len());
                         if !text.is_empty() {
-                            tts::speak_word(&text);
+                            if self.ocr_copy_mode {
+                                self.platform.copy_to_clipboard(&text);
+                            } else {
+                                tts::speak_word(&text);
+                            }
                         }
                         self.ocr_text = Some(text);
                     }
@@ -5103,44 +5109,7 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // === OCR: screenshot detected prompt ===
-            let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
-            if ocr_has_pending && !ocr_is_busy {
-                let mut do_ocr = false;
-                let mut do_dismiss = false;
-                egui::Window::new("Skjermbilde oppdaget")
-                    .collapsible(false)
-                    .resizable(false)
-                    .default_width(300.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.label(
-                            egui::RichText::new("Vil du lese teksten fra skjermbildet?")
-                                .size(14.0)
-                        );
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button(egui::RichText::new("Ja, les teksten").size(13.0)).clicked() {
-                                do_ocr = true;
-                            }
-                            if ui.button(egui::RichText::new("Nei").size(13.0)).clicked() {
-                                do_dismiss = true;
-                            }
-                        });
-                    });
-                if do_ocr {
-                    if let Some(ocr) = &mut self.ocr {
-                        if let Some(rx) = ocr.start_ocr() {
-                            self.ocr_receiver = Some(rx);
-                        }
-                    }
-                }
-                if do_dismiss {
-                    if let Some(ocr) = &mut self.ocr {
-                        ocr.dismiss();
-                    }
-                }
-            }
+            // === OCR: screenshot detected — handled in separate window below ===
 
             // === Whisper transcription popup (centered window) ===
             let is_recording = stt::is_recording();
@@ -5443,6 +5412,76 @@ impl eframe::App for ContextApp {
                     }
                 });
             self.show_voice_window = open;
+        }
+
+        // OCR: screenshot detected prompt (separate OS window)
+        let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
+        let ocr_is_busy = self.ocr_receiver.is_some();
+        if ocr_has_pending && !ocr_is_busy {
+            let mut do_read = false;
+            let mut do_copy = false;
+            let mut do_dismiss = false;
+
+            let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
+            let win_w: f32 = 320.0;
+            let win_h: f32 = 100.0;
+            let screen_center = egui::pos2(
+                (monitor.x - win_w) / 2.0,
+                (monitor.y - win_h) / 2.0,
+            );
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("ocr_prompt"),
+                egui::ViewportBuilder::default()
+                    .with_title("Skjermbilde oppdaget")
+                    .with_inner_size([win_w, win_h])
+                    .with_position(screen_center)
+                    .with_always_on_top()
+                    .with_decorations(true),
+                |vp_ctx, _class| {
+                    vp_ctx.set_visuals(egui::Visuals::light());
+
+                    if vp_ctx.input(|i| i.viewport().close_requested()) {
+                        do_dismiss = true;
+                    }
+
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(16.0))
+                        .show(vp_ctx, |ui| {
+                            ui.label(
+                                egui::RichText::new("Tekst funnet i skjermbildet")
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(30, 30, 30))
+                            );
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("Les tekst").size(13.0)).clicked() {
+                                    do_read = true;
+                                }
+                                if ui.button(egui::RichText::new("Kopier tekst").size(13.0)).clicked() {
+                                    do_copy = true;
+                                }
+                                if ui.button(egui::RichText::new("Avbryt").size(13.0)).clicked() {
+                                    do_dismiss = true;
+                                }
+                            });
+                        });
+                },
+            );
+
+            if do_read || do_copy {
+                self.ocr_copy_mode = do_copy;
+                if let Some(ocr) = &mut self.ocr {
+                    if let Some(rx) = ocr.start_ocr() {
+                        self.ocr_receiver = Some(rx);
+                    }
+                }
+            }
+            if do_dismiss {
+                if let Some(ocr) = &mut self.ocr {
+                    ocr.dismiss();
+                }
+            }
         }
     }
 }
