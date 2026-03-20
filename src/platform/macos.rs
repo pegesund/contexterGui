@@ -39,7 +39,7 @@ impl MacPlatform {
                                 *lock = app.clone();
                             }
                             // Read selected text while external app still has focus
-                            let sel = read_selected_text_system_wide();
+                            let sel = read_selected_text_for_app(app.pid, &app.exe_name);
                             if let Ok(mut lock) = sel_clone.lock() {
                                 *lock = sel;
                             }
@@ -354,8 +354,7 @@ fn read_selected_text_system_wide() -> Option<String> {
         CFRelease(focused_elem);
 
         // Try 3: Walk tree for apps like Word where focused element isn't the text area
-        // Skip for web views (Safari) — they use marker ranges (Try 2) which already ran
-        if app_pid > 0 && role_str != "AXWebArea" {
+        if app_pid > 0 {
             let app_elem = AXUIElementCreateApplication(app_pid);
             let result = walk_for_selected_text(app_elem, 0);
             CFRelease(app_elem as _);
@@ -421,6 +420,228 @@ unsafe fn walk_for_selected_text(element: accessibility_sys::AXUIElementRef, dep
     }
 
     None
+}
+
+/// Read selected text from the given app, trying multiple strategies.
+fn read_selected_text_for_app(pid: u32, _app_name: &str) -> Option<String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    if pid == 0 { return None; }
+
+    unsafe {
+        let app_elem = AXUIElementCreateApplication(pid as i32);
+
+        // Enable enhanced UI on the first window (needed for Chrome/Chromium)
+        let mut windows: CFTypeRef = std::ptr::null();
+        let werr = AXUIElementCopyAttributeValue(
+            app_elem, CFString::from_static_string("AXWindows").as_concrete_TypeRef() as _, &mut windows,
+        );
+        if werr == 0 && !windows.is_null() {
+            let count = core_foundation::array::CFArrayGetCount(windows as _);
+            if count > 0 {
+                let first_win = core_foundation::array::CFArrayGetValueAtIndex(windows as _, 0) as AXUIElementRef;
+                // Ignore error — some apps don't support this, but it still triggers Chrome's a11y
+                let _ = AXUIElementSetAttributeValue(
+                    first_win,
+                    CFString::from_static_string("AXEnhancedUserInterface").as_concrete_TypeRef() as _,
+                    core_foundation::boolean::CFBoolean::true_value().as_concrete_TypeRef() as CFTypeRef,
+                );
+            }
+            CFRelease(windows);
+        }
+
+        // Get focused UI element from this specific app
+        let mut focused_elem: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            app_elem, CFString::from_static_string("AXFocusedUIElement").as_concrete_TypeRef() as _, &mut focused_elem,
+        );
+
+        if err == 0 && !focused_elem.is_null() {
+            let elem = focused_elem as AXUIElementRef;
+
+            // Try AXSelectedText
+            let mut sel: CFTypeRef = std::ptr::null();
+            let e = AXUIElementCopyAttributeValue(
+                elem, CFString::from_static_string("AXSelectedText").as_concrete_TypeRef() as _, &mut sel,
+            );
+            if e == 0 && !sel.is_null() {
+                let s = CFString::wrap_under_create_rule(sel as _).to_string();
+                CFRelease(focused_elem);
+                CFRelease(app_elem as _);
+                if !s.is_empty() { return Some(s); }
+                return None;
+            }
+
+            // Try markers (Safari)
+            let mut marker: CFTypeRef = std::ptr::null();
+            let e = AXUIElementCopyAttributeValue(
+                elem, CFString::from_static_string("AXSelectedTextMarkerRange").as_concrete_TypeRef() as _, &mut marker,
+            );
+            if e == 0 && !marker.is_null() {
+                let mut result_text: CFTypeRef = std::ptr::null();
+                let e = AXUIElementCopyParameterizedAttributeValue(
+                    elem, CFString::from_static_string("AXStringForTextMarkerRange").as_concrete_TypeRef() as _, marker, &mut result_text,
+                );
+                CFRelease(marker);
+                CFRelease(focused_elem);
+                CFRelease(app_elem as _);
+                if e == 0 && !result_text.is_null() {
+                    let s = CFString::wrap_under_create_rule(result_text as _).to_string();
+                    if !s.is_empty() { return Some(s); }
+                }
+                return None;
+            }
+
+            CFRelease(focused_elem);
+        }
+
+        // Tree walk fallback (Word)
+        let result = walk_for_selected_text(app_elem, 0);
+        CFRelease(app_elem as _);
+        if result.is_some() { return result; }
+
+        // System-wide fallback (Safari — AXFocusedApplication works differently)
+        return read_selected_text_system_wide();
+    }
+}
+
+/// Debug wrapper that logs each step to acatts-speak.log
+fn read_selected_text_system_wide_debug(app_name: &str) -> Option<String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    let log = |msg: &str| {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(std::env::temp_dir().join("acatts-speak.log")) {
+            use std::io::Write;
+            let _ = writeln!(f, "[{}] {}", app_name, msg);
+        }
+    };
+
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        let mut focused_app: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            system_wide, CFString::from_static_string("AXFocusedApplication").as_concrete_TypeRef() as _, &mut focused_app,
+        );
+        CFRelease(system_wide as _);
+        if err != 0 || focused_app.is_null() {
+            log(&format!("AXFocusedApplication FAILED err={}", err));
+            return None;
+        }
+
+        let mut app_pid: i32 = 0;
+        AXUIElementGetPid(focused_app as AXUIElementRef, &mut app_pid);
+
+        let mut focused_elem: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            focused_app as AXUIElementRef, CFString::from_static_string("AXFocusedUIElement").as_concrete_TypeRef() as _, &mut focused_elem,
+        );
+        CFRelease(focused_app);
+        if err != 0 || focused_elem.is_null() {
+            log(&format!("AXFocusedUIElement FAILED err={}", err));
+            // Still try tree walk
+            let app_elem = AXUIElementCreateApplication(app_pid);
+            let result = walk_for_selected_text(app_elem, 0);
+            CFRelease(app_elem as _);
+            if result.is_some() { log("tree walk FOUND text"); }
+            return result;
+        }
+
+        let elem = focused_elem as AXUIElementRef;
+
+        // Get role for logging
+        let mut role: CFTypeRef = std::ptr::null();
+        AXUIElementCopyAttributeValue(elem, CFString::from_static_string("AXRole").as_concrete_TypeRef() as _, &mut role);
+        let role_str = if !role.is_null() { CFString::wrap_under_get_rule(role as _).to_string() } else { "?".into() };
+        log(&format!("focused role={}", role_str));
+
+        // Try 1: AXSelectedText
+        let mut selected_text: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            elem, CFString::from_static_string("AXSelectedText").as_concrete_TypeRef() as _, &mut selected_text,
+        );
+        if err == 0 && !selected_text.is_null() {
+            let cf_str = CFString::wrap_under_create_rule(selected_text as _);
+            let result = cf_str.to_string();
+            CFRelease(focused_elem);
+            if !result.is_empty() {
+                log(&format!("AXSelectedText OK len={}", result.len()));
+                return Some(result);
+            }
+            log("AXSelectedText empty");
+            return None;
+        }
+        log(&format!("AXSelectedText FAILED err={}", err));
+
+        // Try 2: markers
+        let mut marker_range: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            elem, CFString::from_static_string("AXSelectedTextMarkerRange").as_concrete_TypeRef() as _, &mut marker_range,
+        );
+        if err == 0 && !marker_range.is_null() {
+            let mut result_text: CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyParameterizedAttributeValue(
+                elem, CFString::from_static_string("AXStringForTextMarkerRange").as_concrete_TypeRef() as _, marker_range, &mut result_text,
+            );
+            CFRelease(marker_range);
+            CFRelease(focused_elem);
+            if err == 0 && !result_text.is_null() {
+                let cf_str = CFString::wrap_under_create_rule(result_text as _);
+                let result = cf_str.to_string();
+                if !result.is_empty() {
+                    log(&format!("markers OK len={}", result.len()));
+                    return Some(result);
+                }
+            }
+            log(&format!("markers FAILED err={}", err));
+            return None;
+        }
+        log(&format!("AXSelectedTextMarkerRange FAILED err={}", err));
+
+        CFRelease(focused_elem);
+
+        // Try 3: tree walk
+        if app_pid > 0 {
+            let app_elem = AXUIElementCreateApplication(app_pid);
+            let result = walk_for_selected_text(app_elem, 0);
+            CFRelease(app_elem as _);
+            if result.is_some() { log("tree walk FOUND text"); } else { log("tree walk NOTHING"); }
+            return result;
+        }
+        None
+    }
+}
+
+/// AppleScript fallback for reading selected text. Works via System Events
+/// which has its own accessibility permissions (doesn't need our app in the list).
+fn read_selected_text_applescript(app_name: &str) -> Option<String> {
+    // Capitalize app name for AppleScript process name
+    let process_name = match app_name {
+        "google chrome" => "Google Chrome",
+        "safari" => "Safari",
+        "microsoft word" => "Microsoft Word",
+        "textedit" => "TextEdit",
+        _ => return None,
+    };
+    let script = format!(
+        r#"tell application "System Events"
+            tell application process "{}"
+                try
+                    set focEl to value of attribute "AXFocusedUIElement"
+                    return value of attribute "AXSelectedText" of focEl
+                on error
+                    return ""
+                end try
+            end tell
+        end tell"#,
+        process_name
+    );
+    let result = run_applescript(&script)?;
+    if result.is_empty() { None } else { Some(result) }
 }
 
 fn query_screen_size() -> Option<(f32, f32)> {
