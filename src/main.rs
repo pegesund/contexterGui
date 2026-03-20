@@ -4,9 +4,9 @@ pub mod logging;
 mod bert_worker;
 mod bridge;
 mod grammar_actor;
-mod microphone;
 mod ocr;
 mod platform;
+mod stt;
 mod tts;
 
 use bridge::{CursorContext, TextBridge};
@@ -569,10 +569,10 @@ enum StartupItem {
     },
 }
 
-/// Lazy-loaded whisper engine items
+/// Lazy-loaded STT engine items
 enum WhisperLoadItem {
-    Final(Result<microphone::WhisperEngine, String>),
-    Streaming(Result<microphone::WhisperEngine, String>),
+    Final(Result<Box<dyn stt::SttEngine>, String>),
+    Streaming(Result<Box<dyn stt::SttEngine>, String>),
 }
 
 struct ContextApp {
@@ -699,9 +699,9 @@ struct ContextApp {
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     ocr_text: Option<String>,
     // Microphone / Whisper
-    whisper_engine: Option<Arc<Mutex<microphone::WhisperEngine>>>,       // final model (medium-q5 or tiny)
-    whisper_streaming: Option<Arc<Mutex<microphone::WhisperEngine>>>,    // streaming model (base; None in tiny mode)
-    mic_handle: Option<microphone::MicHandle>,
+    whisper_engine: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,       // final model (medium-q5 or tiny)
+    whisper_streaming: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,    // streaming model (base; None in tiny mode)
+    mic_handle: Option<stt::MicHandle>,
     mic_transcribing: bool,
     mic_result_text: Option<String>,
     /// 0 = Rask (tiny only, ~75MB), 1 = Beste (base streaming + medium-q5 final, ~690MB)
@@ -714,6 +714,9 @@ struct ContextApp {
     whisper_load_status: String,
     /// Start recording as soon as whisper finishes loading
     whisper_pending_record: bool,
+    // Voice selection window
+    show_voice_window: bool,
+    voice_list: Vec<tts::VoiceInfo>,
     // Startup loading
     startup_rx: Option<std::sync::mpsc::Receiver<StartupItem>>,
     startup_done: Vec<String>,    // labels of completed items
@@ -1154,6 +1157,8 @@ impl ContextApp {
             whisper_loading: false,
             whisper_load_status: String::new(),
             whisper_pending_record: false,
+            show_voice_window: false,
+            voice_list: Vec::new(),
             startup_rx: Some(startup_rx),
             startup_done: Vec::new(),
             startup_total: 1, // completer only
@@ -3424,7 +3429,7 @@ impl eframe::App for ContextApp {
                     if self.whisper_engine.is_some() {
                         let final_eng = self.whisper_engine.as_ref().unwrap().clone();
                         let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-                        match microphone::start_recording(final_eng, stream_eng) {
+                        match stt::start_recording(final_eng, stream_eng) {
                             Ok(handle) => {
                                 log!("Microphone recording auto-started after load");
                                 self.mic_handle = Some(handle);
@@ -4127,7 +4132,7 @@ impl eframe::App for ContextApp {
                 ui.add_space(2.0);
 
                 // 🎤 Microphone / TTS speaking / recording — always same slot
-                let mic_recording = microphone::is_recording() || self.mic_transcribing;
+                let mic_recording = stt::is_recording() || self.mic_transcribing;
                 if tts_speaking || ocr_is_busy {
                     // TTS speaking: show stop button in mic slot
                     if ui.add(egui::Button::new(
@@ -4180,7 +4185,7 @@ impl eframe::App for ContextApp {
                                 // Models already loaded — start recording immediately
                                 let final_eng = self.whisper_engine.as_ref().unwrap().clone();
                                 let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-                                match microphone::start_recording(final_eng, stream_eng) {
+                                match stt::start_recording(final_eng, stream_eng) {
                                     Ok(handle) => {
                                         log!("Microphone recording started");
                                         self.mic_handle = Some(handle);
@@ -4200,40 +4205,49 @@ impl eframe::App for ContextApp {
                                 let (tx, rx) = std::sync::mpsc::channel();
                                 self.whisper_load_rx = Some(rx);
                                 let mode = self.whisper_mode;
-                                let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                    .join("../../whisper-build/bin/Release")
-                                    .to_string_lossy().to_string();
-                                if mode == 0 {
-                                    // Rask: tiny only
-                                    let dll = dll_dir.clone();
-                                    std::thread::spawn(move || {
-                                        let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                            .join("../contexter-repo/training-data/ggml-nb-whisper-tiny.bin")
-                                            .to_string_lossy().to_string();
-                                        let _ = tx.send(WhisperLoadItem::Final(
-                                            microphone::WhisperEngine::load(&dll, &model_path)
-                                        ));
-                                    });
-                                } else {
-                                    // Beste: base (streaming) + medium-q5 (final)
-                                    let tx2 = tx.clone();
-                                    let dll2 = dll_dir.clone();
-                                    std::thread::spawn(move || {
-                                        let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                            .join("../contexter-repo/training-data/ggml-nb-whisper-base.bin")
-                                            .to_string_lossy().to_string();
-                                        let _ = tx2.send(WhisperLoadItem::Streaming(
-                                            microphone::WhisperEngine::load(&dll2, &model_path)
-                                        ));
-                                    });
-                                    std::thread::spawn(move || {
-                                        let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                            .join("../contexter-repo/training-data/ggml-nb-whisper-medium-q5.bin")
-                                            .to_string_lossy().to_string();
-                                        let _ = tx.send(WhisperLoadItem::Final(
-                                            microphone::WhisperEngine::load(&dll_dir, &model_path)
-                                        ));
-                                    });
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                        .join("../../whisper-build/bin/Release")
+                                        .to_string_lossy().to_string();
+                                    if mode == 0 {
+                                        // Rask: tiny only
+                                        let dll = dll_dir.clone();
+                                        std::thread::spawn(move || {
+                                            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                                .join("../contexter-repo/training-data/ggml-nb-whisper-tiny.bin")
+                                                .to_string_lossy().to_string();
+                                            let _ = tx.send(WhisperLoadItem::Final(
+                                                stt::WhisperEngine::load(&dll, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                                            ));
+                                        });
+                                    } else {
+                                        // Beste: base (streaming) + medium-q5 (final)
+                                        let tx2 = tx.clone();
+                                        let dll2 = dll_dir.clone();
+                                        std::thread::spawn(move || {
+                                            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                                .join("../contexter-repo/training-data/ggml-nb-whisper-base.bin")
+                                                .to_string_lossy().to_string();
+                                            let _ = tx2.send(WhisperLoadItem::Streaming(
+                                                stt::WhisperEngine::load(&dll2, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                                            ));
+                                        });
+                                        std::thread::spawn(move || {
+                                            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                                .join("../contexter-repo/training-data/ggml-nb-whisper-medium-q5.bin")
+                                                .to_string_lossy().to_string();
+                                            let _ = tx.send(WhisperLoadItem::Final(
+                                                stt::WhisperEngine::load(&dll_dir, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                                            ));
+                                        });
+                                    }
+                                }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    // TODO: load macOS STT engine
+                                    let engine = stt::MacSttEngine::new();
+                                    let _ = tx.send(WhisperLoadItem::Final(Ok(Box::new(engine) as Box<dyn stt::SttEngine>)));
                                 }
                                 log!("Whisper: lazy-loading models (mode={})", mode);
                             }
@@ -5107,7 +5121,7 @@ impl eframe::App for ContextApp {
             }
 
             // === Whisper transcription popup (centered window) ===
-            let is_recording = microphone::is_recording();
+            let is_recording = stt::is_recording();
             let is_correcting = self.mic_transcribing && !is_recording;
             let is_streaming = is_recording || self.mic_transcribing;
             let show_whisper_popup = self.mic_result_text.is_some() || is_correcting || is_recording || self.whisper_loading;
@@ -5236,7 +5250,7 @@ impl eframe::App for ContextApp {
                     }
                     // Force-clear recording flag so popup closes immediately
                     // (background thread may still be transcribing — it will finish silently)
-                    microphone::force_stop();
+                    stt::force_stop();
                     self.mic_transcribing = false;
                     self.mic_result_text = None;
                     self.whisper_loading = false;
@@ -5308,6 +5322,20 @@ impl eframe::App for ContextApp {
                             .color(egui::Color32::from_rgb(200, 50, 50)),
                     );
                 }
+
+                // Voice selection
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Stemme:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
+                    let current = tts::current_voice();
+                    ui.label(egui::RichText::new(&current).size(12.0).color(egui::Color32::from_rgb(0, 70, 160)));
+                    if ui.add(egui::Button::new(
+                        egui::RichText::new("Velg...").size(11.0)
+                    ).small()).clicked() {
+                        self.voice_list = tts::available_voices();
+                        self.show_voice_window = true;
+                    }
+                });
             }
 
             // === Tab: Debug (3) ===
@@ -5352,6 +5380,47 @@ impl eframe::App for ContextApp {
                 }
             }
         });
+
+        // Voice selection window (separate from main panel)
+        if self.show_voice_window {
+            let mut open = self.show_voice_window;
+            egui::Window::new("Velg stemme")
+                .open(&mut open)
+                .resizable(true)
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    let current = tts::current_voice();
+                    if self.voice_list.is_empty() {
+                        ui.label(egui::RichText::new("Ingen norske stemmer funnet.").size(12.0));
+                        ui.label(egui::RichText::new("Last ned stemmer i Systeminnstillinger > Tilgjengelighet > Opplest innhold > Systemstemme").size(11.0)
+                            .color(egui::Color32::from_rgb(100, 100, 100)));
+                    }
+                    for voice in &self.voice_list {
+                        ui.horizontal(|ui| {
+                            let is_selected = voice.name == current;
+                            let color = if is_selected {
+                                egui::Color32::from_rgb(0, 70, 160)
+                            } else {
+                                egui::Color32::from_rgb(60, 60, 60)
+                            };
+                            let label = if is_selected {
+                                format!("{} (valgt)", &voice.name)
+                            } else {
+                                voice.name.clone()
+                            };
+                            if ui.add(egui::Label::new(
+                                egui::RichText::new(&label).size(13.0).color(color)
+                            ).sense(egui::Sense::click())).clicked() {
+                                tts::set_voice(&voice.name);
+                                tts::speak_word(&voice.sample_text);
+                            }
+                            ui.label(egui::RichText::new(&voice.language).size(10.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)));
+                        });
+                    }
+                });
+            self.show_voice_window = open;
+        }
     }
 }
 

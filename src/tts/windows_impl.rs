@@ -1,7 +1,9 @@
+use super::TtsEngine;
 use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 type LpBabTts = *mut std::ffi::c_void;
 type BabTtsError = i32;
@@ -22,7 +24,7 @@ const SND_MEMORY: u32 = 0x0004;
 const SND_ASYNC: u32 = 0x0001;
 const SND_NODEFAULT: u32 = 0x0002;
 
-static TTS_SENDER: std::sync::OnceLock<mpsc::Sender<String>> = std::sync::OnceLock::new();
+static TTS_SENDER: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 static TTS_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static TTS_SPEAKING: AtomicBool = AtomicBool::new(false);
 static TTS_STOP: AtomicBool = AtomicBool::new(false);
@@ -54,78 +56,106 @@ fn build_wav(samples: &[u8]) -> Vec<u8> {
     wav
 }
 
-pub fn init_tts(sdk_dir: &str, voice_name: &str) {
-    let sdk_dir = sdk_dir.to_string();
-    let voice_name = voice_name.to_string();
-    let (tx, rx) = mpsc::channel::<String>();
-    let (ready_tx, ready_rx) = mpsc::channel::<bool>();
-    std::thread::spawn(move || {
-        let dll_path = format!("{}\\AcaTTS.64.dll", sdk_dir);
-        let lib = match unsafe { Library::new(&dll_path) } {
-            Ok(l) => l,
-            Err(e) => { eprintln!("Acapela TTS: failed to load {}: {}", dll_path, e); let _ = ready_tx.send(false); return; }
-        };
-        let winmm = match unsafe { Library::new("winmm.dll") } {
-            Ok(l) => l,
-            Err(e) => { eprintln!("Acapela TTS: failed to load winmm.dll: {}", e); let _ = ready_tx.send(false); return; }
-        };
-        let play_sound: PlaySoundFn = unsafe { let f: Symbol<PlaySoundFn> = winmm.get(b"PlaySoundW").unwrap(); *f };
-        unsafe {
-            let fn_init: Symbol<FnBabTtsInit> = lib.get(b"BabTTS_Init").unwrap();
-            let fn_create: Symbol<FnBabTtsCreate> = lib.get(b"BabTTS_Create").unwrap();
-            let fn_open: Symbol<FnBabTtsOpen> = lib.get(b"BabTTS_Open").unwrap();
-            let fn_insert: Symbol<FnBabTtsInsertText> = lib.get(b"BabTTS_InsertText").unwrap();
-            let fn_read: Symbol<FnBabTtsReadBuffer> = lib.get(b"BabTTS_ReadBuffer").unwrap();
-            let fn_close: Symbol<FnBabTtsClose> = lib.get(b"BabTTS_Close").unwrap();
-            let fn_uninit: Symbol<FnBabTtsUninit> = lib.get(b"BabTTS_Uninit").unwrap();
-            if !fn_init() { eprintln!("Acapela TTS: BabTTS_Init failed"); let _ = ready_tx.send(false); return; }
-            let engine = fn_create();
-            if engine.is_null() { eprintln!("Acapela TTS: BabTTS_Create returned null"); fn_uninit(); let _ = ready_tx.send(false); return; }
-            let voice_c = CString::new(voice_name.as_str()).unwrap();
-            let err = fn_open(engine, voice_c.as_ptr(), 0);
-            if err != E_BABTTS_NOERROR { eprintln!("Acapela TTS: BabTTS_Open({}) failed: {}", voice_name, err); fn_close(engine); fn_uninit(); let _ = ready_tx.send(false); return; }
-            eprintln!("Acapela TTS initialized with voice: {}", voice_name);
-            let _ = ready_tx.send(true);
-            let mut pcm_buf = [0u8; 4096];
-            while let Ok(word) = rx.recv() {
-                TTS_STOP.store(false, Ordering::Relaxed);
-                let text_c = match CString::new(word.as_str()) { Ok(c) => c, Err(_) => continue };
-                let err = fn_insert(engine, text_c.as_ptr(), BABTTS_TXT_UTF8);
-                if err != E_BABTTS_NOERROR { eprintln!("TTS InsertText error: {}", err); continue; }
-                let mut all_samples: Vec<u8> = Vec::new();
-                loop {
-                    let mut generated: u32 = 0;
-                    let err = fn_read(engine, pcm_buf.as_mut_ptr(), (pcm_buf.len() / 2) as u32, &mut generated);
-                    if generated > 0 { all_samples.extend_from_slice(&pcm_buf[..(generated as usize * 2)]); }
-                    if err == W_BABTTS_NOMOREDATA || err < 0 { break; }
-                }
-                if !all_samples.is_empty() && !TTS_STOP.load(Ordering::Relaxed) {
-                    let wav = build_wav(&all_samples);
-                    TTS_SPEAKING.store(true, Ordering::Relaxed);
-                    play_sound(wav.as_ptr(), 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
-                    let duration_ms = (all_samples.len() as u64 * 1000) / (22050 * 2) + 300;
-                    let start = std::time::Instant::now();
-                    while start.elapsed().as_millis() < duration_ms as u128 {
-                        if TTS_STOP.load(Ordering::Relaxed) { play_sound(std::ptr::null(), 0, 0); break; }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+pub struct WindowsTtsEngine;
+
+impl WindowsTtsEngine {
+    pub fn new(sdk_dir: &str, voice_name: &str) -> Self {
+        let sdk_dir = sdk_dir.to_string();
+        let voice_name = voice_name.to_string();
+        let (tx, rx) = mpsc::channel::<String>();
+        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let dll_path = format!("{}\\AcaTTS.64.dll", sdk_dir);
+            let lib = match unsafe { Library::new(&dll_path) } {
+                Ok(l) => l,
+                Err(e) => { eprintln!("Acapela TTS: failed to load {}: {}", dll_path, e); let _ = ready_tx.send(false); return; }
+            };
+            let winmm = match unsafe { Library::new("winmm.dll") } {
+                Ok(l) => l,
+                Err(e) => { eprintln!("Acapela TTS: failed to load winmm.dll: {}", e); let _ = ready_tx.send(false); return; }
+            };
+            let play_sound: PlaySoundFn = unsafe { let f: Symbol<PlaySoundFn> = winmm.get(b"PlaySoundW").unwrap(); *f };
+            unsafe {
+                let fn_init: Symbol<FnBabTtsInit> = lib.get(b"BabTTS_Init").unwrap();
+                let fn_create: Symbol<FnBabTtsCreate> = lib.get(b"BabTTS_Create").unwrap();
+                let fn_open: Symbol<FnBabTtsOpen> = lib.get(b"BabTTS_Open").unwrap();
+                let fn_insert: Symbol<FnBabTtsInsertText> = lib.get(b"BabTTS_InsertText").unwrap();
+                let fn_read: Symbol<FnBabTtsReadBuffer> = lib.get(b"BabTTS_ReadBuffer").unwrap();
+                let fn_close: Symbol<FnBabTtsClose> = lib.get(b"BabTTS_Close").unwrap();
+                let fn_uninit: Symbol<FnBabTtsUninit> = lib.get(b"BabTTS_Uninit").unwrap();
+                if !fn_init() { eprintln!("Acapela TTS: BabTTS_Init failed"); let _ = ready_tx.send(false); return; }
+                let engine = fn_create();
+                if engine.is_null() { eprintln!("Acapela TTS: BabTTS_Create returned null"); fn_uninit(); let _ = ready_tx.send(false); return; }
+                let voice_c = CString::new(voice_name.as_str()).unwrap();
+                let err = fn_open(engine, voice_c.as_ptr(), 0);
+                if err != E_BABTTS_NOERROR { eprintln!("Acapela TTS: BabTTS_Open({}) failed: {}", voice_name, err); fn_close(engine); fn_uninit(); let _ = ready_tx.send(false); return; }
+                eprintln!("Acapela TTS initialized with voice: {}", voice_name);
+                let _ = ready_tx.send(true);
+                let mut pcm_buf = [0u8; 4096];
+                while let Ok(word) = rx.recv() {
+                    TTS_STOP.store(false, Ordering::Relaxed);
+                    let text_c = match CString::new(word.as_str()) { Ok(c) => c, Err(_) => continue };
+                    let err = fn_insert(engine, text_c.as_ptr(), BABTTS_TXT_UTF8);
+                    if err != E_BABTTS_NOERROR { eprintln!("TTS InsertText error: {}", err); continue; }
+                    let mut all_samples: Vec<u8> = Vec::new();
+                    loop {
+                        let mut generated: u32 = 0;
+                        let err = fn_read(engine, pcm_buf.as_mut_ptr(), (pcm_buf.len() / 2) as u32, &mut generated);
+                        if generated > 0 { all_samples.extend_from_slice(&pcm_buf[..(generated as usize * 2)]); }
+                        if err == W_BABTTS_NOMOREDATA || err < 0 { break; }
                     }
-                    TTS_SPEAKING.store(false, Ordering::Relaxed);
+                    if !all_samples.is_empty() && !TTS_STOP.load(Ordering::Relaxed) {
+                        let wav = build_wav(&all_samples);
+                        TTS_SPEAKING.store(true, Ordering::Relaxed);
+                        play_sound(wav.as_ptr(), 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+                        let duration_ms = (all_samples.len() as u64 * 1000) / (22050 * 2) + 300;
+                        let start = std::time::Instant::now();
+                        while start.elapsed().as_millis() < duration_ms as u128 {
+                            if TTS_STOP.load(Ordering::Relaxed) { play_sound(std::ptr::null(), 0, 0); break; }
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        TTS_SPEAKING.store(false, Ordering::Relaxed);
+                    }
                 }
+                fn_close(engine);
+                fn_uninit();
             }
-            fn_close(engine);
-            fn_uninit();
+        });
+        if ready_rx.recv().unwrap_or(false) {
+            TTS_SENDER.get_or_init(|| tx);
+            TTS_AVAILABLE.store(true, Ordering::Relaxed);
         }
-    });
-    if ready_rx.recv().unwrap_or(false) {
-        TTS_SENDER.get_or_init(|| tx);
-        TTS_AVAILABLE.store(true, Ordering::Relaxed);
+        WindowsTtsEngine
     }
 }
 
-pub fn speak_word(word: &str) {
-    if let Some(tx) = TTS_SENDER.get() { let _ = tx.send(word.to_string()); }
-}
+impl TtsEngine for WindowsTtsEngine {
+    fn speak(&self, text: &str) {
+        if let Some(tx) = TTS_SENDER.get() { let _ = tx.send(text.to_string()); }
+    }
 
-pub fn tts_available() -> bool { TTS_AVAILABLE.load(Ordering::Relaxed) }
-pub fn is_speaking() -> bool { TTS_SPEAKING.load(Ordering::Relaxed) }
-pub fn stop_speaking() { TTS_STOP.store(true, Ordering::Release); }
+    fn is_available(&self) -> bool {
+        TTS_AVAILABLE.load(Ordering::Relaxed)
+    }
+
+    fn is_speaking(&self) -> bool {
+        TTS_SPEAKING.load(Ordering::Relaxed)
+    }
+
+    fn stop(&self) {
+        TTS_STOP.store(true, Ordering::Release);
+    }
+
+    fn available_voices(&self) -> Vec<super::VoiceInfo> {
+        // TODO: enumerate Acapela voices
+        Vec::new()
+    }
+
+    fn current_voice(&self) -> String {
+        "Kari22k_NV".to_string()
+    }
+
+    fn set_voice(&self, _name: &str) {
+        // TODO: support voice switching for Acapela
+    }
+}
