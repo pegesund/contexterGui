@@ -290,6 +290,10 @@ fn read_selected_text_system_wide() -> Option<String> {
         CFRelease(system_wide as _);
         if err != 0 || focused_app.is_null() { return None; }
 
+        // Get the app's PID for tree walking later
+        let mut app_pid: i32 = 0;
+        AXUIElementGetPid(focused_app as AXUIElementRef, &mut app_pid);
+
         // Get focused UI element
         let attr_focused_elem = CFString::from_static_string("AXFocusedUIElement");
         let mut focused_elem: CFTypeRef = std::ptr::null();
@@ -337,9 +341,86 @@ fn read_selected_text_system_wide() -> Option<String> {
             return None;
         }
 
+        // Check the role of the focused element — only walk tree for non-web elements
+        let mut role: CFTypeRef = std::ptr::null();
+        AXUIElementCopyAttributeValue(elem, CFString::from_static_string("AXRole").as_concrete_TypeRef() as _, &mut role);
+        let role_str = if !role.is_null() {
+            let s = CFString::wrap_under_get_rule(role as _).to_string();
+            s
+        } else {
+            String::new()
+        };
+
         CFRelease(focused_elem);
+
+        // Try 3: Walk tree for apps like Word where focused element isn't the text area
+        // Skip for web views (Safari) — they use marker ranges (Try 2) which already ran
+        if app_pid > 0 && role_str != "AXWebArea" {
+            let app_elem = AXUIElementCreateApplication(app_pid);
+            let result = walk_for_selected_text(app_elem, 0);
+            CFRelease(app_elem as _);
+            return result;
+        }
         None
     }
+}
+
+/// Walk the accessibility tree to find elements with AXSelectedText.
+/// Word exposes it on AXTextArea inside AXLayoutArea → AXSelectedChildren.
+unsafe fn walk_for_selected_text(element: accessibility_sys::AXUIElementRef, depth: i32) -> Option<String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    if depth > 6 { return None; }
+
+    // Check AXSelectedChildren first (Word's AXLayoutArea has this)
+    let attr_sel_children = CFString::from_static_string("AXSelectedChildren");
+    let mut sel_children: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        element, attr_sel_children.as_concrete_TypeRef() as _, &mut sel_children,
+    );
+    if err == 0 && !sel_children.is_null() {
+        // sel_children is a CFArray
+        let count = core_foundation::array::CFArrayGetCount(sel_children as _);
+        for i in 0..count {
+            let child = core_foundation::array::CFArrayGetValueAtIndex(sel_children as _, i) as AXUIElementRef;
+            // Try AXSelectedText on this child
+            let attr_selected = CFString::from_static_string("AXSelectedText");
+            let mut selected_text: CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyAttributeValue(
+                child, attr_selected.as_concrete_TypeRef() as _, &mut selected_text,
+            );
+            if err == 0 && !selected_text.is_null() {
+                let cf_str = CFString::wrap_under_create_rule(selected_text as _);
+                let result = cf_str.to_string();
+                CFRelease(sel_children);
+                if !result.is_empty() { return Some(result); }
+                return None;
+            }
+        }
+        CFRelease(sel_children);
+    }
+
+    // Recurse into children
+    let attr_children = CFString::from_static_string("AXChildren");
+    let mut children: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        element, attr_children.as_concrete_TypeRef() as _, &mut children,
+    );
+    if err == 0 && !children.is_null() {
+        let count = core_foundation::array::CFArrayGetCount(children as _);
+        for i in 0..count {
+            let child = core_foundation::array::CFArrayGetValueAtIndex(children as _, i) as AXUIElementRef;
+            if let Some(text) = walk_for_selected_text(child, depth + 1) {
+                CFRelease(children);
+                return Some(text);
+            }
+        }
+        CFRelease(children);
+    }
+
+    None
 }
 
 fn query_screen_size() -> Option<(f32, f32)> {
