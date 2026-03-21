@@ -1578,12 +1578,10 @@ impl ContextApp {
                             // Step 2: Grammar-filter via actor (synchronous)
                             log!("Grammar filter: actor={} left={} right={}", self.grammar_actor.is_some(), left_filtered.len(), right_filtered.len());
                             if let Some(actor) = &self.grammar_actor {
-                                let masked = self.context.masked_sentence.as_deref().unwrap_or("");
-                                let before_mask = masked.split("<mask>").next().unwrap_or("");
-                                let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
-                                    .map(|i| i + 1).unwrap_or(0);
-                                let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
+                                let sentence = &self.context.sentence;
                                 let prefix = extract_prefix(&self.context.word);
+                                let ctx_for_grammar = sentence.strip_suffix(prefix)
+                                    .unwrap_or(sentence).trim_end().to_string();
 
                                 let mut check_fn = |sentence: &str| -> GrammarCheckResult {
                                     let errors = actor.check_sentence_sync(sentence);
