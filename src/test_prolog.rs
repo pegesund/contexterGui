@@ -40,9 +40,24 @@ fn main() {
     // Warmup
     let _ = checker.check_sentence("Hei dette er en test.");
 
+    // Test: does check_sentence_full find all unknown words?
+    println!("=== Unknown word detection ===");
+    let test_sents = vec![
+        "Fotball er en morsom sport somx er veldig morsson.",
+        "Dettex er en test.",
+        "Morsson er et fint ord.",
+    ];
+    for s in &test_sents {
+        let result = checker.check_sentence_full(s);
+        println!("'{}'\n  errors: {:?}\n  unknown: {:?}\n",
+            s,
+            result.errors.iter().map(|e| format!("{}:{}", e.rule_name, e.word)).collect::<Vec<_>>(),
+            result.unknown_words.iter().map(|u| &u.word).collect::<Vec<_>>());
+    }
+
     // Check token readings for key words
     println!("=== Token analysis ===");
-    for word in &["spor", "sport", "bord", "lag", "hus", "morsom"] {
+    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom"] {
         let token = checker.analyze_word(word);
         println!("'{}': {} readings", word, token.readings.len());
         for r in &token.readings {

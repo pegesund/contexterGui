@@ -70,3 +70,7 @@ path = "src/test_cw.rs"
 [[bin]]
 name = "test-prolog"
 path = "src/test_prolog.rs"
+
+[[bin]]
+name = "test-spelling"
+path = "src/test_spelling.rs"
