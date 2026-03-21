@@ -717,6 +717,7 @@ struct ContextApp {
     whisper_pending_record: bool,
     // Voice selection window
     show_voice_window: bool,
+    ui_scale: f32,
     voice_list: Vec<tts::VoiceInfo>,
     // Startup loading
     startup_rx: Option<std::sync::mpsc::Receiver<StartupItem>>,
@@ -1160,6 +1161,7 @@ impl ContextApp {
             whisper_load_status: String::new(),
             whisper_pending_record: false,
             show_voice_window: false,
+            ui_scale: 1.0,
             voice_list: Vec::new(),
             startup_rx: Some(startup_rx),
             startup_done: Vec::new(),
@@ -3989,17 +3991,18 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Window sizing
+        // Window sizing (scaled)
+        let s = self.ui_scale;
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !self.open_completions.is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
-        let win_h = if self.selected_tab >= 1 {
+        let win_h = s * if self.selected_tab >= 1 {
             250.0
         } else if has_content || recently_replaced {
             150.0
         } else {
             80.0
         };
-        let win_w = if self.selected_tab == 0 {
+        let win_w = s * if self.selected_tab == 0 {
             260.0
         } else {
             420.0
@@ -4007,6 +4010,8 @@ impl eframe::App for ContextApp {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
+        // Apply UI scale
+        ctx.set_zoom_factor(self.ui_scale);
 
         // Check if goto freeze has expired
         if let Some(until) = self.goto_freeze_until {
@@ -5297,6 +5302,20 @@ impl eframe::App for ContextApp {
                     ).small()).clicked() {
                         self.voice_list = tts::available_voices();
                         self.show_voice_window = true;
+                    }
+                });
+
+                // UI scale
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Størrelse:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
+                    if ui.small_button("−").clicked() {
+                        self.ui_scale = (self.ui_scale - 0.1).max(0.5);
+                    }
+                    ui.label(egui::RichText::new(format!("{:.0}%", self.ui_scale * 100.0)).size(12.0)
+                        .color(egui::Color32::from_rgb(0, 70, 160)));
+                    if ui.small_button("+").clicked() {
+                        self.ui_scale = (self.ui_scale + 0.1).min(2.5);
                     }
                 });
 
