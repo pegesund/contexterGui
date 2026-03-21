@@ -263,7 +263,7 @@ fn worker_loop(
                             &mut model, &context, "", pi,
                             baselines.as_deref(), wordfreq_shared.as_deref(),
                             fallback_ref, prefix_ref, embedding_store.as_deref(),
-                            1.0, 10.0, 8, 0,
+                            1.0, 10.0, 15, 0,
                         ) {
                             Ok(r) => {
                                 // Exclude words already in left column

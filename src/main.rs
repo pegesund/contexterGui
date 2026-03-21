@@ -1576,11 +1576,11 @@ impl ContextApp {
                             // Step 1: Dictionary-filter completions
                             let left_filtered: Vec<Completion> = left.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(8)
+                                .take(15)
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(8)
+                                .take(15)
                                 .collect();
 
                             // Step 2: Grammar-filter via actor (synchronous)
@@ -3860,9 +3860,9 @@ impl eframe::App for ContextApp {
                             sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end().to_string()
                         };
                         let (top_n, max_steps) = match self.quality {
-                            0 => (8, 0),
-                            1 => (8, 1),
-                            _ => (8, 3),
+                            0 => (15, 0),
+                            1 => (15, 1),
+                            _ => (15, 3),
                         };
                         log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
                         worker.send(|id| bert_worker::BertRequest::CompleteWord {
