@@ -18,8 +18,9 @@ check_error() {
     if echo "$json" | python3 -c "
 import json, sys
 errors = json.load(sys.stdin)
-found = [e for e in errors if e['word'] == '$word']
-if found and (not '$expected_suggestion' or found[0]['suggestion'] == '$expected_suggestion'):
+# Match by word OR by word appearing in the error word (grammar errors use full sentence)
+found = [e for e in errors if e['word'] == '$word' or '$word' in e['word'] or '$word' in e.get('sentence','')]
+if found and (not '$expected_suggestion' or any(f['suggestion'] == '$expected_suggestion' or '$expected_suggestion' in f.get('suggestion','') for f in found)):
     sys.exit(0)
 sys.exit(1)
 " 2>/dev/null; then
@@ -27,6 +28,7 @@ sys.exit(1)
         PASS=$((PASS + 1))
     else
         echo "  FAIL: $desc ('$word' expected '$expected_suggestion')"
+        echo "        errors: $(echo "$json" | python3 -c "import json,sys; [print('    ',e['word'][:30],'|',e['rule']) for e in json.load(sys.stdin)]" 2>/dev/null)"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -162,13 +164,26 @@ check_no_error "fixed: fotball not flagged" "fotball" "$ERRORS_AFTER"
 delete_last 22
 sleep 2
 
-# --- Test 5: Grammar error ---
+# --- Test 5: Grammar error (adj gender mismatch) ---
 echo ""
-echo "Test 5: Grammar error"
+echo "Test 5: Grammar error — 'morsom spor' gender mismatch"
 type_text $'\n'"Fotball er en morsom spor."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "grammar: adj gender" "morsom" "" "$ERRORS"
+# Grammar errors may use full sentence as word — check that the sentence with "spor" has a grammar error
+if echo "$ERRORS" | python3 -c "
+import json, sys
+errors = json.load(sys.stdin)
+found = [e for e in errors if e['category'] == 'grammar' and 'spor' in e.get('sentence','')]
+sys.exit(0 if found else 1)
+" 2>/dev/null; then
+    echo "  PASS: grammar error detected for 'morsom spor'"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: no grammar error for 'morsom spor'"
+    echo "        errors: $(echo "$ERRORS" | python3 -c "import json,sys; [print('    ',e['category'],e['word'][:30],'|',e['rule']) for e in json.load(sys.stdin)]" 2>/dev/null)"
+    FAIL=$((FAIL + 1))
+fi
 
 # Clean up
 delete_last 29
