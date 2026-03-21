@@ -1331,6 +1331,7 @@ impl ContextApp {
                 // Check if it's a valid compound word (e.g. maskinlæringsalgoritmene)
                 // Try splitting at every position and check if both parts are known
                 for i in 3..clean.len().saturating_sub(2) {
+                    if !clean.is_char_boundary(i) { continue; }
                     let left = &clean[..i];
                     let right = &clean[i..];
                     // Allow 's' binding letter: maskinlæring-s-algoritmene
