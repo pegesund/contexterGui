@@ -147,34 +147,40 @@ pub use windows_impl::OcrClipboard;
 mod macos_impl {
     use std::sync::mpsc;
     use std::process::Command;
+    use libloading::{Library, Symbol};
+    use std::ffi::{CStr, CString};
+
+    type OcrRecognizeFn = unsafe extern "C" fn(*const i8) -> *mut i8;
+    type OcrFreeFn = unsafe extern "C" fn(*mut i8);
 
     pub struct OcrClipboard {
         pending_image: bool,
-        helper_path: String,
         last_change_count: isize,
+        lib: Library,
     }
 
     impl OcrClipboard {
         pub fn new() -> Result<Self, String> {
-            // Find ocr_helper next to the binary
+            // Find libocr_helper.dylib
             let exe_dir = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .unwrap_or_default();
 
-            // Try multiple locations
             let candidates = vec![
-                exe_dir.join("ocr_helper").to_string_lossy().to_string(),
-                format!("{}/ocr_helper", env!("CARGO_MANIFEST_DIR")),
+                exe_dir.join("libocr_helper.dylib").to_string_lossy().to_string(),
+                format!("{}/libocr_helper.dylib", env!("CARGO_MANIFEST_DIR")),
             ];
 
-            let helper_path = candidates.into_iter()
+            let lib_path = candidates.into_iter()
                 .find(|p| std::path::Path::new(p).exists())
-                .ok_or_else(|| "ocr_helper binary not found".to_string())?;
+                .ok_or_else(|| "libocr_helper.dylib not found".to_string())?;
 
-            // Record current clipboard changeCount so we don't trigger on existing content
+            let lib = unsafe { Library::new(&lib_path) }
+                .map_err(|e| format!("Failed to load libocr_helper.dylib: {}", e))?;
+
             let count = pasteboard_change_count();
-            Ok(Self { pending_image: false, helper_path, last_change_count: count })
+            Ok(Self { pending_image: false, last_change_count: count, lib })
         }
 
         pub fn poll(&mut self) {
@@ -215,29 +221,41 @@ close access fileRef"#,
                 return None;
             }
 
-            let helper = self.helper_path.clone();
+            // Load function pointers from dylib
+            let recognize: OcrRecognizeFn = unsafe {
+                let sym: Symbol<OcrRecognizeFn> = match self.lib.get(b"ocr_recognize_file") {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
+                *sym
+            };
+            let free_fn: OcrFreeFn = unsafe {
+                let sym: Symbol<OcrFreeFn> = match self.lib.get(b"ocr_free") {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
+                *sym
+            };
+
             let img_path = tmp_path.to_string_lossy().to_string();
             let (tx, rx) = mpsc::channel();
 
             std::thread::spawn(move || {
-                let result = Command::new(&helper)
-                    .arg(&img_path)
-                    .output();
+                let c_path = CString::new(img_path.as_str()).unwrap();
+                let result_ptr = unsafe { recognize(c_path.as_ptr()) };
 
-                let text = match result {
-                    Ok(out) if out.status.success() => {
-                        let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if t.is_empty() {
-                            Err("Ingen tekst funnet i bildet".into())
-                        } else {
-                            Ok(t)
-                        }
+                let text = if result_ptr.is_null() {
+                    Err("Ingen tekst funnet i bildet".into())
+                } else {
+                    let s = unsafe { CStr::from_ptr(result_ptr).to_string_lossy().to_string() };
+                    unsafe { free_fn(result_ptr); }
+                    if s.is_empty() {
+                        Err("Ingen tekst funnet i bildet".into())
+                    } else {
+                        Ok(s)
                     }
-                    Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-                    Err(e) => Err(format!("OCR feilet: {}", e)),
                 };
                 let _ = tx.send(text);
-                // Clean up
                 let _ = std::fs::remove_file(&img_path);
             });
 
