@@ -1576,11 +1576,11 @@ impl ContextApp {
                             // Step 1: Dictionary-filter completions
                             let left_filtered: Vec<Completion> = left.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(15)
+                                .take(8)
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(15)
+                                .take(8)
                                 .collect();
 
                             // Step 2: Grammar-filter via actor (synchronous)
@@ -1591,18 +1591,37 @@ impl ContextApp {
                                 let ctx_for_grammar = sentence.strip_suffix(prefix)
                                     .unwrap_or(sentence).trim_end().to_string();
 
-                                let mut check_fn = |sentence: &str| -> GrammarCheckResult {
-                                    let errors = actor.check_sentence_sync(sentence);
-                                    GrammarCheckResult {
-                                        ok: errors.is_empty(),
-                                        suggestions: errors.iter()
-                                            .filter(|e| !e.suggestion.is_empty())
-                                            .map(|e| e.suggestion.clone())
-                                            .collect(),
-                                    }
+                                // Build all test sentences for batch grammar check
+                                let last_fragment = {
+                                    let start = ctx_for_grammar.rfind(|c: char| ".!?".contains(c))
+                                        .map(|i| i + 1).unwrap_or(0);
+                                    ctx_for_grammar[start..].trim().to_string()
                                 };
-                                self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
-                                self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
+                                let all_candidates: Vec<&Completion> = left_filtered.iter()
+                                    .chain(right_filtered.iter()).collect();
+                                let test_sentences: Vec<String> = all_candidates.iter()
+                                    .map(|c| format!("{} {}.", last_fragment, c.word))
+                                    .collect();
+
+                                // One batch call to grammar actor
+                                let t_grammar = std::time::Instant::now();
+                                let batch_results = actor.check_sentences_batch(&test_sentences);
+                                log!("Grammar batch: {} sentences in {:?}", test_sentences.len(), t_grammar.elapsed());
+
+                                // Build check results map
+                                let mut grammar_ok: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+                                for (i, c) in all_candidates.iter().enumerate() {
+                                    let errors = &batch_results[i];
+                                    grammar_ok.insert(c.word.to_lowercase(), errors.is_empty());
+                                }
+
+                                // Filter left and right by grammar results
+                                self.completions = left_filtered.into_iter()
+                                    .filter(|c| *grammar_ok.get(&c.word.to_lowercase()).unwrap_or(&false))
+                                    .take(5).collect();
+                                self.open_completions = right_filtered.into_iter()
+                                    .filter(|c| *grammar_ok.get(&c.word.to_lowercase()).unwrap_or(&false))
+                                    .take(5).collect();
                             } else {
                                 self.completions = left_filtered.into_iter().take(5).collect();
                                 self.open_completions = right_filtered.into_iter().take(5).collect();
@@ -3841,9 +3860,9 @@ impl eframe::App for ContextApp {
                             sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end().to_string()
                         };
                         let (top_n, max_steps) = match self.quality {
-                            0 => (15, 0),
-                            1 => (15, 1),
-                            _ => (15, 3),
+                            0 => (8, 0),
+                            1 => (8, 1),
+                            _ => (8, 3),
                         };
                         log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
                         worker.send(|id| bert_worker::BertRequest::CompleteWord {

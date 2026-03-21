@@ -232,6 +232,7 @@ fn worker_loop(
                 });
                 let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
 
+                let t_cw = std::time::Instant::now();
                 match complete_word(
                     &mut model,
                     &context,
@@ -248,12 +249,21 @@ fn worker_loop(
                     max_steps,
                 ) {
                     Ok(left) => {
+                        {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                                .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                let _ = writeln!(f, "complete_word(prefix='{}', top_n={}, max_steps={}) → {} results in {:?}",
+                                    prefix, top_n, max_steps, left.len(), t_cw.elapsed());
+                            }
+                        }
+                        let t_right = std::time::Instant::now();
                         // Right completions: complete_word with empty prefix (open predictions)
                         let right = match complete_word(
                             &mut model, &context, "", pi,
                             baselines.as_deref(), wordfreq_shared.as_deref(),
                             fallback_ref, prefix_ref, embedding_store.as_deref(),
-                            1.0, 10.0, 15, 0,
+                            1.0, 10.0, 8, 0,
                         ) {
                             Ok(r) => {
                                 // Exclude words already in left column
@@ -262,6 +272,14 @@ fn worker_loop(
                             }
                             Err(_) => vec![],
                         };
+                        {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                                .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                let _ = writeln!(f, "complete_word(prefix='', right) → {} results in {:?}",
+                                    right.len(), t_right.elapsed());
+                            }
+                        }
                         let _ = tx.send(BertResponse::Completion { id, cache_key, left, right });
                         repaint_ctx.request_repaint();
                     }

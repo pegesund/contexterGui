@@ -31,6 +31,16 @@ pub struct SyncCheckResponse {
     pub errors: Vec<GrammarError>,
 }
 
+/// Batch synchronous check — multiple sentences at once
+pub struct SyncBatchRequest {
+    pub sentences: Vec<String>,
+    pub reply: mpsc::Sender<SyncBatchResponse>,
+}
+
+pub struct SyncBatchResponse {
+    pub results: Vec<Vec<GrammarError>>,
+}
+
 /// Result sent back from the grammar actor — full check_sentence_full output.
 pub struct GrammarCheckResponse {
     pub sentence: String,
@@ -46,6 +56,7 @@ pub struct GrammarCheckResponse {
 enum ActorMessage {
     Async(GrammarCheckRequest),
     Sync(SyncCheckRequest),
+    SyncBatch(SyncBatchRequest),
 }
 
 /// Handle to communicate with the grammar actor
@@ -86,6 +97,19 @@ impl GrammarActorHandle {
         }
     }
 
+    /// Batch synchronous grammar check — one round-trip for all sentences.
+    pub fn check_sentences_batch(&self, sentences: &[String]) -> Vec<Vec<GrammarError>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let _ = self.sender.send(ActorMessage::SyncBatch(SyncBatchRequest {
+            sentences: sentences.to_vec(),
+            reply: reply_tx,
+        }));
+        match reply_rx.recv_timeout(std::time::Duration::from_millis(5000)) {
+            Ok(resp) => resp.results,
+            Err(_) => sentences.iter().map(|_| Vec::new()).collect(),
+        }
+    }
+
     /// Non-blocking poll for results
     pub fn try_recv(&self) -> Option<GrammarCheckResponse> {
         self.receiver.try_recv().ok()
@@ -123,6 +147,12 @@ pub fn spawn_grammar_actor(
                     ActorMessage::Sync(req) => {
                         let errors = checker.check_sentence(&req.sentence);
                         let _ = req.reply.send(SyncCheckResponse { errors });
+                    }
+                    ActorMessage::SyncBatch(req) => {
+                        let results: Vec<Vec<GrammarError>> = req.sentences.iter()
+                            .map(|s| checker.check_sentence(s))
+                            .collect();
+                        let _ = req.reply.send(SyncBatchResponse { results });
                     }
                 }
             }
@@ -211,6 +241,12 @@ pub fn spawn_grammar_actor_with_loader(
                     ActorMessage::Sync(req) => {
                         let errors = checker.check_sentence(&req.sentence);
                         let _ = req.reply.send(SyncCheckResponse { errors });
+                    }
+                    ActorMessage::SyncBatch(req) => {
+                        let results: Vec<Vec<GrammarError>> = req.sentences.iter()
+                            .map(|s| checker.check_sentence(s))
+                            .collect();
+                        let _ = req.reply.send(SyncBatchResponse { results });
                     }
                 }
             }
