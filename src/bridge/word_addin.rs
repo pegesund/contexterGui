@@ -329,6 +329,12 @@ impl TextBridge for WordAddinBridge {
     fn take_reset(&self) -> bool {
         self.take_reset()
     }
+
+    fn update_errors_json(&self, json: &str) {
+        if let Ok(mut lock) = self.errors_json.lock() {
+            *lock = json.to_string();
+        }
+    }
 }
 
 // ── HTTP handling ──
