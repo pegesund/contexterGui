@@ -4090,13 +4090,13 @@ impl eframe::App for ContextApp {
                 let active = egui::Color32::from_rgb(0, 70, 160);
                 let inactive = egui::Color32::from_rgb(100, 100, 100);
 
-                // --- Left side: 💡 | ● ✏ | 📌 | 🎤 ---
+                // --- Left side: 💡 | ●✏ | 🎤 | ▶ ---
 
-                // 💡 Innhold
+                // 💡 Forslag (suggestions tab)
                 let innhold_color = if self.selected_tab == 0 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{1F4A1}").size(16.0).color(innhold_color)
-                ).sense(egui::Sense::click())).clicked() {
+                ).sense(egui::Sense::click())).on_hover_text("Forslag").clicked() {
                     self.selected_tab = 0;
                 }
 
@@ -4113,7 +4113,7 @@ impl eframe::App for ContextApp {
                 let gram_color = if self.selected_tab == 1 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{270F}").size(16.0).color(gram_color)
-                ).sense(egui::Sense::click())).clicked() {
+                ).sense(egui::Sense::click())).on_hover_text("Grammatikk").clicked() {
                     self.selected_tab = 1;
                 }
 
@@ -4121,46 +4121,34 @@ impl eframe::App for ContextApp {
                 ui.label(egui::RichText::new("|").size(12.0).color(sep));
                 ui.add_space(2.0);
 
-                // 🎤 Microphone slot: 🎤 when idle, ■ when recording, ⏳ when transcribing
+                // 🎤 Microphone slot: 🎤 idle, ■ recording, ⏳ transcribing
                 let mic_recording = stt::is_recording() || self.mic_transcribing;
                 if mic_recording {
                     if self.mic_transcribing {
-                        // Transcribing: show spinner-like indicator
-                        ui.add(egui::Button::new(
+                        ui.add(egui::Label::new(
                             egui::RichText::new("⏳").size(13.0)
-                        ).fill(egui::Color32::TRANSPARENT)
-                         .min_size(egui::vec2(22.0, 16.0)));
+                        )).on_hover_text("Transkriberer...");
                     } else {
-                        // Recording: show stop button
-                        if ui.add(egui::Button::new(
-                            egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
-                        ).fill(egui::Color32::from_rgb(200, 40, 40))
-                         .min_size(egui::vec2(22.0, 16.0))
-                        ).clicked() {
+                        if ui.add(egui::Label::new(
+                            egui::RichText::new("■").size(14.0).color(egui::Color32::from_rgb(200, 40, 40))
+                        ).sense(egui::Sense::click())).on_hover_text("Stopp opptak").clicked() {
                             if let Some(handle) = &self.mic_handle {
                                 handle.stop();
                                 self.mic_transcribing = true;
                             }
                         }
                     }
+                } else if self.whisper_loading {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new("⏳").size(13.0)
+                    )).on_hover_text("Laster talemodell...");
+                    ctx.request_repaint_after(Duration::from_millis(100));
                 } else {
-                    // Idle: show mic button (or loading indicator)
-                    if self.whisper_loading {
-                        // Loading whisper models — show spinner
-                        ui.add(egui::Button::new(
-                            egui::RichText::new("⏳").size(13.0)
-                        ).fill(egui::Color32::TRANSPARENT)
-                         .min_size(egui::vec2(22.0, 16.0)))
-                         .on_hover_text("Laster talemodell...");
-                        ctx.request_repaint_after(Duration::from_millis(100));
-                    } else {
-                        let whisper_ready = self.whisper_engine.is_some();
-                        let mic_color = if !self.whisper_loading { inactive } else { egui::Color32::from_rgb(160, 160, 160) };
-                        let mic_btn = ui.add(egui::Button::new(
-                            egui::RichText::new("\u{1F3A4}").size(13.0).color(mic_color)
-                        ).fill(egui::Color32::TRANSPARENT)
-                         .min_size(egui::vec2(22.0, 16.0)));
-                        if mic_btn.on_hover_text("Start talegjenkjenning").clicked() {
+                    let mic_color = inactive;
+                    let whisper_ready = self.whisper_engine.is_some();
+                    if ui.add(egui::Label::new(
+                        egui::RichText::new("\u{1F3A4}").size(13.0).color(mic_color)
+                    ).sense(egui::Sense::click())).on_hover_text("Talegjenkjenning").clicked() {
                             if whisper_ready {
                                 // Models already loaded — start recording immediately
                                 let final_eng = self.whisper_engine.as_ref().unwrap().clone();
@@ -4237,24 +4225,21 @@ impl eframe::App for ContextApp {
                             }
                         }
                     }
-                }
 
-                // 🔊 Speak selection slot: 🔊 when idle, ■ when speaking
+                // ▶ Speak selection slot: ▶ idle, ■ speaking
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("|").size(12.0).color(sep));
                 ui.add_space(2.0);
                 if tts_speaking || ocr_is_busy {
-                    // Speaking/OCR active: show stop button
                     if ui.add(egui::Label::new(
                         egui::RichText::new("■").size(14.0).color(egui::Color32::from_rgb(200, 40, 40))
-                    ).sense(egui::Sense::click())).on_hover_text("Stopp avspilling").clicked() {
+                    ).sense(egui::Sense::click())).on_hover_text("Stopp opplesing").clicked() {
                         tts::stop_speaking();
                         self.ocr_text = None;
                     }
                 } else {
-                    // Idle: show speak-selection button (▶ triangle as speaker icon)
                     if ui.add(egui::Label::new(
-                        egui::RichText::new("▶").size(12.0).color(inactive)
+                        egui::RichText::new("▶").size(14.0).color(inactive)
                     ).sense(egui::Sense::click())).on_hover_text("Les opp markert tekst").clicked() {
                         log!("Speak button clicked!");
                         match self.platform.read_selected_text() {
@@ -4295,22 +4280,16 @@ impl eframe::App for ContextApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
-                // ▁ Minimize
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{2581}").size(14.0).color(inactive)
-                ).sense(egui::Sense::click())).on_hover_text("Minimer").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                }
-
                 // 📌 Follow cursor toggle
                 let pin_color = if self.follow_cursor {
                     egui::Color32::from_rgb(0, 120, 60)
                 } else {
                     egui::Color32::from_rgb(160, 160, 160)
                 };
+                let pin_tooltip = if self.follow_cursor { "Følg markør (på)" } else { "Følg markør (av)" };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
-                ).sense(egui::Sense::click())).clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(pin_tooltip).clicked() {
                     self.follow_cursor = !self.follow_cursor;
                 }
 
@@ -4318,8 +4297,15 @@ impl eframe::App for ContextApp {
                 let settings_color = if self.selected_tab == 2 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
-                ).sense(egui::Sense::click())).clicked() {
+                ).sense(egui::Sense::click())).on_hover_text("Innstillinger").clicked() {
                     self.selected_tab = 2;
+                }
+
+                // ▁ Minimize
+                if ui.add(egui::Label::new(
+                    egui::RichText::new("–").size(14.0).color(inactive)
+                ).sense(egui::Sense::click())).on_hover_text("Minimer").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
                 // ✕ Close button
