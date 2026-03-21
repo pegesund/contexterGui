@@ -1560,19 +1560,27 @@ impl ContextApp {
         for resp in responses {
             match resp {
                 bert_worker::BertResponse::Completion { id: _, cache_key, left, right } => {
+                    // Only accept results for the current context — ignore stale responses
+                    let current_key = format!("{}|{}",
+                        self.context.masked_sentence.as_deref().unwrap_or(""),
+                        extract_prefix(&self.context.word));
+                    if cache_key != current_key {
+                        log!("Ignoring stale completion (key mismatch)");
+                        continue;
+                    }
                     log!("BERT completion received: {} left, {} right: [{}]", left.len(), right.len(),
                         left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                    // Apply grammar filter on main thread (checker isn't Send)
+                    // Apply grammar filter on main thread
                     if self.grammar_completion {
                         if let Some(analyzer) = &self.analyzer {
                             // Step 1: Dictionary-filter completions
                             let left_filtered: Vec<Completion> = left.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(8)
+                                .take(15)
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(8)
+                                .take(15)
                                 .collect();
 
                             // Step 2: Grammar-filter via actor (synchronous)
@@ -3833,9 +3841,9 @@ impl eframe::App for ContextApp {
                             sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end().to_string()
                         };
                         let (top_n, max_steps) = match self.quality {
-                            0 => (5, 0),
-                            1 => (5, 1),
-                            _ => (5, 3),
+                            0 => (15, 0),
+                            1 => (15, 1),
+                            _ => (15, 3),
                         };
                         log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
                         worker.send(|id| bert_worker::BertRequest::CompleteWord {
@@ -4029,10 +4037,8 @@ impl eframe::App for ContextApp {
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
         let win_h = s * if self.selected_tab >= 1 {
             250.0
-        } else if has_content || recently_replaced {
-            150.0
         } else {
-            80.0
+            150.0
         };
         let win_w = s * if self.selected_tab == 0 {
             300.0
