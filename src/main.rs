@@ -1240,6 +1240,13 @@ impl ContextApp {
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
             return;
         }
+        // Skip if user is currently typing this word or a longer version of it
+        let cursor_word = self.context.word.to_lowercase();
+        let cursor_mid = !cursor_word.is_empty()
+            && cursor_word.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        if cursor_mid && (clean == cursor_word || cursor_word.starts_with(&clean) || clean.starts_with(&cursor_word)) {
+            return;
+        }
         self.last_spell_checked_word = clean.clone();
 
         // Skip if word is in ignore list
@@ -2489,7 +2496,17 @@ impl ContextApp {
                     let word_end = char_pos + word.chars().count();
                     char_pos = word_end + 1; // +1 for the space
                     if clean.is_empty() { continue; }
-                    if self.manager.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, &self.context.word) {
+                    // Skip the word user is currently typing (mid-word)
+                    let cursor_word = &self.context.word;
+                    let cursor_mid_word = !cursor_word.is_empty()
+                        && cursor_word.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+                    if cursor_mid_word {
+                        log!("spell skip check: clean='{}' cursor='{}' match={}", clean, cursor_word, clean.eq_ignore_ascii_case(cursor_word));
+                        if clean.eq_ignore_ascii_case(cursor_word) {
+                            continue;
+                        }
+                    }
+                    if self.manager.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, cursor_word) {
                         continue;
                     }
                     self.spelling_queue.push(SpellingQueueItem { word: clean.to_string(), sentence_ctx: trimmed.clone(), paragraph_id: String::new() });
@@ -2627,8 +2644,11 @@ impl ContextApp {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
-                    // Grammar check (async via actor)
-                    actor.check_sentence(sentence_text, 0, &p.paragraph_id, 0);
+                    // Grammar check (async via actor) — only for complete sentences
+                    let ends_with_punct = sentence_text.trim_end().ends_with(|c: char| ".!?:".contains(c));
+                    if ends_with_punct {
+                        actor.check_sentence(sentence_text, 0, &p.paragraph_id, 0);
+                    }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
                 }
@@ -3682,6 +3702,16 @@ impl eframe::App for ContextApp {
 
             let mid = is_mid_word(&self.context.word);
             if mid {
+                // Remove spelling errors for the word currently being typed
+                let cursor_lower = self.context.word.to_lowercase();
+                self.writing_errors.retain(|e| {
+                    if matches!(e.category, ErrorCategory::Spelling) {
+                        let e_lower = e.word.to_lowercase();
+                        !(e_lower == cursor_lower || cursor_lower.starts_with(&e_lower) || e_lower.starts_with(&cursor_lower))
+                    } else {
+                        true
+                    }
+                });
                 // Mid-word: mark prefix change for debouncing
                 // Only trigger run_completion for legacy path (no masked sentence)
                 // Fill-in-the-blank is handled by background completion thread
@@ -3758,7 +3788,9 @@ impl eframe::App for ContextApp {
                 let spell_word = sentence.split_whitespace().last()
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
-                    if !w.is_empty() {
+                    // Don't spell-check the last word if it looks like the user is still typing
+                    let last_char_alpha = sentence.trim_end().chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+                    if !w.is_empty() && !last_char_alpha {
                         {
                             let para_id = self.context.paragraph_id.clone();
                             self.check_spelling(w, &sentence, &para_id, 0);

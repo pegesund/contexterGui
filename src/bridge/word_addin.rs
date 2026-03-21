@@ -195,18 +195,20 @@ impl TextBridge for WordAddinBridge {
         None
     }
 
-    fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, _doc_char_len: usize, word_at_cursor: &str) -> bool {
-        // Skip spell check if cursor is inside the word (user still typing)
-        let mid_word = !word_at_cursor.is_empty()
-            && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
-        mid_word && cursor_off >= word_start && cursor_off <= word_end
+    fn should_skip_word_spelling(&self, _cursor_off: usize, _word_start: usize, _word_end: usize, _doc_char_len: usize, word_at_cursor: &str) -> bool {
+        // The word_at_cursor is checked against ALL words in the sentence.
+        // We only want to skip the word the user is currently typing.
+        // Since we can't reliably compare offsets (doc vs sentence-relative),
+        // we skip when word_at_cursor is mid-word AND is a prefix of or equals the word being checked.
+        // This is handled by the caller — we just report if cursor is mid-word.
+        false // Let the caller handle skip logic via word comparison
     }
 
-    fn should_skip_sentence_grammar(&self, cursor_off: usize, sent_start: usize, sent_end: usize, ends_with_punct: bool, _doc_char_len: usize, word_at_cursor: &str) -> bool {
-        // Skip grammar if cursor is in this sentence and it doesn't end with punctuation
+    fn should_skip_sentence_grammar(&self, _cursor_off: usize, _sent_start: usize, _sent_end: usize, ends_with_punct: bool, _doc_char_len: usize, word_at_cursor: &str) -> bool {
+        // Skip grammar if user is mid-word and sentence doesn't end with punctuation
         let mid_word = !word_at_cursor.is_empty()
             && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
-        mid_word && !ends_with_punct && cursor_off >= sent_start && cursor_off <= sent_end
+        mid_word && !ends_with_punct
     }
 
     fn replace_word(&self, new_text: &str) -> bool {
