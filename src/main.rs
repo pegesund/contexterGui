@@ -69,6 +69,13 @@ impl AnyChecker {
         }
     }
 
+    fn has_error(&mut self, text: &str) -> bool {
+        match self {
+            AnyChecker::Neo(c) => !c.check_sentence(text).is_empty(),
+            AnyChecker::Swi(c) => c.has_error(text),
+        }
+    }
+
     fn check_sentence_full(&mut self, text: &str) -> nostos_cognio::grammar::types::CheckResult {
         match self {
             AnyChecker::Neo(c) => c.check_sentence_full(text),

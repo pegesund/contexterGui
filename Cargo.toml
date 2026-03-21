@@ -66,3 +66,7 @@ path = "src/test_fotball.rs"
 [[bin]]
 name = "test-cw"
 path = "src/test_cw.rs"
+
+[[bin]]
+name = "test-prolog"
+path = "src/test_prolog.rs"

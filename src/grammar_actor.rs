@@ -150,7 +150,14 @@ pub fn spawn_grammar_actor(
                     }
                     ActorMessage::SyncBatch(req) => {
                         let results: Vec<Vec<GrammarError>> = req.sentences.iter()
-                            .map(|s| checker.check_sentence(s))
+                            .map(|s| {
+                                // Quick check first — if no error, skip full check
+                                if !checker.has_error(s) {
+                                    Vec::new()
+                                } else {
+                                    vec![GrammarError { rule_name: "has_error".into(), word: String::new(), position: 0, explanation: String::new(), suggestion: String::new() }]
+                                }
+                            })
                             .collect();
                         let _ = req.reply.send(SyncBatchResponse { results });
                     }
@@ -244,7 +251,14 @@ pub fn spawn_grammar_actor_with_loader(
                     }
                     ActorMessage::SyncBatch(req) => {
                         let results: Vec<Vec<GrammarError>> = req.sentences.iter()
-                            .map(|s| checker.check_sentence(s))
+                            .map(|s| {
+                                // Quick check first — if no error, skip full check
+                                if !checker.has_error(s) {
+                                    Vec::new()
+                                } else {
+                                    vec![GrammarError { rule_name: "has_error".into(), word: String::new(), position: 0, explanation: String::new(), suggestion: String::new() }]
+                                }
+                            })
                             .collect();
                         let _ = req.reply.send(SyncBatchResponse { results });
                     }
