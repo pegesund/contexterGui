@@ -41,6 +41,13 @@ pub fn force_stop() {
     MIC_RECORDING.store(false, Ordering::Relaxed);
 }
 
+/// No-op engine that returns empty string — used for streaming when partials aren't needed
+pub struct NoOpSttEngine;
+
+impl SttEngine for NoOpSttEngine {
+    fn transcribe(&self, _audio: &[f32]) -> String { String::new() }
+}
+
 // Platform implementations
 #[cfg(target_os = "windows")]
 mod windows_impl;
@@ -51,6 +58,8 @@ pub use windows_impl::WhisperEngine;
 mod macos_impl;
 #[cfg(target_os = "macos")]
 pub use macos_impl::MacSttEngine;
+#[cfg(target_os = "macos")]
+pub use macos_impl::start_recording_live;
 
 /// Start recording from default microphone.
 /// Uses `streaming_engine` for fast partial transcription during recording,

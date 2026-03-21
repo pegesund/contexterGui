@@ -4200,24 +4200,35 @@ impl eframe::App for ContextApp {
                                     Err(e) => log!("Microphone error: {}", e),
                                 }
                             } else {
-                                // Lazy-load whisper models, then auto-start recording
-                                self.whisper_loading = true;
-                                self.whisper_pending_record = true;
-                                self.whisper_load_status = if self.whisper_mode == 0 {
-                                    "Laster talemodell (tiny, 75 MB)...".into()
-                                } else {
-                                    "Laster talemodeller (base + medium-q5, 690 MB)...".into()
-                                };
-                                let (tx, rx) = std::sync::mpsc::channel();
-                                self.whisper_load_rx = Some(rx);
-                                let mode = self.whisper_mode;
+                                #[cfg(target_os = "macos")]
+                                {
+                                    // macOS: live streaming with Apple SFSpeechRecognizer
+                                    match stt::start_recording_live() {
+                                        Ok(handle) => {
+                                            log!("Microphone recording started (Apple STT)");
+                                            self.mic_handle = Some(handle);
+                                            self.mic_result_text = None;
+                                        }
+                                        Err(e) => log!("Microphone error: {}", e),
+                                    }
+                                }
                                 #[cfg(target_os = "windows")]
                                 {
+                                    // Windows: lazy-load Whisper models, then auto-start recording
+                                    self.whisper_loading = true;
+                                    self.whisper_pending_record = true;
+                                    self.whisper_load_status = if self.whisper_mode == 0 {
+                                        "Laster talemodell (tiny, 75 MB)...".into()
+                                    } else {
+                                        "Laster talemodeller (base + medium-q5, 690 MB)...".into()
+                                    };
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    self.whisper_load_rx = Some(rx);
+                                    let mode = self.whisper_mode;
                                     let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                                         .join("../../whisper-build/bin/Release")
                                         .to_string_lossy().to_string();
                                     if mode == 0 {
-                                        // Rask: tiny only
                                         let dll = dll_dir.clone();
                                         std::thread::spawn(move || {
                                             let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4228,7 +4239,6 @@ impl eframe::App for ContextApp {
                                             ));
                                         });
                                     } else {
-                                        // Beste: base (streaming) + medium-q5 (final)
                                         let tx2 = tx.clone();
                                         let dll2 = dll_dir.clone();
                                         std::thread::spawn(move || {
@@ -4248,14 +4258,8 @@ impl eframe::App for ContextApp {
                                             ));
                                         });
                                     }
+                                    log!("Whisper: lazy-loading models (mode={})", mode);
                                 }
-                                #[cfg(target_os = "macos")]
-                                {
-                                    // TODO: load macOS STT engine
-                                    let engine = stt::MacSttEngine::new();
-                                    let _ = tx.send(WhisperLoadItem::Final(Ok(Box::new(engine) as Box<dyn stt::SttEngine>)));
-                                }
-                                log!("Whisper: lazy-loading models (mode={})", mode);
                             }
                         }
                     }
