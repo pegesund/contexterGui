@@ -74,7 +74,16 @@ fn main() {
     let wf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../contexter-repo/training-data/wordfreq.tsv");
     let wf = nostos_cognio::wordfreq::load_wordfreq(wf_path.as_path(), 10);
-    for word in &["mor", "son", "mors", "det", "tex", "ex", "sport", "fotball", "som"] {
+    // Check specific words
+    for word in &["osv", "osv.", "nevrale", "nevral", "nevralt", "neural", "nevrale"] {
+        let token = checker.analyze_word(word);
+        let has = checker.has_word(word);
+        println!("  '{}': has_word={} readings={}", word, has, token.readings.len());
+        for r in &token.readings {
+            println!("    lemma='{}' pos={:?} tags={:?}", r.lemma, r.pos, r.tags);
+        }
+    }
+    for word in &["osv", "nevrale", "mor", "son", "mors", "det", "tex", "ex", "sport", "fotball", "som"] {
         println!("  freq('{}') = {:?}", word, wf.get(*word));
     }
     println!();
