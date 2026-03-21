@@ -10,8 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use nostos_cognio::complete::Completion;
+use nostos_cognio::baseline::Baselines;
+use nostos_cognio::complete::{complete_word, Completion};
+use nostos_cognio::embeddings::EmbeddingStore;
 use nostos_cognio::model::Model;
+use nostos_cognio::prefix_index::PrefixIndex;
 use nostos_cognio::spelling;
 
 pub type RequestId = u64;
@@ -47,6 +50,18 @@ pub enum BertRequest {
         id: RequestId,
         masked_text: String,
         top_k: usize,
+    },
+
+    /// Full word completion via complete_word() — the original working pipeline.
+    CompleteWord {
+        id: RequestId,
+        context: String,
+        prefix: String,
+        capitalize: bool,
+        top_n: usize,
+        max_steps: usize,
+        cache_key: String,
+        masked_text: String,
     },
 }
 
@@ -102,6 +117,11 @@ pub fn spawn_bert_worker(
     build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
     build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
+    prefix_index: Arc<PrefixIndex>,
+    baselines: Option<Arc<Baselines>>,
+    wordfreq_shared: Option<Arc<HashMap<String, u64>>>,
+    embedding_store: Option<Arc<EmbeddingStore>>,
+    analyzer: Option<Arc<mtag::Analyzer>>,
 ) -> BertWorkerHandle {
     let (req_tx, req_rx) = mpsc::channel::<BertRequest>();
     let (resp_tx, resp_rx) = mpsc::channel::<BertResponse>();
@@ -109,7 +129,8 @@ pub fn spawn_bert_worker(
     std::thread::Builder::new()
         .name("bert-worker".to_string())
         .spawn(move || {
-            worker_loop(model, repaint_ctx, req_rx, resp_tx, build_bpe, build_mtag, build_right);
+            worker_loop(model, repaint_ctx, req_rx, resp_tx, build_bpe, build_mtag, build_right,
+                prefix_index, baselines, wordfreq_shared, embedding_store, analyzer);
         })
         .expect("Failed to spawn BERT worker thread");
 
@@ -128,13 +149,26 @@ fn worker_loop(
     build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
     build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
+    prefix_index: Arc<PrefixIndex>,
+    baselines: Option<Arc<Baselines>>,
+    wordfreq_shared: Option<Arc<HashMap<String, u64>>>,
+    embedding_store: Option<Arc<EmbeddingStore>>,
+    analyzer: Option<Arc<mtag::Analyzer>>,
 ) {
+    use std::ops::Deref;
     while let Ok(req) = rx.recv() {
         match req {
             BertRequest::Completion {
                 id, masked_text, prefix_lower, matches, mtag_candidates,
                 mtag_valid, nearby_words, wordfreq, capitalize, cancel, cache_key,
             } => {
+                {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(std::env::temp_dir().join("acatts-bert.log")) {
+                        let _ = writeln!(f, "OLD Completion: prefix='{}' matches={}", prefix_lower, matches.len());
+                    }
+                }
                 if cancel.load(Ordering::Acquire) { continue; }
 
                 let logits = match model.single_forward(&masked_text) {
@@ -174,6 +208,69 @@ fn worker_loop(
                 let predictions = mlm_forward_impl(&mut model, &masked_text, top_k);
                 let _ = tx.send(BertResponse::MlmForward { id, predictions });
                 repaint_ctx.request_repaint();
+            }
+
+            BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text } => {
+                {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(std::env::temp_dir().join("acatts-bert.log")) {
+                        let _ = writeln!(f, "CompleteWord: ctx='{}' prefix='{}' wf={} analyzer={} pi={} top_n={} max_steps={}",
+                            &context, prefix,
+                            wordfreq_shared.is_some(), analyzer.is_some(), prefix_index.len(), top_n, max_steps);
+                    }
+                }
+                let pi = &*prefix_index;
+                let fallback_fn: Option<Box<dyn Fn(&str) -> bool>> = analyzer.as_ref().map(|a| {
+                    let a = Arc::clone(a);
+                    Box::new(move |w: &str| a.has_word(w)) as Box<dyn Fn(&str) -> bool>
+                });
+                let fallback_ref: Option<&dyn Fn(&str) -> bool> = fallback_fn.as_ref().map(|b| b.as_ref());
+                let prefix_fn: Option<Box<dyn Fn(&str, usize) -> Vec<String>>> = analyzer.as_ref().map(|a| {
+                    let a = Arc::clone(a);
+                    Box::new(move |p: &str, limit: usize| a.prefix_lookup(p, limit)) as Box<dyn Fn(&str, usize) -> Vec<String>>
+                });
+                let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
+
+                match complete_word(
+                    &mut model,
+                    &context,
+                    &prefix,
+                    pi,
+                    baselines.as_deref(),
+                    wordfreq_shared.as_deref(),
+                    fallback_ref,
+                    prefix_ref,
+                    embedding_store.as_deref(),
+                    1.0,   // pmi_weight
+                    10.0,  // topic_boost
+                    top_n,
+                    max_steps,
+                ) {
+                    Ok(left) => {
+                        // Right completions: complete_word with empty prefix (open predictions)
+                        let right = match complete_word(
+                            &mut model, &context, "", pi,
+                            baselines.as_deref(), wordfreq_shared.as_deref(),
+                            fallback_ref, prefix_ref, embedding_store.as_deref(),
+                            1.0, 10.0, 5, 0,
+                        ) {
+                            Ok(r) => {
+                                // Exclude words already in left column
+                                let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
+                                r.into_iter().filter(|c| !left_words.contains(&c.word.to_lowercase())).collect()
+                            }
+                            Err(_) => vec![],
+                        };
+                        let _ = tx.send(BertResponse::Completion { id, cache_key, left, right });
+                        repaint_ctx.request_repaint();
+                    }
+                    Err(e) => {
+                        eprintln!("complete_word error: {}", e);
+                        let _ = tx.send(BertResponse::Completion { id, cache_key, left: vec![], right: vec![] });
+                        repaint_ctx.request_repaint();
+                    }
+                }
             }
         }
     }

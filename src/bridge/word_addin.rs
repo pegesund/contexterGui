@@ -195,6 +195,20 @@ impl TextBridge for WordAddinBridge {
         None
     }
 
+    fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, _doc_char_len: usize, word_at_cursor: &str) -> bool {
+        // Skip spell check if cursor is inside the word (user still typing)
+        let mid_word = !word_at_cursor.is_empty()
+            && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        mid_word && cursor_off >= word_start && cursor_off <= word_end
+    }
+
+    fn should_skip_sentence_grammar(&self, cursor_off: usize, sent_start: usize, sent_end: usize, ends_with_punct: bool, _doc_char_len: usize, word_at_cursor: &str) -> bool {
+        // Skip grammar if cursor is in this sentence and it doesn't end with punctuation
+        let mid_word = !word_at_cursor.is_empty()
+            && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        mid_word && !ends_with_punct && cursor_off >= sent_start && cursor_off <= sent_end
+    }
+
     fn replace_word(&self, new_text: &str) -> bool {
         let json = format!(
             r#"{{"action":"replaceWord","text":"{}"}}"#,

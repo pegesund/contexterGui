@@ -21,6 +21,16 @@ pub struct GrammarCheckRequest {
     pub sentence_index: usize,
 }
 
+/// Synchronous check request — for completion grammar filtering
+pub struct SyncCheckRequest {
+    pub sentence: String,
+    pub reply: mpsc::Sender<SyncCheckResponse>,
+}
+
+pub struct SyncCheckResponse {
+    pub errors: Vec<GrammarError>,
+}
+
 /// Result sent back from the grammar actor — full check_sentence_full output.
 pub struct GrammarCheckResponse {
     pub sentence: String,
@@ -32,21 +42,48 @@ pub struct GrammarCheckResponse {
     pub compound_candidates: Vec<CompoundCandidate>,
 }
 
+/// Messages the actor can receive
+enum ActorMessage {
+    Async(GrammarCheckRequest),
+    Sync(SyncCheckRequest),
+}
+
 /// Handle to communicate with the grammar actor
 pub struct GrammarActorHandle {
-    sender: mpsc::Sender<GrammarCheckRequest>,
+    sender: mpsc::Sender<ActorMessage>,
     receiver: mpsc::Receiver<GrammarCheckResponse>,
 }
 
 impl GrammarActorHandle {
     /// Send a sentence for checking (non-blocking)
     pub fn check_sentence(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize) {
-        let _ = self.sender.send(GrammarCheckRequest {
+        let _ = self.sender.send(ActorMessage::Async(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,
             paragraph_id: paragraph_id.to_string(),
             sentence_index,
-        });
+        }));
+    }
+
+    /// Synchronous grammar check — blocks until the actor responds.
+    /// Used for completion grammar filtering.
+    pub fn check_sentence_sync(&self, sentence: &str) -> Vec<GrammarError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let _ = self.sender.send(ActorMessage::Sync(SyncCheckRequest {
+            sentence: sentence.to_string(),
+            reply: reply_tx,
+        }));
+        let start = std::time::Instant::now();
+        match reply_rx.recv_timeout(std::time::Duration::from_millis(2000)) {
+            Ok(resp) => {
+                eprintln!("grammar_sync: '{}' → {} errors in {:?}", &sentence[..sentence.len().min(50)], resp.errors.len(), start.elapsed());
+                resp.errors
+            }
+            Err(_) => {
+                eprintln!("grammar_sync TIMEOUT: '{}'", &sentence[..sentence.len().min(50)]);
+                Vec::new()
+            }
+        }
     }
 
     /// Non-blocking poll for results
@@ -61,28 +98,34 @@ pub fn spawn_grammar_actor(
     checker: AnyChecker,
     repaint_ctx: egui::Context,
 ) -> GrammarActorHandle {
-    let (req_tx, req_rx) = mpsc::channel::<GrammarCheckRequest>();
+    let (req_tx, req_rx) = mpsc::channel::<ActorMessage>();
     let (resp_tx, resp_rx) = mpsc::channel::<GrammarCheckResponse>();
 
     std::thread::Builder::new()
         .name("grammar-actor".into())
         .spawn(move || {
             let mut checker = checker;
-            while let Ok(req) = req_rx.recv() {
-                let result = checker.check_sentence_full(&req.sentence);
-                let _ = resp_tx.send(GrammarCheckResponse {
-                    sentence: req.sentence,
-                    doc_offset: req.doc_offset,
-                    paragraph_id: req.paragraph_id,
-                    sentence_index: req.sentence_index,
-                    errors: result.errors,
-                    unknown_words: result.unknown_words,
-                    compound_candidates: result.compound_candidates,
-                });
-                repaint_ctx.request_repaint();
+            while let Ok(msg) = req_rx.recv() {
+                match msg {
+                    ActorMessage::Async(req) => {
+                        let result = checker.check_sentence_full(&req.sentence);
+                        let _ = resp_tx.send(GrammarCheckResponse {
+                            sentence: req.sentence,
+                            doc_offset: req.doc_offset,
+                            paragraph_id: req.paragraph_id,
+                            sentence_index: req.sentence_index,
+                            errors: result.errors,
+                            unknown_words: result.unknown_words,
+                            compound_candidates: result.compound_candidates,
+                        });
+                        repaint_ctx.request_repaint();
+                    }
+                    ActorMessage::Sync(req) => {
+                        let errors = checker.check_sentence(&req.sentence);
+                        let _ = req.reply.send(SyncCheckResponse { errors });
+                    }
+                }
             }
-            // Channel closed (app exiting). Do NOT drop the checker —
-            // SWI-Prolog's thread-local cleanup causes a segfault.
             std::mem::forget(checker);
             loop { std::thread::park(); }
         })
@@ -104,7 +147,7 @@ pub fn spawn_grammar_actor_with_loader(
     compound_data: String,
     repaint_ctx: egui::Context,
 ) -> GrammarActorHandle {
-    let (req_tx, req_rx) = mpsc::channel::<GrammarCheckRequest>();
+    let (req_tx, req_rx) = mpsc::channel::<ActorMessage>();
     let (resp_tx, resp_rx) = mpsc::channel::<GrammarCheckResponse>();
 
     std::thread::Builder::new()
@@ -150,21 +193,27 @@ pub fn spawn_grammar_actor_with_loader(
             };
 
             let mut checker = checker;
-            while let Ok(req) = req_rx.recv() {
-                let result = checker.check_sentence_full(&req.sentence);
-                let _ = resp_tx.send(GrammarCheckResponse {
-                    sentence: req.sentence,
-                    doc_offset: req.doc_offset,
-                    paragraph_id: req.paragraph_id,
-                    sentence_index: req.sentence_index,
-                    errors: result.errors,
-                    unknown_words: result.unknown_words,
-                    compound_candidates: result.compound_candidates,
-                });
-                repaint_ctx.request_repaint();
+            while let Ok(msg) = req_rx.recv() {
+                match msg {
+                    ActorMessage::Async(req) => {
+                        let result = checker.check_sentence_full(&req.sentence);
+                        let _ = resp_tx.send(GrammarCheckResponse {
+                            sentence: req.sentence,
+                            doc_offset: req.doc_offset,
+                            paragraph_id: req.paragraph_id,
+                            sentence_index: req.sentence_index,
+                            errors: result.errors,
+                            unknown_words: result.unknown_words,
+                            compound_candidates: result.compound_candidates,
+                        });
+                        repaint_ctx.request_repaint();
+                    }
+                    ActorMessage::Sync(req) => {
+                        let errors = checker.check_sentence(&req.sentence);
+                        let _ = req.reply.send(SyncCheckResponse { errors });
+                    }
+                }
             }
-            // Channel closed (app exiting). Do NOT drop the checker —
-            // SWI-Prolog's thread-local cleanup causes a segfault.
             std::mem::forget(checker);
             loop { std::thread::park(); }
         })

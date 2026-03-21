@@ -562,9 +562,9 @@ enum StartupItem {
     Completer {
         model: Option<Model>,
         prefix_index: Option<PrefixIndex>,
-        baselines: Option<Baselines>,
+        baselines: Option<Arc<Baselines>>,
         wordfreq: Option<Arc<HashMap<String, u64>>>,
-        embedding_store: Option<EmbeddingStore>,
+        embedding_store: Option<Arc<EmbeddingStore>>,
         errors: Vec<String>,
     },
 }
@@ -601,9 +601,9 @@ struct ContextApp {
     /// The cache key we last dispatched (avoid re-dispatching same)
     dispatched_key: String,
     prefix_index: Option<PrefixIndex>,
-    baselines: Option<Baselines>,
+    baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
-    embedding_store: Option<EmbeddingStore>,
+    embedding_store: Option<Arc<EmbeddingStore>>,
     completions: Vec<Completion>,
     /// Open suggestions (any word) for fill-in-the-blank mode
     open_completions: Vec<Completion>,
@@ -741,18 +741,9 @@ fn build_bpe_completions(
 ) -> Vec<Completion> {
     use std::sync::atomic::Ordering;
 
-    // Build set of single-token BPE words (these are direct token matches, not BPE-extended)
-    let single_token_words: std::collections::HashSet<String> = matches.iter()
-        .map(|(_, w)| w.to_lowercase())
-        .collect();
-
     let is_valid = |w: &str| -> bool {
         let key = w.to_lowercase();
         if nearby_words.contains(&key) { return false; }
-        // For single-token matches (direct BPE tokens like "gøy"), use mtag to validate.
-        // For BPE-extended words (like "gøya" = "gøy" + "a"), only use wordfreq —
-        // mtag includes valid inflections that may be wrong in this context.
-        if single_token_words.contains(&key) && mtag_valid.contains(&key) { return true; }
         wordfreq.map_or(true, |wf| wf.contains_key(&key))
     };
     let cap = |s: &str| -> String {
@@ -812,7 +803,7 @@ fn build_bpe_completions(
     let ctx_before = mask_parts[0].trim_end();
     let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
 
-    let max_steps = if prefix_lower.len() <= 3 { 1 } else { 0 };
+    let max_steps = if prefix_lower.len() <= 3 { 3 } else { 1 };
     for _step in 0..max_steps {
         if cancel.load(Ordering::Acquire) { return vec![]; }
         let best_score = candidates.iter()
@@ -1065,7 +1056,11 @@ impl ContextApp {
                     }
                 };
             let _ = tx2.send(StartupItem::Completer {
-                model: model_opt, prefix_index, baselines, wordfreq: wf, embedding_store, errors,
+                model: model_opt, prefix_index,
+                baselines: baselines.map(|b| Arc::new(b)),
+                wordfreq: wf,
+                embedding_store: embedding_store.map(|e| Arc::new(e)),
+                errors,
             });
         });
 
@@ -1565,26 +1560,52 @@ impl ContextApp {
         for resp in responses {
             match resp {
                 bert_worker::BertResponse::Completion { id: _, cache_key, left, right } => {
-                    log!("BERT completion received: {} left, {} right", left.len(), right.len());
+                    log!("BERT completion received: {} left, {} right: [{}]", left.len(), right.len(),
+                        left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                     // Apply grammar filter on main thread (checker isn't Send)
                     if self.grammar_completion {
                         if let Some(analyzer) = &self.analyzer {
-                            // Dictionary-filter completions using analyzer
+                            // Step 1: Dictionary-filter completions
                             let left_filtered: Vec<Completion> = left.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(5)
+                                .take(8)
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
                                 .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
-                                .take(5)
+                                .take(8)
                                 .collect();
-                            // Grammar filter skipped (checker moved to actor)
-                            eprintln!("completions (dict-filtered): [{}]",
-                                left_filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                            eprintln!("open_completions (dict-filtered): [{}]",
-                                right_filtered.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                            self.completions = left_filtered;
-                            self.open_completions = right_filtered;
+
+                            // Step 2: Grammar-filter via actor (synchronous)
+                            log!("Grammar filter: actor={} left={} right={}", self.grammar_actor.is_some(), left_filtered.len(), right_filtered.len());
+                            if let Some(actor) = &self.grammar_actor {
+                                let masked = self.context.masked_sentence.as_deref().unwrap_or("");
+                                let before_mask = masked.split("<mask>").next().unwrap_or("");
+                                let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
+                                    .map(|i| i + 1).unwrap_or(0);
+                                let ctx_for_grammar = before_mask[sent_start..].trim().to_string();
+                                let prefix = extract_prefix(&self.context.word);
+
+                                let mut check_fn = |sentence: &str| -> GrammarCheckResult {
+                                    let errors = actor.check_sentence_sync(sentence);
+                                    GrammarCheckResult {
+                                        ok: errors.is_empty(),
+                                        suggestions: errors.iter()
+                                            .filter(|e| !e.suggestion.is_empty())
+                                            .map(|e| e.suggestion.clone())
+                                            .collect(),
+                                    }
+                                };
+                                self.completions = grammar_filter(&left_filtered, &ctx_for_grammar, prefix, &mut check_fn, 5);
+                                self.open_completions = grammar_filter(&right_filtered, &ctx_for_grammar, "", &mut check_fn, 5);
+                            } else {
+                                self.completions = left_filtered.into_iter().take(5).collect();
+                                self.open_completions = right_filtered.into_iter().take(5).collect();
+                            }
+
+                            eprintln!("completions (grammar-filtered): [{}]",
+                                self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                            eprintln!("open_completions (grammar-filtered): [{}]",
+                                self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                         } else {
                             self.completions = left.into_iter().take(5).collect();
                             self.open_completions = right.into_iter().take(5).collect();
@@ -2790,7 +2811,7 @@ impl ContextApp {
         }
         self.last_embedding_sync = Instant::now();
 
-        if let Some(store) = &mut self.embedding_store {
+        if let Some(store) = self.embedding_store.as_mut().and_then(|s| Arc::get_mut(s)) {
             if let Some(doc_text) = self.manager.read_document_context() {
                 // split_sentences only returns complete sentences (ending .!?)
                 // so partial/in-progress sentences are never embedded.
@@ -2891,11 +2912,11 @@ impl ContextApp {
                     ctx.as_str(),
                     prefix,
                     pi,
-                    self.baselines.as_ref(),
+                    self.baselines.as_deref(),
                     self.wordfreq.as_deref(),
                     fallback_ref,
                     prefix_ref,
-                    self.embedding_store.as_ref(),
+                    self.embedding_store.as_deref(),
                     1.0,   // pmi_weight
                     10.0,  // topic_boost
                     top_n,
@@ -3366,6 +3387,11 @@ impl eframe::App for ContextApp {
             while let Ok(item) = rx.try_recv() {
                 match item {
                     StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
+                        // Store data FIRST so worker gets the right values
+                        self.prefix_index = prefix_index;
+                        self.baselines = baselines;
+                        self.wordfreq = wordfreq;
+                        self.embedding_store = embedding_store;
                         if let Some(m) = model {
                             self.bert_worker = Some(bert_worker::spawn_bert_worker(
                                 m,
@@ -3373,13 +3399,14 @@ impl eframe::App for ContextApp {
                                 build_bpe_completions,
                                 build_mtag_completions,
                                 build_right_completions,
+                                Arc::new(self.prefix_index.clone().unwrap_or_default()),
+                                self.baselines.clone(),
+                                self.wordfreq.as_ref().cloned(),
+                                self.embedding_store.clone(),
+                                self.analyzer.clone(),
                             ));
                             self.bert_ready = true;
                         }
-                        self.prefix_index = prefix_index;
-                        self.baselines = baselines;
-                        self.wordfreq = wordfreq;
-                        self.embedding_store = embedding_store;
                         self.load_errors.extend(errors);
                         self.startup_done.push("NorBERT4".into());
                         // Force rescan — spelling was skipped while BERT was loading
@@ -3803,18 +3830,25 @@ impl eframe::App for ContextApp {
                             .map(|a| a.prefix_lookup(&prefix_lower, 100)
                                 .into_iter().map(|w| w.to_lowercase()).collect())
                             .unwrap_or_default();
-                        worker.send(|id| bert_worker::BertRequest::Completion {
+                        let context_for_cw = {
+                            let sentence = &self.context.sentence;
+                            sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end().to_string()
+                        };
+                        let (top_n, max_steps) = match self.quality {
+                            0 => (5, 0),
+                            1 => (5, 1),
+                            _ => (5, 3),
+                        };
+                        log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
+                        worker.send(|id| bert_worker::BertRequest::CompleteWord {
                             id,
-                            masked_text: masked_trimmed,
-                            prefix_lower: prefix_lower.clone(),
-                            matches,
-                            mtag_candidates,
-                            mtag_valid,
-                            nearby_words,
-                            wordfreq: wf,
+                            context: context_for_cw,
+                            prefix: prefix.to_string(),
                             capitalize,
-                            cancel,
+                            top_n,
+                            max_steps,
                             cache_key: key_clone,
+                            masked_text: masked_trimmed,
                         });
                         ctx.request_repaint_after(Duration::from_millis(50));
                     }
@@ -4003,7 +4037,7 @@ impl eframe::App for ContextApp {
             80.0
         };
         let win_w = s * if self.selected_tab == 0 {
-            260.0
+            300.0
         } else {
             420.0
         };
@@ -5537,6 +5571,11 @@ fn main() -> eframe::Result {
                         if let Some(m) = model {
                             app.bert_worker = Some(bert_worker::spawn_bert_worker(
                                 m, egui::Context::default(), build_bpe_completions, build_mtag_completions, build_right_completions,
+                                Arc::new(prefix_index.clone().unwrap_or_default()),
+                                baselines.clone(),
+                                wordfreq.as_ref().cloned(),
+                                embedding_store.clone(),
+                                app.analyzer.clone(),
                             ));
                             app.bert_ready = true;
                             eprintln!("BERT worker spawned");
