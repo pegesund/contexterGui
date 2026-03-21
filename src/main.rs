@@ -4090,7 +4090,7 @@ impl eframe::App for ContextApp {
                 let active = egui::Color32::from_rgb(0, 70, 160);
                 let inactive = egui::Color32::from_rgb(100, 100, 100);
 
-                // --- Left side: 💡 | ●✏ | 🎤 | ▶ ---
+                // --- Left side: 💡 ●✏ | 🎤 ▶ ---
 
                 // 💡 Forslag (suggestions tab)
                 let innhold_color = if self.selected_tab == 0 { active } else { inactive };
@@ -4099,10 +4099,6 @@ impl eframe::App for ContextApp {
                 ).sense(egui::Sense::click())).on_hover_text("Forslag").clicked() {
                     self.selected_tab = 0;
                 }
-
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("|").size(12.0).color(sep));
-                ui.add_space(2.0);
 
                 // ● ✏ Grammatikk (dot + pen)
                 let dot_color = if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
@@ -4228,10 +4224,7 @@ impl eframe::App for ContextApp {
                         }
                     }
 
-                // ▶ Speak selection slot: ▶ idle, ■ speaking
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("|").size(12.0).color(sep));
-                ui.add_space(2.0);
+                // ▶ Speak selection (same group as 🎤)
                 if tts_speaking || ocr_is_busy {
                     if ui.add(egui::Button::new(
                         egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
