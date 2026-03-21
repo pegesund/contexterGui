@@ -1,5 +1,32 @@
 # FIXME — Remaining bugs on fix-completion-pipeline branch
 
+## Test endpoint: GET /errors
+
+The Word Add-in HTTPS server exposes a `/errors` endpoint for automated testing.
+
+```bash
+curl -k https://127.0.0.1:3000/errors | python3 -m json.tool
+```
+
+Returns JSON array of current writing errors:
+```json
+[
+  {
+    "category": "spelling",      // "spelling", "grammar", or "sentence_boundary"
+    "word": "somx",              // the error word
+    "suggestion": "som",         // suggested correction
+    "rule": "stavefeil_bert",    // rule name
+    "sentence": "sport somx er"  // sentence context
+  }
+]
+```
+
+Use this to build automated tests:
+1. Use AppleScript to type text with known errors into Word
+2. Wait for processing (2-3 seconds)
+3. `curl -k https://127.0.0.1:3000/errors` to get detected errors
+4. Verify expected errors are found with correct suggestions
+
 ## What works
 - complete_word() produces proper words (sport, sportsgren, etc.)
 - Grammar filter works and is fast (FST v3: 0.1ms instead of 315ms)
