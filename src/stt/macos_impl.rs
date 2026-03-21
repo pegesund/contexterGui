@@ -99,13 +99,21 @@ pub fn start_recording_live() -> Result<MicHandle, String> {
 
             let tx = result_tx.clone();
             let d = done.clone();
+            let last_partial: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+            let last_partial2 = last_partial.clone();
             let callback = ConcreteBlock::new(move |result: *mut Object, error: *mut Object| {
                 if !error.is_null() {
                     let desc: *mut Object = msg_send![error, localizedDescription];
                     let cstr: *const i8 = msg_send![desc, UTF8String];
                     let s = CStr::from_ptr(cstr).to_string_lossy().to_string();
                     stt_log(&format!("STT error: {}", s));
-                    let _ = tx.send(TranscribeResult { text: format!("Feil: {}", s), partial: false });
+                    // On error, use last partial as final result
+                    let fallback = last_partial2.lock().unwrap().clone();
+                    if !fallback.is_empty() {
+                        let _ = tx.send(TranscribeResult { text: fallback, partial: false });
+                    } else {
+                        let _ = tx.send(TranscribeResult { text: format!("Feil: {}", s), partial: false });
+                    }
                     d.store(true, Ordering::Relaxed);
                     return;
                 }
@@ -116,9 +124,23 @@ pub fn start_recording_live() -> Result<MicHandle, String> {
                     let s = CStr::from_ptr(cstr).to_string_lossy().to_string();
                     let is_final: BOOL = msg_send![result, isFinal];
                     stt_log(&format!("STT {}: '{}'", if is_final == YES { "final" } else { "partial" }, &s[..s.len().min(60)]));
-                    let _ = tx.send(TranscribeResult { text: s, partial: is_final != YES });
                     if is_final == YES {
+                        // Use final if non-empty, otherwise fall back to last partial
+                        let text = if s.is_empty() {
+                            let fallback = last_partial2.lock().unwrap().clone();
+                            stt_log(&format!("STT using last partial as final: '{}'", &fallback[..fallback.len().min(60)]));
+                            fallback
+                        } else {
+                            s
+                        };
+                        let _ = tx.send(TranscribeResult { text, partial: false });
                         d.store(true, Ordering::Relaxed);
+                    } else {
+                        // Track last partial
+                        if !s.is_empty() {
+                            *last_partial2.lock().unwrap() = s.clone();
+                        }
+                        let _ = tx.send(TranscribeResult { text: s, partial: true });
                     }
                 }
             });

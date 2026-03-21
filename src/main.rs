@@ -4129,9 +4129,11 @@ impl eframe::App for ContextApp {
                             egui::RichText::new("⏳").size(13.0)
                         )).on_hover_text("Transkriberer...");
                     } else {
-                        if ui.add(egui::Label::new(
-                            egui::RichText::new("■").size(14.0).color(egui::Color32::from_rgb(200, 40, 40))
-                        ).sense(egui::Sense::click())).on_hover_text("Stopp opptak").clicked() {
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                        ).fill(egui::Color32::from_rgb(200, 40, 40))
+                         .min_size(egui::vec2(22.0, 16.0))
+                        ).on_hover_text("Stopp opptak").clicked() {
                             if let Some(handle) = &self.mic_handle {
                                 handle.stop();
                                 self.mic_transcribing = true;
@@ -4231,9 +4233,11 @@ impl eframe::App for ContextApp {
                 ui.label(egui::RichText::new("|").size(12.0).color(sep));
                 ui.add_space(2.0);
                 if tts_speaking || ocr_is_busy {
-                    if ui.add(egui::Label::new(
-                        egui::RichText::new("■").size(14.0).color(egui::Color32::from_rgb(200, 40, 40))
-                    ).sense(egui::Sense::click())).on_hover_text("Stopp opplesing").clicked() {
+                    if ui.add(egui::Button::new(
+                        egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(200, 40, 40))
+                     .min_size(egui::vec2(22.0, 16.0))
+                    ).on_hover_text("Stopp opplesing").clicked() {
                         tts::stop_speaking();
                         self.ocr_text = None;
                     }
