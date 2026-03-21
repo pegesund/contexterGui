@@ -534,6 +534,10 @@ fn extract_prefix(word: &str) -> &str {
     word.trim()
 }
 
+fn escape_json_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+}
+
 // --- Pending BERT state types ---
 
 /// Pending spelling BERT re-ranking
@@ -3282,6 +3286,27 @@ impl eframe::App for ContextApp {
 
         // Poll grammar actor for results (non-blocking)
         self.poll_grammar_responses();
+
+        // Update errors JSON for /errors endpoint
+        {
+            let json = format!("[{}]", self.writing_errors.iter()
+                .filter(|e| !e.ignored)
+                .map(|e| {
+                    let cat = match e.category {
+                        ErrorCategory::Spelling => "spelling",
+                        ErrorCategory::Grammar => "grammar",
+                        ErrorCategory::SentenceBoundary => "sentence_boundary",
+                    };
+                    format!(r#"{{"category":"{}","word":"{}","suggestion":"{}","rule":"{}","sentence":"{}"}}"#,
+                        cat, escape_json_str(&e.word), escape_json_str(&e.suggestion),
+                        escape_json_str(&e.rule_name), escape_json_str(&e.sentence_context))
+                })
+                .collect::<Vec<_>>()
+                .join(","));
+            for bridge in &self.manager.bridges {
+                bridge.update_errors_json(&json);
+            }
+        }
 
         // Drain changed paragraphs from Word Add-in and send to grammar actor
         self.process_addin_changed_paragraphs();

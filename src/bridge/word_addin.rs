@@ -40,6 +40,8 @@ pub struct WordAddinBridge {
     /// Deleted paragraph IDs received from add-in.
     /// Main thread drains these to remove errors for deleted paragraphs.
     deleted_paragraphs: Arc<Mutex<Vec<String>>>,
+    /// JSON snapshot of current errors — updated by main thread, read by /errors endpoint
+    errors_json: Arc<Mutex<String>>,
 }
 
 impl WordAddinBridge {
@@ -53,12 +55,14 @@ impl WordAddinBridge {
         let deleted_paragraphs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let current_doc_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let errors_json: Arc<Mutex<String>> = Arc::new(Mutex::new("[]".to_string()));
 
         let ctx_clone = Arc::clone(&cached_context);
         let reply_clone = Arc::clone(&reply_queue);
         let changed_clone = Arc::clone(&changed_paragraphs);
         let deleted_clone = Arc::clone(&deleted_paragraphs);
         let reset_clone = Arc::clone(&reset_requested);
+        let errors_clone = Arc::clone(&errors_json);
         let doc_name_clone = Arc::clone(&current_doc_name);
 
         std::thread::Builder::new()
@@ -106,6 +110,7 @@ impl WordAddinBridge {
                         let deleted = Arc::clone(&deleted_clone);
                         let reset = Arc::clone(&reset_clone);
                         let doc_name = Arc::clone(&doc_name_clone);
+                        let errors = Arc::clone(&errors_clone);
                         let tls = tls_acceptor.clone();
                         let html = html.clone();
                         let js = js.clone();
@@ -114,7 +119,7 @@ impl WordAddinBridge {
                                 match acceptor.accept(tcp_stream) {
                                     Ok(mut tls_stream) => {
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &html, &js);
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &errors, &html, &js);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -122,7 +127,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &html, &js);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &errors, &html, &js);
                             }
                         });
                     }
@@ -137,6 +142,14 @@ impl WordAddinBridge {
             reset_requested,
             changed_paragraphs,
             deleted_paragraphs,
+            errors_json,
+        }
+    }
+
+    /// Update the errors JSON snapshot (called by main thread)
+    pub fn update_errors_json(&self, json: &str) {
+        if let Ok(mut lock) = self.errors_json.lock() {
+            *lock = json.to_string();
         }
     }
 
@@ -328,6 +341,7 @@ fn handle_request_rw<S: Read + Write>(
     deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
     reset_requested: &Arc<std::sync::atomic::AtomicBool>,
     current_doc_name: &Arc<Mutex<String>>,
+    errors_json: &Arc<Mutex<String>>,
     static_html: &str,
     static_js: &str,
 ) {
@@ -510,6 +524,15 @@ fn handle_request_rw<S: Read + Write>(
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
                 cors
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("GET", "/errors") => {
+            let json = errors_json.lock().map(|l| l.clone()).unwrap_or_else(|_| "[]".to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                cors, json.len(), json
             );
             let _ = stream.write_all(response.as_bytes());
         }

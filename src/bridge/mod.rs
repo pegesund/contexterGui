@@ -106,6 +106,9 @@ pub trait TextBridge {
 
     /// Check if a reset was requested (new document opened). Default: false.
     fn take_reset(&self) -> bool { false }
+
+    /// Update errors JSON for /errors test endpoint
+    fn update_errors_json(&self, _json: &str) {}
 }
 
 #[cfg(target_os = "windows")]
