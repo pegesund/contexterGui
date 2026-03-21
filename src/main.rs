@@ -4121,35 +4121,9 @@ impl eframe::App for ContextApp {
                 ui.label(egui::RichText::new("|").size(12.0).color(sep));
                 ui.add_space(2.0);
 
-                // 📌 Follow cursor toggle
-                let pin_color = if self.follow_cursor {
-                    egui::Color32::from_rgb(0, 120, 60)
-                } else {
-                    egui::Color32::from_rgb(160, 160, 160)
-                };
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
-                ).sense(egui::Sense::click())).clicked() {
-                    self.follow_cursor = !self.follow_cursor;
-                }
-
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("|").size(12.0).color(sep));
-                ui.add_space(2.0);
-
-                // 🎤 Microphone / TTS speaking / recording — always same slot
+                // 🎤 Microphone slot: 🎤 when idle, ■ when recording, ⏳ when transcribing
                 let mic_recording = stt::is_recording() || self.mic_transcribing;
-                if tts_speaking || ocr_is_busy {
-                    // TTS speaking: show stop button in mic slot
-                    if ui.add(egui::Button::new(
-                        egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
-                    ).fill(egui::Color32::from_rgb(200, 40, 40))
-                     .min_size(egui::vec2(22.0, 16.0))
-                    ).clicked() {
-                        tts::stop_speaking();
-                        self.ocr_text = None;
-                    }
-                } else if mic_recording {
+                if mic_recording {
                     if self.mic_transcribing {
                         // Transcribing: show spinner-like indicator
                         ui.add(egui::Button::new(
@@ -4265,12 +4239,23 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // 🔊 Speak selection button
+                // 🔊 Speak selection slot: 🔊 when idle, ■ when speaking
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("|").size(12.0).color(sep));
                 ui.add_space(2.0);
-                if !tts_speaking {
-                    if icon_button(ui, "\u{1F50A}", "Les opp markert tekst") {
+                if tts_speaking || ocr_is_busy {
+                    // Speaking/OCR active: show stop button
+                    if ui.add(egui::Label::new(
+                        egui::RichText::new("■").size(14.0).color(egui::Color32::from_rgb(200, 40, 40))
+                    ).sense(egui::Sense::click())).on_hover_text("Stopp avspilling").clicked() {
+                        tts::stop_speaking();
+                        self.ocr_text = None;
+                    }
+                } else {
+                    // Idle: show speak-selection button (▶ triangle as speaker icon)
+                    if ui.add(egui::Label::new(
+                        egui::RichText::new("▶").size(12.0).color(inactive)
+                    ).sense(egui::Sense::click())).on_hover_text("Les opp markert tekst").clicked() {
                         log!("Speak button clicked!");
                         match self.platform.read_selected_text() {
                             Some(text) => {
@@ -4287,18 +4272,6 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // Debug tab (if enabled)
-                if self.show_debug_tab {
-                    ui.add_space(2.0);
-                    ui.label(egui::RichText::new("|").size(12.0).color(sep));
-                    ui.add_space(2.0);
-                    let dbg_color = if self.selected_tab == 3 { active } else { inactive };
-                    if ui.add(egui::Label::new(
-                        egui::RichText::new("Debug").size(12.0).color(dbg_color)
-                    ).sense(egui::Sense::click())).clicked() {
-                        self.selected_tab = 3;
-                    }
-                }
 
                 // --- Error count (on Grammatikk tab) ---
                 if self.selected_tab == 1 {
@@ -4310,9 +4283,9 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // --- Right side: drag area, ⚙, ✕ ---
+                // --- Right side: drag area, 📌 ⚙ ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = 60.0; // ▁ + ⚙ + ✕
+                let right_w = 80.0; // ▁ + 📌 + ⚙ + ✕
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
                     egui::pos2(remaining.max.x - right_w, remaining.max.y),
@@ -4327,6 +4300,18 @@ impl eframe::App for ContextApp {
                     egui::RichText::new("\u{2581}").size(14.0).color(inactive)
                 ).sense(egui::Sense::click())).on_hover_text("Minimer").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+
+                // 📌 Follow cursor toggle
+                let pin_color = if self.follow_cursor {
+                    egui::Color32::from_rgb(0, 120, 60)
+                } else {
+                    egui::Color32::from_rgb(160, 160, 160)
+                };
+                if ui.add(egui::Label::new(
+                    egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
+                ).sense(egui::Sense::click())).clicked() {
+                    self.follow_cursor = !self.follow_cursor;
                 }
 
                 // ⚙ Settings
