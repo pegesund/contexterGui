@@ -40,6 +40,17 @@ fn main() {
     // Warmup
     let _ = checker.check_sentence("Hei dette er en test.");
 
+    // Check token readings for key words
+    println!("=== Token analysis ===");
+    for word in &["spor", "sport", "bord", "lag", "hus", "morsom"] {
+        let token = checker.analyze_word(word);
+        println!("'{}': {} readings", word, token.readings.len());
+        for r in &token.readings {
+            println!("  {:?}", r);
+        }
+    }
+    println!();
+
     // Test: is it "spor" specifically or any word with many readings?
     let timing_tests = vec![
         "Morsom spor.",      // slow
@@ -83,13 +94,53 @@ fn main() {
         println!("{:>8.1}ms  {} errors  '{}'  rules: [{}]", ms, errors.len(), s, err_desc.join(", "));
     }
 
-    // Test has_error (quick check — stops at first error)
-    println!("\n=== has_error (should be faster) ===");
-    for s in &timing_tests {
+    // Test: isolate which part is slow by testing substrings
+    println!("\n=== Isolate slow part ===");
+    // Just adjective alone
+    let t = Instant::now();
+    let _ = checker.check_sentence("Morsom.");
+    println!("{:>8.1}ms  'Morsom.'", t.elapsed().as_micros() as f64 / 1000.0);
+
+    // Just noun alone
+    let t = Instant::now();
+    let _ = checker.check_sentence("Spor.");
+    println!("{:>8.1}ms  'Spor.'", t.elapsed().as_micros() as f64 / 1000.0);
+
+    // Adj + noun (the slow case)
+    let t = Instant::now();
+    let _ = checker.check_sentence("Morsom spor.");
+    println!("{:>8.1}ms  'Morsom spor.'", t.elapsed().as_micros() as f64 / 1000.0);
+
+    // Different adj + same noun
+    let t = Instant::now();
+    let _ = checker.check_sentence("Morsomt spor.");
+    println!("{:>8.1}ms  'Morsomt spor.' (correct gender)", t.elapsed().as_micros() as f64 / 1000.0);
+
+    // Test with a non-existent word (no readings)
+    let t = Instant::now();
+    let _ = checker.check_sentence("Morsom xyzzy.");
+    println!("{:>8.1}ms  'Morsom xyzzy.' (unknown word)", t.elapsed().as_micros() as f64 / 1000.0);
+
+    // Two correct words
+    let t = Instant::now();
+    let _ = checker.check_sentence("Morsom sport.");
+    println!("{:>8.1}ms  'Morsom sport.' (correct)", t.elapsed().as_micros() as f64 / 1000.0);
+
+    // Run slow case many times
+    println!("\n=== Consistency check (Morsom spor.) ===");
+    let mut times: Vec<f64> = Vec::new();
+    for _ in 0..20 {
         let t = Instant::now();
-        let has_err = checker.has_error(s);
-        let ms = t.elapsed().as_micros() as f64 / 1000.0;
-        println!("{:>8.1}ms  has_error={}  '{}'", ms, has_err, s);
+        let _ = checker.check_sentence("Morsom spor.");
+        times.push(t.elapsed().as_micros() as f64 / 1000.0);
+    }
+    let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let avg = times.iter().sum::<f64>() / times.len() as f64;
+    println!("  min={:.1}ms max={:.1}ms avg={:.1}ms", min, max, avg);
+    for (i, t) in times.iter().enumerate() {
+        print!("  {:.0} ", t);
+        if (i + 1) % 10 == 0 { println!(); }
     }
 
     println!("\n=== Main test ===");
