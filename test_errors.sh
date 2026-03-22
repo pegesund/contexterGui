@@ -259,33 +259,25 @@ type_text "Han spiller fotboll hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
-# Fix: navigate to second 'o' in fotboll (pos 16), replace with 'a'
-# "Han spiller fotboll" → H(0)..r(10) (11)f(12)o(13)t(14)b(15)o(16)
+# Fix: select "fotboll" (7 chars starting at pos 12) and replace with "fotball"
 key_press cmd_left
-repeat_key right 16
-key_press delete
-type_text "a"
-# Move away from sentence (go to end, type on new line)
-go_to_end; key_press return
-type_text "Noe annet her."
+repeat_key right 12
+repeat_key shift_right 7
+type_text "fotball"
+go_to_end
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
-# Now go back and re-introduce the same error
-# Delete "Noe annet her." line
-key_press cmd_left; key_press sel_to_end; key_press backspace; key_press backspace
-# Navigate back to 'a' in fotball (pos 16), replace with 'o'
+# Re-introduce: select "fotball" (7 chars at pos 12) and replace with "fotboll"
 key_press cmd_left
-repeat_key right 16
-key_press delete
-type_text "o"
-# Move away again
-go_to_end; key_press return
-type_text "Ekstra linje."
+repeat_key right 12
+repeat_key shift_right 7
+type_text "fotboll"
+go_to_end
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll re-detected after reintroduce" "fotboll" "" "$ERRORS"
-undo_all 80
+undo_all 50
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
