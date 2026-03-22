@@ -2613,11 +2613,19 @@ impl ContextApp {
                 }
                 // Clear errors for sentences that are no longer in the paragraph
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
+                let before_count = self.writing_errors.len();
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     // Keep if sentence still exists in paragraph
-                    new_sentence_set.contains(&e.sentence_context.to_lowercase())
+                    let keep = new_sentence_set.contains(&e.sentence_context.to_lowercase());
+                    if !keep {
+                        log!("  Removing stale error: word='{}' sentence='{}'", e.word, trunc(&e.sentence_context, 40));
+                    }
+                    keep
                 });
+                if self.writing_errors.len() < before_count {
+                    log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
+                }
 
                 // Check each sentence: skip if already processed (hash unchanged)
                 for sentence_text in &sentences {
