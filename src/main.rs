@@ -1624,13 +1624,18 @@ impl ContextApp {
                     // Apply grammar filter on main thread
                     if self.grammar_completion {
                         if let Some(analyzer) = &self.analyzer {
-                            // Step 1: Dictionary-filter completions
+                            // Step 1: Dictionary-filter completions (also accept user dict words)
+                            let ud_ref = &self.user_dict;
+                            let is_known = |w: &str| -> bool {
+                                analyzer.has_word(&w.to_lowercase())
+                                || ud_ref.as_ref().map_or(false, |ud| ud.has_word(w))
+                            };
                             let left_filtered: Vec<Completion> = left.into_iter()
-                                .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
+                                .filter(|c| is_known(&c.word))
                                 .take(15)
                                 .collect();
                             let right_filtered: Vec<Completion> = right.into_iter()
-                                .filter(|c| analyzer.has_word(&c.word.to_lowercase()))
+                                .filter(|c| is_known(&c.word))
                                 .take(15)
                                 .collect();
 
@@ -1676,6 +1681,25 @@ impl ContextApp {
                             } else {
                                 self.completions = left_filtered.into_iter().take(5).collect();
                                 self.open_completions = right_filtered.into_iter().take(5).collect();
+                            }
+
+                            // Inject user dict words matching the prefix
+                            if let Some(ud) = &self.user_dict {
+                                let prefix = extract_prefix(&self.context.word).to_lowercase();
+                                if !prefix.is_empty() {
+                                    let existing: std::collections::HashSet<String> = self.completions.iter()
+                                        .map(|c| c.word.to_lowercase()).collect();
+                                    for uw in ud.list_words() {
+                                        if uw.starts_with(&prefix) && !existing.contains(&uw) {
+                                            // Insert at top with high score — user explicitly added this word
+                                            self.completions.insert(0, nostos_cognio::complete::Completion {
+                                                word: uw, score: 100.0, elapsed_ms: 0.0,
+                                            });
+                                        }
+                                    }
+                                    // Keep max 5
+                                    self.completions.truncate(5);
+                                }
                             }
 
                             eprintln!("completions (grammar-filtered): [{}]",
@@ -2696,7 +2720,8 @@ impl ContextApp {
                     });
 
                     // Grammar check (async via actor) — pass doc text for proper noun detection
-                    actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text);
+                    let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                    actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
                 }
@@ -2762,7 +2787,8 @@ impl ContextApp {
             }
 
             log!("Grammar send: '{}' (offset={})", trunc(&trimmed, 60), doc_offset);
-            actor.check_sentence_with_doc(&trimmed, doc_offset, "", 0, &self.last_doc_text);
+            let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+            actor.check_sentence_with_doc(&trimmed, doc_offset, "", 0, &self.last_doc_text, &uw);
         }
         self.grammar_scanning = false;
     }

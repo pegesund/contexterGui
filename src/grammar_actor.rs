@@ -12,6 +12,7 @@ use std::sync::mpsc;
 use nostos_cognio::grammar::types::{GrammarError, UnknownWord, CompoundCandidate};
 
 use crate::AnyChecker;
+use crate::user_dict::UserDict;
 
 /// Request sent to the grammar actor
 pub struct GrammarCheckRequest {
@@ -20,6 +21,7 @@ pub struct GrammarCheckRequest {
     pub paragraph_id: String,
     pub sentence_index: usize,
     pub doc_text: String,
+    pub user_words: Vec<String>,
 }
 
 /// Synchronous check request — for completion grammar filtering
@@ -69,16 +71,17 @@ pub struct GrammarActorHandle {
 impl GrammarActorHandle {
     /// Send a sentence for checking (non-blocking)
     pub fn check_sentence(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize) {
-        self.check_sentence_with_doc(sentence, doc_offset, paragraph_id, sentence_index, "")
+        self.check_sentence_with_doc(sentence, doc_offset, paragraph_id, sentence_index, "", &[])
     }
 
-    pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str) {
+    pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str, user_words: &[String]) {
         let _ = self.sender.send(ActorMessage::Async(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,
             paragraph_id: paragraph_id.to_string(),
             doc_text: doc_text.to_string(),
             sentence_index,
+            user_words: user_words.to_vec(),
         }));
     }
 
@@ -138,7 +141,13 @@ pub fn spawn_grammar_actor(
             while let Ok(msg) = req_rx.recv() {
                 match msg {
                     ActorMessage::Async(req) => {
-                        let result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
+                        let mut result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
+                        // Filter out user dict words from unknowns
+                        if !req.user_words.is_empty() {
+                            result.unknown_words.retain(|u| {
+                                !req.user_words.iter().any(|uw| uw.eq_ignore_ascii_case(&u.word))
+                            });
+                        }
                         let _ = resp_tx.send(GrammarCheckResponse {
                             sentence: req.sentence,
                             doc_offset: req.doc_offset,
@@ -232,7 +241,13 @@ pub fn spawn_grammar_actor_with_loader(
             while let Ok(msg) = req_rx.recv() {
                 match msg {
                     ActorMessage::Async(req) => {
-                        let result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
+                        let mut result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
+                        // Filter out user dict words from unknowns
+                        if !req.user_words.is_empty() {
+                            result.unknown_words.retain(|u| {
+                                !req.user_words.iter().any(|uw| uw.eq_ignore_ascii_case(&u.word))
+                            });
+                        }
                         let _ = resp_tx.send(GrammarCheckResponse {
                             sentence: req.sentence,
                             doc_offset: req.doc_offset,

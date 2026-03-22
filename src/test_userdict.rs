@@ -184,6 +184,40 @@ fn main() {
         }
     }
 
+    // --- Test 11: Prefix matching for completions ---
+    {
+        // "nevrale" is in user dict, "tensorflow", "kubernetes" too
+        let prefix_matches = |prefix: &str| -> Vec<String> {
+            udict.list_words().into_iter()
+                .filter(|w| w.starts_with(&prefix.to_lowercase()))
+                .collect()
+        };
+        let matches = prefix_matches("nevr");
+        if matches == vec!["nevrale".to_string()] {
+            println!("PASS: prefix 'nevr' matches 'nevrale'");
+            pass += 1;
+        } else {
+            println!("FAIL: prefix 'nevr' should match 'nevrale', got {:?}", matches);
+            fail += 1;
+        }
+        let matches = prefix_matches("ten");
+        if matches == vec!["tensorflow".to_string()] {
+            println!("PASS: prefix 'ten' matches 'tensorflow'");
+            pass += 1;
+        } else {
+            println!("FAIL: prefix 'ten' should match 'tensorflow', got {:?}", matches);
+            fail += 1;
+        }
+        let matches = prefix_matches("xyz");
+        if matches.is_empty() {
+            println!("PASS: prefix 'xyz' matches nothing");
+            pass += 1;
+        } else {
+            println!("FAIL: prefix 'xyz' should match nothing, got {:?}", matches);
+            fail += 1;
+        }
+    }
+
     // Cleanup
     let _ = std::fs::remove_file(&db_path);
 
