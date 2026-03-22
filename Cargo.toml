@@ -80,3 +80,7 @@ path = "src/test_spelling.rs"
 [[bin]]
 name = "test-userdict"
 path = "src/test_userdict.rs"
+
+[[bin]]
+name = "test-bert-spelling"
+path = "src/test_bert_spelling.rs"

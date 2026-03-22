@@ -48,13 +48,19 @@ fn main() {
         "Morsson er et fint ord.",
         "Jeg liker kjøre bil.",
         "Jeg liker å kjøre bil.",
+        "Han spiller fotbollx godt.",
     ];
     for s in &test_sents {
         let result = checker.check_sentence_full(s);
-        println!("'{}'\n  errors: {:?}\n  unknown: {:?}\n",
+        println!("'{}'\n  errors: {:?}\n  unknown: {:?}",
             s,
             result.errors.iter().map(|e| format!("{}:{}", e.rule_name, e.word)).collect::<Vec<_>>(),
             result.unknown_words.iter().map(|u| &u.word).collect::<Vec<_>>());
+        for unk in &result.unknown_words {
+            println!("    '{}' spelling_suggestions: {:?}", unk.word, unk.spelling_suggestions);
+            println!("    '{}' split_suggestions: {:?}", unk.word, unk.split_suggestions);
+        }
+        println!();
     }
 
     // Check token readings for key words

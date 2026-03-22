@@ -1836,8 +1836,10 @@ impl ContextApp {
         if let Some((idx, word, sentence_ctx)) = to_upgrade.into_iter().next() {
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
-                log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, best, score);
-                self.writing_errors[idx].suggestion = best.clone();
+                if !best.is_empty() {
+                    log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, best, score);
+                    self.writing_errors[idx].suggestion = best.clone();
+                }
             }
             self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
         }
