@@ -3398,17 +3398,19 @@ impl eframe::App for ContextApp {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
                 self.manager.active_bridge_name(),
                 trunc(&find, 60), trunc(&replace, 60), doc_offset);
-            // Clear underline BEFORE replacement (positions are still valid in original doc)
+            // Clear underline BEFORE replacement
             let find_lower_pre = find.to_lowercase();
             for e in &mut self.writing_errors {
-                if e.underlined
-                    && (e.word.to_lowercase() == find_lower_pre || e.sentence_context.to_lowercase() == find_lower_pre)
+                if (e.word.to_lowercase() == find_lower_pre || e.sentence_context.to_lowercase() == find_lower_pre)
                     && e.doc_offset == doc_offset
                 {
-                    self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                    // Clear both position-based (COM) and word-based (add-in) underlines
+                    if e.underlined {
+                        self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                    }
                     self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     e.underlined = false;
-                    log!("  Pre-cleared underline {}..{} word='{}'", e.word_doc_start, e.word_doc_end, e.word);
+                    log!("  Pre-cleared underline word='{}' para='{}'", e.word, trunc(&e.paragraph_id, 10));
                     break;
                 }
             }
@@ -4901,10 +4903,16 @@ impl eframe::App for ContextApp {
                             "ignore" => {
                                 let error = &self.writing_errors[idx];
                                 log!("ACTION ignore: word='{}' rule='{}'", error.word, error.rule_name);
+                                // Clear underline immediately
+                                self.manager.clear_underline_word(&error.word, &error.paragraph_id);
+                                if error.underlined {
+                                    self.manager.clear_error_underline(error.word_doc_start, error.word_doc_end);
+                                }
                                 if matches!(error.category, ErrorCategory::Spelling) {
                                     self.ignored_words.insert(error.word.clone());
                                 }
                                 self.writing_errors[idx].ignored = true;
+                                self.writing_errors[idx].underlined = false;
                             }
                             "add_to_dict" => {
                                 let word = self.writing_errors[idx].word.clone();
@@ -4917,8 +4925,11 @@ impl eframe::App for ContextApp {
                                 // Clear underlines for all instances of this word, then remove
                                 let word_lower = word.to_lowercase();
                                 for e in &self.writing_errors {
-                                    if matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower && e.underlined {
-                                        self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                                    if matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower {
+                                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                                        if e.underlined {
+                                            self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                                        }
                                     }
                                 }
                                 self.writing_errors.retain(|e| {
