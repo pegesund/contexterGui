@@ -2928,16 +2928,8 @@ impl ContextApp {
                 }
             }
 
-            // If sentence is clean (no errors, no unknowns), clear any stale underlines
-            // left from previous sessions for words in this sentence
-            if resp.errors.is_empty() && resp.unknown_words.is_empty() && !resp.paragraph_id.is_empty() {
-                for word in resp.sentence.split_whitespace() {
-                    let clean = word.trim_matches(|c: char| c.is_ascii_punctuation());
-                    if clean.len() >= 2 {
-                        self.manager.clear_underline_word(clean, &resp.paragraph_id);
-                    }
-                }
-            }
+            // Stale underlines from previous sessions are cleared at app startup
+            // via AppleScript (set underline of font to underline none).
         }
     }
 
