@@ -512,7 +512,9 @@ impl BridgeManager {
     }
 
     fn clear_underline_word(&self, word: &str, paragraph_id: &str) -> bool {
-        self.effective_bridge().map(|b| b.clear_underline_word(word, paragraph_id)).unwrap_or(false)
+        let mut any = false;
+        for b in &self.bridges { any |= b.clear_underline_word(word, paragraph_id); }
+        any
     }
 
     fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, doc_char_len: usize, word_at_cursor: &str) -> bool {
@@ -2813,7 +2815,7 @@ impl ContextApp {
                             word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                         });
                         // Blue underline for grammar errors
-                        if let Some(b) = self.manager.effective_bridge() {
+                        for b in &self.manager.bridges {
                             b.underline_word(&ge.word, &resp.paragraph_id, "#0000FF");
                         }
                     }
@@ -2858,8 +2860,8 @@ impl ContextApp {
                     ignored: false,
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                 });
-                // Underline the error word in Word
-                if let Some(b) = self.manager.effective_bridge() {
+                // Underline the error word in Word — use any bridge that supports it
+                for b in &self.manager.bridges {
                     b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
                 }
             }
