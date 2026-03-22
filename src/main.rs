@@ -84,6 +84,13 @@ impl AnyChecker {
         }
     }
 
+    fn check_sentence_full_with_doc(&mut self, text: &str, doc_text: &str) -> nostos_cognio::grammar::types::CheckResult {
+        match self {
+            AnyChecker::Neo(c) => c.check_sentence_full(text), // Neo doesn't have doc variant
+            AnyChecker::Swi(c) => c.check_sentence_full_with_doc(text, doc_text),
+        }
+    }
+
     fn fuzzy_lookup(&self, word: &str, max_distance: u32) -> Vec<(String, u32)> {
         match self {
             AnyChecker::Neo(c) => c.fuzzy_lookup(word, max_distance),
@@ -2688,8 +2695,8 @@ impl ContextApp {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
-                    // Grammar check (async via actor)
-                    actor.check_sentence(sentence_text, 0, &p.paragraph_id, 0);
+                    // Grammar check (async via actor) — pass doc text for proper noun detection
+                    actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text);
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
                 }
@@ -2755,7 +2762,7 @@ impl ContextApp {
             }
 
             log!("Grammar send: '{}' (offset={})", trunc(&trimmed, 60), doc_offset);
-            actor.check_sentence(&trimmed, doc_offset, "", 0);
+            actor.check_sentence_with_doc(&trimmed, doc_offset, "", 0, &self.last_doc_text);
         }
         self.grammar_scanning = false;
     }

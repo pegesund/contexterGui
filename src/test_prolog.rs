@@ -63,6 +63,94 @@ fn main() {
         println!();
     }
 
+    // Test: first-word-in-sentence proper noun detection
+    println!("=== First word capitalization (proper noun vs misspelling) ===");
+    let mut pass = 0;
+    let mut fail = 0;
+
+    // "Dettex" at sentence start — NOT a proper noun, should be flagged
+    {
+        let result = checker.check_sentence_full_with_doc("Dettex er en test.", "");
+        let has_dettex = result.unknown_words.iter().any(|u| u.word == "Dettex" || u.word == "dettex");
+        if has_dettex {
+            println!("  PASS: 'Dettex' at sentence start flagged (no doc context)");
+            pass += 1;
+        } else {
+            println!("  FAIL: 'Dettex' should be flagged as unknown");
+            fail += 1;
+        }
+    }
+
+    // "Tekna" at sentence start — IS a proper noun (appears mid-sentence elsewhere in doc)
+    {
+        let doc = "Vi jobber med Tekna og andre organisasjoner. Tekna er viktig.";
+        let result = checker.check_sentence_full_with_doc("Tekna er viktig.", doc);
+        let has_tekna = result.unknown_words.iter().any(|u| u.word.to_lowercase() == "tekna");
+        if !has_tekna {
+            println!("  PASS: 'Tekna' not flagged (appears mid-sentence in doc)");
+            pass += 1;
+        } else {
+            println!("  FAIL: 'Tekna' should NOT be flagged — it's a proper noun (mid-sentence usage in doc)");
+            fail += 1;
+        }
+    }
+
+    // "Tekna" at sentence start — NO mid-sentence usage → should be flagged
+    {
+        let doc = "Tekna er viktig. Tekna har mange medlemmer.";
+        let result = checker.check_sentence_full_with_doc("Tekna er viktig.", doc);
+        let has_tekna = result.unknown_words.iter().any(|u| u.word.to_lowercase() == "tekna");
+        if has_tekna {
+            println!("  PASS: 'Tekna' flagged (only at sentence starts in doc)");
+            pass += 1;
+        } else {
+            println!("  FAIL: 'Tekna' should be flagged — no mid-sentence evidence of proper noun");
+            fail += 1;
+        }
+    }
+
+    // "Oslo" — known word in dictionary, should never be flagged
+    {
+        let result = checker.check_sentence_full_with_doc("Oslo er en fin by.", "");
+        let has_oslo = result.unknown_words.iter().any(|u| u.word.to_lowercase() == "oslo");
+        if !has_oslo {
+            println!("  PASS: 'Oslo' not flagged (in dictionary)");
+            pass += 1;
+        } else {
+            println!("  FAIL: 'Oslo' should NOT be flagged — it's in the dictionary");
+            fail += 1;
+        }
+    }
+
+    // "Morsson" at sentence start, no mid-sentence usage → should be flagged
+    {
+        let result = checker.check_sentence_full_with_doc("Morsson er et fint ord.", "");
+        let has = result.unknown_words.iter().any(|u| u.word.to_lowercase() == "morsson");
+        if has {
+            println!("  PASS: 'Morsson' flagged (not a proper noun)");
+            pass += 1;
+        } else {
+            println!("  FAIL: 'Morsson' should be flagged");
+            fail += 1;
+        }
+    }
+
+    // "Sannsyn" mid-sentence in doc → not flagged at sentence start
+    {
+        let doc = "Vi i Sannsyn utviklet løsningen. Sannsyn er et selskap.";
+        let result = checker.check_sentence_full_with_doc("Sannsyn er et selskap.", doc);
+        let has = result.unknown_words.iter().any(|u| u.word.to_lowercase() == "sannsyn");
+        if !has {
+            println!("  PASS: 'Sannsyn' not flagged (mid-sentence in doc)");
+            pass += 1;
+        } else {
+            println!("  FAIL: 'Sannsyn' should NOT be flagged — proper noun (mid-sentence in doc)");
+            fail += 1;
+        }
+    }
+
+    println!("\n  Proper noun tests: {} passed, {} failed\n", pass, fail);
+
     // Check token readings for key words
     println!("=== Token analysis ===");
     for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom"] {

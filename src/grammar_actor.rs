@@ -19,6 +19,7 @@ pub struct GrammarCheckRequest {
     pub doc_offset: usize,
     pub paragraph_id: String,
     pub sentence_index: usize,
+    pub doc_text: String,
 }
 
 /// Synchronous check request — for completion grammar filtering
@@ -68,10 +69,15 @@ pub struct GrammarActorHandle {
 impl GrammarActorHandle {
     /// Send a sentence for checking (non-blocking)
     pub fn check_sentence(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize) {
+        self.check_sentence_with_doc(sentence, doc_offset, paragraph_id, sentence_index, "")
+    }
+
+    pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str) {
         let _ = self.sender.send(ActorMessage::Async(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,
             paragraph_id: paragraph_id.to_string(),
+            doc_text: doc_text.to_string(),
             sentence_index,
         }));
     }
@@ -132,7 +138,7 @@ pub fn spawn_grammar_actor(
             while let Ok(msg) = req_rx.recv() {
                 match msg {
                     ActorMessage::Async(req) => {
-                        let result = checker.check_sentence_full(&req.sentence);
+                        let result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
                         let _ = resp_tx.send(GrammarCheckResponse {
                             sentence: req.sentence,
                             doc_offset: req.doc_offset,
@@ -226,7 +232,7 @@ pub fn spawn_grammar_actor_with_loader(
             while let Ok(msg) = req_rx.recv() {
                 match msg {
                     ActorMessage::Async(req) => {
-                        let result = checker.check_sentence_full(&req.sentence);
+                        let result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
                         let _ = resp_tx.send(GrammarCheckResponse {
                             sentence: req.sentence,
                             doc_offset: req.doc_offset,
