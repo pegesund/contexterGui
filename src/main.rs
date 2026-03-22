@@ -19,6 +19,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Truncate a string to at most `max` bytes, backing up to the nearest char boundary.
+fn levenshtein_distance(a: &str, b: &str) -> u32 {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    for i in 0..=m { dp[i][0] = i as u32; }
+    for j in 0..=n { dp[0][j] = j as u32; }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
+            dp[i][j] = (dp[i-1][j] + 1).min(dp[i][j-1] + 1).min(dp[i-1][j-1] + cost);
+        }
+    }
+    dp[m][n]
+}
+
 fn trunc(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }
     let mut end = max;
@@ -1968,6 +1983,20 @@ impl ContextApp {
                 let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
                 if common >= 2 && seen.insert(wl.clone()) {
                     candidates.push(wl);
+                }
+            }
+        }
+
+        // Source 8: User dictionary — words within edit distance 2
+        if let Some(ud) = &self.user_dict {
+            for uw in ud.list_words() {
+                if uw == word_lower || seen.contains(&uw) { continue; }
+                let dist = levenshtein_distance(&word_lower, &uw);
+                if dist <= 2 {
+                    edit_distances.entry(uw.clone()).or_insert(dist);
+                    if seen.insert(uw.clone()) {
+                        candidates.push(uw);
+                    }
                 }
             }
         }

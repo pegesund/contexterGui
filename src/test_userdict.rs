@@ -2,6 +2,22 @@ use std::path::PathBuf;
 
 mod user_dict;
 
+// Levenshtein distance (same as in main.rs)
+fn levenshtein_distance(a: &str, b: &str) -> u32 {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    for i in 0..=m { dp[i][0] = i as u32; }
+    for j in 0..=n { dp[0][j] = j as u32; }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
+            dp[i][j] = (dp[i-1][j] + 1).min(dp[i][j-1] + 1).min(dp[i-1][j-1] + cost);
+        }
+    }
+    dp[m][n]
+}
+
 fn main() {
     let dict_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
@@ -214,6 +230,42 @@ fn main() {
             pass += 1;
         } else {
             println!("FAIL: prefix 'xyz' should match nothing, got {:?}", matches);
+            fail += 1;
+        }
+    }
+
+    // --- Test 14: Levenshtein spelling candidates from user dict ---
+    {
+        // "nevrle" (missing 'a') → "nevrale" should be within distance 2
+        let dist = levenshtein_distance("nevrle", "nevrale");
+        if dist <= 2 {
+            println!("PASS: 'nevrle' → 'nevrale' distance={} (within 2)", dist);
+            pass += 1;
+        } else {
+            println!("FAIL: 'nevrle' → 'nevrale' distance={} (should be ≤2)", dist);
+            fail += 1;
+        }
+
+        // "tensorflow" vs "fotbollx" — should NOT match (too far)
+        let dist = levenshtein_distance("fotbollx", "tensorflow");
+        if dist > 2 {
+            println!("PASS: 'fotbollx' → 'tensorflow' distance={} (too far)", dist);
+            pass += 1;
+        } else {
+            println!("FAIL: 'fotbollx' → 'tensorflow' distance={} (should be >2)", dist);
+            fail += 1;
+        }
+
+        // Simulate spelling candidate selection from user dict
+        let misspelled = "nevrle";
+        let user_candidates: Vec<String> = udict.list_words().into_iter()
+            .filter(|w| levenshtein_distance(misspelled, w) <= 2)
+            .collect();
+        if user_candidates == vec!["nevrale".to_string()] {
+            println!("PASS: spelling candidates for 'nevrle' = {:?}", user_candidates);
+            pass += 1;
+        } else {
+            println!("FAIL: spelling candidates for 'nevrle' should be ['nevrale'], got {:?}", user_candidates);
             fail += 1;
         }
     }
