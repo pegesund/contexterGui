@@ -9,7 +9,22 @@ PASS=0
 FAIL=0
 DELAY=0.15
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # --- Helper functions ---
+
+check_alignment() {
+    local ec=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+    local uc=$(osascript "$SCRIPT_DIR/scan_underlines.applescript" 2>/dev/null | head -1 | grep -o '^[0-9]*')
+    uc=${uc:-0}
+    if [ "$ec" != "$uc" ]; then
+        echo "  ALIGNMENT FAIL: $ec errors != $uc underlines"
+        FAIL=$((FAIL + 1))
+        echo "=== ABORTING: underline alignment broken ==="
+        echo "=== Results: $PASS passed, $FAIL failed ==="
+        exit 1
+    fi
+}
 
 check_error() {
     local desc="$1" word="$2" expected="$3" json="$4"
@@ -107,10 +122,18 @@ repeat_key() {
 go_to_end() { key_press cmd_end; }
 
 # Undo N times to restore document state
+PUSH_URL="https://127.0.0.1:3000/push-reply"
+DOC_MARKER="25.11.2022"
+SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
+
 undo_all() {
-    local n="${1:-60}"
-    for (( i=0; i<n; i++ )); do key_press cmd_z; sleep 0.03; done
-    sleep 2
+    # Delete test text after the original doc marker
+    curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
+    sleep 1
+    # Reload add-in so errors resync with actual doc content
+    bash "$SCRIPT_DIR_ABS/reload_addin.sh"
+    sleep 3
+    check_alignment
 }
 
 echo "=== NorskTale Error Detection Test ==="
@@ -119,6 +142,28 @@ osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
 sleep 1
 
 # ============================================================
+echo "Test 0: Document health — errors match underlines"
+ERROR_COUNT=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+UNDERLINE_COUNT=$(osascript "$(dirname "$0")/scan_underlines.applescript" 2>/dev/null | head -1 | grep -o '^[0-9]*')
+UNDERLINE_COUNT=${UNDERLINE_COUNT:-0}
+if [ "$ERROR_COUNT" = "$UNDERLINE_COUNT" ]; then
+    echo "  PASS: $ERROR_COUNT errors = $UNDERLINE_COUNT underlines"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: $ERROR_COUNT errors != $UNDERLINE_COUNT underlines"
+    echo "  Errors:"
+    curl -sk "$ENDPOINT" | python3 -c "import json,sys; [print(f'    {e[\"word\"]}') for e in json.load(sys.stdin)]" 2>/dev/null
+    echo "  Underlines:"
+    osascript "$(dirname "$0")/scan_underlines.applescript" 2>/dev/null | tail -n +2
+    FAIL=$((FAIL + 1))
+    echo ""
+    echo "=== ABORTING: document health check failed ==="
+    echo "=== Results: $PASS passed, $FAIL failed ==="
+    exit 1
+fi
+
+# ============================================================
+echo ""
 echo "Test 1: Spelling error 'somx' → 'som'"
 go_to_end; key_press return
 type_text "Fotball er en morsom sport somx er veldig morsom."
@@ -289,6 +334,33 @@ sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll re-detected after reintroduce" "fotboll" "" "$ERRORS"
 undo_all 50
+
+# ============================================================
+echo ""
+echo "Test 12: Correct sentences — no false positives"
+go_to_end; key_press return
+type_text "Fotball er en morsom sport."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "Fotball not flagged" "Fotball" "$ERRORS"
+check_no_error "sport not flagged" "sport" "$ERRORS"
+undo_all 40
+
+go_to_end; key_press return
+type_text "Fotball er et morsomt spill."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "spill not flagged" "spill" "$ERRORS"
+check_no_error "Fotball not flagged (neuter)" "Fotball" "$ERRORS"
+undo_all 40
+
+go_to_end; key_press return
+type_text "Han liker å spille fotball."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "spille not flagged" "spille" "$ERRORS"
+check_no_error "fotball not flagged" "fotball" "$ERRORS"
+undo_all 40
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

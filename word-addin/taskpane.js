@@ -384,6 +384,10 @@ function pollReplies() {
             } else if (data.action === "rescan") {
                 paragraphMap = {};
                 initialScan();
+            } else if (data.action === "deleteAfter" && data.text) {
+                doDeleteAfter(data.text);
+            } else if (data.action === "deleteText" && data.text) {
+                doDeleteText(data.text);
             }
         })
         .catch(function () {});
@@ -451,6 +455,37 @@ function doClearUnderline(word, paragraphId) {
             return ctx.sync();
         });
     }).catch(function () {});
+}
+
+function doDeleteAfter(marker) {
+    Word.run(function (ctx) {
+        var body = ctx.document.body;
+        var results = body.search(marker, { matchCase: false });
+        results.load("items");
+        return ctx.sync().then(function () {
+            if (results.items.length > 0) {
+                var last = results.items[results.items.length - 1];
+                var rangeAfter = last.getRange("After");
+                var endRange = body.getRange("End");
+                var toDelete = rangeAfter.expandTo(endRange);
+                toDelete.delete();
+                return ctx.sync();
+            }
+        });
+    }).catch(function (e) { console.log("deleteAfter error:", e); });
+}
+
+function doDeleteText(text) {
+    Word.run(function (ctx) {
+        var results = ctx.document.body.search(text, { matchCase: false });
+        results.load("items");
+        return ctx.sync().then(function () {
+            for (var i = 0; i < results.items.length; i++) {
+                results.items[i].delete();
+            }
+            return ctx.sync();
+        });
+    }).catch(function (e) { console.log("deleteText error:", e); });
 }
 
 function doClearAllUnderlines() {

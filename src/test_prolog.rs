@@ -50,6 +50,7 @@ fn main() {
         "Jeg liker å kjøre bil.",
         "Han spiller fotbollx godt.",
         "Fotball er et morsomt spill.",
+        "Han spiller fotball hver dag.",
     ];
     for s in &test_sents {
         let result = checker.check_sentence_full(s);

@@ -568,7 +568,7 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
-        ("GET", "/taskpane.js") => {
+        ("GET", path) if path.starts_with("/taskpane.js") => {
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
                 cors, static_js.len(), static_js

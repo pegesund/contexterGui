@@ -2748,7 +2748,8 @@ impl ContextApp {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
-                    // Grammar check (async via actor) — pass doc text for proper noun detection
+                    // Always send for spelling (unknown word detection).
+                    // Grammar errors from incomplete sentences are filtered in poll_grammar_responses.
                     let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                     actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
 
@@ -2846,8 +2847,10 @@ impl ContextApp {
 
             self.processed_sentence_hashes.insert(sent_h); // Mark sentence as processed
 
-            // Handle grammar errors
-            if !resp.errors.is_empty() {
+            // Handle grammar errors — only for complete sentences (ends with punctuation)
+            let sentence_complete = resp.sentence.ends_with('.') || resp.sentence.ends_with('!')
+                || resp.sentence.ends_with('?') || resp.sentence.ends_with(':');
+            if !resp.errors.is_empty() && sentence_complete {
                 for ge in &resp.errors {
                     log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
                 }
