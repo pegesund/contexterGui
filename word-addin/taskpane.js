@@ -381,6 +381,9 @@ function pollReplies() {
                 doClearUnderline(data.word, data.paragraphId);
             } else if (data.action === "clearAllUnderlines") {
                 doClearAllUnderlines();
+            } else if (data.action === "rescan") {
+                paragraphMap = {};
+                initialScan();
             }
         })
         .catch(function () {});

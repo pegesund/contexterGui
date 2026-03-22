@@ -50,7 +50,10 @@ impl WordAddinBridge {
     pub fn new() -> Self {
         let cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>> =
             Arc::new(Mutex::new(None));
-        let reply_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        // Queue a rescan command so the add-in re-sends all paragraphs on first connect
+        let reply_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(
+            vec![r#"{"action":"rescan"}"#.to_string()]
+        ));
         let changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>> = Arc::new(Mutex::new(Vec::new()));
         let deleted_paragraphs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -518,11 +521,9 @@ fn handle_request_rw<S: Read + Write>(
                     *current = doc_name;
                 }
             }
-            // Clear all stale underlines from previous session
-            if let Ok(mut q) = reply_queue.lock() {
-                q.push(r#"{"action":"clearAllUnderlines"}"#.to_string());
-            }
-            eprintln!("HTTP /reset: clearing all state + queued clearAllUnderlines");
+            // Stale underlines are cleared at app startup via AppleScript.
+            // Do NOT queue clearAllUnderlines here — it races with newly applied underlines.
+            eprintln!("HTTP /reset: clearing all state");
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
                 cors

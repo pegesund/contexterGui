@@ -140,6 +140,17 @@ undo_all 40
 
 # ============================================================
 echo ""
+echo "Test 2b: Correct neuter sentence — no false positives"
+go_to_end; key_press return
+type_text "Fotball er et morsomt spill."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "spill not flagged" "spill" "$ERRORS"
+check_no_error "morsomt not flagged" "morsomt" "$ERRORS"
+undo_all 40
+
+# ============================================================
+echo ""
 echo "Test 3: Multiple errors in one sentence"
 go_to_end; key_press return
 type_text "Jeg liker aa spise matx og drikkx."
