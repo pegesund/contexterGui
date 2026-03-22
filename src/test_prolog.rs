@@ -46,6 +46,8 @@ fn main() {
         "Fotball er en morsom sport somx er veldig morsson.",
         "Dettex er en test.",
         "Morsson er et fint ord.",
+        "Jeg liker kjøre bil.",
+        "Jeg liker å kjøre bil.",
     ];
     for s in &test_sents {
         let result = checker.check_sentence_full(s);

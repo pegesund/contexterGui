@@ -530,6 +530,18 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
+        // Test endpoint: push a command to the add-in reply queue
+        ("POST", "/push-reply") => {
+            if let Ok(mut q) = reply_queue.lock() {
+                q.push(body.clone());
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
+                cors
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
         ("GET", "/ping") => {
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
@@ -557,7 +569,7 @@ fn handle_request_rw<S: Read + Write>(
 
         ("GET", "/taskpane.js") => {
             let response = format!(
-                "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
                 cors, static_js.len(), static_js
             );
             let _ = stream.write_all(response.as_bytes());
