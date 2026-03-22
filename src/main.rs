@@ -2599,16 +2599,6 @@ impl ContextApp {
             if bridge.take_reset() {
                 log!("Reset: clearing ALL state + underlines");
                 self.manager.clear_all_error_underlines();
-                // Also clear via AppleScript (JS add-in may have stale cache)
-                #[cfg(target_os = "macos")]
-                {
-                    std::thread::spawn(|| {
-                        let _ = std::process::Command::new("osascript")
-                            .arg("-e")
-                            .arg("tell application \"Microsoft Word\"\nset f to font object of text object of active document\nset underline of f to underline none\nend tell")
-                            .output();
-                    });
-                }
                 self.writing_errors.clear();
                 self.processed_sentence_hashes.clear();
                 self.paragraph_sentence_hashes.clear();
@@ -5808,6 +5798,15 @@ impl eframe::App for ContextApp {
 
 fn main() -> eframe::Result {
     let setup_platform = platform::create_platform();
+
+    // Clear stale underlines from previous session (saved in document formatting)
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg("tell application \"Microsoft Word\"\ntry\nset f to font object of text object of active document\nset underline of f to underline none\nend try\nend tell")
+            .output();
+    }
 
     // Set ORT_DYLIB_PATH if not already set
     if std::env::var("ORT_DYLIB_PATH").is_err() {
