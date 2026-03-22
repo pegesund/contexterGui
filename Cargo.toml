@@ -9,6 +9,9 @@ egui = "0.33"
 anyhow = "1"
 redb = "2"
 dirs = "6"
+ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
+tokenizers = "0.20"
+ndarray = "0.16"
 libloading = "0.8"
 nostos-cognio = { path = "../contexter-repo/nostos-cognio" }
 mtag = { package = "mtag-rs", path = "../rustSpell/mtag-rs" }
@@ -84,3 +87,7 @@ path = "src/test_userdict.rs"
 [[bin]]
 name = "test-bert-spelling"
 path = "src/test_bert_spelling.rs"
+
+[[bin]]
+name = "test-bert-bench"
+path = "src/test_bert_bench.rs"

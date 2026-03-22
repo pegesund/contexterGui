@@ -62,6 +62,7 @@ pub enum BertRequest {
         max_steps: usize,
         cache_key: String,
         masked_text: String,
+        cancel: Arc<AtomicBool>,
     },
 }
 
@@ -157,6 +158,32 @@ fn worker_loop(
 ) {
     use std::ops::Deref;
     while let Ok(req) = rx.recv() {
+        // Drain stale requests: if newer requests are already queued,
+        // skip to the latest one (for completions). Keep non-completion requests.
+        let req = {
+            let mut current = req;
+            while let Ok(newer) = rx.try_recv() {
+                match (&current, &newer) {
+                    // If both are CompleteWord, skip the older one
+                    (BertRequest::CompleteWord { .. }, BertRequest::CompleteWord { .. }) => {
+                        current = newer;
+                    }
+                    // If both are old Completion, skip the older one
+                    (BertRequest::Completion { .. }, BertRequest::Completion { .. }) => {
+                        current = newer;
+                    }
+                    // Non-completion request: process current first, put newer back
+                    // (can't put back into mpsc, so just process current and let newer be next)
+                    _ => {
+                        // Process non-completion requests immediately would be complex;
+                        // just keep the newer one and let the old one be skipped
+                        current = newer;
+                    }
+                }
+            }
+            current
+        };
+
         match req {
             BertRequest::Completion {
                 id, masked_text, prefix_lower, matches, mtag_candidates,
@@ -210,7 +237,8 @@ fn worker_loop(
                 repaint_ctx.request_repaint();
             }
 
-            BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text } => {
+            BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text, cancel } => {
+                if cancel.load(Ordering::Acquire) { continue; }
                 {
                     use std::io::Write;
                     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)

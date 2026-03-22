@@ -4039,6 +4039,7 @@ impl eframe::App for ContextApp {
                             _ => (15, 3),
                         };
                         log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
+                        let cancel_clone = cancel.clone();
                         worker.send(|id| bert_worker::BertRequest::CompleteWord {
                             id,
                             context: context_for_cw,
@@ -4048,6 +4049,7 @@ impl eframe::App for ContextApp {
                             max_steps,
                             cache_key: key_clone,
                             masked_text: masked_trimmed,
+                            cancel: cancel_clone,
                         });
                         ctx.request_repaint_after(Duration::from_millis(50));
                     }
