@@ -7,6 +7,8 @@ edition = "2024"
 eframe = "0.33"
 egui = "0.33"
 anyhow = "1"
+redb = "2"
+dirs = "6"
 libloading = "0.8"
 nostos-cognio = { path = "../contexter-repo/nostos-cognio" }
 mtag = { package = "mtag-rs", path = "../rustSpell/mtag-rs" }
@@ -74,3 +76,7 @@ path = "src/test_prolog.rs"
 [[bin]]
 name = "test-spelling"
 path = "src/test_spelling.rs"
+
+[[bin]]
+name = "test-userdict"
+path = "src/test_userdict.rs"

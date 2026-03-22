@@ -8,6 +8,7 @@ mod ocr;
 mod platform;
 mod stt;
 mod tts;
+pub mod user_dict;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
@@ -510,6 +511,10 @@ impl BridgeManager {
         self.effective_bridge().map(|b| b.clear_all_error_underlines()).unwrap_or(false)
     }
 
+    fn clear_underline_word(&self, word: &str, paragraph_id: &str) -> bool {
+        self.effective_bridge().map(|b| b.clear_underline_word(word, paragraph_id)).unwrap_or(false)
+    }
+
     fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, doc_char_len: usize, word_at_cursor: &str) -> bool {
         self.effective_bridge().map(|b| b.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, word_at_cursor)).unwrap_or(false)
     }
@@ -662,6 +667,12 @@ struct ContextApp {
     writing_errors: Vec<WritingError>,
     /// Words the user has chosen to ignore (spelling)
     ignored_words: std::collections::HashSet<String>,
+    /// User dictionary — words added by the user (persisted in redb)
+    user_dict: Option<user_dict::UserDict>,
+    /// Show user dictionary editor window
+    show_userdict_window: bool,
+    /// Text input for new word in user dict editor
+    userdict_new_word: String,
     /// Last word that was spell-checked (to avoid re-checking)
     last_spell_checked_word: String,
     /// Authoritative document text from paragraph reads — used for grammar/spelling/pruning
@@ -1128,6 +1139,20 @@ impl ContextApp {
             focused_error_scroll_done: false,
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
+            user_dict: {
+                let dir = dirs::home_dir().unwrap_or_default().join(".norsktale");
+                let _ = std::fs::create_dir_all(&dir);
+                match user_dict::UserDict::open(dir.join("user_words.db")) {
+                    Ok(ud) => {
+                        let count = ud.list_words().len();
+                        if count > 0 { eprintln!("User dictionary: {} words loaded", count); }
+                        Some(ud)
+                    }
+                    Err(e) => { eprintln!("User dictionary unavailable: {}", e); None }
+                }
+            },
+            show_userdict_window: false,
+            userdict_new_word: String::new(),
             last_spell_checked_word: String::new(),
             last_doc_text: String::new(),
             last_doc_approx_len: 0,
@@ -1248,6 +1273,11 @@ impl ContextApp {
 
         // Skip if word is in ignore list
         if self.ignored_words.contains(&clean) {
+            return;
+        }
+
+        // Skip if word is in user dictionary
+        if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&clean)) {
             return;
         }
 
@@ -2280,6 +2310,7 @@ impl ContextApp {
             // Major change (window switch, paste, etc.) — clear all stale state
             log!("Major doc change: {} → {} sentences, clearing all queues + clean hashes",
                 old_sentence_count, new_sentence_count);
+            self.manager.clear_all_error_underlines();
             self.writing_errors.clear();
             self.spelling_queue.clear();
             self.pending_spelling_bert.clear();
@@ -2564,7 +2595,18 @@ impl ContextApp {
         // Check for reset (new document opened)
         for bridge in &self.manager.bridges {
             if bridge.take_reset() {
-                log!("Reset: clearing ALL state");
+                log!("Reset: clearing ALL state + underlines");
+                self.manager.clear_all_error_underlines();
+                // Also clear via AppleScript (JS add-in may have stale cache)
+                #[cfg(target_os = "macos")]
+                {
+                    std::thread::spawn(|| {
+                        let _ = std::process::Command::new("osascript")
+                            .arg("-e")
+                            .arg("tell application \"Microsoft Word\"\nset f to font object of text object of active document\nset underline of f to underline none\nend tell")
+                            .output();
+                    });
+                }
                 self.writing_errors.clear();
                 self.processed_sentence_hashes.clear();
                 self.paragraph_sentence_hashes.clear();
@@ -2614,9 +2656,16 @@ impl ContextApp {
                 // Clear errors for sentences that are no longer in the paragraph
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let before_count = self.writing_errors.len();
+                // Clear underlines for errors being removed
+                for e in &self.writing_errors {
+                    if e.paragraph_id == p.paragraph_id && e.underlined
+                        && !new_sentence_set.contains(&e.sentence_context.to_lowercase())
+                    {
+                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                    }
+                }
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
-                    // Keep if sentence still exists in paragraph
                     let keep = new_sentence_set.contains(&e.sentence_context.to_lowercase());
                     if !keep {
                         log!("  Removing stale error: word='{}' sentence='{}'", e.word, trunc(&e.sentence_context, 40));
@@ -2634,8 +2683,13 @@ impl ContextApp {
                         continue; // Already processed, skip
                     }
 
-                    // This sentence changed — clear its errors
+                    // This sentence changed — clear its errors and underlines
                     let sentence_lower = sentence_text.to_lowercase();
+                    for e in &self.writing_errors {
+                        if e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower && e.underlined {
+                            self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                        }
+                    }
                     self.writing_errors.retain(|e| {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
@@ -2656,6 +2710,11 @@ impl ContextApp {
             let deleted = bridge.drain_deleted_paragraphs();
             for para_id in deleted {
                 let before = self.writing_errors.len();
+                for e in &self.writing_errors {
+                    if e.paragraph_id == para_id && e.underlined {
+                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                    }
+                }
                 self.writing_errors.retain(|e| e.paragraph_id != para_id);
                 if self.writing_errors.len() < before {
                     log!("Cleared {} errors for deleted para={}", before - self.writing_errors.len(), trunc(&para_id, 10));
@@ -2785,7 +2844,9 @@ impl ContextApp {
             }
 
             // Handle unknown words (spelling errors) — from check_sentence_full
-            for unk in &resp.unknown_words {
+            for unk in resp.unknown_words.iter()
+                .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
+            {
                 let best = unk.spelling_suggestions.first().cloned().unwrap_or_default();
                 if best.is_empty() && unk.split_suggestions.is_empty() {
                     // No suggestions at all — still flag as unknown
@@ -3345,8 +3406,9 @@ impl eframe::App for ContextApp {
                     && e.doc_offset == doc_offset
                 {
                     self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                    self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     e.underlined = false;
-                    log!("  Pre-cleared underline {}..{}", e.word_doc_start, e.word_doc_end);
+                    log!("  Pre-cleared underline {}..{} word='{}'", e.word_doc_start, e.word_doc_end, e.word);
                     break;
                 }
             }
@@ -4757,6 +4819,9 @@ impl eframe::App for ContextApp {
                                     if icon_button(ui, "👎", "Ignorer") {
                                         action = Some((idx, "ignore"));
                                     }
+                                    if icon_button(ui, "+", "Legg til i ordbok") {
+                                        action = Some((idx, "add_to_dict"));
+                                    }
                                     if icon_button(ui, "🔊", "Les opp") {
                                         let speak = if !err_suggestion.is_empty() { &err_suggestion } else { &err_word };
                                         tts::speak_word(speak);
@@ -4840,6 +4905,28 @@ impl eframe::App for ContextApp {
                                     self.ignored_words.insert(error.word.clone());
                                 }
                                 self.writing_errors[idx].ignored = true;
+                            }
+                            "add_to_dict" => {
+                                let word = self.writing_errors[idx].word.clone();
+                                log!("ACTION add_to_dict: '{}'", word);
+                                if let Some(ud) = &self.user_dict {
+                                    if let Err(e) = ud.add_word(&word) {
+                                        eprintln!("Failed to add '{}' to user dict: {}", word, e);
+                                    }
+                                }
+                                // Clear underlines for all instances of this word, then remove
+                                let word_lower = word.to_lowercase();
+                                for e in &self.writing_errors {
+                                    if matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower && e.underlined {
+                                        self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                                    }
+                                }
+                                self.writing_errors.retain(|e| {
+                                    !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower)
+                                });
+                                // Force rescan so the word is no longer flagged
+                                self.processed_sentence_hashes.clear();
+                                self.last_doc_hash = 0;
                             }
                             "ignore_group" => {
                                 let ctx = self.writing_errors[idx].sentence_context.clone();
@@ -5430,6 +5517,20 @@ impl eframe::App for ContextApp {
                     }
                 });
 
+                // User dictionary
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Egen ordbok:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
+                    let count = self.user_dict.as_ref().map_or(0, |ud| ud.list_words().len());
+                    ui.label(egui::RichText::new(format!("{} ord", count)).size(12.0)
+                        .color(egui::Color32::from_rgb(0, 70, 160)));
+                    if ui.add(egui::Button::new(
+                        egui::RichText::new("Rediger...").size(11.0)
+                    ).small()).clicked() {
+                        self.show_userdict_window = true;
+                    }
+                });
+
             }
 
             // === Tab: Debug (3) ===
@@ -5514,6 +5615,110 @@ impl eframe::App for ContextApp {
                     }
                 });
             self.show_voice_window = open;
+        }
+
+        // User dictionary editor window (separate OS window)
+        if self.show_userdict_window {
+            let mut word_to_remove: Option<String> = None;
+            let mut word_to_add: Option<String> = None;
+            let mut do_close = false;
+            let mut words: Vec<String> = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+            words.sort();
+            let mut new_word_buf = self.userdict_new_word.clone();
+            let scale = self.ui_scale;
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("userdict_editor"),
+                egui::ViewportBuilder::default()
+                    .with_title("Egen ordbok")
+                    .with_inner_size([350.0 * scale, 400.0 * scale])
+                    .with_decorations(true),
+                |vp_ctx, _class| {
+                    vp_ctx.set_visuals(egui::Visuals::light());
+                    vp_ctx.set_pixels_per_point(scale);
+
+                    if vp_ctx.input(|i| i.viewport().close_requested()) {
+                        do_close = true;
+                    }
+
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(12.0))
+                        .show(vp_ctx, |ui| {
+                            ui.label(egui::RichText::new("Ord du har lagt til:")
+                                .size(14.0).color(egui::Color32::from_rgb(30, 30, 30)));
+                            ui.add_space(4.0);
+
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut new_word_buf)
+                                        .hint_text("Nytt ord...")
+                                        .desired_width(220.0)
+                                );
+                                if ui.button("Legg til").clicked()
+                                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                {
+                                    let trimmed = new_word_buf.trim().to_string();
+                                    if !trimmed.is_empty() {
+                                        word_to_add = Some(trimmed);
+                                        new_word_buf.clear();
+                                    }
+                                }
+                            });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                if words.is_empty() {
+                                    ui.label(egui::RichText::new("Ingen ord lagt til enda.").size(11.0)
+                                        .color(egui::Color32::from_rgb(140, 140, 140)));
+                                }
+                                for w in &words {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(w).size(13.0));
+                                        if ui.small_button("Fjern").clicked() {
+                                            word_to_remove = Some(w.clone());
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                },
+            );
+
+            self.userdict_new_word = new_word_buf;
+
+            if let Some(w) = word_to_add {
+                if let Some(ud) = &self.user_dict {
+                    if let Err(e) = ud.add_word(&w) {
+                        eprintln!("Failed to add word: {}", e);
+                    } else {
+                        log!("User dict: added '{}'", w);
+                    }
+                }
+                self.userdict_new_word.clear();
+                let lower = w.to_lowercase();
+                self.writing_errors.retain(|e| {
+                    !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == lower)
+                });
+                self.processed_sentence_hashes.clear();
+                self.last_doc_hash = 0;
+            }
+            if let Some(w) = word_to_remove {
+                if let Some(ud) = &self.user_dict {
+                    if let Err(e) = ud.remove_word(&w) {
+                        eprintln!("Failed to remove word: {}", e);
+                    } else {
+                        log!("User dict: removed '{}'", w);
+                    }
+                }
+                self.processed_sentence_hashes.clear();
+                self.last_doc_hash = 0;
+            }
+            if do_close {
+                self.show_userdict_window = false;
+            }
         }
 
         // OCR: screenshot detected prompt (separate OS window)

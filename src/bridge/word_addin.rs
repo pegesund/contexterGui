@@ -518,7 +518,11 @@ fn handle_request_rw<S: Read + Write>(
                     *current = doc_name;
                 }
             }
-            eprintln!("HTTP /reset: clearing all state");
+            // Clear all stale underlines from previous session
+            if let Ok(mut q) = reply_queue.lock() {
+                q.push(r#"{"action":"clearAllUnderlines"}"#.to_string());
+            }
+            eprintln!("HTTP /reset: clearing all state + queued clearAllUnderlines");
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
                 cors

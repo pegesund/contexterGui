@@ -379,6 +379,8 @@ function pollReplies() {
                 doUnderline(data.word, data.paragraphId, data.color || "red");
             } else if (data.action === "clearUnderline" && data.word) {
                 doClearUnderline(data.word, data.paragraphId);
+            } else if (data.action === "clearAllUnderlines") {
+                doClearAllUnderlines();
             }
         })
         .catch(function () {});
@@ -446,6 +448,15 @@ function doClearUnderline(word, paragraphId) {
             return ctx.sync();
         });
     }).catch(function () {});
+}
+
+function doClearAllUnderlines() {
+    Word.run(function (ctx) {
+        var body = ctx.document.body;
+        var range = body.getRange();
+        range.font.underline = "None";
+        return ctx.sync();
+    }).catch(function (e) { console.log("clearAllUnderlines error:", e); });
 }
 
 function doReplaceCurrentWord(replacement) {
