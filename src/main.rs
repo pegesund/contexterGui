@@ -1686,7 +1686,7 @@ impl ContextApp {
                             // Inject user dict words matching the prefix
                             if let Some(ud) = &self.user_dict {
                                 let prefix = extract_prefix(&self.context.word).to_lowercase();
-                                if !prefix.is_empty() {
+                                if prefix.len() >= 3 {
                                     let existing: std::collections::HashSet<String> = self.completions.iter()
                                         .map(|c| c.word.to_lowercase()).collect();
                                     for uw in ud.list_words() {
