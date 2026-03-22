@@ -251,5 +251,41 @@ ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilx after rapid" "feilx" "" "$ERRORS"
 undo_all 60
 
+# ============================================================
+echo ""
+echo "Test 11: Fix error then re-introduce same error (stale hash race)"
+go_to_end; key_press return
+type_text "Han spiller fotboll hver dag."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
+# Fix: navigate to second 'o' in fotboll (pos 16), replace with 'a'
+# "Han spiller fotboll" → H(0)..r(10) (11)f(12)o(13)t(14)b(15)o(16)
+key_press cmd_left
+repeat_key right 16
+key_press delete
+type_text "a"
+# Move away from sentence (go to end, type on new line)
+go_to_end; key_press return
+type_text "Noe annet her."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
+# Now go back and re-introduce the same error
+# Delete "Noe annet her." line
+key_press cmd_left; key_press sel_to_end; key_press backspace; key_press backspace
+# Navigate back to 'a' in fotball (pos 16), replace with 'o'
+key_press cmd_left
+repeat_key right 16
+key_press delete
+type_text "o"
+# Move away again
+go_to_end; key_press return
+type_text "Ekstra linje."
+sleep 8
+ERRORS=$(curl -sk "$ENDPOINT")
+check_error "fotboll re-detected after reintroduce" "fotboll" "" "$ERRORS"
+undo_all 80
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

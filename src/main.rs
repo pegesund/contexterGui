@@ -2716,7 +2716,20 @@ impl ContextApp {
 
         while let Some(resp) = actor.try_recv() {
             let sent_h = hash_str(&resp.sentence);
-            self.processed_sentence_hashes.insert(sent_h); // Mark ALL sentences as processed
+
+            // Guard: if this response is for a paragraph whose sentence has already changed,
+            // discard it — inserting a stale hash would prevent re-detection when the same
+            // error is reintroduced.
+            if !resp.paragraph_id.is_empty() {
+                if let Some(current_hashes) = self.paragraph_sentence_hashes.get(&resp.paragraph_id) {
+                    if !current_hashes.contains(&sent_h) {
+                        log!("Stale grammar response discarded: sentence no longer in para={}", trunc(&resp.paragraph_id, 10));
+                        continue;
+                    }
+                }
+            }
+
+            self.processed_sentence_hashes.insert(sent_h); // Mark sentence as processed
 
             // Handle grammar errors
             if !resp.errors.is_empty() {
