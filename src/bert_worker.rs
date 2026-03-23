@@ -312,13 +312,30 @@ fn worker_loop(
                                     right.len(), t_right.elapsed());
                             }
                         }
-                        // Dictionary filter only — no blocking grammar batch
-                        let (left_filtered, right_filtered) = if let Some(ref a) = analyzer {
-                            let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(5).collect();
-                            let rf: Vec<Completion> = right.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(5).collect();
+                        // Dictionary filter
+                        let (left_dict, right_dict) = if let Some(ref a) = analyzer {
+                            let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).collect();
+                            let rf: Vec<Completion> = right.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).collect();
                             (lf, rf)
                         } else {
-                            (left.into_iter().take(5).collect(), right.into_iter().take(5).collect())
+                            (left, right)
+                        };
+
+                        // Grammar filter via grammar_filter() from nostos-cognio
+                        let (left_filtered, right_filtered) = if let Some(ref gs) = grammar_sender {
+                            use nostos_cognio::complete::{grammar_filter, GrammarCheckResult};
+                            let mut check_fn = |s: &str| {
+                                let errs = crate::grammar_actor::grammar_batch_via_sender(gs, &[s.to_string()]);
+                                let ok = errs.first().map_or(true, |e| e.is_empty());
+                                let suggestions = errs.into_iter().next().unwrap_or_default()
+                                    .into_iter().filter_map(|e| if e.suggestion.is_empty() { None } else { Some(e.suggestion) }).collect();
+                                GrammarCheckResult { ok, suggestions }
+                            };
+                            let lf = grammar_filter(&left_dict, &context, &prefix, &mut check_fn, 5);
+                            let rf = grammar_filter(&right_dict, &context, "", &mut check_fn, 5);
+                            (lf, rf)
+                        } else {
+                            (left_dict.into_iter().take(5).collect(), right_dict.into_iter().take(5).collect())
                         };
 
                         // Skip sending if cancelled (newer request arrived)
