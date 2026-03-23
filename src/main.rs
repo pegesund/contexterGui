@@ -1686,17 +1686,20 @@ impl ContextApp {
             }
         }
 
+        // Only keep the LAST Completion response — discard older ones
+        let mut last_completion: Option<(String, Vec<Completion>, Vec<Completion>)> = None;
+        let mut other_responses = Vec::new();
         for resp in responses {
             match resp {
                 bert_worker::BertResponse::Completion { id: _, cache_key, left, right } => {
-                    // Only accept results for the current context — ignore stale responses
-                    let current_key = format!("{}|{}",
-                        self.context.masked_sentence.as_deref().unwrap_or(""),
-                        extract_prefix(&self.context.word));
-                    if cache_key != current_key {
-                        log!("Ignoring stale completion (key mismatch)");
-                        continue;
-                    }
+                    last_completion = Some((cache_key, left, right)); // overwrite — keep latest
+                }
+                other => other_responses.push(other),
+            }
+        }
+        // Process the one completion result
+        if let Some((cache_key, left, right)) = last_completion {
+            {
                     log!("BERT completion received: {} left, {} right: [{}]", left.len(), right.len(),
                         left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                     // Completions arrive already dictionary + grammar filtered from worker thread
@@ -1721,9 +1724,13 @@ impl ContextApp {
                             }
                         }
                     }
-                    self.last_completed_prefix = cache_key;
-                }
-
+                self.last_completed_prefix = cache_key;
+            }
+        }
+        // Process non-completion responses
+        for resp in other_responses {
+            match resp {
+                bert_worker::BertResponse::Completion { .. } => unreachable!(),
                 bert_worker::BertResponse::SpellingScore { id, scored_candidates } => {
                     if let Some(idx) = self.pending_spelling_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_spelling_bert.remove(idx);
@@ -1752,7 +1759,6 @@ impl ContextApp {
             || !self.completions.is_empty()
             || !self.open_completions.is_empty()
         {
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 
@@ -3559,27 +3565,49 @@ impl eframe::App for ContextApp {
                     let comp = if self.selected_column == 0 { self.completions.get(idx) } else { self.open_completions.get(idx) };
                     if let Some(c) = comp {
                         let prefix = self.context.word.clone();
-                        let repl = if self.selected_column == 0 { c.word.clone() }
-                            else if prefix.is_empty() { c.word.clone() }
-                            else { format!("{} {}", prefix, c.word) };
-                        log!("TAB SELECT: '{}' for '{}'", repl, prefix);
-                        let json = if prefix.is_empty() {
-                            format!(r#"{{"action":"replaceWord","text":"{} "}}"#, repl.replace('"', "\\\""))
-                        } else {
-                            format!(r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
-                                prefix.replace('"', "\\\""), repl.replace('"', "\\\""))
-                        };
-                        for b in &self.manager.bridges { b.push_reply_urgent(&json); }
+                        let word = c.word.clone();
+                        let col = self.selected_column;
+                        log!("TAB SELECT: '{}' col={} for prefix '{}'", word, col, prefix);
+                        #[cfg(target_os = "macos")]
+                        {
+                            // Left column: select prefix and replace. Right column: append.
+                            let plen = if col == 0 { prefix.chars().count() } else { 0 };
+                            let repl = if col == 0 {
+                                format!("{} ", word)
+                            } else if prefix.is_empty() {
+                                format!("{} ", word)
+                            } else {
+                                format!(" {} ", word)
+                            };
+                            let app_handle = self.app_handle;
+                            std::thread::spawn(move || {
+                                // Return focus to Word (egui had focus for selection mode)
+                                if let Some(pid) = app_handle {
+                                    let _ = std::process::Command::new("osascript").arg("-e")
+                                        .arg(format!(
+                                            r#"tell application "System Events"
+                                                set frontProcess to first application process whose unix id is {}
+                                                set frontmost of frontProcess to true
+                                            end tell"#, pid))
+                                        .output();
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
+                                if plen > 0 {
+                                    let _ = std::process::Command::new("osascript").arg("-e")
+                                        .arg("tell application \"System Events\" to key code 123 using {shift down, option down}")
+                                        .output();
+                                }
+                                let _ = std::process::Command::new("osascript").arg("-e")
+                                    .arg(format!("tell application \"System Events\" to keystroke \"{}\"",
+                                        repl.replace('\\', "\\\\").replace('"', "\\\"")))
+                                    .output();
+                            });
+                        }
                         self.selection_mode = false;
                         self.platform.set_tab_intercept(false);
                         self.selected_completion = None;
                         self.completions.clear();
                         self.open_completions.clear();
-                        let current_key = if let Some(m) = &self.context.masked_sentence {
-                            format!("{}|{}", m, extract_prefix(&self.context.word))
-                        } else { String::new() };
-                        self.last_completed_prefix = current_key.clone();
-                        self.dispatched_key = current_key;
                     }
                 }
             } else if cancel {
@@ -3587,7 +3615,6 @@ impl eframe::App for ContextApp {
                 self.platform.set_tab_intercept(false);
                 self.selected_completion = None;
             }
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         // Allow copying text from labels
@@ -3903,6 +3930,10 @@ impl eframe::App for ContextApp {
                 }
             }
             if let Some(new_ctx) = ctx_result {
+                let ctx_changed = new_ctx.word != self.context.word
+                    || new_ctx.sentence != self.context.sentence
+                    || new_ctx.masked_sentence != self.context.masked_sentence;
+                if ctx_changed {
                 log!("Context: word='{}' sentence='{}' masked={} offset={:?}",
                     trunc(&new_ctx.word, 20), trunc(&new_ctx.sentence, 40),
                     new_ctx.masked_sentence.is_some(), new_ctx.cursor_doc_offset);
@@ -4143,20 +4174,12 @@ impl eframe::App for ContextApp {
                     self.process_grammar_queue();
                 }
                 self.sync_error_underlines();
-            }
+            } // end if ctx_changed
+            } // end if let Some(new_ctx)
 
-            // Background completion: debounce + dispatch via BERT worker
-            // Skip when in selection mode — user is navigating suggestions, not typing
-            if self.selection_mode {
-                // Don't dispatch new completions while selecting
-            } else {
-            // When masked_sentence is None (cursor after space), construct one for next-word prediction
-            let masked_opt = self.context.masked_sentence.clone().or_else(|| {
-                if !self.context.sentence.is_empty() {
-                    Some(format!("{} <mask>.", self.context.sentence.trim_end()))
-                } else { None }
-            });
-            if let Some(masked) = &masked_opt {
+            // Background completion: skip in selection mode
+            if !self.selection_mode {
+            if let Some(masked) = &self.context.masked_sentence.clone() {
                 let prefix = extract_prefix(&self.context.word);
                 let prefix_lower = prefix.to_lowercase();
                 let cache_key = format!("{}|{}", masked, prefix);
@@ -4259,10 +4282,10 @@ impl eframe::App for ContextApp {
                             cancel: cancel_clone,
                             sentence: sentence_clone,
                         });
-                        ctx.request_repaint_after(Duration::from_millis(50));
+                        // Mark as dispatched so we don't re-send
+                        self.last_completed_prefix = cache_key.clone();
                     }
                 } else if needs_completion {
-                    ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
         }
@@ -4781,7 +4804,7 @@ impl eframe::App for ContextApp {
                 if !self.completions.is_empty() || !self.open_completions.is_empty() {
 
                     let sel = self.selected_completion;
-                    let mut clicked_word: Option<String> = None;
+                    let mut clicked_word: Option<(String, usize)> = None; // (word, column: 0=left, 1=right)
                     let has_dual = !self.open_completions.is_empty() && !self.completions.is_empty();
                     let has_right_only = !self.open_completions.is_empty() && self.completions.is_empty();
 
@@ -4845,7 +4868,7 @@ impl eframe::App for ContextApp {
                                     let is_sel = self.selected_column == 0 && sel == Some(row);
                                     let is_top = row == 0 && sel.is_none();
                                     let (clicked, _) = render_row(ui, comp, row, is_sel, is_top, col_w);
-                                    if clicked { clicked_word = Some(comp.word.clone()); }
+                                    if clicked { clicked_word = Some((comp.word.clone(), 0)); }
                                 } else {
                                     ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
                                 }
@@ -4854,7 +4877,7 @@ impl eframe::App for ContextApp {
                                     let comp = &self.open_completions[row];
                                     let is_sel = self.selected_column == 1 && sel == Some(row);
                                     let (clicked, _) = render_row(ui, comp, row + 100, is_sel, false, col_w);
-                                    if clicked { clicked_word = Some(comp.word.clone()); }
+                                    if clicked { clicked_word = Some((comp.word.clone(), 1)); }
                                 }
                             });
                         }
@@ -4865,7 +4888,7 @@ impl eframe::App for ContextApp {
                             let is_sel = sel == Some(i);
                             let is_top = i == 0 && sel.is_none();
                             let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
-                            if clicked { clicked_word = Some(comp.word.clone()); }
+                            if clicked { clicked_word = Some((comp.word.clone(), 1)); }
                         }
                     } else {
                         let avail_w = ui.available_width();
@@ -4873,33 +4896,53 @@ impl eframe::App for ContextApp {
                             let is_sel = sel == Some(i);
                             let is_top = i == 0 && sel.is_none();
                             let (clicked, _) = render_row(ui, comp, i, is_sel, is_top, avail_w);
-                            if clicked { clicked_word = Some(comp.word.clone()); }
+                            if clicked { clicked_word = Some((comp.word.clone(), 0)); }
                         }
                     }
 
 
-                    if let Some(word) = clicked_word {
+                    if let Some((word, col)) = clicked_word {
                         let prefix = self.context.word.clone();
-                        log!("CLICKED word: '{}' replacing '{}'", word, prefix);
-                        let json = if prefix.is_empty() {
-                            // No prefix — just insert at cursor (right column / next word)
-                            format!(r#"{{"action":"replaceWord","text":"{} "}}"#, word.replace('"', "\\\""))
-                        } else {
-                            format!(
-                                r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
-                                prefix.replace('"', "\\\""), word.replace('"', "\\\"")
-                            )
-                        };
-                        for b in &self.manager.bridges { b.push_reply_urgent(&json); }
+                        log!("CLICKED word: '{}' col={} replacing '{}'", word, col, prefix);
+                        #[cfg(target_os = "macos")]
+                        {
+                            // Left column: select prefix and replace. Right column: append.
+                            let plen = if col == 0 { prefix.chars().count() } else { 0 };
+                            let repl = if col == 0 {
+                                format!("{} ", word)
+                            } else if prefix.is_empty() {
+                                format!("{} ", word)
+                            } else {
+                                format!(" {} ", word)
+                            };
+                            let app_handle = self.app_handle;
+                            std::thread::spawn(move || {
+                                // Return focus to Word (click may have stolen it)
+                                if let Some(pid) = app_handle {
+                                    let _ = std::process::Command::new("osascript").arg("-e")
+                                        .arg(format!(
+                                            r#"tell application "System Events"
+                                                set frontProcess to first application process whose unix id is {}
+                                                set frontmost of frontProcess to true
+                                            end tell"#, pid))
+                                        .output();
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
+                                if plen > 0 {
+                                    let _ = std::process::Command::new("osascript").arg("-e")
+                                        .arg("tell application \"System Events\" to key code 123 using {shift down, option down}")
+                                        .output();
+                                }
+                                let _ = std::process::Command::new("osascript").arg("-e")
+                                    .arg(format!("tell application \"System Events\" to keystroke \"{}\"",
+                                        repl.replace('\\', "\\\\").replace('"', "\\\"")))
+                                    .output();
+                            });
+                        }
                         self.completions.clear();
                         self.open_completions.clear();
                         self.selected_completion = None;
                         self.selection_mode = false;
-                        let current_key = if let Some(m) = &self.context.masked_sentence {
-                            format!("{}|{}", m, extract_prefix(&self.context.word))
-                        } else { String::new() };
-                        self.last_completed_prefix = current_key.clone();
-                        self.dispatched_key = current_key;
                     }
                 }
             }

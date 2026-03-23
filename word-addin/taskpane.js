@@ -506,20 +506,30 @@ function doClearAllUnderlines() {
 }
 
 function doReplaceAtCursor(prefix, replacement) {
+    if (!prefix) {
+        Word.run(function (ctx) {
+            ctx.document.getSelection().insertText(replacement + " ", "End");
+            return ctx.sync();
+        }).catch(function () {});
+        return;
+    }
+    // Prefix exists: get paragraph text, rewrite with replacement at cursor position
     var paraId = lastCursorParaId;
-    if (!paraId || !prefix) return;
+    var cursorPos = lastCursorInPara;
+    if (!paraId || cursorPos < prefix.length) return;
 
     Word.run(function (ctx) {
         var para = ctx.document.getParagraphByUniqueLocalId(paraId);
-        var results = para.search(prefix, { matchCase: false });
-        results.load("items");
+        para.load("text");
         return ctx.sync().then(function () {
-            if (results.items.length > 0) {
-                var item = results.items[results.items.length - 1];
-                var inserted = item.insertText(replacement + " ", "Replace");
-                inserted.getRange("End").select();
-                return ctx.sync();
-            }
+            var text = para.text;
+            var before = text.substring(0, cursorPos - prefix.length);
+            var after = text.substring(cursorPos);
+            var newText = before + replacement + " " + after;
+            para.insertText(newText, "Replace");
+            // Put cursor after inserted word
+            // cursorPos was at end of prefix, new cursor = before.length + replacement.length + 1
+            return ctx.sync();
         });
     }).catch(function (e) { console.log("replaceAtCursor error:", e); });
 }

@@ -321,7 +321,10 @@ fn worker_loop(
                             (left.into_iter().take(5).collect(), right.into_iter().take(5).collect())
                         };
 
-                        let _ = tx.send(BertResponse::Completion { id, cache_key, left: left_filtered, right: right_filtered });
+                        // Skip sending if cancelled (newer request arrived)
+                        if !cancel.load(Ordering::Acquire) {
+                            let _ = tx.send(BertResponse::Completion { id, cache_key, left: left_filtered, right: right_filtered });
+                        }
                         repaint_ctx.request_repaint();
                     }
                     Err(e) => {
