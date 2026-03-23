@@ -4433,7 +4433,7 @@ impl eframe::App for ContextApp {
             150.0
         };
         let win_w = s * if self.selected_tab == 0 {
-            300.0
+            220.0
         } else {
             420.0
         };
@@ -4825,7 +4825,7 @@ impl eframe::App for ContextApp {
 
                     if has_dual {
                         let avail_w = ui.available_width();
-                        let col_w = (avail_w - 4.0) / 2.0;
+                        let col_w = (avail_w - 2.0) / 2.0;
                         let max_rows = self.completions.len().max(self.open_completions.len());
                         for row in 0..max_rows {
                             ui.horizontal(|ui| {
@@ -4838,7 +4838,7 @@ impl eframe::App for ContextApp {
                                 } else {
                                     ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
                                 }
-                                ui.add_space(4.0);
+                                ui.add_space(2.0);
                                 if row < self.open_completions.len() {
                                     let comp = &self.open_completions[row];
                                     let is_sel = self.selected_column == 1 && sel == Some(row);
@@ -4878,13 +4878,6 @@ impl eframe::App for ContextApp {
                         self.last_completed_prefix.clear();
                         self.last_poll = Instant::now() - self.poll_interval;
                     }
-                } else {
-                    ui.label(
-                        egui::RichText::new("Flytt cursoren for å se forslag...")
-                            .italics()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(150, 150, 140)),
-                    );
                 }
             }
 
