@@ -56,7 +56,7 @@ pub struct GrammarCheckResponse {
 }
 
 /// Messages the actor can receive
-enum ActorMessage {
+pub enum ActorMessage {
     Async(GrammarCheckRequest),
     Sync(SyncCheckRequest),
     SyncBatch(SyncBatchRequest),
@@ -69,6 +69,11 @@ pub struct GrammarActorHandle {
 }
 
 impl GrammarActorHandle {
+    /// Get a sender clone for use by other threads (e.g. BERT worker for grammar filtering)
+    pub fn sender_clone(&self) -> mpsc::Sender<ActorMessage> {
+        self.sender.clone()
+    }
+
     /// Send a sentence for checking (non-blocking)
     pub fn check_sentence(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize) {
         self.check_sentence_with_doc(sentence, doc_offset, paragraph_id, sentence_index, "", &[])
@@ -120,6 +125,19 @@ impl GrammarActorHandle {
 
 /// Spawn the grammar actor thread. Takes ownership of the checker.
 /// The egui Context is used to trigger repaint when results are ready.
+/// Grammar batch check using a sender clone. Can be called from any thread.
+pub fn grammar_batch_via_sender(sender: &mpsc::Sender<ActorMessage>, sentences: &[String]) -> Vec<Vec<GrammarError>> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let _ = sender.send(ActorMessage::SyncBatch(SyncBatchRequest {
+        sentences: sentences.to_vec(),
+        reply: reply_tx,
+    }));
+    match reply_rx.recv() {
+        Ok(resp) => resp.results,
+        Err(_) => sentences.iter().map(|_| Vec::new()).collect(),
+    }
+}
+
 pub fn spawn_grammar_actor(
     checker: AnyChecker,
     repaint_ctx: egui::Context,

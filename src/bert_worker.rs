@@ -63,6 +63,7 @@ pub enum BertRequest {
         cache_key: String,
         masked_text: String,
         cancel: Arc<AtomicBool>,
+        sentence: String,
     },
 }
 
@@ -123,6 +124,7 @@ pub fn spawn_bert_worker(
     wordfreq_shared: Option<Arc<HashMap<String, u64>>>,
     embedding_store: Option<Arc<EmbeddingStore>>,
     analyzer: Option<Arc<mtag::Analyzer>>,
+    grammar_sender: Option<mpsc::Sender<crate::grammar_actor::ActorMessage>>,
 ) -> BertWorkerHandle {
     let (req_tx, req_rx) = mpsc::channel::<BertRequest>();
     let (resp_tx, resp_rx) = mpsc::channel::<BertResponse>();
@@ -131,7 +133,7 @@ pub fn spawn_bert_worker(
         .name("bert-worker".to_string())
         .spawn(move || {
             worker_loop(model, repaint_ctx, req_rx, resp_tx, build_bpe, build_mtag, build_right,
-                prefix_index, baselines, wordfreq_shared, embedding_store, analyzer);
+                prefix_index, baselines, wordfreq_shared, embedding_store, analyzer, grammar_sender);
         })
         .expect("Failed to spawn BERT worker thread");
 
@@ -155,6 +157,7 @@ fn worker_loop(
     wordfreq_shared: Option<Arc<HashMap<String, u64>>>,
     embedding_store: Option<Arc<EmbeddingStore>>,
     analyzer: Option<Arc<mtag::Analyzer>>,
+    grammar_sender: Option<mpsc::Sender<crate::grammar_actor::ActorMessage>>,
 ) {
     use std::ops::Deref;
     while let Ok(req) = rx.recv() {
@@ -238,7 +241,7 @@ fn worker_loop(
                 repaint_ctx.request_repaint();
             }
 
-            BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text, cancel } => {
+            BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text, cancel, sentence } => {
                 if cancel.load(Ordering::Acquire) { continue; }
                 {
                     use std::io::Write;
@@ -309,7 +312,39 @@ fn worker_loop(
                                     right.len(), t_right.elapsed());
                             }
                         }
-                        let _ = tx.send(BertResponse::Completion { id, cache_key, left, right });
+                        // Dictionary + grammar filter on worker thread (non-blocking for main thread)
+                        let (left_filtered, right_filtered) = if let Some(ref a) = analyzer {
+                            let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(15).collect();
+                            let rf: Vec<Completion> = right.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(15).collect();
+
+                            if let Some(ref gs) = grammar_sender {
+                                if cancel.load(Ordering::Acquire) {
+                                    // Cancelled — skip grammar, return dict-only
+                                    (lf.into_iter().take(5).collect(), rf.into_iter().take(5).collect())
+                                } else {
+                                let ctx_for_grammar = sentence.strip_suffix(&prefix).unwrap_or(&sentence).trim_end();
+                                let last_fragment = {
+                                    let start = ctx_for_grammar.rfind(|c: char| ".!?".contains(c)).map(|i| i + 1).unwrap_or(0);
+                                    ctx_for_grammar[start..].trim()
+                                };
+                                let all: Vec<&Completion> = lf.iter().chain(rf.iter()).collect();
+                                let test_sents: Vec<String> = all.iter().map(|c| format!("{} {}.", last_fragment, c.word)).collect();
+                                let batch = crate::grammar_actor::grammar_batch_via_sender(gs, &test_sents);
+                                let mut ok: HashSet<String> = HashSet::new();
+                                for (i, c) in all.iter().enumerate() {
+                                    if batch[i].is_empty() { ok.insert(c.word.to_lowercase()); }
+                                }
+                                (lf.into_iter().filter(|c| ok.contains(&c.word.to_lowercase())).take(5).collect(),
+                                 rf.into_iter().filter(|c| ok.contains(&c.word.to_lowercase())).take(5).collect())
+                                }
+                            } else {
+                                (lf.into_iter().take(5).collect(), rf.into_iter().take(5).collect())
+                            }
+                        } else {
+                            (left.into_iter().take(5).collect(), right.into_iter().take(5).collect())
+                        };
+
+                        let _ = tx.send(BertResponse::Completion { id, cache_key, left: left_filtered, right: right_filtered });
                         repaint_ctx.request_repaint();
                     }
                     Err(e) => {

@@ -1699,97 +1699,27 @@ impl ContextApp {
                     }
                     log!("BERT completion received: {} left, {} right: [{}]", left.len(), right.len(),
                         left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                    // Apply grammar filter on main thread
-                    if self.grammar_completion {
-                        if let Some(analyzer) = &self.analyzer {
-                            // Step 1: Dictionary-filter completions (also accept user dict words)
-                            let ud_ref = &self.user_dict;
-                            let is_known = |w: &str| -> bool {
-                                analyzer.has_word(&w.to_lowercase())
-                                || ud_ref.as_ref().map_or(false, |ud| ud.has_word(w))
-                            };
-                            let left_filtered: Vec<Completion> = left.into_iter()
-                                .filter(|c| is_known(&c.word))
-                                .take(15)
-                                .collect();
-                            let right_filtered: Vec<Completion> = right.into_iter()
-                                .filter(|c| is_known(&c.word))
-                                .take(15)
-                                .collect();
-
-                            // Step 2: Grammar-filter via actor (synchronous)
-                            log!("Grammar filter: actor={} left={} right={}", self.grammar_actor.is_some(), left_filtered.len(), right_filtered.len());
-                            if let Some(actor) = &self.grammar_actor {
-                                let sentence = &self.context.sentence;
-                                let prefix = extract_prefix(&self.context.word);
-                                let ctx_for_grammar = sentence.strip_suffix(prefix)
-                                    .unwrap_or(sentence).trim_end().to_string();
-
-                                // Build all test sentences for batch grammar check
-                                let last_fragment = {
-                                    let start = ctx_for_grammar.rfind(|c: char| ".!?".contains(c))
-                                        .map(|i| i + 1).unwrap_or(0);
-                                    ctx_for_grammar[start..].trim().to_string()
-                                };
-                                let all_candidates: Vec<&Completion> = left_filtered.iter()
-                                    .chain(right_filtered.iter()).collect();
-                                let test_sentences: Vec<String> = all_candidates.iter()
-                                    .map(|c| format!("{} {}.", last_fragment, c.word))
-                                    .collect();
-
-                                // One batch call to grammar actor — BLOCKS until actor responds
-                                let t_grammar = std::time::Instant::now();
-                                let batch_results = actor.check_sentences_batch(&test_sentences);
-
-                                // Build check results map
-                                let mut grammar_ok: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-                                for (i, c) in all_candidates.iter().enumerate() {
-                                    let errors = &batch_results[i];
-                                    grammar_ok.insert(c.word.to_lowercase(), errors.is_empty());
-                                }
-
-                                // Filter left and right by grammar results
-                                self.completions = left_filtered.into_iter()
-                                    .filter(|c| *grammar_ok.get(&c.word.to_lowercase()).unwrap_or(&false))
-                                    .take(5).collect();
-                                self.open_completions = right_filtered.into_iter()
-                                    .filter(|c| *grammar_ok.get(&c.word.to_lowercase()).unwrap_or(&false))
-                                    .take(5).collect();
-                            } else {
-                                self.completions = left_filtered.into_iter().take(5).collect();
-                                self.open_completions = right_filtered.into_iter().take(5).collect();
-                            }
-
-                            // Inject user dict words matching the prefix
-                            if let Some(ud) = &self.user_dict {
-                                let prefix = extract_prefix(&self.context.word).to_lowercase();
-                                if prefix.len() >= 3 {
-                                    let existing: std::collections::HashSet<String> = self.completions.iter()
-                                        .map(|c| c.word.to_lowercase()).collect();
-                                    for uw in ud.list_words() {
-                                        if uw.starts_with(&prefix) && !existing.contains(&uw) {
-                                            // Insert at top with high score — user explicitly added this word
-                                            self.completions.insert(0, nostos_cognio::complete::Completion {
-                                                word: uw, score: 100.0, elapsed_ms: 0.0,
-                                            });
-                                        }
-                                    }
-                                    // Keep max 5
-                                    self.completions.truncate(5);
-                                }
-                            }
-
-                            eprintln!("completions (grammar-filtered): [{}]",
-                                self.completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                            eprintln!("open_completions (grammar-filtered): [{}]",
-                                self.open_completions.iter().map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
-                        } else {
-                            self.completions = left.into_iter().take(5).collect();
-                            self.open_completions = right.into_iter().take(5).collect();
-                        }
-                    } else {
+                    // Completions arrive already dictionary + grammar filtered from worker thread
+                    {
                         self.completions = left.into_iter().take(5).collect();
                         self.open_completions = right.into_iter().take(5).collect();
+
+                        // Inject user dict words matching the prefix
+                        if let Some(ud) = &self.user_dict {
+                            let prefix = extract_prefix(&self.context.word).to_lowercase();
+                            if prefix.len() >= 3 {
+                                let existing: std::collections::HashSet<String> = self.completions.iter()
+                                    .map(|c| c.word.to_lowercase()).collect();
+                                for uw in ud.list_words() {
+                                    if uw.starts_with(&prefix) && !existing.contains(&uw) {
+                                        self.completions.insert(0, nostos_cognio::complete::Completion {
+                                            word: uw, score: 100.0, elapsed_ms: 0.0,
+                                        });
+                                    }
+                                }
+                                self.completions.truncate(5);
+                            }
+                        }
                     }
                     self.last_completed_prefix = cache_key;
                 }
@@ -3757,7 +3687,7 @@ impl eframe::App for ContextApp {
                 // Document changed — reset doc hash so next poll re-scans
                 self.last_doc_hash = 0;
                 // Clear clean hashes so ALL sentences get re-checked after fix
-                ; self.processed_sentence_hashes.clear();
+                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
                 // Clear grammar queue — document changed, stale sentences
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3848,6 +3778,7 @@ impl eframe::App for ContextApp {
                         self.wordfreq = wordfreq;
                         self.embedding_store = embedding_store;
                         if let Some(m) = model {
+                            let gs = self.grammar_actor.as_ref().map(|a| a.sender_clone());
                             self.bert_worker = Some(bert_worker::spawn_bert_worker(
                                 m,
                                 ctx.clone(),
@@ -3859,6 +3790,7 @@ impl eframe::App for ContextApp {
                                 self.wordfreq.as_ref().cloned(),
                                 self.embedding_store.clone(),
                                 self.analyzer.clone(),
+                                gs,
                             ));
                             self.bert_ready = true;
                         }
@@ -3866,7 +3798,7 @@ impl eframe::App for ContextApp {
                         self.startup_done.push("NorBERT4".into());
                         // Force rescan — spelling was skipped while BERT was loading
                         self.last_doc_hash = 0;
-                        ; self.processed_sentence_hashes.clear();
+                        // processed_sentence_hashes NOT cleared — only invalidate changed sentence
                         log!("Startup: NorBERT4 completer ready (bert_worker spawned)");
                     }
                 }
@@ -4313,6 +4245,7 @@ impl eframe::App for ContextApp {
                         };
                         log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
                         let cancel_clone = cancel.clone();
+                        let sentence_clone = self.context.sentence.clone();
                         worker.send(|id| bert_worker::BertRequest::CompleteWord {
                             id,
                             context: context_for_cw,
@@ -4323,6 +4256,7 @@ impl eframe::App for ContextApp {
                             cache_key: key_clone,
                             masked_text: masked_trimmed,
                             cancel: cancel_clone,
+                            sentence: sentence_clone,
                         });
                         ctx.request_repaint_after(Duration::from_millis(50));
                     }
@@ -5328,7 +5262,7 @@ impl eframe::App for ContextApp {
                                     !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower)
                                 });
                                 // Force rescan so the word is no longer flagged
-                                ; self.processed_sentence_hashes.clear();
+                                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
                                 self.last_doc_hash = 0;
                             }
                             "ignore_group" => {
@@ -6105,7 +6039,7 @@ impl eframe::App for ContextApp {
                 self.writing_errors.retain(|e| {
                     !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == lower)
                 });
-                ; self.processed_sentence_hashes.clear();
+                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
                 self.last_doc_hash = 0;
             }
             if let Some(w) = word_to_remove {
@@ -6116,7 +6050,7 @@ impl eframe::App for ContextApp {
                         log!("User dict: removed '{}'", w);
                     }
                 }
-                ; self.processed_sentence_hashes.clear();
+                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
                 self.last_doc_hash = 0;
             }
             if do_close {
@@ -6270,6 +6204,7 @@ fn main() -> eframe::Result {
                                 wordfreq.as_ref().cloned(),
                                 embedding_store.clone(),
                                 app.analyzer.clone(),
+                                None,
                             ));
                             app.bert_ready = true;
                             eprintln!("BERT worker spawned");
