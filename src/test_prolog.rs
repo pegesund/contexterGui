@@ -58,6 +58,9 @@ fn main() {
         "Han er en spiller.",
         "direktørrx for IKT og digitale tjenester.",
         "Direktørrx for IKT og digitale tjenester.",
+        "PKarrierekompasset er et godt verktøy.",
+        "Karrierekompassetx er et godt verktøy.",
+        "xmaskinlæring er viktig.",
         "direktørrx for IKT og digitale tjenester, Håvard Rye (havard.",
         "Direktørrx for IKT og digitale tjenester, Håvard Rye (havard.",
         "Håndtering og anonymisering av data for å trene modellerff.",
@@ -166,7 +169,7 @@ fn main() {
 
     // Check token readings for key words
     println!("=== Token analysis ===");
-    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom", "spiller", "modellerff", "ff", "osv", "osv.", "f.eks", "f.eks.", "bl.a", "bl.a.", "dvs", "dvs.", "mfl", "mfl."] {
+    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom", "spiller", "modellerff", "ff", "osv", "osv.", "f.eks", "f.eks.", "bl.a", "bl.a.", "dvs", "dvs.", "mfl", "mfl.", "karrierekompasset", "maskinlæring"] {
         let token = checker.analyze_word(word);
         println!("'{}': {} readings", word, token.readings.len());
         for r in &token.readings {

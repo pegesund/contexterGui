@@ -2085,6 +2085,41 @@ impl ContextApp {
             }
         }
 
+        // Source 9: Long word truncation (>= 10 chars) — strip 1-2 chars from start/end
+        // Catches typos on compound words (e.g. "PKarrierekompasset" → "karrierekompasset")
+        if word_lower.len() >= 10 {
+            if let Some(analyzer) = &self.analyzer {
+                let is_known_or_compound = |w: &str| -> bool {
+                    if analyzer.has_word(w) { return true; }
+                    for j in 3..w.len().saturating_sub(2) {
+                        if !w.is_char_boundary(j) { continue; }
+                        let left = &w[..j];
+                        let right = &w[j..];
+                        if right.len() >= 3 && analyzer.has_word(left) && analyzer.has_word(right) { return true; }
+                        if right.starts_with('s') && right.len() > 3 && analyzer.has_word(left) && analyzer.has_word(&right[1..]) { return true; }
+                    }
+                    false
+                };
+                for strip in 1..=2usize {
+                    if word_lower.is_char_boundary(strip) {
+                        let trimmed = &word_lower[strip..];
+                        if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
+                            edit_distances.insert(trimmed.to_string(), strip as u32);
+                            candidates.push(trimmed.to_string());
+                        }
+                    }
+                    let end = word_lower.len() - strip;
+                    if word_lower.is_char_boundary(end) {
+                        let trimmed = &word_lower[..end];
+                        if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
+                            edit_distances.insert(trimmed.to_string(), strip as u32);
+                            candidates.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         log!("find_spelling_suggestions: {} raw candidates for '{}'", candidates.len(), word_lower);
 
         // ── Phase 2: Ortho score all candidates ──
