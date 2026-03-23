@@ -1850,8 +1850,14 @@ impl ContextApp {
                     && !e.ignored
                 {
                     if e.suggestion != *best {
-                        log!("spelling BERT upgrade: '{}' → '{}' (was '{}')", e.word, best, e.suggestion);
-                        e.suggestion = best.clone();
+                        // Preserve capitalization from original word
+                        let mut suggestion = best.clone();
+                        if e.word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                            let mut chars = suggestion.chars();
+                            suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                        }
+                        log!("spelling BERT upgrade: '{}' → '{}' (was '{}')", e.word, suggestion, e.suggestion);
+                        e.suggestion = suggestion;
                     }
                     break;
                 }
@@ -1944,8 +1950,14 @@ impl ContextApp {
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
                 if !best.is_empty() {
-                    log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, best, score);
-                    self.writing_errors[idx].suggestion = best.clone();
+                    // Preserve capitalization from original word
+                    let mut suggestion = best.clone();
+                    if word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        let mut chars = suggestion.chars();
+                        suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                    }
+                    log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, suggestion, score);
+                    self.writing_errors[idx].suggestion = suggestion;
                 }
             }
             self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
@@ -3003,7 +3015,12 @@ impl ContextApp {
             for unk in resp.unknown_words.iter()
                 .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
             {
-                let best = unk.spelling_suggestions.first().cloned().unwrap_or_default();
+                let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default();
+                // Preserve capitalization: if original word starts uppercase, capitalize suggestion
+                if !best.is_empty() && unk.word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    let mut chars = best.chars();
+                    best = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                }
                 if best.is_empty() && unk.split_suggestions.is_empty() {
                     // No suggestions at all — still flag as unknown
                     log!("  Unknown word: '{}' (no suggestions)", unk.word);
