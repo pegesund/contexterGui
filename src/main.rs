@@ -3937,8 +3937,9 @@ impl eframe::App for ContextApp {
                         self.last_caret_pos = Some((x, y));
                     }
                 } else if let Some((x, y)) = self.platform.caret_screen_position() {
-                    // macOS: caret position via accessibility API, offset ~1.3cm below
-                    self.last_caret_pos = Some((x, y + 49));
+                    // macOS: caret position via accessibility API
+                    // Position: slightly below caret, shifted 30% left of cursor
+                    self.last_caret_pos = Some((x - 100, y + 30));
                 }
                 // Only update context if we got something useful — don't overwrite
                 // good context with empty when our own window is focused
@@ -4004,8 +4005,11 @@ impl eframe::App for ContextApp {
                                 log!("Click hit: word='{}' → error idx={} '{}' rule={}",
                                     cursor_word, idx, trunc(&e.explanation, 40), e.rule_name);
                             }
-                            // Switch to Grammatikk tab when clicking on an error word
-                            self.selected_tab = 1;
+                            // Only switch to Grammatikk tab if already on it
+                            // Don't interrupt the user's suggestion workflow
+                            if self.selected_tab == 1 {
+                                // already on grammar tab — keep it
+                            }
                             if self.focused_error_idx != Some(idx) {
                                 self.focused_error_scroll_done = false;
                             }
