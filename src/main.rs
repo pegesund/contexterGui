@@ -1850,9 +1850,14 @@ impl ContextApp {
                     && !e.ignored
                 {
                     if e.suggestion != *best {
-                        // Preserve capitalization from original word
+                        // Capitalize if at sentence start or originally capitalized
                         let mut suggestion = best.clone();
-                        if e.word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        let word_lower = e.word.to_lowercase();
+                        let at_sentence_start = e.sentence_context.to_lowercase().starts_with(&word_lower);
+                        let is_upper = e.sentence_context.to_lowercase().find(&word_lower)
+                            .and_then(|pos| e.sentence_context[pos..].chars().next())
+                            .map_or(false, |c| c.is_uppercase());
+                        if at_sentence_start || is_upper {
                             let mut chars = suggestion.chars();
                             suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
                         }
@@ -1950,9 +1955,13 @@ impl ContextApp {
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
                 if !best.is_empty() {
-                    // Preserve capitalization from original word
                     let mut suggestion = best.clone();
-                    if word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    let word_lower = word.to_lowercase();
+                    let at_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
+                    let is_upper = sentence_ctx.to_lowercase().find(&word_lower)
+                        .and_then(|pos| sentence_ctx[pos..].chars().next())
+                        .map_or(false, |c| c.is_uppercase());
+                    if at_start || is_upper {
                         let mut chars = suggestion.chars();
                         suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
                     }
@@ -3016,10 +3025,18 @@ impl ContextApp {
                 .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
             {
                 let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default();
-                // Preserve capitalization: if original word starts uppercase, capitalize suggestion
-                if !best.is_empty() && unk.word.chars().next().map_or(false, |c| c.is_uppercase()) {
-                    let mut chars = best.chars();
-                    best = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                // Capitalize suggestion if word is at start of sentence or originally capitalized
+                if !best.is_empty() {
+                    let word_lower = unk.word.to_lowercase();
+                    let at_sentence_start = resp.sentence.to_lowercase().starts_with(&word_lower);
+                    let is_upper_in_original = resp.sentence.to_lowercase()
+                        .find(&word_lower)
+                        .and_then(|pos| resp.sentence[pos..].chars().next())
+                        .map_or(false, |c| c.is_uppercase());
+                    if at_sentence_start || is_upper_in_original {
+                        let mut chars = best.chars();
+                        best = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                    }
                 }
                 if best.is_empty() && unk.split_suggestions.is_empty() {
                     // No suggestions at all — still flag as unknown
