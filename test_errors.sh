@@ -374,6 +374,16 @@ undo_all 40
 
 # ============================================================
 echo ""
+echo "Test 5c: Grammar error — er + present verb"
+go_to_end; key_press return
+type_text "Jeg er spiller fotball."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_grammar "er + present verb" "er" "$ERRORS"
+undo_all 40
+
+# ============================================================
+echo ""
 echo "Test 13: Duplicate sentences both detected"
 go_to_end; key_press return
 type_text "Han liker fotbollx veldig godt."
