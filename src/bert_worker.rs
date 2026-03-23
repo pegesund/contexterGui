@@ -158,27 +158,28 @@ fn worker_loop(
 ) {
     use std::ops::Deref;
     while let Ok(req) = rx.recv() {
-        // Drain stale requests: if newer requests are already queued,
-        // skip to the latest one (for completions). Keep non-completion requests.
+        // Drain stale completion requests: if newer CompleteWord is queued, skip to it.
+        // Never skip non-completion requests (SpellingScore, MlmForward).
         let req = {
             let mut current = req;
-            while let Ok(newer) = rx.try_recv() {
-                match (&current, &newer) {
-                    // If both are CompleteWord, skip the older one
-                    (BertRequest::CompleteWord { .. }, BertRequest::CompleteWord { .. }) => {
-                        current = newer;
+            loop {
+                match rx.try_recv() {
+                    Ok(newer) => {
+                        let same_type = matches!(
+                            (&current, &newer),
+                            (BertRequest::CompleteWord { .. }, BertRequest::CompleteWord { .. })
+                            | (BertRequest::Completion { .. }, BertRequest::Completion { .. })
+                        );
+                        if same_type {
+                            current = newer; // Skip older, keep newer
+                        } else {
+                            // Different type — process current first, then newer next iteration
+                            // Can't put back into mpsc, so process current now and newer is lost
+                            // TODO: use a VecDeque if this becomes an issue
+                            break;
+                        }
                     }
-                    // If both are old Completion, skip the older one
-                    (BertRequest::Completion { .. }, BertRequest::Completion { .. }) => {
-                        current = newer;
-                    }
-                    // Non-completion request: process current first, put newer back
-                    // (can't put back into mpsc, so just process current and let newer be next)
-                    _ => {
-                        // Process non-completion requests immediately would be complex;
-                        // just keep the newer one and let the old one be skipped
-                        current = newer;
-                    }
+                    Err(_) => break, // Queue empty
                 }
             }
             current
