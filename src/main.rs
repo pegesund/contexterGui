@@ -1737,10 +1737,9 @@ impl ContextApp {
                                     .map(|c| format!("{} {}.", last_fragment, c.word))
                                     .collect();
 
-                                // One batch call to grammar actor
+                                // One batch call to grammar actor — BLOCKS until actor responds
                                 let t_grammar = std::time::Instant::now();
                                 let batch_results = actor.check_sentences_batch(&test_sentences);
-                                log!("Grammar batch: {} sentences in {:?}", test_sentences.len(), t_grammar.elapsed());
 
                                 // Build check results map
                                 let mut grammar_ok: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
@@ -2513,7 +2512,7 @@ impl ContextApp {
             self.pending_spelling_bert.clear();
             self.grammar_queue.clear();
             self.grammar_queue_total = 0;
-            self.processed_sentence_hashes.clear();
+            ; self.processed_sentence_hashes.clear();
         }
 
         {
@@ -2792,10 +2791,11 @@ impl ContextApp {
         // Check for reset (new document opened)
         for bridge in &self.manager.bridges {
             if bridge.take_reset() {
-                log!("Reset: clearing ALL state + underlines");
+                log!("Reset: clearing errors + underlines (NOT sentence hashes)");
                 self.manager.clear_all_error_underlines();
                 self.writing_errors.clear();
-                self.processed_sentence_hashes.clear();
+                // DO NOT clear processed_sentence_hashes — causes full document rescan
+                // The paragraph change flow handles incremental re-checking
                 self.paragraph_sentence_hashes.clear();
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
@@ -3606,7 +3606,6 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let frame_start = Instant::now();
 
         // In selection mode: handle keys at the top, set skip_processing flag
         let mut skip_processing = false;
@@ -3634,13 +3633,12 @@ impl eframe::App for ContextApp {
                         let repl = if self.selected_column == 0 { c.word.clone() }
                             else if prefix.is_empty() { c.word.clone() }
                             else { format!("{} {}", prefix, c.word) };
-                        log!("TAB SELECT START: '{}' for '{}' frame_age={:?}", repl, prefix, frame_start.elapsed());
+                        log!("TAB SELECT: '{}' for '{}' ", repl, prefix);
                         let json = format!(
                             r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
                             prefix.replace('"', "\\\""), repl.replace('"', "\\\"")
                         );
                         for b in &self.manager.bridges { b.push_reply_urgent(&json); }
-                        log!("TAB SELECT PUSHED: frame_age={:?}", frame_start.elapsed());
                         self.selection_mode = false;
                         self.platform.set_tab_intercept(false);
                         self.selected_completion = None;
@@ -3680,6 +3678,8 @@ impl eframe::App for ContextApp {
 
         // Poll grammar actor for results (non-blocking)
         self.poll_grammar_responses();
+        if let Some(actor) = &self.grammar_actor {
+        }
 
         // Update errors JSON for /errors endpoint
         {
@@ -3757,7 +3757,7 @@ impl eframe::App for ContextApp {
                 // Document changed — reset doc hash so next poll re-scans
                 self.last_doc_hash = 0;
                 // Clear clean hashes so ALL sentences get re-checked after fix
-                self.processed_sentence_hashes.clear();
+                ; self.processed_sentence_hashes.clear();
                 // Clear grammar queue — document changed, stale sentences
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3866,7 +3866,7 @@ impl eframe::App for ContextApp {
                         self.startup_done.push("NorBERT4".into());
                         // Force rescan — spelling was skipped while BERT was loading
                         self.last_doc_hash = 0;
-                        self.processed_sentence_hashes.clear();
+                        ; self.processed_sentence_hashes.clear();
                         log!("Startup: NorBERT4 completer ready (bert_worker spawned)");
                     }
                 }
@@ -3986,7 +3986,7 @@ impl eframe::App for ContextApp {
                     self.pending_consonant_bert.clear();
                     self.grammar_queue.clear();
                     self.grammar_queue_total = 0;
-                    self.processed_sentence_hashes.clear();
+                    ; self.processed_sentence_hashes.clear();
                     self.last_doc_hash = 0;
                     // Do NOT reset last_sentence_count to 0 — that causes a
                     // false "major doc change" on the very next read, which
@@ -5328,7 +5328,7 @@ impl eframe::App for ContextApp {
                                     !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower)
                                 });
                                 // Force rescan so the word is no longer flagged
-                                self.processed_sentence_hashes.clear();
+                                ; self.processed_sentence_hashes.clear();
                                 self.last_doc_hash = 0;
                             }
                             "ignore_group" => {
@@ -6105,7 +6105,7 @@ impl eframe::App for ContextApp {
                 self.writing_errors.retain(|e| {
                     !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == lower)
                 });
-                self.processed_sentence_hashes.clear();
+                ; self.processed_sentence_hashes.clear();
                 self.last_doc_hash = 0;
             }
             if let Some(w) = word_to_remove {
@@ -6116,7 +6116,7 @@ impl eframe::App for ContextApp {
                         log!("User dict: removed '{}'", w);
                     }
                 }
-                self.processed_sentence_hashes.clear();
+                ; self.processed_sentence_hashes.clear();
                 self.last_doc_hash = 0;
             }
             if do_close {

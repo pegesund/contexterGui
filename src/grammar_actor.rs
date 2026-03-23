@@ -93,16 +93,9 @@ impl GrammarActorHandle {
             sentence: sentence.to_string(),
             reply: reply_tx,
         }));
-        let start = std::time::Instant::now();
-        match reply_rx.recv_timeout(std::time::Duration::from_millis(2000)) {
-            Ok(resp) => {
-                eprintln!("grammar_sync: '{}' → {} errors in {:?}", &sentence[..sentence.len().min(50)], resp.errors.len(), start.elapsed());
-                resp.errors
-            }
-            Err(_) => {
-                eprintln!("grammar_sync TIMEOUT: '{}'", &sentence[..sentence.len().min(50)]);
-                Vec::new()
-            }
+        match reply_rx.recv() {
+            Ok(resp) => resp.errors,
+            Err(_) => Vec::new(),
         }
     }
 
@@ -113,7 +106,7 @@ impl GrammarActorHandle {
             sentences: sentences.to_vec(),
             reply: reply_tx,
         }));
-        match reply_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+        match reply_rx.recv() {
             Ok(resp) => resp.results,
             Err(_) => sentences.iter().map(|_| Vec::new()).collect(),
         }
