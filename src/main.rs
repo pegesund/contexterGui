@@ -1360,9 +1360,23 @@ impl ContextApp {
         if clean.chars().any(|c| c.is_ascii_digit()) {
             return;
         }
-        // Skip email addresses
+        // Skip email addresses and words that are parts of email addresses
+        // e.g. "havard.rye@tekna.no" may be split into "havard", "rye", "tekna", "no"
         if clean.contains('@') {
             return;
+        }
+        if sentence_ctx.contains('@') {
+            // Check if this word is part of an email in the sentence
+            let word_lower = clean.to_lowercase();
+            for token in sentence_ctx.split_whitespace() {
+                let t = token.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == ';');
+                if t.contains('@') {
+                    let email_parts: Vec<&str> = t.split(|c: char| c == '@' || c == '.' || c == '-' || c == '_').collect();
+                    if email_parts.iter().any(|p| p.to_lowercase() == word_lower) {
+                        return;
+                    }
+                }
+            }
         }
         // Split on slash and check each part separately (oppdrag/prosjekt → oppdrag, prosjekt)
         if clean.contains('/') {
@@ -2738,6 +2752,22 @@ impl ContextApp {
 
                 log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
 
+                // Extract email parts to skip in spelling checks
+                let email_skip_words: std::collections::HashSet<String> = if p.text.contains('@') {
+                    p.text.split_whitespace()
+                        .map(|t| t.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == ';'))
+                        .filter(|t| t.contains('@'))
+                        .flat_map(|email| email.split(|c: char| c == '@' || c == '.' || c == '-' || c == '_')
+                            .filter(|p| p.len() >= 2)
+                            .map(|p| p.to_lowercase()))
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+                if !email_skip_words.is_empty() {
+                    log!("  Email skip words: {:?}", email_skip_words);
+                }
+
                 // Split paragraph into sentences
                 let sentences = split_sentences(&p.text);
                 let new_hashes: Vec<u64> = sentences.iter()
@@ -2798,7 +2828,9 @@ impl ContextApp {
 
                     // Always send for spelling (unknown word detection).
                     // Grammar errors from incomplete sentences are filtered in poll_grammar_responses.
-                    let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                    let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                    // Add email parts so they get filtered as "known" words
+                    uw.extend(email_skip_words.iter().cloned());
                     actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
