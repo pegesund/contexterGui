@@ -57,6 +57,9 @@ fn main() {
         "Jeg spiller fotball.",
         "Han er en spiller.",
         "direktørrx for IKT og digitale tjenester.",
+        "Direktørrx for IKT og digitale tjenester.",
+        "direktørrx for IKT og digitale tjenester, Håvard Rye (havard.",
+        "Direktørrx for IKT og digitale tjenester, Håvard Rye (havard.",
         "Håndtering og anonymisering av data for å trene modellerff.",
         "Vi trener modellerff her.",
     ];

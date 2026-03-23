@@ -2752,13 +2752,20 @@ impl ContextApp {
 
                 log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
 
+                // Strip control characters and their escaped forms (\u000b etc.)
+                let clean_text = p.text
+                    .replace("\\u000b", " ")
+                    .replace("\\u000B", " ")
+                    .replace("\x0b", " ")
+                    .replace("\x0c", " ");
+
                 // Extract email parts to skip in spelling checks
-                let email_skip_words: std::collections::HashSet<String> = if p.text.contains('@') {
-                    p.text.split_whitespace()
+                let email_skip_words: std::collections::HashSet<String> = if clean_text.contains('@') {
+                    clean_text.split_whitespace()
                         .map(|t| t.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == ';'))
                         .filter(|t| t.contains('@'))
                         .flat_map(|email| email.split(|c: char| c == '@' || c == '.' || c == '-' || c == '_')
-                            .filter(|p| p.len() >= 2)
+                            .filter(|p| p.len() >= 2 && p.chars().all(|c| c.is_alphanumeric()))
                             .map(|p| p.to_lowercase()))
                         .collect()
                 } else {
@@ -2769,7 +2776,7 @@ impl ContextApp {
                 }
 
                 // Split paragraph into sentences
-                let sentences = split_sentences(&p.text);
+                let sentences = split_sentences(&clean_text);
                 let new_hashes: Vec<u64> = sentences.iter()
                     .map(|s| hash_str(&format!("{}|{}", p.paragraph_id, s))).collect();
 
