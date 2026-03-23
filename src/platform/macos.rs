@@ -130,6 +130,63 @@ impl PlatformServices for MacPlatform {
         Some("/System/Library/Fonts/Apple Color Emoji.ttc")
     }
 
+    fn caret_screen_position(&self) -> Option<(i32, i32)> {
+        use accessibility_sys::*;
+        use core_foundation::base::{CFRelease, TCFType};
+        use core_foundation::string::CFString;
+
+        unsafe {
+            // Get the system-wide accessibility element
+            let sys = AXUIElementCreateSystemWide();
+            let key = CFString::new("AXFocusedUIElement");
+            let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyAttributeValue(sys, key.as_concrete_TypeRef(), &mut focused);
+            CFRelease(sys as _);
+            if err != 0 || focused.is_null() { return None; }
+
+            // Get AXSelectedTextRange
+            let range_key = CFString::new("AXSelectedTextRange");
+            let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
+            if err != 0 || range_val.is_null() {
+                CFRelease(focused);
+                return None;
+            }
+
+            // Get AXBoundsForRange for the selection — gives us screen coordinates
+            let bounds_key = CFString::new("AXBoundsForRange");
+            let mut bounds_val: core_foundation::base::CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyParameterizedAttributeValue(
+                focused as AXUIElementRef,
+                bounds_key.as_concrete_TypeRef(),
+                range_val,
+                &mut bounds_val,
+            );
+            CFRelease(range_val);
+            CFRelease(focused);
+
+            if err != 0 || bounds_val.is_null() { return None; }
+
+            // bounds_val is an AXValue containing a CGRect
+            let mut rect = core_graphics::geometry::CGRect::new(
+                &core_graphics::geometry::CGPoint::new(0.0, 0.0),
+                &core_graphics::geometry::CGSize::new(0.0, 0.0),
+            );
+            let ok = AXValueGetValue(
+                bounds_val as AXValueRef,
+                kAXValueTypeCGRect,
+                &mut rect as *mut _ as *mut std::ffi::c_void,
+            );
+            CFRelease(bounds_val);
+
+            if !ok { return None; }
+
+            // rect.origin is top-left of the selection in screen coords
+            // Return bottom of selection (where we want the window)
+            Some((rect.origin.x as i32, (rect.origin.y + rect.size.height) as i32))
+        }
+    }
+
     fn ort_dylib_candidates(&self) -> Vec<String> {
         vec![
             concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/lib/libonnxruntime.dylib").to_string(),

@@ -3931,11 +3931,14 @@ impl eframe::App for ContextApp {
                     self.try_update_doc_text(doc);
                 }
                 let fg = self.platform.foreground_app();
-                // Only update caret position if valid (not 0,0 which means unknown)
+                // Update caret position from bridge context or accessibility API
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
                         self.last_caret_pos = Some((x, y));
                     }
+                } else if let Some((x, y)) = self.platform.caret_screen_position() {
+                    // macOS: caret position via accessibility API, offset ~1.3cm below
+                    self.last_caret_pos = Some((x, y + 49));
                 }
                 // Only update context if we got something useful — don't overwrite
                 // good context with empty when our own window is focused

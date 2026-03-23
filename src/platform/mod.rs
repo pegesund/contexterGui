@@ -81,6 +81,10 @@ pub trait PlatformServices: Send + Sync {
     /// Path to the SWI-Prolog shared library.
     fn swipl_path(&self) -> &str;
 
+    /// Get the screen position of the text cursor (caret) in the focused app.
+    /// Returns (x, y) in screen coordinates, or None if unavailable.
+    fn caret_screen_position(&self) -> Option<(i32, i32)> { None }
+
     /// Initialize TTS engine (platform-specific).
     fn init_tts(&self);
 
