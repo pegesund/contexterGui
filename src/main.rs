@@ -2724,9 +2724,8 @@ impl ContextApp {
                 log!("Reset: clearing errors + underlines (NOT sentence hashes)");
                 self.manager.clear_all_error_underlines();
                 self.writing_errors.clear();
-                // DO NOT clear processed_sentence_hashes — causes full document rescan
-                // The paragraph change flow handles incremental re-checking
-                self.paragraph_sentence_hashes.clear();
+                // DO NOT clear processed_sentence_hashes or paragraph_sentence_hashes
+                // — causes full document rescan. Paragraph change flow handles incremental checks.
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3563,12 +3562,13 @@ impl eframe::App for ContextApp {
                         let repl = if self.selected_column == 0 { c.word.clone() }
                             else if prefix.is_empty() { c.word.clone() }
                             else { format!("{} {}", prefix, c.word) };
-                        log!("TAB SELECT: '{}' for '{}' ", repl, prefix);
+                        log!("=== CLICK SELECT: '{}' for '{}' ===", repl, prefix);
                         let json = format!(
                             r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
                             prefix.replace('"', "\\\""), repl.replace('"', "\\\"")
                         );
                         for b in &self.manager.bridges { b.push_reply_urgent(&json); }
+                        log!("=== CLICK PUSHED TO QUEUE ===");
                         self.selection_mode = false;
                         self.platform.set_tab_intercept(false);
                         self.selected_completion = None;
@@ -4391,28 +4391,11 @@ impl eframe::App for ContextApp {
             });
 
             if accept && !self.completions.is_empty() {
-                // Old Ctrl+Space path — only if completions still exist
-                // (Tab selection clears them before reaching here)
-                if let Some(idx) = self.selected_completion {
-                    let active = if self.selected_column == 1 && !self.open_completions.is_empty() {
-                        &self.open_completions
-                    } else if self.completions.is_empty() { &self.open_completions } else { &self.completions };
-                    if let Some(comp) = active.get(idx) {
-                        let word = comp.word.clone();
-                        self.return_focus_to_app();
-                        self.manager.replace_word(&word);
-                        self.completions.clear();
-                        self.open_completions.clear();
-                        self.last_completed_prefix.clear();
-                        self.last_replace_time = Instant::now();
-                        self.last_poll = Instant::now() - self.poll_interval;
-                    }
-                }
+                // Handled by selection mode code at top of update()
                 self.selection_mode = false;
                 self.selected_completion = None;
             }
             if cancel {
-                self.return_focus_to_app();
                 self.selection_mode = false;
                 self.selected_completion = None;
             }
@@ -4793,58 +4776,7 @@ impl eframe::App for ContextApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
 
-                if self.selection_mode {
-                    let down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::Tab));
-                    let up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
-                    let left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
-                    let right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
-                    let select = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
-                    let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-
-                    if down {
-                        let max = if self.selected_column == 0 { self.completions.len() } else { self.open_completions.len() };
-                        if max > 0 { self.selected_completion = Some(self.selected_completion.map_or(0, |s| (s+1) % max)); }
-                    } else if up {
-                        self.selected_completion = Some(self.selected_completion.unwrap_or(0).saturating_sub(1));
-                    } else if left && !self.completions.is_empty() { self.selected_column = 0;
-                    } else if right && !self.open_completions.is_empty() { self.selected_column = 1;
-                    } else if select {
-                        if let Some(idx) = self.selected_completion {
-                            let comp = if self.selected_column == 0 { self.completions.get(idx) } else { self.open_completions.get(idx) };
-                            if let Some(c) = comp {
-                                let prefix = self.context.word.clone();
-                                let repl = if self.selected_column == 0 { c.word.clone() }
-                                    else if prefix.is_empty() { c.word.clone() }
-                                    else { format!("{} {}", prefix, c.word) };
-                                let t0 = Instant::now();
-                                log!("TAB SELECT: '{}' for '{}' t=0", repl, prefix);
-                                // Send directly to add-in — uses stored cursor position, fast
-                                let json = format!(
-                                    r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
-                                    prefix.replace('"', "\\\""), repl.replace('"', "\\\"")
-                                );
-                                for b in &self.manager.bridges { b.push_reply_urgent(&json); }
-                                self.selection_mode = false;
-                                self.platform.set_tab_intercept(false);
-                                self.selected_completion = None;
-                                self.completions.clear();
-                                self.open_completions.clear();
-                                // Mark as "done" so old context doesn't re-trigger
-                                // New context from add-in (after replacement) will have different key
-                                let current_key = if let Some(m) = &self.context.masked_sentence {
-                                    format!("{}|{}", m, extract_prefix(&self.context.word))
-                                } else { String::new() };
-                                self.last_completed_prefix = current_key.clone();
-                                self.dispatched_key = current_key;
-                            }
-                        }
-                    } else if cancel {
-                        self.selection_mode = false;
-                        self.platform.set_tab_intercept(false);
-                        self.selected_completion = None;
-                        self.return_focus_to_app();
-                    }
-                }
+                // Selection mode keyboard handling is at the top of update()
                 if !self.completions.is_empty() || !self.open_completions.is_empty() {
 
                     let sel = self.selected_completion;
@@ -4946,15 +4878,22 @@ impl eframe::App for ContextApp {
 
 
                     if let Some(word) = clicked_word {
-                        log!("CLICKED word: '{}' bridge={}", word, self.manager.active_bridge_name());
-                        self.return_focus_to_app();
-                        self.manager.replace_word(&word);
+                        let prefix = self.context.word.clone();
+                        log!("CLICKED word: '{}' replacing '{}'", word, prefix);
+                        let json = format!(
+                            r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
+                            prefix.replace('"', "\\\""), word.replace('"', "\\\"")
+                        );
+                        for b in &self.manager.bridges { b.push_reply_urgent(&json); }
                         self.completions.clear();
                         self.open_completions.clear();
                         self.selected_completion = None;
                         self.selection_mode = false;
-                        self.last_completed_prefix.clear();
-                        self.last_poll = Instant::now() - self.poll_interval;
+                        let current_key = if let Some(m) = &self.context.masked_sentence {
+                            format!("{}|{}", m, extract_prefix(&self.context.word))
+                        } else { String::new() };
+                        self.last_completed_prefix = current_key.clone();
+                        self.dispatched_key = current_key;
                     }
                 }
             }

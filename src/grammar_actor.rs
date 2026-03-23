@@ -80,6 +80,7 @@ impl GrammarActorHandle {
     }
 
     pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str, user_words: &[String]) {
+        crate::log!("ACTOR ASYNC SEND: '{}'", &sentence[..sentence.len().min(40)]);
         let _ = self.sender.send(ActorMessage::Async(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,
@@ -127,6 +128,13 @@ impl GrammarActorHandle {
 /// The egui Context is used to trigger repaint when results are ready.
 /// Grammar batch check using a sender clone. Can be called from any thread.
 pub fn grammar_batch_via_sender(sender: &mpsc::Sender<ActorMessage>, sentences: &[String]) -> Vec<Vec<GrammarError>> {
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(std::env::temp_dir().join("acatts-rust.log")) {
+            let _ = writeln!(f, "ACTOR BATCH SEND: {} sentences", sentences.len());
+        }
+    }
     let (reply_tx, reply_rx) = mpsc::channel();
     let _ = sender.send(ActorMessage::SyncBatch(SyncBatchRequest {
         sentences: sentences.to_vec(),

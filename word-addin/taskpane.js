@@ -506,11 +506,11 @@ function doClearAllUnderlines() {
 }
 
 function doReplaceAtCursor(prefix, replacement) {
-    // Fast: use stored cursor position — rewrite paragraph text in ONE sync
+    setStatus("INSERT: " + prefix + " → " + replacement, "ok");
     var prefixLen = prefix.length;
     var paraId = lastCursorParaId;
     var cursorPos = lastCursorInPara;
-    if (!paraId || cursorPos < prefixLen) return;
+    if (!paraId || cursorPos < prefixLen) { setStatus("INSERT FAIL: no paraId or cursorPos", "err"); return; }
 
     Word.run(function (ctx) {
         var para = ctx.document.getParagraphByUniqueLocalId(paraId);
@@ -520,9 +520,11 @@ function doReplaceAtCursor(prefix, replacement) {
             var before = text.substring(0, cursorPos - prefixLen);
             var after = text.substring(cursorPos);
             para.insertText(before + replacement + " " + after, "Replace");
-            return ctx.sync();
+            return ctx.sync().then(function () {
+                setStatus("INSERT DONE", "ok");
+            });
         });
-    }).catch(function (e) { console.log("replaceAtCursor error:", e); });
+    }).catch(function (e) { setStatus("INSERT ERROR: " + e, "err"); });
 }
 
 function doReplaceCurrentWord(replacement) {
