@@ -14,6 +14,8 @@ var BRIDGE_URL = "https://localhost:3000";
 var statusEl;
 var SENTENCE_DELIMITERS = /[.!?:]/;
 var lastSentKey = "";
+var lastCursorParaId = "";
+var lastCursorInPara = 0;
 // Unique document identifier — URL for saved docs, random ID for unsaved
 var documentId = (Office.context && Office.context.document && Office.context.document.url)
     || ("unsaved-" + Math.random().toString(36).substring(2, 10));
@@ -293,6 +295,10 @@ function onSelectionChanged() {
                 scheduleRescan();
             }
 
+            // Store for fast replaceAtCursor
+            lastCursorParaId = paraId;
+            lastCursorInPara = cursorInPara;
+
             var result = detectSentence(paraText, cursorInPara);
 
             var key = result.sentence + "|" + result.wordAtCursor + "|" + sel.start;
@@ -381,6 +387,8 @@ function pollReplies() {
                 doClearUnderline(data.word, data.paragraphId);
             } else if (data.action === "clearAllUnderlines") {
                 doClearAllUnderlines();
+            } else if (data.action === "replaceAtCursor" && data.expected && data.text) {
+                doReplaceAtCursor(data.expected, data.text);
             } else if (data.action === "rescan") {
                 paragraphMap = {};
                 initialScan();
@@ -495,6 +503,26 @@ function doClearAllUnderlines() {
         range.font.underline = "None";
         return ctx.sync();
     }).catch(function (e) { console.log("clearAllUnderlines error:", e); });
+}
+
+function doReplaceAtCursor(prefix, replacement) {
+    // Fast: use stored cursor position — rewrite paragraph text in ONE sync
+    var prefixLen = prefix.length;
+    var paraId = lastCursorParaId;
+    var cursorPos = lastCursorInPara;
+    if (!paraId || cursorPos < prefixLen) return;
+
+    Word.run(function (ctx) {
+        var para = ctx.document.getParagraphByUniqueLocalId(paraId);
+        para.load("text");
+        return ctx.sync().then(function () {
+            var text = para.text;
+            var before = text.substring(0, cursorPos - prefixLen);
+            var after = text.substring(cursorPos);
+            para.insertText(before + replacement + " " + after, "Replace");
+            return ctx.sync();
+        });
+    }).catch(function (e) { console.log("replaceAtCursor error:", e); });
 }
 
 function doReplaceCurrentWord(replacement) {

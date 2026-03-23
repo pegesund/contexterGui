@@ -2905,12 +2905,15 @@ impl ContextApp {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
-                    // Always send for spelling (unknown word detection).
-                    // Grammar errors from incomplete sentences are filtered in poll_grammar_responses.
-                    let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-                    // Add email parts so they get filtered as "known" words
-                    uw.extend(email_skip_words.iter().cloned());
-                    actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
+                    // Only send complete sentences (ending with punctuation) to grammar actor.
+                    // Incomplete sentences (user still typing) are not checked.
+                    let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
+                        || sentence_text.ends_with('?') || sentence_text.ends_with(':');
+                    if is_complete {
+                        let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                        uw.extend(email_skip_words.iter().cloned());
+                        actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
+                    }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
                 }
@@ -3097,21 +3100,28 @@ impl ContextApp {
                 } else {
                     log!("  Spelling: '{}' → '{}' (from grammar checker)", unk.word, best);
                 }
-                self.writing_errors.push(WritingError {
-                    category: ErrorCategory::Spelling,
-                    word: unk.word.clone(),
-                    suggestion: best,
-                    explanation: format!("«{}» finnes ikke i ordboken.", unk.word),
-                    rule_name: "stavefeil".to_string(),
-                    sentence_context: resp.sentence.to_string(),
-                    doc_offset: resp.doc_offset,
-                    position: unk.position,
-                    ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                // Only add if not already in writing_errors for this paragraph
+                let already_exists = self.writing_errors.iter().any(|e| {
+                    e.word.to_lowercase() == unk.word.to_lowercase()
+                    && e.paragraph_id == resp.paragraph_id
+                    && !e.ignored
                 });
-                // Underline the error word in Word — use any bridge that supports it
-                for b in &self.manager.bridges {
-                    b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
+                if !already_exists {
+                    self.writing_errors.push(WritingError {
+                        category: ErrorCategory::Spelling,
+                        word: unk.word.clone(),
+                        suggestion: best,
+                        explanation: format!("«{}» finnes ikke i ordboken.", unk.word),
+                        rule_name: "stavefeil".to_string(),
+                        sentence_context: resp.sentence.to_string(),
+                        doc_offset: resp.doc_offset,
+                        position: unk.position,
+                        ignored: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                    });
+                    for b in &self.manager.bridges {
+                        b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
+                    }
                 }
             }
 
@@ -3596,9 +3606,65 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
+
+        // In selection mode: handle keys at the top, set skip_processing flag
+        let mut skip_processing = false;
+        if self.selection_mode {
+            skip_processing = true;
+            let down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::Tab));
+            let up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+            let left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+            let right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
+            let select = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
+            let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+            if down {
+                let max = if self.selected_column == 0 { self.completions.len() } else { self.open_completions.len() };
+                if max > 0 { self.selected_completion = Some(self.selected_completion.map_or(0, |s| (s+1) % max)); }
+            } else if up {
+                self.selected_completion = Some(self.selected_completion.unwrap_or(0).saturating_sub(1));
+            } else if left && !self.completions.is_empty() { self.selected_column = 0;
+            } else if right && !self.open_completions.is_empty() { self.selected_column = 1;
+            } else if select {
+                if let Some(idx) = self.selected_completion {
+                    let comp = if self.selected_column == 0 { self.completions.get(idx) } else { self.open_completions.get(idx) };
+                    if let Some(c) = comp {
+                        let prefix = self.context.word.clone();
+                        let repl = if self.selected_column == 0 { c.word.clone() }
+                            else if prefix.is_empty() { c.word.clone() }
+                            else { format!("{} {}", prefix, c.word) };
+                        log!("TAB SELECT START: '{}' for '{}' frame_age={:?}", repl, prefix, frame_start.elapsed());
+                        let json = format!(
+                            r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
+                            prefix.replace('"', "\\\""), repl.replace('"', "\\\"")
+                        );
+                        for b in &self.manager.bridges { b.push_reply_urgent(&json); }
+                        log!("TAB SELECT PUSHED: frame_age={:?}", frame_start.elapsed());
+                        self.selection_mode = false;
+                        self.platform.set_tab_intercept(false);
+                        self.selected_completion = None;
+                        self.completions.clear();
+                        self.open_completions.clear();
+                        let current_key = if let Some(m) = &self.context.masked_sentence {
+                            format!("{}|{}", m, extract_prefix(&self.context.word))
+                        } else { String::new() };
+                        self.last_completed_prefix = current_key.clone();
+                        self.dispatched_key = current_key;
+                    }
+                }
+            } else if cancel {
+                self.selection_mode = false;
+                self.platform.set_tab_intercept(false);
+                self.selected_completion = None;
+            }
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
         // Allow copying text from labels
         ctx.style_mut(|s| s.interaction.selectable_labels = true);
 
+      if !skip_processing {
         // Spawn grammar actor on first update — loads SWI-Prolog on its own thread
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
             self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(
@@ -4147,7 +4213,17 @@ impl eframe::App for ContextApp {
             }
 
             // Background completion: debounce + dispatch via BERT worker
-            if let Some(masked) = &self.context.masked_sentence.clone() {
+            // Skip when in selection mode — user is navigating suggestions, not typing
+            if self.selection_mode {
+                // Don't dispatch new completions while selecting
+            } else {
+            // When masked_sentence is None (cursor after space), construct one for next-word prediction
+            let masked_opt = self.context.masked_sentence.clone().or_else(|| {
+                if !self.context.sentence.is_empty() {
+                    Some(format!("{} <mask>.", self.context.sentence.trim_end()))
+                } else { None }
+            });
+            if let Some(masked) = &masked_opt {
                 let prefix = extract_prefix(&self.context.word);
                 let prefix_lower = prefix.to_lowercase();
                 let cache_key = format!("{}|{}", masked, prefix);
@@ -4255,18 +4331,18 @@ impl eframe::App for ContextApp {
                 }
             }
         }
+        } // end if !selection_mode (completion dispatch)
 
         // Poll ALL BERT worker responses (completions + sentence scoring + MLM)
-        self.poll_bert_responses(&ctx);
-        // Validate any consonant checks that arrived from BERT
-        self.validate_consonant_checks();
-
-        // Idle spelling + grammar queue processing
-        if !self.spelling_queue.is_empty() {
-            self.process_spelling_queue();
-        }
-        if !self.grammar_queue.is_empty() {
-            self.process_grammar_queue();
+        if !self.selection_mode {
+            self.poll_bert_responses(&ctx);
+            self.validate_consonant_checks();
+            if !self.spelling_queue.is_empty() {
+                self.process_spelling_queue();
+            }
+            if !self.grammar_queue.is_empty() {
+                self.process_grammar_queue();
+            }
         }
 
         // Phase 1: Ctrl+Space while Word has focus → enter selection mode
@@ -4380,7 +4456,9 @@ impl eframe::App for ContextApp {
                 }
             });
 
-            if accept {
+            if accept && !self.completions.is_empty() {
+                // Old Ctrl+Space path — only if completions still exist
+                // (Tab selection clears them before reaching here)
                 if let Some(idx) = self.selected_completion {
                     let active = if self.selected_column == 1 && !self.open_completions.is_empty() {
                         &self.open_completions
@@ -4393,7 +4471,6 @@ impl eframe::App for ContextApp {
                         self.open_completions.clear();
                         self.last_completed_prefix.clear();
                         self.last_replace_time = Instant::now();
-                        // Force immediate context refresh after replace
                         self.last_poll = Instant::now() - self.poll_interval;
                     }
                 }
@@ -4422,6 +4499,8 @@ impl eframe::App for ContextApp {
                 ctx.request_repaint_after(Duration::from_millis(self.debounce_ms));
             }
         }
+
+      } // end if !skip_processing
 
         // Window sizing (scaled)
         let s = self.ui_scale;
@@ -4767,6 +4846,71 @@ impl eframe::App for ContextApp {
 
             // === Tab: Innhold (0) ===
             if self.selected_tab == 0 {
+                // Tab key selection
+                let has_sugg = !self.completions.is_empty() || !self.open_completions.is_empty();
+                if has_sugg && !self.selection_mode { self.platform.set_tab_intercept(true); }
+                else if !has_sugg { self.platform.set_tab_intercept(false); self.selection_mode = false; }
+
+                if self.platform.take_tab_press() && has_sugg {
+                    self.selection_mode = true;
+                    self.selected_completion = Some(0);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.selected_column = if !self.completions.is_empty() { 0 } else { 1 };
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+
+                if self.selection_mode {
+                    let down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::Tab));
+                    let up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                    let left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+                    let right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
+                    let select = ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space));
+                    let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+                    if down {
+                        let max = if self.selected_column == 0 { self.completions.len() } else { self.open_completions.len() };
+                        if max > 0 { self.selected_completion = Some(self.selected_completion.map_or(0, |s| (s+1) % max)); }
+                    } else if up {
+                        self.selected_completion = Some(self.selected_completion.unwrap_or(0).saturating_sub(1));
+                    } else if left && !self.completions.is_empty() { self.selected_column = 0;
+                    } else if right && !self.open_completions.is_empty() { self.selected_column = 1;
+                    } else if select {
+                        if let Some(idx) = self.selected_completion {
+                            let comp = if self.selected_column == 0 { self.completions.get(idx) } else { self.open_completions.get(idx) };
+                            if let Some(c) = comp {
+                                let prefix = self.context.word.clone();
+                                let repl = if self.selected_column == 0 { c.word.clone() }
+                                    else if prefix.is_empty() { c.word.clone() }
+                                    else { format!("{} {}", prefix, c.word) };
+                                let t0 = Instant::now();
+                                log!("TAB SELECT: '{}' for '{}' t=0", repl, prefix);
+                                // Send directly to add-in — uses stored cursor position, fast
+                                let json = format!(
+                                    r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
+                                    prefix.replace('"', "\\\""), repl.replace('"', "\\\"")
+                                );
+                                for b in &self.manager.bridges { b.push_reply_urgent(&json); }
+                                self.selection_mode = false;
+                                self.platform.set_tab_intercept(false);
+                                self.selected_completion = None;
+                                self.completions.clear();
+                                self.open_completions.clear();
+                                // Mark as "done" so old context doesn't re-trigger
+                                // New context from add-in (after replacement) will have different key
+                                let current_key = if let Some(m) = &self.context.masked_sentence {
+                                    format!("{}|{}", m, extract_prefix(&self.context.word))
+                                } else { String::new() };
+                                self.last_completed_prefix = current_key.clone();
+                                self.dispatched_key = current_key;
+                            }
+                        }
+                    } else if cancel {
+                        self.selection_mode = false;
+                        self.platform.set_tab_intercept(false);
+                        self.selected_completion = None;
+                        self.return_focus_to_app();
+                    }
+                }
                 if !self.completions.is_empty() || !self.open_completions.is_empty() {
 
                     let sel = self.selected_completion;

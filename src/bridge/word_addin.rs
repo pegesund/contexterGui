@@ -338,6 +338,18 @@ impl TextBridge for WordAddinBridge {
             *lock = json.to_string();
         }
     }
+
+    fn push_reply(&self, json: &str) {
+        if let Ok(mut q) = self.reply_queue.lock() {
+            q.push(json.to_string());
+        }
+    }
+
+    fn push_reply_urgent(&self, json: &str) {
+        if let Ok(mut q) = self.reply_queue.lock() {
+            q.insert(0, json.to_string());
+        }
+    }
 }
 
 // ── HTTP handling ──

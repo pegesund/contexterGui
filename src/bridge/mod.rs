@@ -77,6 +77,12 @@ pub trait TextBridge {
     /// Clear underline from a word by searching within a paragraph.
     fn clear_underline_word(&self, _word: &str, _paragraph_id: &str) -> bool { false }
 
+    /// Push a raw JSON command to the add-in reply queue.
+    fn push_reply(&self, _json: &str) {}
+
+    /// Push a command to the FRONT of the reply queue (priority).
+    fn push_reply_urgent(&self, _json: &str) {}
+
     // ── Per-bridge error scanning behavior ──
     // Each bridge controls WHEN spelling/grammar checks run.
     // Default: always check (safe for Word COM, Accessibility).

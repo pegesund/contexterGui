@@ -113,7 +113,7 @@ impl GrammarActorHandle {
             sentences: sentences.to_vec(),
             reply: reply_tx,
         }));
-        match reply_rx.recv_timeout(std::time::Duration::from_millis(5000)) {
+        match reply_rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok(resp) => resp.results,
             Err(_) => sentences.iter().map(|_| Vec::new()).collect(),
         }

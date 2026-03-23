@@ -1,6 +1,7 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// macOS platform services.
@@ -14,6 +15,8 @@ pub struct MacPlatform {
     /// Cached selected text from last external app — read while that app is still in focus
     cached_selected_text: Arc<Mutex<Option<String>>>,
     screen: (f32, f32),
+    intercept_tab: Arc<AtomicBool>,
+    tab_pressed: Arc<AtomicBool>,
 }
 
 impl MacPlatform {
@@ -21,6 +24,10 @@ impl MacPlatform {
         let cached_fg = Arc::new(Mutex::new((ForegroundApp::default(), Instant::now())));
         let last_external_fg = Arc::new(Mutex::new(ForegroundApp::default()));
         let cached_selected_text = Arc::new(Mutex::new(None));
+        let intercept_tab = Arc::new(AtomicBool::new(false));
+        let tab_pressed = Arc::new(AtomicBool::new(false));
+        { let i = Arc::clone(&intercept_tab); let p = Arc::clone(&tab_pressed);
+          std::thread::Builder::new().name("tab-tap".into()).spawn(move || start_tab_event_tap(i, p)).ok(); }
 
         // Background thread polls foreground app every 200ms
         let fg_clone = Arc::clone(&cached_fg);
@@ -55,7 +62,7 @@ impl MacPlatform {
 
         let screen = query_screen_size().unwrap_or((1920.0, 1080.0));
 
-        MacPlatform { cached_fg, last_external_fg, cached_selected_text, screen }
+        MacPlatform { cached_fg, last_external_fg, cached_selected_text, screen, intercept_tab, tab_pressed }
     }
 }
 
@@ -108,10 +115,9 @@ impl PlatformServices for MacPlatform {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    fn check_hotkey_state(&self) -> (bool, bool) {
-        // TODO: Use CGEventSourceKeyState via core-graphics crate
-        (false, false)
-    }
+    fn check_hotkey_state(&self) -> (bool, bool) { (false, false) }
+    fn set_tab_intercept(&self, active: bool) { self.intercept_tab.store(active, Ordering::Relaxed); }
+    fn take_tab_press(&self) -> bool { self.tab_pressed.swap(false, Ordering::Relaxed) }
 
     fn copy_to_clipboard(&self, text: &str) {
         let _ = Command::new("pbcopy")
@@ -714,4 +720,35 @@ fn query_screen_size() -> Option<(f32, f32)> {
         }
     }
     None
+}
+
+fn start_tab_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
+    unsafe {
+        unsafe extern "C" {
+            fn CGEventTapCreate(t:u32,p:u32,o:u32,m:u64,cb:extern "C" fn(*const std::ffi::c_void,u32,*const std::ffi::c_void,*mut std::ffi::c_void)->*const std::ffi::c_void,i:*mut std::ffi::c_void)->*const std::ffi::c_void;
+            fn CFMachPortCreateRunLoopSource(a:*const std::ffi::c_void,p:*const std::ffi::c_void,o:i64)->*const std::ffi::c_void;
+            fn CFRunLoopGetCurrent()->*const std::ffi::c_void;
+            fn CFRunLoopAddSource(r:*const std::ffi::c_void,s:*const std::ffi::c_void,m:*const std::ffi::c_void);
+            fn CFRunLoopRun();
+            fn CGEventGetIntegerValueField(e:*const std::ffi::c_void,f:u32)->i64;
+            static kCFRunLoopCommonModes: *const std::ffi::c_void;
+        }
+        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>}
+        let ctx=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed})) as *mut std::ffi::c_void;
+        extern "C" fn cb(_:*const std::ffi::c_void,et:u32,ev:*const std::ffi::c_void,ui:*mut std::ffi::c_void)->*const std::ffi::c_void{
+            unsafe{
+                let c=&*(ui as*const Ctx);
+                if et!=10{return ev;}
+                if !c.i.load(Ordering::Relaxed){return ev;}
+                if CGEventGetIntegerValueField(ev,9)!=48{return ev;}
+                c.p.store(true,Ordering::Relaxed);
+                std::ptr::null()
+            }
+        }
+        let tap=CGEventTapCreate(0,0,0,1<<10,cb,ctx);
+        if tap.is_null(){return;}
+        let src=CFMachPortCreateRunLoopSource(std::ptr::null(),tap,0);
+        CFRunLoopAddSource(CFRunLoopGetCurrent(),src,kCFRunLoopCommonModes);
+        CFRunLoopRun();
+    }
 }
