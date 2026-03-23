@@ -1956,6 +1956,16 @@ impl ContextApp {
 
         // Process only 1 upgrade per frame to keep GUI responsive
         if let Some((idx, word, sentence_ctx)) = to_upgrade.into_iter().next() {
+            // For long words with an existing suggestion that's close (edit distance ≤ 2),
+            // keep it — BERT can't score multi-token compound words properly
+            let original = &self.writing_errors[idx].suggestion;
+            if word.len() >= 10 && !original.is_empty() && original.len() >= 8 {
+                let dist = levenshtein_distance(&word.to_lowercase(), &original.to_lowercase());
+                if dist <= 2 {
+                    self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
+                    return;
+                }
+            }
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
                 if !best.is_empty() {
