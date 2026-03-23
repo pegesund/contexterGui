@@ -685,6 +685,7 @@ struct ContextApp {
     last_context_change: Instant,
     /// The cache key we last dispatched (avoid re-dispatching same)
     dispatched_key: String,
+    last_dispatched_sentence: String,
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
@@ -1176,6 +1177,7 @@ impl ContextApp {
             completion_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_context_change: Instant::now(),
             dispatched_key: String::new(),
+            last_dispatched_sentence: String::new(),
             prefix_index: None,
             baselines: None,
             wordfreq: None,
@@ -1700,8 +1702,9 @@ impl ContextApp {
         // Process the one completion result
         if let Some((cache_key, left, right)) = last_completion {
             {
-                    log!("BERT completion received: {} left, {} right: [{}]", left.len(), right.len(),
-                        left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                    log!("BERT completion received: {} left [{}] | {} right [{}]",
+                        left.len(), left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
+                        right.len(), right.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                     // Completions arrive already dictionary + grammar filtered from worker thread
                     {
                         self.completions = left.into_iter().take(5).collect();
@@ -3134,6 +3137,7 @@ impl ContextApp {
                         }
                         // New embeddings available — force re-completion so topic boost applies
                         self.last_completed_prefix.clear();
+                        self.last_dispatched_sentence.clear();
                         self.cached_forward = None;
                         self.cached_right_column = None;
                         self.cached_mtag_supplement = None;
@@ -4146,6 +4150,7 @@ impl eframe::App for ContextApp {
                 self.completions.clear();
                 self.open_completions.clear();
                 self.last_completed_prefix.clear();
+                self.last_dispatched_sentence.clear();
                 // Check spelling + grammar on the last word/sentence
                 let sentence = self.context.sentence.clone();
                 let cursor_off = self.context.cursor_doc_offset.unwrap_or(0);
@@ -4183,7 +4188,10 @@ impl eframe::App for ContextApp {
                 let prefix = extract_prefix(&self.context.word);
                 let prefix_lower = prefix.to_lowercase();
                 let cache_key = format!("{}|{}", masked, prefix);
-                let needs_completion = cache_key != self.last_completed_prefix;
+                // Dedup: use sentence (masked text) as the stable key — prefix bounces don't re-trigger
+                let sentence_key = masked.clone();
+                let needs_completion = cache_key != self.last_completed_prefix
+                    && sentence_key != self.last_dispatched_sentence;
 
                 if needs_completion && cache_key != self.dispatched_key {
                     // Context or prefix changed — reset debounce timer, cancel in-flight
@@ -4196,7 +4204,7 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // Dispatch after 300ms idle
+                // Dispatch after 300ms idle — ONE dispatch per sentence
                 if needs_completion
                     && self.last_context_change.elapsed() >= Duration::from_millis(300)
                 {
@@ -4284,6 +4292,7 @@ impl eframe::App for ContextApp {
                         });
                         // Mark as dispatched so we don't re-send
                         self.last_completed_prefix = cache_key.clone();
+                        self.last_dispatched_sentence = sentence_key.clone();
                     }
                 } else if needs_completion {
                 }

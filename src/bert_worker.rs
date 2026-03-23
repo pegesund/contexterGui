@@ -265,53 +265,71 @@ fn worker_loop(
                 let prefix_ref: Option<&dyn Fn(&str, usize) -> Vec<String>> = prefix_fn.as_ref().map(|b| b.as_ref());
 
                 let t_cw = std::time::Instant::now();
-                match complete_word(
-                    &mut model,
-                    &context,
-                    &prefix,
-                    pi,
-                    baselines.as_deref(),
-                    wordfreq_shared.as_deref(),
-                    fallback_ref,
-                    prefix_ref,
-                    embedding_store.as_deref(),
-                    1.0,   // pmi_weight
-                    10.0,  // topic_boost
-                    top_n,
-                    max_steps,
-                ) {
-                    Ok(left) => {
-                        {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                .open(std::env::temp_dir().join("acatts-bert.log")) {
-                                let _ = writeln!(f, "complete_word(prefix='{}', top_n={}, max_steps={}) → {} results in {:?}",
-                                    prefix, top_n, max_steps, left.len(), t_cw.elapsed());
-                            }
+
+                // When prefix is empty, only do ONE call (right column / open predictions).
+                // No point running left+right both with prefix=''.
+                let (left_raw, right_raw) = if prefix.is_empty() {
+                    let right = match complete_word(
+                        &mut model, &context, "", pi,
+                        baselines.as_deref(), wordfreq_shared.as_deref(),
+                        fallback_ref, prefix_ref, embedding_store.as_deref(),
+                        1.0, 10.0, 15, 0,
+                    ) {
+                        Ok(r) => r,
+                        Err(_) => vec![],
+                    };
+                    {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                            .open(std::env::temp_dir().join("acatts-bert.log")) {
+                            let _ = writeln!(f, "complete_word(prefix='', right-only) → {} results in {:?}",
+                                right.len(), t_cw.elapsed());
                         }
-                        let t_right = std::time::Instant::now();
-                        // Right completions: complete_word with empty prefix (open predictions)
-                        let right = match complete_word(
-                            &mut model, &context, "", pi,
-                            baselines.as_deref(), wordfreq_shared.as_deref(),
-                            fallback_ref, prefix_ref, embedding_store.as_deref(),
-                            1.0, 10.0, 15, 0,
-                        ) {
-                            Ok(r) => {
-                                // Exclude words already in left column
-                                let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
-                                r.into_iter().filter(|c| !left_words.contains(&c.word.to_lowercase())).collect()
-                            }
-                            Err(_) => vec![],
-                        };
-                        {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                .open(std::env::temp_dir().join("acatts-bert.log")) {
-                                let _ = writeln!(f, "complete_word(prefix='', right) → {} results in {:?}",
-                                    right.len(), t_right.elapsed());
-                            }
+                    }
+                    (vec![], right)
+                } else {
+                    let left = match complete_word(
+                        &mut model, &context, &prefix, pi,
+                        baselines.as_deref(), wordfreq_shared.as_deref(),
+                        fallback_ref, prefix_ref, embedding_store.as_deref(),
+                        1.0, 10.0, top_n, max_steps,
+                    ) {
+                        Ok(l) => l,
+                        Err(_) => vec![],
+                    };
+                    {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                            .open(std::env::temp_dir().join("acatts-bert.log")) {
+                            let _ = writeln!(f, "complete_word(prefix='{}', top_n={}, max_steps={}) → {} results in {:?}",
+                                prefix, top_n, max_steps, left.len(), t_cw.elapsed());
                         }
+                    }
+                    let right = match complete_word(
+                        &mut model, &context, "", pi,
+                        baselines.as_deref(), wordfreq_shared.as_deref(),
+                        fallback_ref, prefix_ref, embedding_store.as_deref(),
+                        1.0, 10.0, 15, 0,
+                    ) {
+                        Ok(r) => {
+                            let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
+                            r.into_iter().filter(|c| !left_words.contains(&c.word.to_lowercase())).collect()
+                        }
+                        Err(_) => vec![],
+                    };
+                    {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                            .open(std::env::temp_dir().join("acatts-bert.log")) {
+                            let _ = writeln!(f, "complete_word(prefix='', right) → {} results in {:?}",
+                                right.len(), t_cw.elapsed());
+                        }
+                    }
+                    (left, right)
+                };
+
+                match Ok::<_, anyhow::Error>((left_raw, right_raw)) {
+                    Ok((left, right)) => {
                         // Dictionary filter
                         let (left_dict, right_dict) = if let Some(ref a) = analyzer {
                             let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).collect();
@@ -321,18 +339,36 @@ fn worker_loop(
                             (left, right)
                         };
 
-                        // Grammar filter via grammar_filter() from nostos-cognio
+                        // Grammar filter: batch ALL candidates in ONE call to grammar actor
                         let (left_filtered, right_filtered) = if let Some(ref gs) = grammar_sender {
-                            use nostos_cognio::complete::{grammar_filter, GrammarCheckResult};
-                            let mut check_fn = |s: &str| {
-                                let errs = crate::grammar_actor::grammar_batch_via_sender(gs, &[s.to_string()]);
-                                let ok = errs.first().map_or(true, |e| e.is_empty());
-                                let suggestions = errs.into_iter().next().unwrap_or_default()
-                                    .into_iter().filter_map(|e| if e.suggestion.is_empty() { None } else { Some(e.suggestion) }).collect();
-                                GrammarCheckResult { ok, suggestions }
+                            let filter_batch = |candidates: Vec<Completion>, ctx: &str, label: &str| -> Vec<Completion> {
+                                if candidates.is_empty() { return candidates; }
+                                let last_start = ctx.rfind(|c: char| ".!?".contains(c))
+                                    .map(|i| i + 1).unwrap_or(0);
+                                let fragment = ctx[last_start..].trim();
+                                let sentences: Vec<String> = candidates.iter()
+                                    .map(|c| format!("{} {}.", fragment, c.word))
+                                    .collect();
+                                let t_gram = std::time::Instant::now();
+                                let results = crate::grammar_actor::grammar_batch_via_sender(gs, &sentences);
+                                {
+                                    use std::io::Write;
+                                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                                        .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                        let _ = writeln!(f, "grammar_batch({}, {} sentences) → {:?} in {:?}",
+                                            label, sentences.len(),
+                                            results.iter().map(|r| r.len()).collect::<Vec<_>>(),
+                                            t_gram.elapsed());
+                                    }
+                                }
+                                candidates.into_iter().zip(results.iter())
+                                    .filter(|(_, errs)| errs.is_empty())
+                                    .map(|(c, _)| c)
+                                    .take(5)
+                                    .collect()
                             };
-                            let lf = grammar_filter(&left_dict, &context, &prefix, &mut check_fn, 5);
-                            let rf = grammar_filter(&right_dict, &context, "", &mut check_fn, 5);
+                            let lf = filter_batch(left_dict, &context, "left");
+                            let rf = filter_batch(right_dict, &context, "right");
                             (lf, rf)
                         } else {
                             (left_dict.into_iter().take(5).collect(), right_dict.into_iter().take(5).collect())
