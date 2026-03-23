@@ -2202,9 +2202,13 @@ impl ContextApp {
                     continue;
                 }
 
-                // Dictionary check: every word in the candidate must exist
+                // Dictionary check: every word must exist in standard or user dict
+                let ud = &self.user_dict;
                 let words: Vec<&str> = candidate.split_whitespace().collect();
-                if words.iter().any(|w| !analyzer.has_word(w)) {
+                if words.iter().any(|w| {
+                    !analyzer.has_word(w)
+                    && !ud.as_ref().map_or(false, |u| u.has_word(w))
+                }) {
                     continue;
                 }
 
