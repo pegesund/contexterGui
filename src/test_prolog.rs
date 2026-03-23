@@ -51,6 +51,8 @@ fn main() {
         "Han spiller fotbollx godt.",
         "Fotball er et morsomt spill.",
         "Han spiller fotball hver dag.",
+        "Fotball er en morsomt sport.",
+        "Fotball er en morsom spill.",
     ];
     for s in &test_sents {
         let result = checker.check_sentence_full(s);

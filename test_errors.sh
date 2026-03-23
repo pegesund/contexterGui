@@ -230,6 +230,16 @@ undo_all 40
 
 # ============================================================
 echo ""
+echo "Test 5b: Grammar error — adj gender mismatch (morsomt with masculine)"
+go_to_end; key_press return
+type_text "Fotball er en morsomt sport."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_grammar "adj gender mismatch" "morsomt" "$ERRORS"
+undo_all 40
+
+# ============================================================
+echo ""
 echo "Test 6: Delete sentence — stale error gone"
 go_to_end; key_press return
 type_text "Dette er en feilx i teksten."
@@ -361,6 +371,26 @@ ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spille not flagged" "spille" "$ERRORS"
 check_no_error "fotball not flagged" "fotball" "$ERRORS"
 undo_all 40
+
+# ============================================================
+echo ""
+echo "Test 13: Duplicate sentences both detected"
+go_to_end; key_press return
+type_text "Han liker fotbollx veldig godt."
+key_press return
+type_text "Han liker fotbollx veldig godt."
+sleep 8
+ERRORS=$(curl -sk "$ENDPOINT")
+# Count how many fotbollx errors
+FOTBOLLX_COUNT=$(echo "$ERRORS" | python3 -c "import json,sys; print(len([e for e in json.load(sys.stdin) if e['word']=='fotbollx']))" 2>/dev/null)
+if [ "$FOTBOLLX_COUNT" = "2" ]; then
+    echo "  PASS: both duplicate fotbollx detected ($FOTBOLLX_COUNT)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: expected 2 fotbollx errors, got $FOTBOLLX_COUNT"
+    FAIL=$((FAIL + 1))
+fi
+undo_all 50
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

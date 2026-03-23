@@ -34,6 +34,51 @@ fn levenshtein_distance(a: &str, b: &str) -> u32 {
     dp[m][n]
 }
 
+/// Fix adjective agreement after article gender change.
+/// Norwegian: "en morsom" (masc) ↔ "et morsomt" (neuter)
+/// When "et" precedes an adjective without -t suffix, add -t.
+/// When "en/ei" precedes an adjective with -t suffix, remove -t.
+fn fix_adjective_agreement(sentence: &str) -> String {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    let mut result: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if i + 1 < words.len() {
+            let article = words[i].to_lowercase();
+            let next = words[i + 1];
+            let next_lower = next.to_lowercase();
+            let next_clean = next_lower.trim_matches(|c: char| c.is_ascii_punctuation());
+            if article == "et" && !next_clean.ends_with('t') && next_clean.len() >= 3 {
+                // Neuter article but adjective missing -t: add -t
+                // Check it's likely an adjective (not a noun)
+                // Simple heuristic: if the word after this one exists, treat current as adjective
+                if i + 2 < words.len() {
+                    let fixed = format!("{}t", next_clean);
+                    // Preserve trailing punctuation
+                    let trailing: String = next.chars().rev().take_while(|c| c.is_ascii_punctuation()).collect::<String>().chars().rev().collect();
+                    result.push(words[i].to_string());
+                    result.push(format!("{}{}", fixed, trailing));
+                    i += 2;
+                    continue;
+                }
+            } else if (article == "en" || article == "ei") && next_clean.ends_with('t') && next_clean.len() >= 4 {
+                // Masculine/feminine article but adjective has neuter -t: remove -t
+                if i + 2 < words.len() {
+                    let fixed = &next_clean[..next_clean.len() - 1];
+                    let trailing: String = next.chars().rev().take_while(|c| c.is_ascii_punctuation()).collect::<String>().chars().rev().collect();
+                    result.push(words[i].to_string());
+                    result.push(format!("{}{}", fixed, trailing));
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        result.push(words[i].to_string());
+        i += 1;
+    }
+    result.join(" ")
+}
+
 fn trunc(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }
     let mut end = max;
@@ -2695,7 +2740,8 @@ impl ContextApp {
 
                 // Split paragraph into sentences
                 let sentences = split_sentences(&p.text);
-                let new_hashes: Vec<u64> = sentences.iter().map(|s| hash_str(s)).collect();
+                let new_hashes: Vec<u64> = sentences.iter()
+                    .map(|s| hash_str(&format!("{}|{}", p.paragraph_id, s))).collect();
 
                 // Remove old sentence hashes for this paragraph from clean set
                 // and clear errors for sentences that no longer exist
@@ -2732,7 +2778,9 @@ impl ContextApp {
 
                 // Check each sentence: skip if already processed (hash unchanged)
                 for sentence_text in &sentences {
-                    let sent_h = hash_str(sentence_text);
+                    // Include paragraph_id in hash so identical sentences in
+                    // different paragraphs are processed independently
+                    let sent_h = hash_str(&format!("{}|{}", p.paragraph_id, sentence_text));
                     if self.processed_sentence_hashes.contains(&sent_h) {
                         continue; // Already processed, skip
                     }
@@ -2831,7 +2879,11 @@ impl ContextApp {
         };
 
         while let Some(resp) = actor.try_recv() {
-            let sent_h = hash_str(&resp.sentence);
+            let sent_h = if resp.paragraph_id.is_empty() {
+                hash_str(&resp.sentence)
+            } else {
+                hash_str(&format!("{}|{}", resp.paragraph_id, resp.sentence))
+            };
 
             // Guard: if this response is for a paragraph whose sentence has already changed,
             // discard it — inserting a stale hash would prevent re-detection when the same
@@ -2862,7 +2914,11 @@ impl ContextApp {
                 if !errors_with_suggestions.is_empty() {
                     for (i, ge) in errors_with_suggestions.iter().enumerate() {
                         let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
-                        let corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
+                        let mut corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
+                        // When article gender changes (en↔et), also fix adjective agreement
+                        if ge.rule_name.contains("kjoenn") || ge.rule_name.contains("kjønn") {
+                            corrected = fix_adjective_agreement(&corrected);
+                        }
                         if corrected.trim() == resp.sentence.trim() {
                             continue;
                         }
@@ -2899,6 +2955,10 @@ impl ContextApp {
                         ignored: false,
                         word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                     });
+                    // Blue underline for grammar errors without suggestions too
+                    for b in &self.manager.bridges {
+                        b.underline_word(&first.word, &resp.paragraph_id, "#0000FF");
+                    }
                 }
             }
 
