@@ -56,6 +56,9 @@ fn main() {
         "Jeg er spiller fotball.",
         "Jeg spiller fotball.",
         "Han er en spiller.",
+        "direktørrx for IKT og digitale tjenester.",
+        "Håndtering og anonymisering av data for å trene modellerff.",
+        "Vi trener modellerff her.",
     ];
     for s in &test_sents {
         let result = checker.check_sentence_full(s);
@@ -160,7 +163,7 @@ fn main() {
 
     // Check token readings for key words
     println!("=== Token analysis ===");
-    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom", "spiller"] {
+    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom", "spiller", "modellerff", "ff"] {
         let token = checker.analyze_word(word);
         println!("'{}': {} readings", word, token.readings.len());
         for r in &token.readings {
