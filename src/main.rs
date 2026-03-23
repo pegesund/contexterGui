@@ -3562,13 +3562,14 @@ impl eframe::App for ContextApp {
                         let repl = if self.selected_column == 0 { c.word.clone() }
                             else if prefix.is_empty() { c.word.clone() }
                             else { format!("{} {}", prefix, c.word) };
-                        log!("=== CLICK SELECT: '{}' for '{}' ===", repl, prefix);
-                        let json = format!(
-                            r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
-                            prefix.replace('"', "\\\""), repl.replace('"', "\\\"")
-                        );
+                        log!("TAB SELECT: '{}' for '{}'", repl, prefix);
+                        let json = if prefix.is_empty() {
+                            format!(r#"{{"action":"replaceWord","text":"{} "}}"#, repl.replace('"', "\\\""))
+                        } else {
+                            format!(r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
+                                prefix.replace('"', "\\\""), repl.replace('"', "\\\""))
+                        };
                         for b in &self.manager.bridges { b.push_reply_urgent(&json); }
-                        log!("=== CLICK PUSHED TO QUEUE ===");
                         self.selection_mode = false;
                         self.platform.set_tab_intercept(false);
                         self.selected_completion = None;
@@ -4880,10 +4881,15 @@ impl eframe::App for ContextApp {
                     if let Some(word) = clicked_word {
                         let prefix = self.context.word.clone();
                         log!("CLICKED word: '{}' replacing '{}'", word, prefix);
-                        let json = format!(
-                            r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
-                            prefix.replace('"', "\\\""), word.replace('"', "\\\"")
-                        );
+                        let json = if prefix.is_empty() {
+                            // No prefix — just insert at cursor (right column / next word)
+                            format!(r#"{{"action":"replaceWord","text":"{} "}}"#, word.replace('"', "\\\""))
+                        } else {
+                            format!(
+                                r#"{{"action":"replaceAtCursor","expected":"{}","text":"{}"}}"#,
+                                prefix.replace('"', "\\\""), word.replace('"', "\\\"")
+                            )
+                        };
                         for b in &self.manager.bridges { b.push_reply_urgent(&json); }
                         self.completions.clear();
                         self.open_completions.clear();

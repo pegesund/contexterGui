@@ -506,25 +506,22 @@ function doClearAllUnderlines() {
 }
 
 function doReplaceAtCursor(prefix, replacement) {
-    setStatus("INSERT: " + prefix + " → " + replacement, "ok");
-    var prefixLen = prefix.length;
     var paraId = lastCursorParaId;
-    var cursorPos = lastCursorInPara;
-    if (!paraId || cursorPos < prefixLen) { setStatus("INSERT FAIL: no paraId or cursorPos", "err"); return; }
+    if (!paraId || !prefix) return;
 
     Word.run(function (ctx) {
         var para = ctx.document.getParagraphByUniqueLocalId(paraId);
-        para.load("text");
+        var results = para.search(prefix, { matchCase: false });
+        results.load("items");
         return ctx.sync().then(function () {
-            var text = para.text;
-            var before = text.substring(0, cursorPos - prefixLen);
-            var after = text.substring(cursorPos);
-            para.insertText(before + replacement + " " + after, "Replace");
-            return ctx.sync().then(function () {
-                setStatus("INSERT DONE", "ok");
-            });
+            if (results.items.length > 0) {
+                var item = results.items[results.items.length - 1];
+                var inserted = item.insertText(replacement + " ", "Replace");
+                inserted.getRange("End").select();
+                return ctx.sync();
+            }
         });
-    }).catch(function (e) { setStatus("INSERT ERROR: " + e, "err"); });
+    }).catch(function (e) { console.log("replaceAtCursor error:", e); });
 }
 
 function doReplaceCurrentWord(replacement) {

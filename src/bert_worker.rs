@@ -312,34 +312,11 @@ fn worker_loop(
                                     right.len(), t_right.elapsed());
                             }
                         }
-                        // Dictionary + grammar filter on worker thread (non-blocking for main thread)
+                        // Dictionary filter only — no blocking grammar batch
                         let (left_filtered, right_filtered) = if let Some(ref a) = analyzer {
-                            let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(15).collect();
-                            let rf: Vec<Completion> = right.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(15).collect();
-
-                            if let Some(ref gs) = grammar_sender {
-                                if cancel.load(Ordering::Acquire) {
-                                    // Cancelled — skip grammar, return dict-only
-                                    (lf.into_iter().take(5).collect(), rf.into_iter().take(5).collect())
-                                } else {
-                                let ctx_for_grammar = sentence.strip_suffix(&prefix).unwrap_or(&sentence).trim_end();
-                                let last_fragment = {
-                                    let start = ctx_for_grammar.rfind(|c: char| ".!?".contains(c)).map(|i| i + 1).unwrap_or(0);
-                                    ctx_for_grammar[start..].trim()
-                                };
-                                let all: Vec<&Completion> = lf.iter().chain(rf.iter()).collect();
-                                let test_sents: Vec<String> = all.iter().map(|c| format!("{} {}.", last_fragment, c.word)).collect();
-                                let batch = crate::grammar_actor::grammar_batch_via_sender(gs, &test_sents);
-                                let mut ok: HashSet<String> = HashSet::new();
-                                for (i, c) in all.iter().enumerate() {
-                                    if batch[i].is_empty() { ok.insert(c.word.to_lowercase()); }
-                                }
-                                (lf.into_iter().filter(|c| ok.contains(&c.word.to_lowercase())).take(5).collect(),
-                                 rf.into_iter().filter(|c| ok.contains(&c.word.to_lowercase())).take(5).collect())
-                                }
-                            } else {
-                                (lf.into_iter().take(5).collect(), rf.into_iter().take(5).collect())
-                            }
+                            let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(5).collect();
+                            let rf: Vec<Completion> = right.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).take(5).collect();
+                            (lf, rf)
                         } else {
                             (left.into_iter().take(5).collect(), right.into_iter().take(5).collect())
                         };
