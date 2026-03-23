@@ -1444,6 +1444,10 @@ impl ContextApp {
             };
 
             found = analyzer.has_word(&clean);
+            // Check abbreviation: "osv" without period → try "osv."
+            if !found && analyzer.has_word(&format!("{}.", clean)) {
+                found = true;
+            }
             if !found {
                 // Check if it's a valid compound word (e.g. maskinlæringsalgoritmene)
                 // Try splitting at every position and check if both parts are known

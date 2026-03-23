@@ -166,7 +166,7 @@ fn main() {
 
     // Check token readings for key words
     println!("=== Token analysis ===");
-    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom", "spiller", "modellerff", "ff"] {
+    for word in &["morsson", "dettex", "Dettex", "somx", "spor", "sport", "bord", "lag", "hus", "morsom", "spiller", "modellerff", "ff", "osv", "osv.", "f.eks", "f.eks.", "bl.a", "bl.a.", "dvs", "dvs.", "mfl", "mfl."] {
         let token = checker.analyze_word(word);
         println!("'{}': {} readings", word, token.readings.len());
         for r in &token.readings {
