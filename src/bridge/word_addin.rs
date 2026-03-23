@@ -672,6 +672,22 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
                 Some('r') => result.push('\r'),
                 Some('"') => result.push('"'),
                 Some('\\') => result.push('\\'),
+                Some('/') => result.push('/'),
+                Some('u') => {
+                    // Decode \uXXXX Unicode escape
+                    let mut hex = String::with_capacity(4);
+                    for _ in 0..4 {
+                        match chars.next() {
+                            Some(h) => hex.push(h),
+                            None => break,
+                        }
+                    }
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(code) {
+                            result.push(c);
+                        }
+                    }
+                }
                 Some(c) => {
                     result.push('\\');
                     result.push(c);

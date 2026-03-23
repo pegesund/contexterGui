@@ -2752,12 +2752,10 @@ impl ContextApp {
 
                 log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
 
-                // Strip control characters and their escaped forms (\u000b etc.)
-                let clean_text = p.text
-                    .replace("\\u000b", " ")
-                    .replace("\\u000B", " ")
-                    .replace("\x0b", " ")
-                    .replace("\x0c", " ");
+                // Strip control characters (vertical tab etc.) — now properly decoded by JSON parser
+                let clean_text: String = p.text.chars()
+                    .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
+                    .collect();
 
                 // Extract email parts to skip in spelling checks
                 let email_skip_words: std::collections::HashSet<String> = if clean_text.contains('@') {
