@@ -2845,10 +2845,15 @@ impl ContextApp {
                 }
                 // Clear errors for sentences that are no longer in the paragraph
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
+                let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
-                // Clear ALL underlines for changed paragraph, then re-underline remaining errors
-                let has_errors_in_para = self.writing_errors.iter().any(|e| e.paragraph_id == p.paragraph_id);
-                if has_errors_in_para {
+                // Only clear paragraph underlines when an error's WORD is gone from the paragraph
+                // (not on every keystroke — that causes flickering)
+                let has_stale = self.writing_errors.iter().any(|e| {
+                    e.paragraph_id == p.paragraph_id && e.underlined
+                        && !para_text_lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == e.word.to_lowercase())
+                });
+                if has_stale {
                     self.manager.clear_paragraph_underlines(&p.paragraph_id);
                     for e in &mut self.writing_errors {
                         if e.paragraph_id == p.paragraph_id {
@@ -2856,7 +2861,6 @@ impl ContextApp {
                         }
                     }
                 }
-                let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     // Exact sentence match — keep
