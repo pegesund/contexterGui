@@ -126,38 +126,13 @@ go_to_end() { key_press cmd_end; sleep 0.3; key_press return; sleep 0.2; }
 
 # Undo N times to restore document state
 PUSH_URL="https://127.0.0.1:3000/push-reply"
-DOC_MARKER="25.11.2022"
+DOC_MARKER="leveransen"
 SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 
 undo_all() {
-    # Delete text after marker
+    # Delete test text after the document marker (safe — only removes appended text)
     curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
-    sleep 1
-    # Also clean known test words that may have merged into existing paragraphs
-    for word in fotboll fotbollx somx feilx matx drikkx; do
-        osascript -e "
-tell application \"Microsoft Word\" to activate
-delay 0.1
-tell application \"System Events\"
-    keystroke \"h\" using {command down, option down}
-    delay 0.15
-    keystroke \"a\" using command down
-    keystroke \"$word\"
-    delay 0.1
-    keystroke tab
-    keystroke \"a\" using command down
-    key code 51
-    delay 0.1
-    keystroke \"a\" using command down
-    delay 0.15
-    keystroke return
-    delay 0.1
-    key code 53
-end tell
-" 2>/dev/null
-        sleep 0.1
-    done
-    sleep 1
+    sleep 2
     bash "$SCRIPT_DIR_ABS/reload_addin.sh"
     sleep 5
     check_alignment
@@ -168,36 +143,9 @@ echo ""
 osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
 sleep 1
 
-# Clean known test artifacts from the document via find/replace
-echo "Cleaning test artifacts..."
-for word in fotboll fotbollx somx feilx matx drikkx; do
-    osascript -e "
-tell application \"Microsoft Word\" to activate
-delay 0.1
-tell application \"System Events\"
-    keystroke \"h\" using {command down, option down}
-    delay 0.2
-    keystroke \"a\" using command down
-    keystroke \"$word\"
-    delay 0.1
-    keystroke tab
-    keystroke \"a\" using command down
-    key code 51
-    delay 0.1
-    keystroke \"a\" using command down
-    delay 0.2
-    keystroke return
-    delay 0.1
-    key code 53
-end tell
-" 2>/dev/null
-    sleep 0.2
-done
-# Also deleteAfter to clean any trailing test text
+# Clean any trailing test text (safe — only removes text after marker)
 curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
 sleep 2
-bash "$SCRIPT_DIR_ABS/reload_addin.sh"
-sleep 5
 
 # ============================================================
 echo "Test 0: Document health — errors match underlines"
