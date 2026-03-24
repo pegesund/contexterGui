@@ -136,7 +136,10 @@ SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 undo_all() {
     # Delete test text after the original doc marker
     curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
-    sleep 1
+    sleep 2
+    # Delete again to catch any remnants
+    curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
+    sleep 2
     # Reload add-in so errors resync with actual doc content
     bash "$SCRIPT_DIR_ABS/reload_addin.sh"
     sleep 5
