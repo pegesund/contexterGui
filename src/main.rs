@@ -3740,6 +3740,10 @@ impl eframe::App for ContextApp {
         if let Some(actor) = &self.grammar_actor {
         }
 
+        // Drain changed paragraphs from Word Add-in and send to grammar actor
+        // (must run BEFORE JSON build so deletions are reflected immediately)
+        self.process_addin_changed_paragraphs();
+
         // Update errors JSON for /errors endpoint
         {
             let json = format!("[{}]", self.writing_errors.iter()
@@ -3760,9 +3764,6 @@ impl eframe::App for ContextApp {
                 bridge.update_errors_json(&json);
             }
         }
-
-        // Drain changed paragraphs from Word Add-in and send to grammar actor
-        self.process_addin_changed_paragraphs();
 
         // Send pending incomplete sentence to grammar actor after 1s idle (user stopped typing)
         if let Some((ref sentence, ref para_id, timestamp)) = self.pending_incomplete_sentence.clone() {

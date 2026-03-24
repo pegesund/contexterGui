@@ -372,5 +372,66 @@ else
 fi
 undo_all 50
 
+# ============================================================
+echo ""
+echo "Test 14: Paste misspelled text — error detected"
+osascript -e 'set the clipboard to "Han liker fotbollx veldig godt."' 2>/dev/null
+sleep 0.5
+# Go to end of doc and paste
+osascript -e '
+tell application "Microsoft Word" to activate
+delay 0.3
+tell application "System Events"
+    key code 125 using command down
+    delay 0.2
+    keystroke return
+    delay 0.2
+    keystroke "v" using command down
+end tell
+' 2>/dev/null
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_error "fotbollx detected after paste" "fotbollx" "" "$ERRORS"
+undo_all 50
+
+# ============================================================
+echo ""
+echo "Test 15: Cut removes error"
+append_text "Dette er en feilzz i teksten."
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_error "feilzz detected before cut" "feilzz" "" "$ERRORS"
+# Select all text in the appended paragraph and cut
+osascript -e '
+tell application "Microsoft Word" to activate
+delay 0.3
+tell application "System Events"
+    key code 125 using command down
+    delay 0.2
+    key code 123 using {command down, shift down}
+    delay 0.2
+    keystroke "x" using command down
+end tell
+' 2>/dev/null
+sleep 8
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "feilzz gone after cut" "feilzz" "$ERRORS"
+undo_all 50
+
+# ============================================================
+echo ""
+echo "Test 16: Paste replaces selection — new error detected"
+append_text "Fotball er en morsom sport."
+sleep 3
+# Select "sport" in the appended text and replace with misspelled via paste
+osascript -e 'set the clipboard to "sporten er gøy med feilxx."' 2>/dev/null
+sleep 0.3
+# Use API replace instead of cursor — more reliable
+curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Fotball er en morsom sport.","text":"Fotball er en morsom sporten er gøy med feilxx."}' 2>/dev/null
+sleep 5
+ERRORS=$(curl -sk "$ENDPOINT")
+check_error "feilxx detected after paste-replace" "feilxx" "" "$ERRORS"
+undo_all 50
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
