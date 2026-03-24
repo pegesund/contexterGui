@@ -2865,12 +2865,6 @@ impl ContextApp {
 
                     // This sentence is new or changed — clear old errors and underlines
                     let sentence_lower = sentence_text.to_lowercase();
-                    let cleared_count = self.writing_errors.iter().filter(|e| {
-                        e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower
-                    }).count();
-                    if cleared_count > 0 {
-                        log!("  Clearing {} errors for changed sentence: '{}'", cleared_count, trunc(&sentence_lower, 50));
-                    }
                     for e in &self.writing_errors {
                         if e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower && e.underlined {
                             self.manager.clear_underline_word(&e.word, &e.paragraph_id);
@@ -3095,7 +3089,6 @@ impl ContextApp {
                     && !e.ignored
                 });
                 if !already_exists {
-                    log!("  ADDING spelling error: '{}' para='{}' sentence='{}'", unk.word, trunc(&resp.paragraph_id, 10), trunc(&resp.sentence, 40));
                     self.writing_errors.push(WritingError {
                         category: ErrorCategory::Spelling,
                         word: unk.word.clone(),
@@ -3111,8 +3104,6 @@ impl ContextApp {
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
                     }
-                } else {
-                    log!("  SKIPPED spelling error (already exists): '{}' para='{}'", unk.word, trunc(&resp.paragraph_id, 10));
                 }
             }
 

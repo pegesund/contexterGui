@@ -477,7 +477,11 @@ function doDeleteAfter(marker) {
                 var endRange = body.getRange("End");
                 var toDelete = rangeAfter.expandTo(endRange);
                 toDelete.delete();
-                return ctx.sync();
+                return ctx.sync().then(function () {
+                    // Add empty paragraph at end for clean test separation
+                    body.insertParagraph("", "End");
+                    return ctx.sync();
+                });
             }
         });
     }).catch(function (e) { console.log("deleteAfter error:", e); });

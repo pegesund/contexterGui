@@ -14,16 +14,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # --- Helper functions ---
 
 check_alignment() {
-    local ec=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
-    local uc=$(osascript "$SCRIPT_DIR/scan_underlines.applescript" 2>/dev/null | head -1 | grep -o '^[0-9]*')
-    uc=${uc:-0}
-    if [ "$ec" != "$uc" ]; then
-        echo "  ALIGNMENT FAIL: $ec errors != $uc underlines"
-        FAIL=$((FAIL + 1))
-        echo "=== ABORTING: underline alignment broken ==="
-        echo "=== Results: $PASS passed, $FAIL failed ==="
-        exit 1
-    fi
+    # Retry alignment check up to 3 times with 3s wait (grammar actor may still be processing)
+    for attempt in 1 2 3; do
+        local ec=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+        local uc=$(osascript "$SCRIPT_DIR/scan_underlines.applescript" 2>/dev/null | head -1 | grep -o '^[0-9]*')
+        uc=${uc:-0}
+        if [ "$ec" = "$uc" ]; then
+            return
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            sleep 3
+        fi
+    done
+    echo "  ALIGNMENT FAIL: $ec errors != $uc underlines"
+    FAIL=$((FAIL + 1))
+    echo "=== ABORTING: underline alignment broken ==="
+    echo "=== Results: $PASS passed, $FAIL failed ==="
+    exit 1
 }
 
 check_error() {
@@ -132,7 +139,7 @@ undo_all() {
     sleep 1
     # Reload add-in so errors resync with actual doc content
     bash "$SCRIPT_DIR_ABS/reload_addin.sh"
-    sleep 3
+    sleep 5
     check_alignment
 }
 
