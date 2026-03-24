@@ -126,7 +126,7 @@ repeat_key() {
     for (( i=0; i<n; i++ )); do key_press "$key"; done
 }
 
-go_to_end() { key_press cmd_end; }
+go_to_end() { key_press cmd_end; sleep 0.3; }
 
 # Undo N times to restore document state
 PUSH_URL="https://127.0.0.1:3000/push-reply"

@@ -2373,9 +2373,18 @@ impl ContextApp {
 
     /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
-        // Use cached text — never read COM here (race condition causes garbled text)
-        if self.last_doc_text.is_empty() { return; }
-        let doc_text = self.last_doc_text.to_lowercase();
+        // Build doc text from paragraph_texts (always up-to-date) or fall back to cached
+        let doc_text = if !self.paragraph_texts.is_empty() {
+            self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ").to_lowercase()
+        } else if !self.last_doc_text.is_empty() {
+            self.last_doc_text.to_lowercase()
+        } else {
+            return;
+        };
+        // Pre-build per-paragraph text lookup for precise spelling checks
+        let para_texts_lower: std::collections::HashMap<&str, String> = self.paragraph_texts.iter()
+            .map(|(k, v)| (k.as_str(), v.to_lowercase()))
+            .collect();
         // Clear underlines for errors that will be removed
         for e in &mut self.writing_errors {
             let should_remove = if e.ignored {
@@ -2922,6 +2931,10 @@ impl ContextApp {
                 }
             }
         }
+
+        // Clean stale paragraph_texts entries (paragraphs that were deleted/merged)
+        let active_para_ids: std::collections::HashSet<&String> = self.paragraph_sentence_hashes.keys().collect();
+        self.paragraph_texts.retain(|k, _| active_para_ids.contains(k));
 
         // Update last_doc_text from accumulated paragraph texts (for prune_resolved_errors)
         if !self.paragraph_texts.is_empty() {
