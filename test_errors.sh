@@ -388,17 +388,14 @@ key_press cmd_left
 repeat_key right 12
 repeat_key shift_right 7
 sleep 0.3
-type_text "fotball"
+osascript -e 'tell application "System Events" to keystroke "fotball"' 2>/dev/null
 go_to_end
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
-# Re-introduce: select "fotball" (7 chars at pos 12) and replace with "fotboll"
-key_press cmd_left
-repeat_key right 12
-repeat_key shift_right 7
-type_text "fotboll"
-go_to_end
+# Re-introduce: type the same misspelling in a new paragraph
+go_to_end; key_press return
+type_text "Han spiller fotboll hver dag."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll re-detected after reintroduce" "fotboll" "" "$ERRORS"
