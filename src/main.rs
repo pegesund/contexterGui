@@ -2770,6 +2770,8 @@ impl ContextApp {
                     self.processed_sentence_hashes.remove(h);
                 }
                 self.paragraph_sentence_hashes.clear();
+                self.paragraph_texts.clear();
+                self.last_doc_text.clear();
                 self.grammar_inflight.clear();
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
