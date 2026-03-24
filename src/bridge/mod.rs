@@ -76,6 +76,8 @@ pub trait TextBridge {
 
     /// Clear underline from a word by searching within a paragraph.
     fn clear_underline_word(&self, _word: &str, _paragraph_id: &str) -> bool { false }
+    /// Clear ALL underlines in a paragraph (used when paragraph content changes).
+    fn clear_paragraph_underlines(&self, _paragraph_id: &str) -> bool { false }
 
     /// Push a raw JSON command to the add-in reply queue.
     fn push_reply(&self, _json: &str) {}

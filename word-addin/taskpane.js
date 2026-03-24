@@ -383,6 +383,8 @@ function pollReplies() {
                 doReplaceCurrentWord(data.text);
             } else if (data.action === "underline" && data.word) {
                 doUnderline(data.word, data.paragraphId, data.color || "red");
+            } else if (data.action === "clearParagraphUnderlines" && data.paragraphId) {
+                doClearParagraphUnderlines(data.paragraphId);
             } else if (data.action === "clearUnderline" && data.word) {
                 doClearUnderline(data.word, data.paragraphId);
             } else if (data.action === "clearAllUnderlines") {
@@ -443,6 +445,18 @@ function doUnderline(word, paragraphId, color) {
                 results.items[i].font.underline = "Wave";
                 try { results.items[i].font.underlineColor = color || "#FF0000"; } catch(e) {}
             }
+            return ctx.sync();
+        });
+    }).catch(function () {});
+}
+
+function doClearParagraphUnderlines(paragraphId) {
+    if (!paragraphId) return;
+    Word.run(function (ctx) {
+        var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+        para.load("font");
+        return ctx.sync().then(function () {
+            para.font.underline = "None";
             return ctx.sync();
         });
     }).catch(function () {});

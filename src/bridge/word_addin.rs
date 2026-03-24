@@ -321,6 +321,15 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
+    fn clear_paragraph_underlines(&self, paragraph_id: &str) -> bool {
+        let json = format!(
+            r#"{{"action":"clearParagraphUnderlines","paragraphId":"{}"}}"#,
+            escape_json(paragraph_id)
+        );
+        self.push_reply(json);
+        true
+    }
+
     fn drain_changed_paragraphs(&self) -> Vec<ChangedParagraph> {
         self.drain_changed_paragraphs()
     }

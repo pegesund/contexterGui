@@ -584,6 +584,10 @@ impl BridgeManager {
         any
     }
 
+    fn clear_paragraph_underlines(&self, paragraph_id: &str) {
+        for b in &self.bridges { b.clear_paragraph_underlines(paragraph_id); }
+    }
+
     fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, doc_char_len: usize, word_at_cursor: &str) -> bool {
         self.effective_bridge().map(|b| b.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, word_at_cursor)).unwrap_or(false)
     }
@@ -2842,12 +2846,18 @@ impl ContextApp {
                 // Clear errors for sentences that are no longer in the paragraph
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let before_count = self.writing_errors.len();
-                // Clear underlines for errors being removed
-                for e in &self.writing_errors {
-                    if e.paragraph_id == p.paragraph_id && e.underlined
+                // Clear ALL underlines for this paragraph (word-search fails when word changed)
+                let has_stale = self.writing_errors.iter().any(|e| {
+                    e.paragraph_id == p.paragraph_id && e.underlined
                         && !new_sentence_set.contains(&e.sentence_context.to_lowercase())
-                    {
-                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                });
+                if has_stale {
+                    self.manager.clear_paragraph_underlines(&p.paragraph_id);
+                    // Mark all errors in this paragraph as not underlined (will be re-underlined if still valid)
+                    for e in &mut self.writing_errors {
+                        if e.paragraph_id == p.paragraph_id {
+                            e.underlined = false;
+                        }
                     }
                 }
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
