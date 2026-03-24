@@ -130,7 +130,19 @@ DOC_MARKER="25.11.2022"
 SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 
 undo_all() {
-    # Delete test text after the original doc marker
+    # Use Cmd+Z to undo test changes, then deleteAfter as backup
+    osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
+    sleep 0.3
+    local n=${1:-50}
+    osascript -e "
+tell application \"System Events\"
+    repeat $n times
+        keystroke \"z\" using command down
+        delay 0.02
+    end repeat
+end tell
+" 2>/dev/null
+    sleep 1
     curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
     sleep 2
     # Reload add-in so errors resync with actual doc content
