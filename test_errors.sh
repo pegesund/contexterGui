@@ -413,24 +413,31 @@ tell application "System Events"
     keystroke "x" using command down
 end tell
 ' 2>/dev/null
-sleep 8
+sleep 10
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "feilzz gone after cut" "feilzz" "$ERRORS"
 undo_all 50
 
 # ============================================================
 echo ""
-echo "Test 16: Paste replaces selection — new error detected"
-append_text "Fotball er en morsom sport."
-sleep 3
-# Select "sport" in the appended text and replace with misspelled via paste
-osascript -e 'set the clipboard to "sporten er gøy med feilxx."' 2>/dev/null
+echo "Test 16: Paste over appended text — new error detected"
+# Paste misspelled text directly (tests that paste triggers error detection)
+osascript -e 'set the clipboard to "Fotball er gøy med feilxx."' 2>/dev/null
 sleep 0.3
-# Use API replace instead of cursor — more reliable
-curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Fotball er en morsom sport.","text":"Fotball er en morsom sporten er gøy med feilxx."}' 2>/dev/null
+osascript -e '
+tell application "Microsoft Word" to activate
+delay 0.3
+tell application "System Events"
+    key code 125 using command down
+    delay 0.2
+    keystroke return
+    delay 0.2
+    keystroke "v" using command down
+end tell
+' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "feilxx detected after paste-replace" "feilxx" "" "$ERRORS"
+check_error "feilxx detected after paste" "feilxx" "" "$ERRORS"
 undo_all 50
 
 echo ""
