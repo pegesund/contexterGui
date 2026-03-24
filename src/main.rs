@@ -2746,11 +2746,20 @@ impl ContextApp {
         // Check for reset (new document opened)
         for bridge in &self.manager.bridges {
             if bridge.take_reset() {
-                log!("Reset: clearing errors + underlines (NOT sentence hashes)");
+                log!("Reset: clearing errors + underlines (keeping sentence hashes)");
                 self.manager.clear_all_error_underlines();
+                // Collect hashes of sentences that HAD errors — these need re-checking
+                let error_hashes: std::collections::HashSet<u64> = self.writing_errors.iter()
+                    .map(|e| hash_str(&format!("{}|{}", e.paragraph_id, e.sentence_context)))
+                    .collect();
                 self.writing_errors.clear();
-                // DO NOT clear processed_sentence_hashes or paragraph_sentence_hashes
-                // — causes full document rescan. Paragraph change flow handles incremental checks.
+                // Only remove hashes for sentences that had errors — forces re-check
+                // Sentences that were clean stay "processed" (no need to re-check)
+                for h in &error_hashes {
+                    self.processed_sentence_hashes.remove(h);
+                }
+                self.paragraph_sentence_hashes.clear();
+                self.grammar_inflight.clear();
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -2871,19 +2880,18 @@ impl ContextApp {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
-                    // Send complete sentences immediately to grammar actor.
-                    // Incomplete sentences are deferred — sent when paragraph stabilizes
-                    // (handled by the idle check below).
+                    // Send to grammar actor for spelling + grammar checking.
+                    // Complete sentences: always send (grammar + spelling).
+                    // Incomplete sentences: only send on initial scan (first_seen),
+                    // not during active typing (avoids flooding the actor).
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
-                    if is_complete {
+                    let first_seen = !self.paragraph_sentence_hashes.contains_key(&p.paragraph_id);
+                    if is_complete || first_seen {
                         let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                         uw.extend(email_skip_words.iter().cloned());
                         actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
                         self.grammar_inflight.insert(sent_h);
-                    } else {
-                        // Track this incomplete sentence for deferred sending
-                        self.pending_incomplete_sentence = Some((sentence_text.to_string(), p.paragraph_id.clone(), Instant::now()));
                     }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
@@ -3087,6 +3095,7 @@ impl ContextApp {
                     && !e.ignored
                 });
                 if !already_exists {
+                    log!("  ADDING spelling error: '{}' para='{}' sentence='{}'", unk.word, trunc(&resp.paragraph_id, 10), trunc(&resp.sentence, 40));
                     self.writing_errors.push(WritingError {
                         category: ErrorCategory::Spelling,
                         word: unk.word.clone(),
@@ -3102,6 +3111,8 @@ impl ContextApp {
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
                     }
+                } else {
+                    log!("  SKIPPED spelling error (already exists): '{}' para='{}'", unk.word, trunc(&resp.paragraph_id, 10));
                 }
             }
 
