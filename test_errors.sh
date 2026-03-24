@@ -253,16 +253,16 @@ check_no_error "feilx gone after undo" "feilx" "$ERRORS"
 
 # ============================================================
 echo ""
-echo "Test 7: Edit middle of word with arrows"
-append_text "Han liker fotboll veldig godt."
+echo "Test 7: Fix misspelled word via replace"
+append_text "Han liker fotbollzz veldig godt."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "fotboll detected" "fotboll" "" "$ERRORS"
-# Fix via Word API replace (more reliable than cursor navigation after append_text)
-curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotboll","text":"fotball"}' 2>/dev/null
+check_error "fotbollzz detected" "fotbollzz" "" "$ERRORS"
+# Fix via Word API replace
+curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbollzz","text":"fotball"}' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
+check_no_error "fotbollzz gone after fix" "fotbollzz" "$ERRORS"
 undo_all 50
 
 # ============================================================
@@ -375,23 +375,23 @@ undo_all 50
 # ============================================================
 echo ""
 echo "Test 14: Paste misspelled text — error detected"
-osascript -e 'set the clipboard to "Han liker fotbollx veldig godt."' 2>/dev/null
+osascript -e 'set the clipboard to "Han liker pasteerrorx veldig godt."' 2>/dev/null
 sleep 0.5
-# Go to end of doc and paste
+# Create safe empty paragraph at end via API, then paste there
+curl -sk -X POST "$PUSH_URL" -d '{"action":"appendParagraph","text":""}' 2>/dev/null
+sleep 1
 osascript -e '
 tell application "Microsoft Word" to activate
 delay 0.3
 tell application "System Events"
     key code 125 using command down
     delay 0.2
-    keystroke return
-    delay 0.2
     keystroke "v" using command down
 end tell
 ' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "fotbollx detected after paste" "fotbollx" "" "$ERRORS"
+check_error "pasteerrorx detected after paste" "pasteerrorx" "" "$ERRORS"
 undo_all 50
 
 # ============================================================
@@ -420,24 +420,23 @@ undo_all 50
 
 # ============================================================
 echo ""
-echo "Test 16: Paste over appended text — new error detected"
-# Paste misspelled text directly (tests that paste triggers error detection)
-osascript -e 'set the clipboard to "Fotball er gøy med feilxx."' 2>/dev/null
+echo "Test 16: Paste different misspelled text — error detected"
+osascript -e 'set the clipboard to "Fotball er gøy med pastezz."' 2>/dev/null
 sleep 0.3
+curl -sk -X POST "$PUSH_URL" -d '{"action":"appendParagraph","text":""}' 2>/dev/null
+sleep 1
 osascript -e '
 tell application "Microsoft Word" to activate
 delay 0.3
 tell application "System Events"
     key code 125 using command down
     delay 0.2
-    keystroke return
-    delay 0.2
     keystroke "v" using command down
 end tell
 ' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "feilxx detected after paste" "feilxx" "" "$ERRORS"
+check_error "pastezz detected after paste" "pastezz" "" "$ERRORS"
 undo_all 50
 
 echo ""

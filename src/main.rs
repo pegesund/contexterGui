@@ -2972,6 +2972,9 @@ impl ContextApp {
             self.last_doc_text = self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ");
         }
 
+        // Prune errors whose word is no longer in the document (e.g., after cut)
+        self.prune_resolved_errors();
+
         // Process spelling queue (1 word per call, same as Windows)
         if !self.spelling_queue.is_empty() {
             self.process_spelling_queue();
