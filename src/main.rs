@@ -2846,14 +2846,10 @@ impl ContextApp {
                 // Clear errors for sentences that are no longer in the paragraph
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let before_count = self.writing_errors.len();
-                // Clear ALL underlines for this paragraph (word-search fails when word changed)
-                let has_stale = self.writing_errors.iter().any(|e| {
-                    e.paragraph_id == p.paragraph_id && e.underlined
-                        && !new_sentence_set.contains(&e.sentence_context.to_lowercase())
-                });
-                if has_stale {
+                // Clear ALL underlines for changed paragraph, then re-underline remaining errors
+                let has_errors_in_para = self.writing_errors.iter().any(|e| e.paragraph_id == p.paragraph_id);
+                if has_errors_in_para {
                     self.manager.clear_paragraph_underlines(&p.paragraph_id);
-                    // Mark all errors in this paragraph as not underlined (will be re-underlined if still valid)
                     for e in &mut self.writing_errors {
                         if e.paragraph_id == p.paragraph_id {
                             e.underlined = false;
@@ -3063,7 +3059,7 @@ impl ContextApp {
                             doc_offset: resp.doc_offset,
                             position: i,
                             ignored: false,
-                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                            word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                         });
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
@@ -3083,7 +3079,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                     });
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
@@ -3133,7 +3129,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: unk.position,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(),
                     });
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
