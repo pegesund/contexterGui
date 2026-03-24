@@ -609,7 +609,19 @@ fn extract_prefix(word: &str) -> &str {
 }
 
 fn escape_json_str(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // --- Pending BERT state types ---
@@ -686,6 +698,8 @@ struct ContextApp {
     /// The cache key we last dispatched (avoid re-dispatching same)
     dispatched_key: String,
     last_dispatched_sentence: String,
+    pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
+    grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
@@ -1178,6 +1192,8 @@ impl ContextApp {
             last_context_change: Instant::now(),
             dispatched_key: String::new(),
             last_dispatched_sentence: String::new(),
+            pending_incomplete_sentence: None,
+            grammar_inflight: std::collections::HashSet::new(),
             prefix_index: None,
             baselines: None,
             wordfreq: None,
@@ -2811,13 +2827,18 @@ impl ContextApp {
                         self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     }
                 }
+                let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
-                    let keep = new_sentence_set.contains(&e.sentence_context.to_lowercase());
-                    if !keep {
-                        log!("  Removing stale error: word='{}' sentence='{}'", e.word, trunc(&e.sentence_context, 40));
+                    // Exact sentence match — keep
+                    if new_sentence_set.contains(&e.sentence_context.to_lowercase()) { return true; }
+                    // For spelling errors: keep if the misspelled word is still in the paragraph
+                    if matches!(e.category, ErrorCategory::Spelling) {
+                        let word_lower = e.word.to_lowercase();
+                        if para_text_lower.contains(&word_lower) { return true; }
                     }
-                    keep
+                    log!("  Removing stale error: word='{}' sentence='{}'", e.word, trunc(&e.sentence_context, 40));
+                    false
                 });
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
@@ -2828,12 +2849,19 @@ impl ContextApp {
                     // Include paragraph_id in hash so identical sentences in
                     // different paragraphs are processed independently
                     let sent_h = hash_str(&format!("{}|{}", p.paragraph_id, sentence_text));
-                    if self.processed_sentence_hashes.contains(&sent_h) {
-                        continue; // Already processed, skip
+                    if self.processed_sentence_hashes.contains(&sent_h)
+                        || self.grammar_inflight.contains(&sent_h) {
+                        continue; // Already processed or in-flight, skip
                     }
 
-                    // This sentence changed — clear its errors and underlines
+                    // This sentence is new or changed — clear old errors and underlines
                     let sentence_lower = sentence_text.to_lowercase();
+                    let cleared_count = self.writing_errors.iter().filter(|e| {
+                        e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower
+                    }).count();
+                    if cleared_count > 0 {
+                        log!("  Clearing {} errors for changed sentence: '{}'", cleared_count, trunc(&sentence_lower, 50));
+                    }
                     for e in &self.writing_errors {
                         if e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower && e.underlined {
                             self.manager.clear_underline_word(&e.word, &e.paragraph_id);
@@ -2843,14 +2871,19 @@ impl ContextApp {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
-                    // Only send complete sentences (ending with punctuation) to grammar actor.
-                    // Incomplete sentences (user still typing) are not checked.
+                    // Send complete sentences immediately to grammar actor.
+                    // Incomplete sentences are deferred — sent when paragraph stabilizes
+                    // (handled by the idle check below).
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
                     if is_complete {
                         let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                         uw.extend(email_skip_words.iter().cloned());
                         actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
+                        self.grammar_inflight.insert(sent_h);
+                    } else {
+                        // Track this incomplete sentence for deferred sending
+                        self.pending_incomplete_sentence = Some((sentence_text.to_string(), p.paragraph_id.clone(), Instant::now()));
                     }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
@@ -2898,8 +2931,13 @@ impl ContextApp {
             None => return,
         };
 
-        // Send all queued sentences to the actor
-        while let Some((trimmed, doc_offset)) = self.grammar_queue.first().cloned() {
+        // Send up to 3 queued sentences per frame to avoid flooding the actor
+        let mut sent_count = 0;
+        while sent_count < 3 {
+            let (trimmed, doc_offset) = match self.grammar_queue.first().cloned() {
+                Some(v) => v,
+                None => break,
+            };
             self.grammar_queue.remove(0);
 
             // Skip if already has errors
@@ -2919,8 +2957,11 @@ impl ContextApp {
             log!("Grammar send: '{}' (offset={})", trunc(&trimmed, 60), doc_offset);
             let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
             actor.check_sentence_with_doc(&trimmed, doc_offset, "", 0, &self.last_doc_text, &uw);
+            sent_count += 1;
         }
-        self.grammar_scanning = false;
+        if self.grammar_queue.is_empty() {
+            self.grammar_scanning = false;
+        }
     }
 
     /// Poll grammar actor for results and create WritingErrors.
@@ -2949,6 +2990,7 @@ impl ContextApp {
                 }
             }
 
+            self.grammar_inflight.remove(&sent_h);
             self.processed_sentence_hashes.insert(sent_h); // Mark sentence as processed
 
             // Handle grammar errors — only for complete sentences (ends with punctuation)
@@ -3666,6 +3708,20 @@ impl eframe::App for ContextApp {
 
         // Drain changed paragraphs from Word Add-in and send to grammar actor
         self.process_addin_changed_paragraphs();
+
+        // Send pending incomplete sentence to grammar actor after 1s idle (user stopped typing)
+        if let Some((ref sentence, ref para_id, timestamp)) = self.pending_incomplete_sentence.clone() {
+            if timestamp.elapsed() >= Duration::from_millis(1000) {
+                let sent_h = hash_str(&format!("{}|{}", para_id, sentence));
+                if !self.processed_sentence_hashes.contains(&sent_h) {
+                    if let Some(actor) = &self.grammar_actor {
+                        let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                        actor.check_sentence_with_doc(sentence, 0, para_id, 0, &self.last_doc_text, &uw);
+                    }
+                }
+                self.pending_incomplete_sentence = None;
+            }
+        }
 
         // Execute deferred find-and-replace
         if let Some((find, replace, context, doc_offset)) = self.pending_fix.take() {
