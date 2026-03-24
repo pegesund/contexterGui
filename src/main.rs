@@ -700,6 +700,7 @@ struct ContextApp {
     last_dispatched_sentence: String,
     pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
+    paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
@@ -1194,6 +1195,7 @@ impl ContextApp {
             last_dispatched_sentence: String::new(),
             pending_incomplete_sentence: None,
             grammar_inflight: std::collections::HashSet::new(),
+            paragraph_texts: std::collections::HashMap::new(),
             prefix_index: None,
             baselines: None,
             wordfreq: None,
@@ -2788,6 +2790,7 @@ impl ContextApp {
                 // Errors for unchanged (clean hash) sentences are kept.
 
                 log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
+                self.paragraph_texts.insert(p.paragraph_id.clone(), p.text.clone());
 
                 // Strip control characters (vertical tab etc.) — now properly decoded by JSON parser
                 let clean_text: String = p.text.chars()
@@ -2910,6 +2913,7 @@ impl ContextApp {
                 if self.writing_errors.len() < before {
                     log!("Cleared {} errors for deleted para={}", before - self.writing_errors.len(), trunc(&para_id, 10));
                 }
+                self.paragraph_texts.remove(&para_id);
                 // Remove sentence hashes for deleted paragraph
                 if let Some(hashes) = self.paragraph_sentence_hashes.remove(&para_id) {
                     for h in hashes {
@@ -2917,6 +2921,11 @@ impl ContextApp {
                     }
                 }
             }
+        }
+
+        // Update last_doc_text from accumulated paragraph texts (for prune_resolved_errors)
+        if !self.paragraph_texts.is_empty() {
+            self.last_doc_text = self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ");
         }
 
         // Process spelling queue (1 word per call, same as Windows)
