@@ -4788,7 +4788,7 @@ impl eframe::App for ContextApp {
                         match self.platform.read_selected_text() {
                             Some(text) => {
                                 let trimmed = text.trim();
-                                log!("Selected text: '{}'", &trimmed[..trimmed.len().min(80)]);
+                                log!("Selected text: '{}'", trimmed);
                                 if !trimmed.is_empty() {
                                     tts::speak_word(trimmed);
                                 }

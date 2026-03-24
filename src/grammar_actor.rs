@@ -80,7 +80,7 @@ impl GrammarActorHandle {
     }
 
     pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str, user_words: &[String]) {
-        crate::log!("ACTOR ASYNC SEND: '{}'", &sentence[..sentence.len().min(40)]);
+        crate::log!("ACTOR ASYNC SEND: '{}'", sentence);
         let _ = self.sender.send(ActorMessage::Async(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,

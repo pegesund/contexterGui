@@ -281,7 +281,7 @@ impl TextBridge for BrowserBridge {
         let text = self.last_text.borrow().clone();
         if text.is_empty() { return false; }
         log_browser(&format!("REPLACE: find='{}' replace='{}' char_offset={}", find, replace, char_offset));
-        log_browser(&format!("  cached text ({} chars): '{}'", text.chars().count(), &text[..text.len().min(200)]));
+        log_browser(&format!("  cached text ({} chars): '{}'", text.chars().count(), text));
         // Use the char_offset to find the exact position
         // Find ALL occurrences and pick the one closest to char_offset
         let text_lower = text.to_lowercase();
@@ -303,7 +303,7 @@ impl TextBridge for BrowserBridge {
         if let Some((start, _dist)) = best_match {
             let end = start + find.chars().count();
             log_browser(&format!("  FOUND at char {}..{}, sending replace JSON", start, end));
-            log_browser(&format!("  text BEFORE replace: '{}'", &text[..text.len().min(200)]));
+            log_browser(&format!("  text BEFORE replace: '{}'", text));
             let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let find_escaped = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
@@ -315,7 +315,7 @@ impl TextBridge for BrowserBridge {
                 self.update_cached_text(start, end, replace);
                 self.activate_replace_freeze(find);
                 let new_text = self.last_text.borrow().clone();
-                log_browser(&format!("  text AFTER replace: '{}'", &new_text[..new_text.len().min(200)]));
+                log_browser(&format!("  text AFTER replace: '{}'", new_text));
                 return true;
             }
             return false;

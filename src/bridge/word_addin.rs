@@ -479,7 +479,7 @@ fn handle_request_rw<S: Read + Write>(
                     "{}".to_string()
                 } else {
                     let j = q.remove(0);
-                    log_to_file(&format!("REPLY sending: {}", &j[..j.len().min(200)]));
+                    log_to_file(&format!("REPLY sending: {}", j));
                     j
                 }
             } else {
