@@ -392,6 +392,8 @@ function pollReplies() {
             } else if (data.action === "rescan") {
                 paragraphMap = {};
                 initialScan();
+            } else if (data.action === "appendParagraph" && data.text) {
+                doAppendParagraph(data.text);
             } else if (data.action === "deleteAfter" && data.text) {
                 doDeleteAfter(data.text);
             } else if (data.action === "deleteText" && data.text) {
@@ -463,6 +465,13 @@ function doClearUnderline(word, paragraphId) {
             return ctx.sync();
         });
     }).catch(function () {});
+}
+
+function doAppendParagraph(text) {
+    Word.run(function (ctx) {
+        ctx.document.body.insertParagraph(text, "End");
+        return ctx.sync();
+    }).catch(function (e) { console.log("appendParagraph error:", e); });
 }
 
 function doDeleteAfter(marker) {
