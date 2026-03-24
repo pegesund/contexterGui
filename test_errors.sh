@@ -122,7 +122,7 @@ repeat_key() {
     for (( i=0; i<n; i++ )); do key_press "$key"; done
 }
 
-go_to_end() { key_press cmd_end; sleep 0.3; }
+go_to_end() { key_press cmd_end; sleep 0.3; key_press return; sleep 0.2; }
 
 # Undo N times to restore document state
 PUSH_URL="https://127.0.0.1:3000/push-reply"
@@ -130,22 +130,9 @@ DOC_MARKER="25.11.2022"
 SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 
 undo_all() {
-    # Use Cmd+Z to undo test changes, then deleteAfter as backup
-    osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
-    sleep 0.3
-    local n=${1:-50}
-    osascript -e "
-tell application \"System Events\"
-    repeat $n times
-        keystroke \"z\" using command down
-        delay 0.02
-    end repeat
-end tell
-" 2>/dev/null
-    sleep 1
+    # Delete test text and reload
     curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
     sleep 2
-    # Reload add-in so errors resync with actual doc content
     bash "$SCRIPT_DIR_ABS/reload_addin.sh"
     sleep 5
     check_alignment
