@@ -156,6 +156,37 @@ echo ""
 osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
 sleep 1
 
+# Clean known test artifacts from the document via find/replace
+echo "Cleaning test artifacts..."
+for word in fotboll fotbollx somx feilx matx drikkx; do
+    osascript -e "
+tell application \"Microsoft Word\" to activate
+delay 0.1
+tell application \"System Events\"
+    keystroke \"h\" using {command down, option down}
+    delay 0.2
+    keystroke \"a\" using command down
+    keystroke \"$word\"
+    delay 0.1
+    keystroke tab
+    keystroke \"a\" using command down
+    key code 51
+    delay 0.1
+    keystroke \"a\" using command down
+    delay 0.2
+    keystroke return
+    delay 0.1
+    key code 53
+end tell
+" 2>/dev/null
+    sleep 0.2
+done
+# Also deleteAfter to clean any trailing test text
+curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
+sleep 2
+bash "$SCRIPT_DIR_ABS/reload_addin.sh"
+sleep 5
+
 # ============================================================
 echo "Test 0: Document health — errors match underlines"
 ERROR_COUNT=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
