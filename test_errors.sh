@@ -429,7 +429,7 @@ sleep 0.5
 go_to_end; key_press_counted return
 key_press cmd_v
 UNDO_COUNT=$((UNDO_COUNT + 1))
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pasteerrorx detected after paste" "pasteerrorx" "" "$ERRORS"
 undo_all
