@@ -133,31 +133,48 @@ repeat_key() {
 go_to_end() { key_press cmd_end; sleep 0.3; }
 
 PUSH_URL="https://127.0.0.1:3000/push-reply"
-DOC_MARKER="TESTMARKER2026"
 SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 
+# Safety: verify we're on the temp doc before any destructive operation
+TEMP_DOC_NAME=""
+verify_temp_doc() {
+    local current=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
+    if [ "$current" != "$TEMP_DOC_NAME" ]; then
+        echo "  SAFETY ABORT: Active document is '$current', expected '$TEMP_DOC_NAME'"
+        echo "  Refusing to modify the wrong document!"
+        echo "=== Results: $PASS passed, $FAIL failed (ABORTED - wrong document) ==="
+        exit 1
+    fi
+}
+
 undo_all() {
-    # Select all and delete, re-type marker (clean slate for next test)
+    verify_temp_doc
+    # Undo all changes in the temp doc using Cmd+Z (safe, reversible)
     osascript -e '
 tell application "Microsoft Word" to activate
 delay 0.3
 tell application "System Events"
-    keystroke "a" using command down
-    delay 0.2
-    key code 51
+    repeat 100 times
+        keystroke "z" using command down
+        delay 0.02
+    end repeat
 end tell
 ' 2>/dev/null
-    sleep 1
-    type_text "$DOC_MARKER"
     sleep 2
-    bash "$SCRIPT_DIR_ABS/reload_addin.sh"
-    sleep 5
+    # Reset to clear stale errors
+    curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
+    sleep 3
 }
 
-# Create temporary test document (user's document is NOT modified)
 echo "=== NorskTale Error Detection Test ==="
+
+# Save hash of user's original document for safety check at end
+ORIG_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
+ORIG_DOC_HASH=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
+echo "Original document: '$ORIG_DOC_NAME' (hash: $ORIG_DOC_HASH)"
+
+# Create temporary test document
 echo "Creating temporary test document..."
-ORIG_DOC=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
 osascript -e '
 tell application "Microsoft Word"
     make new document
@@ -165,11 +182,17 @@ tell application "Microsoft Word"
     delay 1
 end tell
 ' 2>/dev/null
-sleep 3
-# Type marker in the temp doc
-osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
-sleep 0.5
-type_text "$DOC_MARKER"
+sleep 2
+TEMP_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
+echo "Temp document: '$TEMP_DOC_NAME'"
+
+if [ "$TEMP_DOC_NAME" = "$ORIG_DOC_NAME" ]; then
+    echo "ERROR: Failed to create temp document — still on original!"
+    exit 1
+fi
+
+# Type some initial content in the temp doc
+type_text "Test document for NorskTale integration tests."
 sleep 2
 # Reload add-in so it connects to the temp doc
 bash "$SCRIPT_DIR_ABS/reload_addin.sh"
@@ -472,6 +495,7 @@ undo_all 50
 # Close temporary test document WITHOUT saving
 echo ""
 echo "Closing temporary test document..."
+verify_temp_doc  # Make sure we're closing the RIGHT document
 osascript -e '
 tell application "Microsoft Word"
     close active document saving no
@@ -480,6 +504,17 @@ tell application "Microsoft Word"
 end tell
 ' 2>/dev/null
 sleep 2
+
+# Verify original document is intact
+echo "Verifying original document..."
+FINAL_DOC_HASH=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
+if [ "$FINAL_DOC_HASH" = "$ORIG_DOC_HASH" ]; then
+    echo "  Original document: INTACT (hash matches)"
+else
+    echo "  WARNING: Original document hash changed!"
+    echo "  Before: $ORIG_DOC_HASH"
+    echo "  After:  $FINAL_DOC_HASH"
+fi
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
