@@ -137,30 +137,55 @@ SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 
 # Safety: verify we're on the temp doc before any destructive operation
 TEMP_DOC_NAME=""
+activate_temp_doc() {
+    # Activate the temp doc BY NAME — never use generic "activate"
+    osascript -e "
+tell application \"Microsoft Word\"
+    activate
+    set w to active window
+    -- Find and activate the temp doc window
+    repeat with d in documents
+        if name of d is \"$TEMP_DOC_NAME\" then
+            set active document to d
+            exit repeat
+        end if
+    end repeat
+end tell
+" 2>/dev/null
+    sleep 0.3
+}
+
 verify_temp_doc() {
     local current=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
     if [ "$current" != "$TEMP_DOC_NAME" ]; then
-        echo "  SAFETY ABORT: Active document is '$current', expected '$TEMP_DOC_NAME'"
-        echo "  Refusing to modify the wrong document!"
-        echo "=== Results: $PASS passed, $FAIL failed (ABORTED - wrong document) ==="
-        exit 1
+        # Try to activate it
+        activate_temp_doc
+        current=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
+        if [ "$current" != "$TEMP_DOC_NAME" ]; then
+            echo "  SAFETY ABORT: Active document is '$current', expected '$TEMP_DOC_NAME'"
+            echo "  Refusing to modify the wrong document!"
+            echo "=== Results: $PASS passed, $FAIL failed (ABORTED - wrong document) ==="
+            exit 1
+        fi
     fi
 }
 
 undo_all() {
+    activate_temp_doc
     verify_temp_doc
-    # Undo all changes in the temp doc using Cmd+Z (safe, reversible)
+    # Select all and delete in temp doc, re-type initial content
     osascript -e '
 tell application "Microsoft Word" to activate
 delay 0.3
 tell application "System Events"
-    repeat 100 times
-        keystroke "z" using command down
-        delay 0.02
-    end repeat
+    keystroke "a" using command down
+    delay 0.2
+    key code 51
 end tell
 ' 2>/dev/null
-    sleep 2
+    sleep 1
+    type_text "Test document for NorskTale integration tests."
+    sleep 1
     # Reset to clear stale errors
     curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
     sleep 3
