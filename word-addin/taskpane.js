@@ -454,9 +454,10 @@ function doUnderline(word, paragraphId, color) {
         var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
         results.load("items/font");
         return ctx.sync().then(function () {
-            for (var i = 0; i < results.items.length; i++) {
-                results.items[i].font.underline = "Wave";
-                try { results.items[i].font.underlineColor = color || "#FF0000"; } catch(e) {}
+            // Only underline the FIRST match (avoid underlining common words everywhere)
+            if (results.items.length > 0) {
+                results.items[0].font.underline = "Wave";
+                try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
             }
             return ctx.sync();
         });
