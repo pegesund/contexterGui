@@ -147,7 +147,7 @@ UNDO_COUNT=0  # Tracks keystrokes for undo
 undo_all() {
     # Undo exactly the number of keystrokes typed since last undo
     # Add small buffer for return keys and replace operations
-    local n=$((UNDO_COUNT + 5))
+    local n=$((UNDO_COUNT + 10))
     UNDO_COUNT=0
     osascript -e "
 tell application \"Microsoft Word\" to activate
@@ -182,7 +182,8 @@ end tell
             exit 1
         fi
     fi
-    sleep 1
+    # Wait for grammar actor to settle (process pending responses)
+    sleep 3
 }
 
 echo "=== NorskTale Error Detection Test ==="
