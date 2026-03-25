@@ -3087,7 +3087,7 @@ impl ContextApp {
             for unk in resp.unknown_words.iter()
                 .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
             {
-                let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default();
+                let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default().trim().to_string();
                 // Capitalize suggestion if word is at start of sentence or originally capitalized
                 if !best.is_empty() {
                     let word_lower = unk.word.to_lowercase();
