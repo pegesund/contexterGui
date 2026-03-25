@@ -171,24 +171,20 @@ verify_temp_doc() {
 }
 
 undo_all() {
-    activate_temp_doc
+    # SAFE cleanup: close temp doc and create new one
+    # NEVER use Cmd+A or Cmd+X — can hit wrong document
     verify_temp_doc
-    # Select all and delete in temp doc, re-type initial content
-    osascript -e '
-tell application "Microsoft Word" to activate
-delay 0.3
-tell application "System Events"
-    keystroke "a" using command down
-    delay 0.2
-    key code 51
-end tell
-' 2>/dev/null
+    osascript -e 'tell application "Microsoft Word" to close active document saving no' 2>/dev/null
     sleep 1
+    osascript -e 'tell application "Microsoft Word" to make new document' 2>/dev/null
+    sleep 2
+    TEMP_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
+    osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
+    sleep 0.5
     type_text "Test document for NorskTale integration tests."
     sleep 1
-    # Reset to clear stale errors
-    curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-    sleep 3
+    bash "$SCRIPT_DIR_ABS/reload_addin.sh"
+    sleep 5
 }
 
 echo "=== NorskTale Error Detection Test ==="
