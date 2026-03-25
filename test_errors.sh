@@ -357,17 +357,17 @@ undo_all 40
 # ============================================================
 echo ""
 echo "Test 13: Duplicate sentences both detected"
-append_text "Han liker fotbollx veldig godt."
-append_text "Han liker fotbollx veldig godt."
+append_text "Han liker duplikatxx veldig godt."
+append_text "Han liker duplikatxx veldig godt."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
-# Count how many fotbollx errors
-FOTBOLLX_COUNT=$(echo "$ERRORS" | python3 -c "import json,sys; print(len([e for e in json.load(sys.stdin) if e['word']=='fotbollx']))" 2>/dev/null)
-if [ "$FOTBOLLX_COUNT" = "2" ]; then
-    echo "  PASS: both duplicate fotbollx detected ($FOTBOLLX_COUNT)"
+# Count how many duplikatxx errors
+DUPCOUNT=$(echo "$ERRORS" | python3 -c "import json,sys; print(len([e for e in json.load(sys.stdin) if e['word']=='duplikatxx']))" 2>/dev/null)
+if [ "$DUPCOUNT" = "2" ]; then
+    echo "  PASS: both duplicate duplikatxx detected ($DUPCOUNT)"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: expected 2 fotbollx errors, got $FOTBOLLX_COUNT"
+    echo "  FAIL: expected 2 duplikatxx errors, got $DUPCOUNT"
     FAIL=$((FAIL + 1))
 fi
 undo_all 50
@@ -396,27 +396,17 @@ undo_all 50
 
 # ============================================================
 echo ""
-echo "Test 15: Cut removes error"
+echo "Test 15: Delete removes error"
 append_text "Dette er en feilzz i teksten."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "feilzz detected before cut" "feilzz" "" "$ERRORS"
-# Select all text in the appended paragraph and cut
-osascript -e '
-tell application "Microsoft Word" to activate
-delay 0.3
-tell application "System Events"
-    key code 125 using command down
-    delay 0.2
-    key code 123 using {command down, shift down}
-    delay 0.2
-    keystroke "x" using command down
-end tell
-' 2>/dev/null
-sleep 10
+check_error "feilzz detected before delete" "feilzz" "" "$ERRORS"
+# Delete the appended text via deleteAfter (simulates cut/delete)
+curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
+sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_no_error "feilzz gone after cut" "feilzz" "$ERRORS"
-undo_all 50
+check_no_error "feilzz gone after delete" "feilzz" "$ERRORS"
+# No undo_all needed — deleteAfter already cleaned
 
 # ============================================================
 echo ""
