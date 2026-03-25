@@ -362,7 +362,7 @@ check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Han spiller fotboll","text":"Han spiller fotball"}' 2>/dev/null
 UNDO_COUNT=$((UNDO_COUNT + 2))
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-sleep 8
+sleep 10
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
 go_to_end; key_press_counted return
