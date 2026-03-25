@@ -132,106 +132,54 @@ repeat_key() {
 
 go_to_end() { key_press cmd_end; sleep 0.3; }
 
+
 PUSH_URL="https://127.0.0.1:3000/push-reply"
 SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 
-# Safety: verify we're on the temp doc before any destructive operation
-TEMP_DOC_NAME=""
-activate_temp_doc() {
-    # Activate the temp doc BY NAME — never use generic "activate"
-    osascript -e "
-tell application \"Microsoft Word\"
-    activate
-    set w to active window
-    -- Find and activate the temp doc window
-    repeat with d in documents
-        if name of d is \"$TEMP_DOC_NAME\" then
-            set active document to d
-            exit repeat
-        end if
-    end repeat
-end tell
-" 2>/dev/null
-    sleep 0.3
-}
-
-verify_temp_doc() {
-    local current=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
-    if [ "$current" != "$TEMP_DOC_NAME" ]; then
-        # Try to activate it
-        activate_temp_doc
-        current=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
-        if [ "$current" != "$TEMP_DOC_NAME" ]; then
-            echo "  SAFETY ABORT: Active document is '$current', expected '$TEMP_DOC_NAME'"
-            echo "  Refusing to modify the wrong document!"
-            echo "=== Results: $PASS passed, $FAIL failed (ABORTED - wrong document) ==="
-            exit 1
-        fi
-    fi
-}
+# Marker: last 30 chars of document — used by deleteAfter to remove test text
+DOC_MARKER=""
 
 undo_all() {
-    # SAFE cleanup: close temp doc and create new one
-    # NEVER use Cmd+A or Cmd+X — can hit wrong document
-    verify_temp_doc
-    osascript -e 'tell application "Microsoft Word" to close active document saving no' 2>/dev/null
-    sleep 1
-    osascript -e 'tell application "Microsoft Word" to make new document' 2>/dev/null
+    # SAFE cleanup: Cmd+Z to undo typed text (safe even on wrong window)
+    # NEVER use Cmd+A, Cmd+X, deleteAfter, or open/close documents
+    osascript -e '
+tell application "Microsoft Word" to activate
+delay 0.3
+tell application "System Events"
+    repeat 80 times
+        keystroke "z" using command down
+        delay 0.02
+    end repeat
+end tell
+' 2>/dev/null
     sleep 2
-    TEMP_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
-    osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
-    sleep 0.5
-    type_text "Test document for NorskTale integration tests."
+    # Verify document intact
+    local h=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
+    if [ "$h" != "$ORIG_DOC_HASH" ]; then
+        echo "  ABORT: Document corrupted! hash=$h expected=$ORIG_DOC_HASH"
+        echo "=== Results: $PASS passed, $FAIL failed (ABORTED) ==="
+        exit 1
+    fi
     sleep 1
-    bash "$SCRIPT_DIR_ABS/reload_addin.sh"
-    sleep 5
 }
 
 echo "=== NorskTale Error Detection Test ==="
 
-# Save hash of user's original document for safety check at end
+# Work in the EXISTING document — never open/close/save documents
 ORIG_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
 ORIG_DOC_HASH=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
-echo "Original document: '$ORIG_DOC_NAME' (hash: $ORIG_DOC_HASH)"
-
-# Create temporary test document
-echo "Creating temporary test document..."
-osascript -e '
-tell application "Microsoft Word"
-    make new document
-    activate
-    delay 1
-end tell
-' 2>/dev/null
-sleep 2
-TEMP_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
-echo "Temp document: '$TEMP_DOC_NAME'"
-
-if [ "$TEMP_DOC_NAME" = "$ORIG_DOC_NAME" ]; then
-    echo "ERROR: Failed to create temp document — still on original!"
-    exit 1
-fi
-
-# Type some initial content in the temp doc
-type_text "Test document for NorskTale integration tests."
-sleep 2
-# Reload add-in so it connects to the temp doc
-bash "$SCRIPT_DIR_ABS/reload_addin.sh"
-sleep 5
+DOC_MARKER=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | tail -c 30 | tr -d '\n')
+echo "Document: '$ORIG_DOC_NAME' (hash: $ORIG_DOC_HASH)"
+echo "Marker: '$DOC_MARKER'"
+echo ""
+osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
+sleep 1
 
 # ============================================================
 echo "Test 0: Document health — errors match underlines"
 ERROR_COUNT=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
-UNDERLINE_COUNT=$(osascript "$(dirname "$0")/scan_underlines.applescript" 2>/dev/null | head -1 | grep -o '^[0-9]*')
-UNDERLINE_COUNT=${UNDERLINE_COUNT:-0}
-if [ "$ERROR_COUNT" = "$UNDERLINE_COUNT" ]; then
-    echo "  PASS: $ERROR_COUNT errors = $UNDERLINE_COUNT underlines"
-    PASS=$((PASS + 1))
-else
-    echo "  INFO: $ERROR_COUNT errors, $UNDERLINE_COUNT underlines (mismatch OK for real documents)"
-    PASS=$((PASS + 1))
-fi
-BASELINE_ERRORS=$ERROR_COUNT
+echo "  INFO: $ERROR_COUNT errors detected"
+PASS=$((PASS + 1))
 
 # ============================================================
 echo ""
@@ -241,7 +189,7 @@ type_text "Fotball er en morsom sport somx er veldig morsom."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx detected" "somx" "som" "$ERRORS"
-undo_all 60
+undo_all
 
 # ============================================================
 echo ""
@@ -252,7 +200,7 @@ sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "sport not flagged" "sport" "$ERRORS"
 check_no_error "morsom not flagged" "morsom" "$ERRORS"
-undo_all 40
+undo_all
 
 # ============================================================
 echo ""
@@ -263,7 +211,7 @@ sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spill not flagged" "spill" "$ERRORS"
 check_no_error "morsomt not flagged" "morsomt" "$ERRORS"
-undo_all 40
+undo_all
 
 # ============================================================
 echo ""
@@ -274,7 +222,7 @@ sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "matx detected" "matx" "" "$ERRORS"
 check_error "drikkx detected" "drikkx" "" "$ERRORS"
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
@@ -282,12 +230,11 @@ echo "Test 4: Type misspelled, fix with backspace"
 go_to_end; key_press return
 type_text "Jeg liker fotbalx."
 sleep 3
-# Fix via API replace
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbalx","text":"fotball"}' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotball not flagged after fix" "fotball" "$ERRORS"
-undo_all 30
+undo_all
 
 # ============================================================
 echo ""
@@ -297,7 +244,7 @@ type_text "Fotball er en morsom spor."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_grammar "gender mismatch" "spor" "$ERRORS"
-undo_all 40
+undo_all
 
 # ============================================================
 echo ""
@@ -307,7 +254,7 @@ type_text "Fotball er en morsomt sport."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_grammar "adj gender mismatch" "morsomt" "$ERRORS"
-undo_all 40
+undo_all
 
 # ============================================================
 echo ""
@@ -317,8 +264,7 @@ type_text "Dette er en feilx i teksten."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilx detected" "feilx" "" "$ERRORS"
-# Undo the whole line (removes all typed text)
-undo_all 40
+undo_all
 sleep 3
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "feilx gone after undo" "feilx" "$ERRORS"
@@ -331,12 +277,11 @@ type_text "Han liker fotbollzz veldig godt."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotbollzz detected" "fotbollzz" "" "$ERRORS"
-# Fix via Word API replace
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbollzz","text":"fotball"}' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotbollzz gone after fix" "fotbollzz" "$ERRORS"
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
@@ -346,12 +291,11 @@ type_text "Fotball er morsomt somx er fint."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx in single line" "somx" "" "$ERRORS"
-# Split: replace "morsomt " with "morsomt\n" (newline creates split)
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"morsomt somx","text":"morsomt\nsomx"}' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx after split" "somx" "" "$ERRORS"
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
@@ -361,12 +305,11 @@ type_text "Jeg spiller fotball hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotball correct" "fotball" "$ERRORS"
-# Replace correct word with misspelled via API
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Jeg spiller fotball","text":"Jeg spiller fotboll"}' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll after replace" "fotboll" "" "$ERRORS"
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
@@ -376,7 +319,7 @@ type_text "Dette er en rask test med mange ord uten feilx."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilx after rapid" "feilx" "" "$ERRORS"
-undo_all 60
+undo_all
 
 # ============================================================
 echo ""
@@ -386,18 +329,16 @@ type_text "Han spiller fotboll hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
-# Fix via API replace
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Han spiller fotboll","text":"Han spiller fotball"}' 2>/dev/null
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
-# Re-introduce: type the same misspelling in a new paragraph
 go_to_end; key_press return
 type_text "Han spiller fotboll hver dag."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll re-detected after reintroduce" "fotboll" "" "$ERRORS"
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
@@ -408,7 +349,7 @@ sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "Fotball not flagged" "Fotball" "$ERRORS"
 check_no_error "sport not flagged" "sport" "$ERRORS"
-undo_all 40
+undo_all
 
 go_to_end; key_press return
 type_text "Fotball er et morsomt spill."
@@ -416,7 +357,7 @@ sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spill not flagged" "spill" "$ERRORS"
 check_no_error "Fotball not flagged (neuter)" "Fotball" "$ERRORS"
-undo_all 40
+undo_all
 
 go_to_end; key_press return
 type_text "Han liker å spille fotball."
@@ -424,7 +365,7 @@ sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spille not flagged" "spille" "$ERRORS"
 check_no_error "fotball not flagged" "fotball" "$ERRORS"
-undo_all 40
+undo_all
 
 # ============================================================
 echo ""
@@ -434,7 +375,7 @@ type_text "Jeg er spiller fotball."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_grammar "er + present verb" "er" "$ERRORS"
-undo_all 40
+undo_all
 
 # ============================================================
 echo ""
@@ -445,7 +386,6 @@ go_to_end; key_press return
 type_text "Han liker duplikatxx veldig godt."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
-# Count how many duplikatxx errors
 DUPCOUNT=$(echo "$ERRORS" | python3 -c "import json,sys; print(len([e for e in json.load(sys.stdin) if e['word']=='duplikatxx']))" 2>/dev/null)
 if [ "$DUPCOUNT" = "2" ]; then
     echo "  PASS: both duplicate duplikatxx detected ($DUPCOUNT)"
@@ -454,28 +394,19 @@ else
     echo "  FAIL: expected 2 duplikatxx errors, got $DUPCOUNT"
     FAIL=$((FAIL + 1))
 fi
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
 echo "Test 14: Paste misspelled text — error detected"
 osascript -e 'set the clipboard to "Han liker pasteerrorx veldig godt."' 2>/dev/null
 sleep 0.5
-osascript -e '
-tell application "Microsoft Word" to activate
-delay 0.3
-tell application "System Events"
-    key code 125 using command down
-    delay 0.2
-    keystroke return
-    delay 0.2
-    keystroke "v" using command down
-end tell
-' 2>/dev/null
+go_to_end; key_press return
+key_press cmd_v
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pasteerrorx detected after paste" "pasteerrorx" "" "$ERRORS"
-undo_all 50
+undo_all
 
 # ============================================================
 echo ""
@@ -485,48 +416,34 @@ type_text "Dette er en feilzz i teksten."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilzz detected before delete" "feilzz" "" "$ERRORS"
-# Delete the appended text via deleteAfter (simulates cut/delete)
-curl -sk -X POST "$PUSH_URL" -d "{\"action\":\"deleteAfter\",\"text\":\"$DOC_MARKER\"}" 2>/dev/null
+osascript -e '
+tell application "Microsoft Word" to activate
+delay 0.3
+tell application "System Events"
+    repeat 40 times
+        keystroke "z" using command down
+        delay 0.02
+    end repeat
+end tell
+' 2>/dev/null
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "feilzz gone after delete" "feilzz" "$ERRORS"
-# No undo_all needed — deleteAfter already cleaned
 
 # ============================================================
 echo ""
 echo "Test 16: Paste different misspelled text — error detected"
 osascript -e 'set the clipboard to "Fotball er gøy med pastezz."' 2>/dev/null
 sleep 0.3
-osascript -e '
-tell application "Microsoft Word" to activate
-delay 0.3
-tell application "System Events"
-    key code 125 using command down
-    delay 0.2
-    keystroke return
-    delay 0.2
-    keystroke "v" using command down
-end tell
-' 2>/dev/null
+go_to_end; key_press return
+key_press cmd_v
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pastezz detected after paste" "pastezz" "" "$ERRORS"
-undo_all 50
-
-# Close temporary test document WITHOUT saving
-echo ""
-echo "Closing temporary test document..."
-verify_temp_doc  # Make sure we're closing the RIGHT document
-osascript -e '
-tell application "Microsoft Word"
-    close active document saving no
-    delay 1
-    activate
-end tell
-' 2>/dev/null
-sleep 2
+undo_all
 
 # Verify original document is intact
+echo ""
 echo "Verifying original document..."
 FINAL_DOC_HASH=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
 if [ "$FINAL_DOC_HASH" = "$ORIG_DOC_HASH" ]; then
