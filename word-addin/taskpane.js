@@ -289,10 +289,17 @@ function onSelectionChanged() {
             var cursorInPara = beforeCursor.text.length;
             if (cursorInPara > paraText.length) cursorInPara = paraText.length;
 
-            // Check if current paragraph is unknown (new from paste) — trigger debounced rescan
+            // Check if paragraph is new or changed (paste/cut/drag) — trigger rescan
             var paraId = para.uniqueLocalId;
-            if (paragraphMap[paraId] === undefined) {
-                scheduleRescan();
+            var currentHash = hashString(paraText);
+            if (paragraphMap[paraId] === undefined || paragraphMap[paraId] !== currentHash) {
+                if (paragraphMap[paraId] !== currentHash) {
+                    paragraphMap[paraId] = currentHash;
+                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText }]);
+                }
+                if (paragraphMap[paraId] === undefined) {
+                    scheduleRescan();
+                }
             }
 
             // Store for fast replaceAtCursor
