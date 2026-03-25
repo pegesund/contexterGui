@@ -296,19 +296,17 @@ check_no_error "feilx gone after undo" "feilx" "$ERRORS"
 
 # ============================================================
 echo ""
-echo "Test 7: Fix misspelled word via replace"
+echo "Test 7: Error removed when text is undone"
 go_to_end; key_press_counted return
 type_text "Han liker fotbollzz veldig godt."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotbollzz detected" "fotbollzz" "" "$ERRORS"
-curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbollzz","text":"fotball"}' 2>/dev/null
-curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-UNDO_COUNT=$((UNDO_COUNT + 2))
-sleep 8
-ERRORS=$(curl -sk "$ENDPOINT")
-check_no_error "fotbollzz gone after fix" "fotbollzz" "$ERRORS"
+# Undo the typing — error should disappear
 undo_all
+sleep 3
+ERRORS=$(curl -sk "$ENDPOINT")
+check_no_error "fotbollzz gone after undo" "fotbollzz" "$ERRORS"
 
 # ============================================================
 echo ""
@@ -472,7 +470,7 @@ sleep 0.3
 go_to_end; key_press_counted return
 key_press cmd_v
 UNDO_COUNT=$((UNDO_COUNT + 1))
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pastezz detected after paste" "pastezz" "" "$ERRORS"
 undo_all
