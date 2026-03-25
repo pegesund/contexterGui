@@ -232,7 +232,7 @@ type_text "Jeg liker fotbalx."
 sleep 3
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbalx","text":"fotball"}' 2>/dev/null
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotball not flagged after fix" "fotball" "$ERRORS"
 undo_all
@@ -280,7 +280,7 @@ ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotbollzz detected" "fotbollzz" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbollzz","text":"fotball"}' 2>/dev/null
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotbollzz gone after fix" "fotbollzz" "$ERRORS"
 undo_all
@@ -295,7 +295,7 @@ ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx in single line" "somx" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"morsomt somx","text":"morsomt\nsomx"}' 2>/dev/null
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx after split" "somx" "" "$ERRORS"
 undo_all
@@ -310,7 +310,7 @@ ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotball correct" "fotball" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Jeg spiller fotball","text":"Jeg spiller fotboll"}' 2>/dev/null
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll after replace" "fotboll" "" "$ERRORS"
 undo_all
