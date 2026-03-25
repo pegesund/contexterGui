@@ -467,9 +467,14 @@ function doClearParagraphUnderlines(paragraphId) {
     if (!paragraphId) return;
     Word.run(function (ctx) {
         var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
-        para.load("font");
+        // Search for all wavy-underlined text in this paragraph and clear it
+        var range = para.getRange("Whole");
+        range.load("font");
         return ctx.sync().then(function () {
-            para.font.underline = "None";
+            // Only clear if actually underlined (Wave = our error underlines)
+            if (range.font.underline === "Wave" || range.font.underline === "Mixed") {
+                range.font.underline = "None";
+            }
             return ctx.sync();
         });
     }).catch(function () {});

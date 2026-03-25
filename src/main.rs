@@ -2847,39 +2847,8 @@ impl ContextApp {
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
-                // Clear underlines only for errors whose word is gone from the paragraph,
-                // then immediately re-underline errors that still exist
-                let mut cleared_para = false;
-                for e in &self.writing_errors {
-                    if e.paragraph_id == p.paragraph_id && e.underlined {
-                        let word_lower = e.word.to_lowercase();
-                        let word_gone = !para_text_lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower);
-                        if word_gone && !cleared_para {
-                            // Clear whole paragraph once, then re-underline surviving errors
-                            self.manager.clear_paragraph_underlines(&p.paragraph_id);
-                            cleared_para = true;
-                        }
-                    }
-                }
-                if cleared_para {
-                    // Re-underline errors that still exist in this paragraph
-                    for e in &mut self.writing_errors {
-                        if e.paragraph_id == p.paragraph_id {
-                            if cleared_para {
-                                e.underlined = false;
-                            }
-                            let word_lower = e.word.to_lowercase();
-                            let still_exists = para_text_lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower);
-                            if still_exists && !e.ignored {
-                                let color = if matches!(e.category, ErrorCategory::Spelling) { "#FF0000" } else { "#0000FF" };
-                                for b in &self.manager.bridges {
-                                    b.underline_word(&e.word, &p.paragraph_id, color);
-                                }
-                                e.underlined = true;
-                            }
-                        }
-                    }
-                }
+                // When a word is gone from the paragraph (user fixed it),
+                // its underline disappears with the word. No explicit clear needed.
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     // Exact sentence match — keep

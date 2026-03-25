@@ -182,8 +182,12 @@ end tell
             exit 1
         fi
     fi
-    # Wait for grammar actor to process undo changes
+    # Wait for grammar actor to settle, then verify error count is reasonable
     sleep 3
+    local ec=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+    if [ "$ec" -gt "$((BASELINE_ERRORS + 5))" ] 2>/dev/null; then
+        echo "  WARNING: $ec errors after undo (baseline was $BASELINE_ERRORS)"
+    fi
 }
 
 echo "=== NorskTale Error Detection Test ==="
@@ -192,8 +196,8 @@ echo "=== NorskTale Error Detection Test ==="
 ORIG_DOC_NAME=$(osascript -e 'tell application "Microsoft Word" to name of active document' 2>/dev/null)
 ORIG_DOC_HASH=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
 DOC_MARKER=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | tail -c 30 | tr -d '\n')
-echo "Document: '$ORIG_DOC_NAME' (hash: $ORIG_DOC_HASH)"
-echo "Marker: '$DOC_MARKER'"
+BASELINE_ERRORS=$(curl -sk "$ENDPOINT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+echo "Document: '$ORIG_DOC_NAME' (hash: $ORIG_DOC_HASH, baseline: $BASELINE_ERRORS errors)"
 echo ""
 osascript -e 'tell application "Microsoft Word" to activate' 2>/dev/null
 sleep 1
