@@ -97,6 +97,7 @@ type_text() {
         else
             osascript -e "tell application \"Microsoft Word\" to type text selection text \"$char\"" 2>/dev/null
         fi
+        UNDO_COUNT=$((UNDO_COUNT + 1))
         sleep $DELAY
     done
 }
@@ -131,6 +132,8 @@ repeat_key() {
 }
 
 go_to_end() { key_press cmd_end; sleep 0.3; }
+# key_press_counted: like key_press but counts for undo
+key_press_counted() { key_press "$1"; UNDO_COUNT=$((UNDO_COUNT + 1)); }
 
 
 PUSH_URL="https://127.0.0.1:3000/push-reply"
@@ -139,26 +142,45 @@ SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)"
 # Marker: last 30 chars of document — used by deleteAfter to remove test text
 DOC_MARKER=""
 
+UNDO_COUNT=0  # Tracks keystrokes for undo
+
 undo_all() {
-    # SAFE cleanup: Cmd+Z to undo typed text (safe even on wrong window)
-    # NEVER use Cmd+A, Cmd+X, deleteAfter, or open/close documents
-    osascript -e '
-tell application "Microsoft Word" to activate
+    # Undo exactly the number of keystrokes typed since last undo
+    # Add small buffer for return keys and replace operations
+    local n=$((UNDO_COUNT + 5))
+    UNDO_COUNT=0
+    osascript -e "
+tell application \"Microsoft Word\" to activate
 delay 0.3
+tell application \"System Events\"
+    repeat $n times
+        keystroke \"z\" using command down
+        delay 0.02
+    end repeat
+end tell
+" 2>/dev/null
+    sleep 2
+    # Verify document intact
+    local h=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
+    if [ "$h" != "$ORIG_DOC_HASH" ]; then
+        # Try a few more undos to recover
+        osascript -e '
+tell application "Microsoft Word" to activate
+delay 0.2
 tell application "System Events"
-    repeat 80 times
+    repeat 20 times
         keystroke "z" using command down
         delay 0.02
     end repeat
 end tell
 ' 2>/dev/null
-    sleep 2
-    # Verify document intact
-    local h=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
-    if [ "$h" != "$ORIG_DOC_HASH" ]; then
-        echo "  ABORT: Document corrupted! hash=$h expected=$ORIG_DOC_HASH"
-        echo "=== Results: $PASS passed, $FAIL failed (ABORTED) ==="
-        exit 1
+        sleep 1
+        h=$(osascript -e 'tell application "Microsoft Word" to content of text object of active document' 2>/dev/null | md5)
+        if [ "$h" != "$ORIG_DOC_HASH" ]; then
+            echo "  ABORT: Document corrupted! hash=$h expected=$ORIG_DOC_HASH"
+            echo "=== Results: $PASS passed, $FAIL failed (ABORTED) ==="
+            exit 1
+        fi
     fi
     sleep 1
 }
@@ -184,7 +206,7 @@ PASS=$((PASS + 1))
 # ============================================================
 echo ""
 echo "Test 1: Spelling error 'somx' → 'som'"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er en morsom sport somx er veldig morsom."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -194,7 +216,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 2: Correct text — no false positives"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er en morsom sport."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -205,7 +227,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 2b: Correct neuter sentence — no false positives"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er et morsomt spill."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -216,7 +238,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 3: Multiple errors in one sentence"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Jeg liker aa spise matx og drikkx."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -227,10 +249,11 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 4: Type misspelled, fix with backspace"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Jeg liker fotbalx."
 sleep 3
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbalx","text":"fotball"}' 2>/dev/null
+UNDO_COUNT=$((UNDO_COUNT + 2))
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -240,7 +263,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 5: Grammar error — gender mismatch"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er en morsom spor."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -250,7 +273,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 5b: Grammar error — adj gender mismatch (morsomt with masculine)"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er en morsomt sport."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -260,7 +283,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 6: Delete sentence — stale error gone"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Dette er en feilx i teksten."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -273,12 +296,13 @@ check_no_error "feilx gone after undo" "feilx" "$ERRORS"
 # ============================================================
 echo ""
 echo "Test 7: Fix misspelled word via replace"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Han liker fotbollzz veldig godt."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotbollzz detected" "fotbollzz" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"fotbollzz","text":"fotball"}' 2>/dev/null
+UNDO_COUNT=$((UNDO_COUNT + 2))
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -288,12 +312,13 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 8: Split sentence with Enter"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er morsomt somx er fint."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx in single line" "somx" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"morsomt somx","text":"morsomt\nsomx"}' 2>/dev/null
+UNDO_COUNT=$((UNDO_COUNT + 2))
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -303,12 +328,13 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 9: Replace correct word with misspelled"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Jeg spiller fotball hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotball correct" "fotball" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Jeg spiller fotball","text":"Jeg spiller fotboll"}' 2>/dev/null
+UNDO_COUNT=$((UNDO_COUNT + 2))
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -318,7 +344,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 10: Rapid typing — no crash"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Dette er en rask test med mange ord uten feilx."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -328,17 +354,18 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 11: Fix error then re-introduce same error (stale hash race)"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Han spiller fotboll hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Han spiller fotboll","text":"Han spiller fotball"}' 2>/dev/null
+UNDO_COUNT=$((UNDO_COUNT + 2))
 curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Han spiller fotboll hver dag."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -348,7 +375,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 12: Correct sentences — no false positives"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er en morsom sport."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -356,7 +383,7 @@ check_no_error "Fotball not flagged" "Fotball" "$ERRORS"
 check_no_error "sport not flagged" "sport" "$ERRORS"
 undo_all
 
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Fotball er et morsomt spill."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -364,7 +391,7 @@ check_no_error "spill not flagged" "spill" "$ERRORS"
 check_no_error "Fotball not flagged (neuter)" "Fotball" "$ERRORS"
 undo_all
 
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Han liker å spille fotball."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -375,7 +402,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 5c: Grammar error — er + present verb"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Jeg er spiller fotball."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -385,9 +412,9 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 13: Duplicate sentences both detected"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Han liker duplikatxx veldig godt."
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Han liker duplikatxx veldig godt."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -406,8 +433,9 @@ echo ""
 echo "Test 14: Paste misspelled text — error detected"
 osascript -e 'set the clipboard to "Han liker pasteerrorx veldig godt."' 2>/dev/null
 sleep 0.5
-go_to_end; key_press return
+go_to_end; key_press_counted return
 key_press cmd_v
+UNDO_COUNT=$((UNDO_COUNT + 1))
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pasteerrorx detected after paste" "pasteerrorx" "" "$ERRORS"
@@ -416,7 +444,7 @@ undo_all
 # ============================================================
 echo ""
 echo "Test 15: Delete removes error"
-go_to_end; key_press return
+go_to_end; key_press_counted return
 type_text "Dette er en feilzz i teksten."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
@@ -440,8 +468,9 @@ echo ""
 echo "Test 16: Paste different misspelled text — error detected"
 osascript -e 'set the clipboard to "Fotball er gøy med pastezz."' 2>/dev/null
 sleep 0.3
-go_to_end; key_press return
+go_to_end; key_press_counted return
 key_press cmd_v
+UNDO_COUNT=$((UNDO_COUNT + 1))
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pastezz detected after paste" "pastezz" "" "$ERRORS"
