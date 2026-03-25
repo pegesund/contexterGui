@@ -583,7 +583,7 @@ fn handle_request_rw<S: Read + Write>(
 
         ("GET", "/taskpane.html") | ("GET", "/") => {
             let response = format!(
-                "HTTP/1.1 200 OK\r\n{}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\n{}Content-Type: text/html; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
                 cors, static_html.len(), static_html
             );
             let _ = stream.write_all(response.as_bytes());

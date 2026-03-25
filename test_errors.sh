@@ -182,7 +182,8 @@ end tell
             exit 1
         fi
     fi
-    # Wait for grammar actor to settle (process pending responses)
+    # Trigger rescan to reset paragraph tracking after undo
+    curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
     sleep 3
 }
 
