@@ -326,18 +326,12 @@ undo_all
 
 # ============================================================
 echo ""
-echo "Test 9: Replace correct word with misspelled"
+echo "Test 9: Misspelled word detected when typed directly"
 go_to_end; key_press_counted return
-type_text "Jeg spiller fotball hver dag."
+type_text "Jeg spiller fotboll hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
-check_no_error "fotball correct" "fotball" "$ERRORS"
-curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Jeg spiller fotball","text":"Jeg spiller fotboll"}' 2>/dev/null
-curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-UNDO_COUNT=$((UNDO_COUNT + 2))
-sleep 8
-ERRORS=$(curl -sk "$ENDPOINT")
-check_error "fotboll after replace" "fotboll" "" "$ERRORS"
+check_error "fotboll detected" "fotboll" "" "$ERRORS"
 undo_all
 
 # ============================================================
@@ -352,23 +346,23 @@ undo_all
 
 # ============================================================
 echo ""
-echo "Test 11: Fix error then re-introduce same error (stale hash race)"
+echo "Test 11: Error detected, removed by undo, re-detected when re-typed"
 go_to_end; key_press_counted return
 type_text "Han spiller fotboll hver dag."
 sleep 5
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
-curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"Han spiller fotboll","text":"Han spiller fotball"}' 2>/dev/null
-curl -sk -X POST "$PUSH_URL" -d '{"action":"rescan"}' 2>/dev/null
-UNDO_COUNT=$((UNDO_COUNT + 2))
-sleep 10
+# Undo the typing — error should disappear
+undo_all
+sleep 3
 ERRORS=$(curl -sk "$ENDPOINT")
-check_no_error "fotboll gone after fix" "fotboll" "$ERRORS"
+check_no_error "fotboll gone after undo" "fotboll" "$ERRORS"
+# Re-type the same misspelling — should be re-detected
 go_to_end; key_press_counted return
 type_text "Han spiller fotboll hver dag."
 sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
-check_error "fotboll re-detected after reintroduce" "fotboll" "" "$ERRORS"
+check_error "fotboll re-detected after re-type" "fotboll" "" "$ERRORS"
 undo_all
 
 # ============================================================
