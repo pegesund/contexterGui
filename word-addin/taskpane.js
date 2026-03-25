@@ -414,7 +414,10 @@ function doReplace(expected, replacement, paragraphId) {
             return ctx.sync().then(function () {
                 if (results.items.length > 0) {
                     results.items[0].insertText(replacement, "Replace");
-                    return ctx.sync();
+                    return ctx.sync().then(function () {
+                        // Trigger rescan so changed paragraph is detected
+                        rescanAll();
+                    });
                 }
             });
         } else {
@@ -423,7 +426,10 @@ function doReplace(expected, replacement, paragraphId) {
             return ctx.sync().then(function () {
                 if (results.items.length > 0) {
                     results.items[0].insertText(replacement, "Replace");
-                    return ctx.sync();
+                    return ctx.sync().then(function () {
+                        // Trigger rescan so changed paragraph is detected
+                        rescanAll();
+                    });
                 }
             });
         }
