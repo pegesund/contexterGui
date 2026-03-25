@@ -1815,7 +1815,7 @@ impl ContextApp {
                 {
                     if e.suggestion != *best {
                         // Capitalize if at sentence start or originally capitalized
-                        let mut suggestion = best.clone();
+                        let mut suggestion = best.trim().to_string();
                         let word_lower = e.word.to_lowercase();
                         let at_sentence_start = e.sentence_context.to_lowercase().starts_with(&word_lower);
                         let is_upper = e.sentence_context.to_lowercase().find(&word_lower)
@@ -1929,7 +1929,7 @@ impl ContextApp {
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
                 if !best.is_empty() {
-                    let mut suggestion = best.clone();
+                    let mut suggestion = best.trim().to_string();
                     let word_lower = word.to_lowercase();
                     let at_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
                     let is_upper = sentence_ctx.to_lowercase().find(&word_lower)
