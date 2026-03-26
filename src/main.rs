@@ -1492,6 +1492,15 @@ impl ContextApp {
                         }
                     }
                 }
+                // Also accept words found in wordfreq (freq ≥ 10 in Norwegian corpus)
+                if !found {
+                    if let Some(wf) = &self.wordfreq {
+                        if wf.contains_key(&clean) {
+                            found = true;
+                            log!("spell: '{}' accepted via wordfreq", clean);
+                        }
+                    }
+                }
                 if !found {
                     log!("spell: '{}' NOT in dict (sentence: '{}')", clean, trunc(sentence_ctx, 50));
                 }
@@ -3086,6 +3095,7 @@ impl ContextApp {
             // Handle unknown words (spelling errors) — from check_sentence_full
             for unk in resp.unknown_words.iter()
                 .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
+                .filter(|u| !self.wordfreq.as_ref().map_or(false, |wf| wf.contains_key(&u.word.to_lowercase())))
             {
                 let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default()
                     .trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
@@ -3135,6 +3145,45 @@ impl ContextApp {
 
             // Stale underlines from previous sessions are cleared at app startup
             // via AppleScript (set underline of font to underline none).
+        }
+
+        // BERT re-rank spelling suggestions from grammar checker
+        if self.bert_ready {
+            let to_rerank: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
+                .filter(|(_, e)| {
+                    matches!(e.category, ErrorCategory::Spelling)
+                        && !e.ignored
+                        && e.rule_name == "stavefeil"
+                        && !e.sentence_context.is_empty()
+                })
+                .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
+                .collect();
+            for (idx, word, sentence_ctx) in to_rerank {
+                // Skip long words with close suggestions (compound words)
+                let orig = &self.writing_errors[idx].suggestion;
+                if word.len() >= 10 && !orig.is_empty() && orig.len() >= 8 {
+                    let dist = levenshtein_distance(&word.to_lowercase(), &orig.to_lowercase());
+                    if dist <= 2 {
+                        self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
+                        continue;
+                    }
+                }
+                let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
+                if let Some((best, score)) = suggestions.first() {
+                    if !best.is_empty() {
+                        let mut suggestion = best.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
+                        let word_lower = word.to_lowercase();
+                        let at_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
+                        if at_start {
+                            let mut chars = suggestion.chars();
+                            suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                        }
+                        log!("Grammar spell rerank: '{}' → '{}' (score={:.2})", word, suggestion, score);
+                        self.writing_errors[idx].suggestion = suggestion;
+                    }
+                }
+                self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
+            }
         }
     }
 
@@ -3893,6 +3942,17 @@ impl eframe::App for ContextApp {
                         self.prefix_index = prefix_index;
                         self.baselines = baselines;
                         self.wordfreq = wordfreq;
+                        // Retroactively remove spelling errors for words now found in wordfreq
+                        if let Some(wf) = &self.wordfreq {
+                            let before = self.writing_errors.len();
+                            self.writing_errors.retain(|e| {
+                                !(matches!(e.category, ErrorCategory::Spelling) && wf.contains_key(&e.word.to_lowercase()))
+                            });
+                            let removed = before - self.writing_errors.len();
+                            if removed > 0 {
+                                log!("Wordfreq: removed {} false-positive spelling errors", removed);
+                            }
+                        }
                         self.embedding_store = embedding_store;
                         if let Some(m) = model {
                             let gs = self.grammar_actor.as_ref().map(|a| a.sender_clone());
