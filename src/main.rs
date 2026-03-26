@@ -1222,7 +1222,7 @@ impl ContextApp {
             manager: BridgeManager::new(platform::create_platform()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
-            poll_interval: Duration::from_millis(300),
+            poll_interval: Duration::from_millis(100),
             follow_cursor: true,
             goto_freeze_until: None,
             last_caret_pos: None,
@@ -4530,9 +4530,9 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // Dispatch after 300ms idle — ONE dispatch per sentence
+                // Dispatch after 150ms idle
                 if needs_completion
-                    && self.last_context_change.elapsed() >= Duration::from_millis(300)
+                    && self.last_context_change.elapsed() >= Duration::from_millis(150)
                 {
                     if let Some(worker) = &mut self.bert_worker {
                         // Pre-fetch on main thread (fast, uses analyzer)
