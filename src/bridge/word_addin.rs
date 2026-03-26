@@ -25,6 +25,8 @@ const PORT: u16 = 3000;
 pub struct ChangedParagraph {
     pub paragraph_id: String,
     pub text: String,
+    /// Absolute cursor position (from sel.start) — used to derive word/sentence for suggestions
+    pub cursor_start: Option<usize>,
 }
 
 pub struct WordAddinBridge {
@@ -776,9 +778,10 @@ fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
 
         let paragraph_id = extract_json_string(obj, "paragraphId").unwrap_or_default();
         let text = clean_word_text(&extract_json_string(obj, "text").unwrap_or_default());
+        let cursor_start = extract_json_number(obj, "cursorStart");
 
         if !text.is_empty() {
-            results.push(ChangedParagraph { paragraph_id, text });
+            results.push(ChangedParagraph { paragraph_id, text, cursor_start });
         }
 
         pos = obj_end;

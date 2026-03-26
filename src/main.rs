@@ -2941,8 +2941,45 @@ impl ContextApp {
                     continue;
                 }
 
-                log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
+                log!("Addin changed paragraph: '{}' (para={} cursor={:?})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10), p.cursor_start);
                 self.paragraph_texts.insert(p.paragraph_id.clone(), p.text.clone());
+
+                // Derive cursor context from paragraph text for fast suggestion triggering
+                // (don't wait for the slow /context POST — use paragraph data directly)
+                if let Some(_cursor_abs) = p.cursor_start {
+                    let text = &p.text;
+                    // Extract last word (what user is typing) — everything after last whitespace
+                    let last_word = text.rsplit(|c: char| c.is_whitespace())
+                        .next().unwrap_or("").trim_matches(|c: char| c.is_ascii_punctuation() && c != '-');
+                    // Extract sentence context — text after last sentence-ending punctuation
+                    let sent_start = text.rfind(|c: char| ".!?:".contains(c))
+                        .map(|i| {
+                            // Skip whitespace after punctuation
+                            let after = i + 1;
+                            text[after..].find(|c: char| !c.is_whitespace()).map(|j| after + j).unwrap_or(after)
+                        })
+                        .unwrap_or(0);
+                    let sentence = text[sent_start..].trim();
+                    // Build masked sentence for BERT: sentence with <mask> replacing the word
+                    let masked = if !last_word.is_empty() && sentence.ends_with(last_word) {
+                        let before = sentence[..sentence.len() - last_word.len()].trim_end();
+                        if before.is_empty() { "<mask>".to_string() } else { format!("{} <mask>", before) }
+                    } else {
+                        format!("{} <mask>", sentence)
+                    };
+                    let new_word = last_word.to_string();
+                    let new_sentence = sentence.to_string();
+                    // Only update context if word changed (avoids redundant completion dispatches)
+                    if new_word != self.context.word || new_sentence != self.context.sentence {
+                        self.context.word = new_word;
+                        self.context.sentence = new_sentence;
+                        self.context.masked_sentence = Some(masked);
+                        self.context.paragraph_id = p.paragraph_id.clone();
+                        self.context.cursor_doc_offset = p.cursor_start;
+                        self.last_prefix_change = Instant::now();
+                        self.pending_completion = true;
+                    }
+                }
 
                 // Strip control characters (vertical tab etc.) — now properly decoded by JSON parser
                 let clean_text: String = p.text.chars()
