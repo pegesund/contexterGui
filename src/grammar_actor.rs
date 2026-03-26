@@ -157,37 +157,80 @@ pub fn spawn_grammar_actor(
         .name("grammar-actor".into())
         .spawn(move || {
             let mut checker = checker;
+            // Helper: process one async request
+            let process_async = |checker: &mut AnyChecker, req: GrammarCheckRequest, resp_tx: &mpsc::Sender<GrammarCheckResponse>, repaint_ctx: &egui::Context| {
+                let mut result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
+                if !req.user_words.is_empty() {
+                    result.unknown_words.retain(|u| {
+                        !req.user_words.iter().any(|uw| uw.eq_ignore_ascii_case(&u.word))
+                    });
+                }
+                let _ = resp_tx.send(GrammarCheckResponse {
+                    sentence: req.sentence,
+                    doc_offset: req.doc_offset,
+                    paragraph_id: req.paragraph_id,
+                    sentence_index: req.sentence_index,
+                    errors: result.errors,
+                    unknown_words: result.unknown_words,
+                    compound_candidates: result.compound_candidates,
+                });
+                repaint_ctx.request_repaint();
+            };
+
             while let Ok(msg) = req_rx.recv() {
-                match msg {
-                    ActorMessage::Async(req) => {
-                        let mut result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
-                        // Filter out user dict words from unknowns
-                        if !req.user_words.is_empty() {
-                            result.unknown_words.retain(|u| {
-                                !req.user_words.iter().any(|uw| uw.eq_ignore_ascii_case(&u.word))
-                            });
+                // Drain all pending messages: process sync immediately, dedup async by paragraph
+                let mut pending_async: Vec<GrammarCheckRequest> = Vec::new();
+                let mut first = Some(msg);
+                loop {
+                    let m = if let Some(f) = first.take() { f } else {
+                        match req_rx.try_recv() { Ok(m) => m, Err(_) => break }
+                    };
+                    match m {
+                        ActorMessage::Sync(req) => {
+                            // Priority: process sync immediately
+                            let errors = checker.check_sentence(&req.sentence);
+                            let _ = req.reply.send(SyncCheckResponse { errors });
                         }
-                        let _ = resp_tx.send(GrammarCheckResponse {
-                            sentence: req.sentence,
-                            doc_offset: req.doc_offset,
-                            paragraph_id: req.paragraph_id,
-                            sentence_index: req.sentence_index,
-                            errors: result.errors,
-                            unknown_words: result.unknown_words,
-                            compound_candidates: result.compound_candidates,
-                        });
-                        repaint_ctx.request_repaint();
+                        ActorMessage::SyncBatch(req) => {
+                            // Priority: process batch immediately
+                            let results: Vec<Vec<GrammarError>> = req.sentences.iter()
+                                .map(|s| checker.check_sentence(s))
+                                .collect();
+                            let _ = req.reply.send(SyncBatchResponse { results });
+                        }
+                        ActorMessage::Async(req) => {
+                            // Dedup: replace older request for same paragraph+sentence
+                            if let Some(pos) = pending_async.iter().position(|p| {
+                                p.paragraph_id == req.paragraph_id && p.sentence == req.sentence
+                            }) {
+                                pending_async[pos] = req;
+                            } else {
+                                pending_async.push(req);
+                            }
+                        }
                     }
-                    ActorMessage::Sync(req) => {
-                        let errors = checker.check_sentence(&req.sentence);
-                        let _ = req.reply.send(SyncCheckResponse { errors });
+                }
+                // Process deduped async requests (oldest first)
+                for req in pending_async {
+                    // Before each async, check for new sync requests that arrived
+                    while let Ok(m) = req_rx.try_recv() {
+                        match m {
+                            ActorMessage::Sync(r) => {
+                                let errors = checker.check_sentence(&r.sentence);
+                                let _ = r.reply.send(SyncCheckResponse { errors });
+                            }
+                            ActorMessage::SyncBatch(r) => {
+                                let results: Vec<Vec<GrammarError>> = r.sentences.iter()
+                                    .map(|s| checker.check_sentence(s))
+                                    .collect();
+                                let _ = r.reply.send(SyncBatchResponse { results });
+                            }
+                            ActorMessage::Async(_) => {
+                                // Drop late arrivals — they'll come again on next paragraph change
+                            }
+                        }
                     }
-                    ActorMessage::SyncBatch(req) => {
-                        let results: Vec<Vec<GrammarError>> = req.sentences.iter()
-                            .map(|s| checker.check_sentence(s))
-                            .collect();
-                        let _ = req.reply.send(SyncBatchResponse { results });
-                    }
+                    process_async(&mut checker, req, &resp_tx, &repaint_ctx);
                 }
             }
             std::mem::forget(checker);

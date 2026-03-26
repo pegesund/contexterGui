@@ -2936,8 +2936,10 @@ impl ContextApp {
         for bridge in &self.manager.bridges {
             let changed = bridge.drain_changed_paragraphs();
             for p in changed {
-                // Clear errors only for CHANGED sentences in this paragraph.
-                // Errors for unchanged (clean hash) sentences are kept.
+                // Skip if text is identical to last time (add-in sends duplicates)
+                if self.paragraph_texts.get(&p.paragraph_id).map_or(false, |t| t == &p.text) {
+                    continue;
+                }
 
                 log!("Addin changed paragraph: '{}' (para={})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10));
                 self.paragraph_texts.insert(p.paragraph_id.clone(), p.text.clone());
@@ -3298,30 +3300,8 @@ impl ContextApp {
                     }
                 }
                 let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
-                // Grammar-filter: pick first candidate that doesn't produce grammar errors
-                let best_suggestion = if let Some(actor) = &self.grammar_actor {
-                    let word_lower = word.to_lowercase();
-                    let top: Vec<&(String, f32)> = suggestions.iter().take(8).collect();
-                    if !top.is_empty() {
-                        // Build test sentences: replace misspelled word with each candidate
-                        let sentences: Vec<String> = top.iter().map(|(c, _)| {
-                            if let Some(pos) = sentence_ctx.to_lowercase().find(&word_lower) {
-                                format!("{}{}{}", &sentence_ctx[..pos], c, &sentence_ctx[pos + word_lower.len()..])
-                            } else {
-                                sentence_ctx.replace(&word, c)
-                            }
-                        }).collect();
-                        let results = actor.check_sentences_batch(&sentences);
-                        // Pick first candidate with no grammar errors
-                        let grammar_valid = top.iter().zip(results.iter())
-                            .find(|(_, errs)| errs.is_empty())
-                            .map(|((c, s), _)| (c.clone(), *s));
-                        grammar_valid.or_else(|| top.first().map(|(c, s)| (c.clone(), *s)))
-                    } else { None }
-                } else {
-                    suggestions.first().cloned()
-                };
-                if let Some((best, score)) = best_suggestion {
+                // Pick best ortho+dict candidate (grammar filtering happens async in BERT worker)
+                if let Some((best, score)) = suggestions.first().cloned() {
                     if !best.is_empty() {
                         let mut suggestion = best.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
                         let word_lower = word.to_lowercase();

@@ -368,39 +368,33 @@ fn worker_loop(
                             (left, right)
                         };
 
-                        // Grammar filter: batch ALL candidates in ONE call to grammar actor
-                        let (left_filtered, right_filtered) = if let Some(ref gs) = grammar_sender {
-                            let filter_batch = |candidates: Vec<Completion>, ctx: &str, label: &str| -> Vec<Completion> {
-                                if candidates.is_empty() { return candidates; }
-                                let last_start = ctx.rfind(|c: char| ".!?".contains(c))
-                                    .map(|i| i + 1).unwrap_or(0);
-                                let fragment = ctx[last_start..].trim();
-                                let sentences: Vec<String> = candidates.iter()
-                                    .map(|c| format!("{} {}.", fragment, c.word))
-                                    .collect();
-                                let t_gram = std::time::Instant::now();
-                                let results = crate::grammar_actor::grammar_batch_via_sender(gs, &sentences);
-                                {
-                                    use std::io::Write;
-                                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                        .open(std::env::temp_dir().join("acatts-bert.log")) {
-                                        let _ = writeln!(f, "grammar_batch({}, {} sentences) → {:?} in {:?}",
-                                            label, sentences.len(),
-                                            results.iter().map(|r| r.len()).collect::<Vec<_>>(),
-                                            t_gram.elapsed());
-                                    }
-                                }
-                                candidates.into_iter().zip(results.iter())
-                                    .filter(|(_, errs)| errs.is_empty())
-                                    .map(|(c, _)| c)
-                                    .take(5)
-                                    .collect()
-                            };
-                            let lf = filter_batch(left_dict, &context, "left");
-                            let rf = filter_batch(right_dict, &context, "right");
-                            (lf, rf)
+                        // Grammar filter — but skip if already cancelled (user typed more)
+                        let (left_filtered, right_filtered) = if !cancel.load(Ordering::Acquire) {
+                            if let Some(ref gs) = grammar_sender {
+                                let filter_batch = |candidates: Vec<Completion>, ctx: &str| -> Vec<Completion> {
+                                    if candidates.is_empty() { return candidates; }
+                                    let last_start = ctx.rfind(|c: char| ".!?".contains(c))
+                                        .map(|i| i + 1).unwrap_or(0);
+                                    let fragment = ctx[last_start..].trim();
+                                    let sentences: Vec<String> = candidates.iter()
+                                        .map(|c| format!("{} {}.", fragment, c.word))
+                                        .collect();
+                                    let results = crate::grammar_actor::grammar_batch_via_sender(gs, &sentences);
+                                    candidates.into_iter().zip(results.iter())
+                                        .filter(|(_, errs)| errs.is_empty())
+                                        .map(|(c, _)| c)
+                                        .take(5)
+                                        .collect()
+                                };
+                                let lf = filter_batch(left_dict, &context);
+                                let rf = filter_batch(right_dict, &context);
+                                (lf, rf)
+                            } else {
+                                (left_dict.into_iter().take(5).collect(), right_dict.into_iter().take(5).collect())
+                            }
                         } else {
-                            (left_dict.into_iter().take(5).collect(), right_dict.into_iter().take(5).collect())
+                            // Cancelled — skip grammar filter, will be discarded anyway
+                            (vec![], vec![])
                         };
 
                         // Skip sending if cancelled (newer request arrived)
