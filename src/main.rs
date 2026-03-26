@@ -4517,8 +4517,7 @@ impl eframe::App for ContextApp {
                 let cache_key = format!("{}|{}", masked, prefix);
                 // Dedup: use sentence (masked text) as the stable key — prefix bounces don't re-trigger
                 let sentence_key = masked.clone();
-                let needs_completion = cache_key != self.last_completed_prefix
-                    && sentence_key != self.last_dispatched_sentence;
+                let needs_completion = cache_key != self.last_completed_prefix;
 
                 if needs_completion && cache_key != self.dispatched_key {
                     // Context or prefix changed — reset debounce timer, cancel in-flight

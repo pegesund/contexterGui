@@ -275,74 +275,84 @@ function sendChangedParagraphs(changed) {
 
 // ── Typing / cursor move ──
 
+var selectionSeq = 0; // sequence counter — only latest callback sends context
+var lastSelStart = -1; // track cursor position
+var lastSentWord = ""; // track last word sent — reject stale empty-word reads
+
 function onSelectionChanged() {
+    var mySeq = ++selectionSeq;
     Word.run(function (ctx) {
-        // Lightweight: only load what we need — no getRange/expandTo
         var sel = ctx.document.getSelection();
         var para = sel.paragraphs.getFirst();
+        var paraRange = para.getRange("Start");
+        var beforeCursor = paraRange.expandTo(sel.getRange("Start"));
         sel.load("start");
         para.load("text,uniqueLocalId");
+        beforeCursor.load("text");
         return ctx.sync().then(function () {
-            var paraText = para.text;
-            var paraId = para.uniqueLocalId;
+            // Stale callback — a newer onSelectionChanged already fired
+            if (mySeq !== selectionSeq) return;
 
-            // Detect paragraph changes — send text + cursor offset
+            // (stale-read check moved below after paragraph change detection)
+
+            var paraText = para.text;
+            var cursorInPara = beforeCursor.text.length;
+            if (cursorInPara > paraText.length) cursorInPara = paraText.length;
+
+            // Check if paragraph is new or changed (paste/cut/drag) — trigger rescan
+            var paraId = para.uniqueLocalId;
             var currentHash = hashString(paraText);
-            var textChanged = (paragraphMap[paraId] !== currentHash);
-            if (textChanged || paragraphMap[paraId] === undefined) {
-                paragraphMap[paraId] = currentHash;
-                // Include cursor offset so Rust can derive word/sentence
-                sendChangedParagraphs([{
-                    paragraphId: paraId,
-                    text: paraText,
-                    cursorStart: sel.start
-                }]);
-                if (!textChanged) {
+            if (paragraphMap[paraId] === undefined || paragraphMap[paraId] !== currentHash) {
+                if (paragraphMap[paraId] !== currentHash) {
+                    paragraphMap[paraId] = currentHash;
+                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText }]);
+                }
+                if (paragraphMap[paraId] === undefined) {
                     scheduleRescan();
                 }
             }
 
             // Store for fast replaceAtCursor
-            var result = detectSentence(paraText, paraText.length); // approximate
             lastCursorParaId = paraId;
-            lastCursorInPara = paraText.length;
+            lastCursorInPara = cursorInPara;
 
-            // Full /context POST only on word boundary (space, punctuation, or empty word)
-            var lastChar = paraText.length > 0 ? paraText[paraText.length - 1] : " ";
-            var atWordBoundary = (lastChar === " " || SENTENCE_DELIMITERS.test(lastChar));
-            if (atWordBoundary || !textChanged) {
-                // Compute precise cursor position for word boundary context
-                var cursorInPara = paraText.length; // approximation: cursor at end
-                var result2 = detectSentence(paraText, cursorInPara);
+            var result = detectSentence(paraText, cursorInPara);
 
-                var key = result2.sentence + "|" + result2.wordAtCursor + "|" + sel.start;
-                if (key === lastSentKey) return;
-                lastSentKey = key;
-
-                setStatus("pos " + sel.start + " ord: " + result2.wordAtCursor, "ok");
-
-                return fetch(BRIDGE_URL + "/context", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        type: "typing",
-                        sentence: result2.sentence,
-                        word: result2.wordAtCursor,
-                        cursorStart: sel.start,
-                        paragraphId: paraId,
-                        documentName: (Office.context.document && Office.context.document.url) || ("doc-" + paraId)
-                    })
-                }).then(function (resp) {
-                    return resp.json();
-                }).then(function (data) {
-                    if (data && data.status === "rescan") {
-                        setStatus("Byttet dokument — skanner...", "ok");
-                        initialScan();
-                    }
-                }).catch(function () {
-                    setStatus("Kan ikke nå NorskTale-app", "err");
-                });
+            // Reject stale reads: empty word near a recent non-empty word position
+            if (result.wordAtCursor === "" && lastSentWord !== ""
+                && Math.abs(sel.start - lastSelStart) < 5) {
+                return;
             }
+            lastSelStart = sel.start;
+            lastSentWord = result.wordAtCursor;
+
+            var key = result.sentence + "|" + result.wordAtCursor + "|" + sel.start;
+            if (key === lastSentKey) return;
+            lastSentKey = key;
+
+            setStatus("pos " + sel.start + " ord: " + result.wordAtCursor, "ok");
+
+            return fetch(BRIDGE_URL + "/context", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    type: "typing",
+                    sentence: result.sentence,
+                    word: result.wordAtCursor,
+                    cursorStart: sel.start,
+                    paragraphId: para.uniqueLocalId,
+                    documentName: (Office.context.document && Office.context.document.url) || ("doc-" + para.uniqueLocalId)
+                })
+            }).then(function (resp) {
+                return resp.json();
+            }).then(function (data) {
+                if (data && data.status === "rescan") {
+                    setStatus("Byttet dokument — skanner...", "ok");
+                    initialScan();
+                }
+            }).catch(function () {
+                setStatus("Kan ikke nå NorskTale-app", "err");
+            });
         });
     }).catch(function () {});
 }
