@@ -3169,7 +3169,30 @@ impl ContextApp {
                     }
                 }
                 let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
-                if let Some((best, score)) = suggestions.first() {
+                // Grammar-filter: pick first candidate that doesn't produce grammar errors
+                let best_suggestion = if let Some(actor) = &self.grammar_actor {
+                    let word_lower = word.to_lowercase();
+                    let top: Vec<&(String, f32)> = suggestions.iter().take(8).collect();
+                    if !top.is_empty() {
+                        // Build test sentences: replace misspelled word with each candidate
+                        let sentences: Vec<String> = top.iter().map(|(c, _)| {
+                            if let Some(pos) = sentence_ctx.to_lowercase().find(&word_lower) {
+                                format!("{}{}{}", &sentence_ctx[..pos], c, &sentence_ctx[pos + word_lower.len()..])
+                            } else {
+                                sentence_ctx.replace(&word, c)
+                            }
+                        }).collect();
+                        let results = actor.check_sentences_batch(&sentences);
+                        // Pick first candidate with no grammar errors
+                        let grammar_valid = top.iter().zip(results.iter())
+                            .find(|(_, errs)| errs.is_empty())
+                            .map(|((c, s), _)| (c.clone(), *s));
+                        grammar_valid.or_else(|| top.first().map(|(c, s)| (c.clone(), *s)))
+                    } else { None }
+                } else {
+                    suggestions.first().cloned()
+                };
+                if let Some((best, score)) = best_suggestion {
                     if !best.is_empty() {
                         let mut suggestion = best.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
                         let word_lower = word.to_lowercase();
@@ -3178,7 +3201,7 @@ impl ContextApp {
                             let mut chars = suggestion.chars();
                             suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
                         }
-                        log!("Grammar spell rerank: '{}' → '{}' (score={:.2})", word, suggestion, score);
+                        log!("Grammar spell rerank: '{}' → '{}' (score={:.2}, grammar-checked)", word, suggestion, score);
                         self.writing_errors[idx].suggestion = suggestion;
                     }
                 }
@@ -4170,11 +4193,39 @@ impl eframe::App for ContextApp {
                     }
                     // Check if cursor is on an error word → activate in Grammatikk tab
                     let cursor_word = new_ctx.word.to_lowercase();
+                    let cursor_para = new_ctx.paragraph_id.clone();
                     {
                         let hit = if !cursor_word.is_empty() {
-                            // Match by word text (works with add-in where doc offsets aren't available)
                             self.writing_errors.iter().enumerate().find(|(_, e)| {
-                                !e.ignored && e.word.to_lowercase() == cursor_word
+                                if e.ignored { return false; }
+                                // Spelling errors: word field is the misspelled word
+                                if matches!(e.category, ErrorCategory::Spelling) {
+                                    return e.word.to_lowercase() == cursor_word;
+                                }
+                                // Grammar errors: match if cursor word is in the same
+                                // paragraph's sentence. Check all «word» in explanation.
+                                if matches!(e.category, ErrorCategory::Grammar) {
+                                    // Must be same paragraph
+                                    if !cursor_para.is_empty() && e.paragraph_id != cursor_para {
+                                        return false;
+                                    }
+                                    // Check all «flagged» words in explanation
+                                    let expl = &e.explanation;
+                                    let mut pos = 0;
+                                    while let Some(start) = expl[pos..].find('«') {
+                                        let abs_start = pos + start + '«'.len_utf8();
+                                        if let Some(end) = expl[abs_start..].find('»') {
+                                            let flagged = &expl[abs_start..abs_start + end];
+                                            if flagged.to_lowercase() == cursor_word {
+                                                return true;
+                                            }
+                                            pos = abs_start + end + '»'.len_utf8();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                                false
                             })
                         } else {
                             None
@@ -4184,10 +4235,9 @@ impl eframe::App for ContextApp {
                                 log!("Click hit: word='{}' → error idx={} '{}' rule={}",
                                     cursor_word, idx, trunc(&e.explanation, 40), e.rule_name);
                             }
-                            // Only switch to Grammatikk tab if already on it
-                            // Don't interrupt the user's suggestion workflow
-                            if self.selected_tab == 1 {
-                                // already on grammar tab — keep it
+                            // Switch to Grammatikk tab when clicking a grammar error
+                            if matches!(e.category, ErrorCategory::Grammar) {
+                                self.selected_tab = 1;
                             }
                             if self.focused_error_idx != Some(idx) {
                                 self.focused_error_scroll_done = false;

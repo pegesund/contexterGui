@@ -231,6 +231,35 @@ fn worker_loop(
                     Ok(result) => result.scored_candidates,
                     Err(_) => Vec::new(),
                 };
+                // Grammar filter: remove candidates that produce grammar errors in context
+                let scored = if let Some(ref gs) = grammar_sender {
+                    if !scored.is_empty() {
+                        let last_start = context_before.rfind(|c: char| ".!?".contains(c))
+                            .map(|i| i + 1).unwrap_or(0);
+                        let fragment = context_before[last_start..].trim();
+                        let sentences: Vec<String> = scored.iter()
+                            .map(|(c, _)| if context_after.is_empty() {
+                                format!("{} {}.", fragment, c)
+                            } else {
+                                format!("{} {} {}", fragment, c, context_after.trim_start())
+                            })
+                            .collect();
+                        let results = crate::grammar_actor::grammar_batch_via_sender(gs, &sentences);
+                        let filtered: Vec<(String, f32)> = scored.into_iter().zip(results.iter())
+                            .filter(|(_, errs)| errs.is_empty())
+                            .map(|(c, _)| c)
+                            .collect();
+                        if filtered.is_empty() {
+                            // All failed grammar — return original BERT-scored list unfiltered
+                            match spelling::score_spelling(&mut model, &context_before, &context_after, &candidates) {
+                                Ok(result) => result.scored_candidates,
+                                Err(_) => Vec::new(),
+                            }
+                        } else {
+                            filtered
+                        }
+                    } else { scored }
+                } else { scored };
                 let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
                 repaint_ctx.request_repaint();
             }
