@@ -275,12 +275,18 @@ function sendChangedParagraphs(changed) {
 
 // ── Typing / cursor move ──
 
-var selectionSeq = 0; // sequence counter — only latest callback sends context
+var selectionTimer = null; // debounce timer — one Word.run per pause
 var lastSelStart = -1; // track cursor position
 var lastSentWord = ""; // track last word sent — reject stale empty-word reads
 
 function onSelectionChanged() {
-    var mySeq = ++selectionSeq;
+    // Debounce: wait 80ms after last keystroke, then do ONE Word.run
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = setTimeout(doSelectionRead, 80);
+}
+
+function doSelectionRead() {
+    selectionTimer = null;
     Word.run(function (ctx) {
         var sel = ctx.document.getSelection();
         var para = sel.paragraphs.getFirst();
@@ -290,11 +296,6 @@ function onSelectionChanged() {
         para.load("text,uniqueLocalId");
         beforeCursor.load("text");
         return ctx.sync().then(function () {
-            // Stale callback — a newer onSelectionChanged already fired
-            if (mySeq !== selectionSeq) return;
-
-            // (stale-read check moved below after paragraph change detection)
-
             var paraText = para.text;
             var cursorInPara = beforeCursor.text.length;
             if (cursorInPara > paraText.length) cursorInPara = paraText.length;

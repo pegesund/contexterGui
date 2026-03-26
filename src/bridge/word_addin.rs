@@ -648,7 +648,11 @@ fn parse_context_json(body: &str) -> Option<CursorContext> {
     let sentence = clean_word_text(&extract_json_string(body, "sentence").unwrap_or_default());
     let word = clean_word_text(&extract_json_string(body, "word").unwrap_or_default());
     let cursor_start = extract_json_number(body, "cursorStart").unwrap_or(0);
+    let sync_ms = extract_json_number(body, "syncMs").unwrap_or(0);
     let paragraph_id = extract_json_string(body, "paragraphId").unwrap_or_default();
+    if sync_ms > 0 {
+        eprintln!("JS sync: {}ms word='{}' pos={}", sync_ms, word, cursor_start);
+    }
 
     // Build masked_sentence: replace the word with <mask> in the sentence.
     // The BERT completion pipeline requires this.
