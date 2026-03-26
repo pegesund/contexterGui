@@ -407,6 +407,8 @@ function pollReplies() {
                 doDeleteAfter(data.text);
             } else if (data.action === "deleteText" && data.text) {
                 doDeleteText(data.text);
+            } else if (data.action === "selectWord" && data.word) {
+                doSelectWord(data.word, data.paragraphId);
             }
         })
         .catch(function () {});
@@ -441,6 +443,25 @@ function doReplace(expected, replacement, paragraphId) {
             });
         }
     }).catch(function () {});
+}
+
+function doSelectWord(word, paragraphId) {
+    Word.run(function (ctx) {
+        var searchScope;
+        if (paragraphId) {
+            searchScope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+        } else {
+            searchScope = ctx.document.body;
+        }
+        var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
+        results.load("items");
+        return ctx.sync().then(function () {
+            if (results.items.length > 0) {
+                results.items[0].select();
+                return ctx.sync();
+            }
+        });
+    }).catch(function (e) { console.log("selectWord error:", e); });
 }
 
 function doUnderline(word, paragraphId, color) {

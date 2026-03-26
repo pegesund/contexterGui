@@ -56,6 +56,9 @@ pub trait TextBridge {
     /// Returns optional (x, y) screen position of the selection.
     fn select_range(&self, _char_start: usize, _char_end: usize) -> Option<(i32, i32)> { None }
 
+    /// Select/highlight a word within a specific paragraph (for navigating to errors in add-in).
+    fn select_word_in_paragraph(&self, _word: &str, _paragraph_id: &str) -> bool { false }
+
     /// Set the target window handle for cross-process reads (no-op by default).
     fn set_target_hwnd(&self, _hwnd: isize) {}
 

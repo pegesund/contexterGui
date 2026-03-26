@@ -303,6 +303,15 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
+    fn select_word_in_paragraph(&self, word: &str, paragraph_id: &str) -> bool {
+        let json = format!(
+            r#"{{"action":"selectWord","word":"{}","paragraphId":"{}"}}"#,
+            escape_json(word), escape_json(paragraph_id)
+        );
+        self.push_reply(json);
+        true
+    }
+
     fn underline_word(&self, word: &str, paragraph_id: &str, color: &str) -> bool {
         let json = format!(
             r#"{{"action":"underline","word":"{}","paragraphId":"{}","color":"{}"}}"#,

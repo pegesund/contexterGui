@@ -19,6 +19,30 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Truncate a string to at most `max` bytes, backing up to the nearest char boundary.
+/// Compute boost multiplier for a candidate word based on document frequency and user dictionary.
+/// Returns 1.0 (no boost) for common function words or words not in doc/user_dict.
+pub fn compute_boost(
+    word: &str,
+    doc_word_counts: &HashMap<String, u16>,
+    user_dict: Option<&user_dict::UserDict>,
+    wordfreq: Option<&HashMap<String, u64>>,
+) -> f32 {
+    let lower = word.to_lowercase();
+    // Never boost common function words (top ~31 in Norwegian: og, er, for, til, av, det, ...)
+    const COMMON_THRESHOLD: u64 = 40_000;
+    if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= COMMON_THRESHOLD) {
+        return 1.0;
+    }
+    let in_doc = doc_word_counts.get(&lower).copied().unwrap_or(0) >= 2;
+    let in_user = user_dict.map_or(false, |ud| ud.has_word(&lower));
+    match (in_doc, in_user) {
+        (true, true)   => 1.6,  // strongest: in both document and user dict
+        (false, true)  => 1.3,  // moderate: user's validated vocabulary
+        (true, false)  => 1.25, // mild: topic word in current document
+        (false, false) => 1.0,
+    }
+}
+
 fn levenshtein_distance(a: &str, b: &str) -> u32 {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let (m, n) = (a.len(), b.len());
@@ -251,6 +275,8 @@ pub(crate) struct WritingError {
     pub(crate) pinned: bool,
     /// Paragraph ID from Word Add-in (for error removal when sentence changes)
     pub(crate) paragraph_id: String,
+    /// The specific trigger word for grammar errors (what gets underlined)
+    pub(crate) error_word: String,
 }
 
 #[derive(Clone)]
@@ -560,6 +586,15 @@ impl BridgeManager {
         None
     }
 
+    fn select_word_in_paragraph(&self, word: &str, paragraph_id: &str) -> bool {
+        for bridge in &self.bridges {
+            if bridge.select_word_in_paragraph(word, paragraph_id) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn set_target_hwnd(&self, hwnd: isize) {
         for bridge in &self.bridges {
             bridge.set_target_hwnd(hwnd);
@@ -772,6 +807,11 @@ struct ContextApp {
     last_replaced_word: Option<String>,
     /// Hash of last document text — skip entire update if doc unchanged
     last_doc_hash: u64,
+    /// Document word frequency map — rebuilt when doc hash changes.
+    /// Maps lowercase word → count in current document.
+    doc_word_counts: HashMap<String, u16>,
+    /// Hash when doc_word_counts was last built
+    doc_word_counts_hash: u64,
     /// Number of sentences in last scan — detect paste vs fix
     last_sentence_count: usize,
     /// Hashes of sentences already checked for Prolog sub-splitting (expensive, persists across doc changes)
@@ -1251,6 +1291,8 @@ impl ContextApp {
             last_doc_approx_len: 0,
             last_replaced_word: None,
             last_doc_hash: 0,
+            doc_word_counts: HashMap::new(),
+            doc_word_counts_hash: 0,
             last_sentence_count: 0,
             prolog_checked_hashes: std::collections::HashSet::new(),
             processed_sentence_hashes: std::collections::HashSet::new(),
@@ -1449,7 +1491,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(),
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(),
                 });
             }
             return;
@@ -1618,7 +1660,7 @@ impl ContextApp {
             doc_offset,
             position: 0,
             ignored: false,
-            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(),
+            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(),
         });
         if !best.is_empty() {
             log!("Spelling: '{}' → '{}' (unified pipeline, bert_pending={})", clean, best, has_pending_bert);
@@ -1737,25 +1779,80 @@ impl ContextApp {
                         left.len(), left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
                         right.len(), right.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
                     // Completions arrive already dictionary + grammar filtered from worker thread
+                    // Apply document-frequency and user-dict boosting, then re-sort
                     {
-                        self.completions = left.into_iter().take(5).collect();
-                        self.open_completions = right.into_iter().take(5).collect();
+                        self.rebuild_doc_word_counts();
+                        // Capitalize all completions if after period or user typed uppercase
+                        let capitalize = self.context.sentence.trim().is_empty()
+                            || self.context.word.chars().next().map_or(false, |c| c.is_uppercase());
+                        let mut left_boosted: Vec<_> = left;
+                        for c in &mut left_boosted {
+                            c.score *= compute_boost(&c.word, &self.doc_word_counts,
+                                self.user_dict.as_ref(), self.wordfreq.as_deref());
+                            if capitalize && c.word.chars().next().map_or(false, |ch| ch.is_lowercase()) {
+                                let mut chars = c.word.chars();
+                                c.word = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                            }
+                        }
+                        left_boosted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                        self.completions = left_boosted.into_iter().take(5).collect();
 
-                        // Inject user dict words matching the prefix
-                        if let Some(ud) = &self.user_dict {
-                            let prefix = extract_prefix(&self.context.word).to_lowercase();
-                            if prefix.len() >= 3 {
+                        let mut right_boosted: Vec<_> = right;
+                        for c in &mut right_boosted {
+                            c.score *= compute_boost(&c.word, &self.doc_word_counts,
+                                self.user_dict.as_ref(), self.wordfreq.as_deref());
+                        }
+                        right_boosted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                        self.open_completions = right_boosted.into_iter().take(5).collect();
+
+                        // Inject document words and user dict words matching the prefix
+                        let prefix = extract_prefix(&self.context.word).to_lowercase();
+                        if prefix.len() >= 1 {
+                            let existing: std::collections::HashSet<String> = self.completions.iter()
+                                .map(|c| c.word.to_lowercase()).collect();
+
+                            // Inject document words (sorted by count, highest first)
+                            log!("Doc inject: prefix='{}' doc_word_counts={} entries, matches: {:?}",
+                                prefix, self.doc_word_counts.len(),
+                                self.doc_word_counts.iter()
+                                    .filter(|(w, _)| w.starts_with(&prefix))
+                                    .take(5).collect::<Vec<_>>());
+                            let mut doc_matches: Vec<(&String, &u16)> = self.doc_word_counts.iter()
+                                .filter(|(w, count)| **count >= 1 && w.starts_with(&prefix) && w.len() > prefix.len() && !existing.contains(w.as_str()))
+                                .collect();
+                            doc_matches.sort_by(|a, b| b.1.cmp(a.1));
+                            let after_period = self.context.sentence.trim().is_empty()
+                                || self.context.word.chars().next().map_or(false, |c| c.is_uppercase());
+                            for (dw, count) in doc_matches.into_iter().take(3) {
+                                // Restore original casing from paragraph_texts
+                                let mut word = self.paragraph_texts.values()
+                                    .flat_map(|t| t.split(|c: char| !c.is_alphanumeric() && c != '-'))
+                                    .find(|w| w.to_lowercase() == *dw)
+                                    .unwrap_or(dw.as_str())
+                                    .to_string();
+                                // After period or if user typed uppercase: capitalize
+                                if after_period && word.chars().next().map_or(false, |c| c.is_lowercase()) {
+                                    let mut chars = word.chars();
+                                    word = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                                }
+                                self.completions.insert(0, nostos_cognio::complete::Completion {
+                                    word, score: 50.0 + *count as f32, elapsed_ms: 0.0,
+                                });
+                            }
+
+                            // Inject user dict words
+                            if let Some(ud) = &self.user_dict {
                                 let existing: std::collections::HashSet<String> = self.completions.iter()
                                     .map(|c| c.word.to_lowercase()).collect();
                                 for uw in ud.list_words() {
-                                    if uw.starts_with(&prefix) && !existing.contains(&uw) {
+                                    if uw.starts_with(&prefix) && uw.len() > prefix.len() && !existing.contains(&uw) {
                                         self.completions.insert(0, nostos_cognio::complete::Completion {
                                             word: uw, score: 100.0, elapsed_ms: 0.0,
                                         });
                                     }
                                 }
-                                self.completions.truncate(5);
                             }
+                            self.completions.truncate(5);
                         }
                     }
                 self.last_completed_prefix = cache_key;
@@ -1808,8 +1905,10 @@ impl ContextApp {
         let mut rescored: Vec<(String, f32)> = scored_candidates.iter()
             .map(|(candidate, bert_score)| {
                 let ortho_sim = ortho_map.get(candidate).copied().unwrap_or(0.5);
-                let final_score = bert_score * ortho_sim.sqrt();
-                log!("  spelling BERT: '{}' bert={:.3} × sqrt(ortho {:.2}) = {:.3}", candidate, bert_score, ortho_sim, final_score);
+                let boost = compute_boost(candidate, &self.doc_word_counts,
+                    self.user_dict.as_ref(), self.wordfreq.as_deref());
+                let final_score = bert_score * ortho_sim.sqrt() * boost;
+                log!("  spelling BERT: '{}' bert={:.3} × sqrt(ortho {:.2}) × boost {:.2} = {:.3}", candidate, bert_score, ortho_sim, boost, final_score);
                 (candidate.clone(), final_score)
             })
             .collect();
@@ -1902,7 +2001,7 @@ impl ContextApp {
                     doc_offset: pending.doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(),
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(),
                 });
             }
         }
@@ -2125,6 +2224,9 @@ impl ContextApp {
             if w.chars().next() == Some(word_first) {
                 ortho_sim += 0.15;
             }
+            // Boost words found in document or user dictionary (TF-IDF style)
+            ortho_sim *= compute_boost(w, &self.doc_word_counts,
+                self.user_dict.as_ref(), self.wordfreq.as_deref());
             ortho_scored.push((w.clone(), ortho_sim));
         }
         ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -2382,6 +2484,30 @@ impl ContextApp {
             self.last_replaced_word = None;
         }
         self.last_doc_text = doc;
+    }
+
+    /// Rebuild document word frequency map (cached — skips if text unchanged).
+    fn rebuild_doc_word_counts(&mut self) {
+        // Get text source — prefer paragraph_texts, fall back to last_doc_text
+        let text = if !self.paragraph_texts.is_empty() {
+            self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ")
+        } else if !self.last_doc_text.is_empty() {
+            self.last_doc_text.clone()
+        } else {
+            return; // no text — keep existing counts (don't clear)
+        };
+        // Quick hash to avoid redundant rebuilds
+        let current_hash = hash_str(&text);
+        if current_hash == self.doc_word_counts_hash {
+            return;
+        }
+        self.doc_word_counts.clear();
+        for word in text.split(|c: char| !c.is_alphanumeric() && c != '-') {
+            if word.len() < 2 { continue; }
+            let lower = word.to_lowercase();
+            *self.doc_word_counts.entry(lower).or_insert(0) += 1;
+        }
+        self.doc_word_counts_hash = current_hash;
     }
 
     /// Remove errors whose word has been corrected in the document.
@@ -2661,7 +2787,7 @@ impl ContextApp {
                 doc_offset: 0,
                 position: 0,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(),
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(),
             });
         }
 
@@ -2950,6 +3076,9 @@ impl ContextApp {
             self.last_doc_text = self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ");
         }
 
+        // Rebuild document word counts for suggestion boosting
+        self.rebuild_doc_word_counts();
+
         // Prune errors whose word is no longer in the document (e.g., after cut)
         self.prune_resolved_errors();
 
@@ -3063,7 +3192,7 @@ impl ContextApp {
                             doc_offset: resp.doc_offset,
                             position: i,
                             ignored: false,
-                            word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                            word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
                         });
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
@@ -3083,7 +3212,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
                     });
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
@@ -3135,7 +3264,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: unk.position,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
                     });
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
@@ -4202,27 +4331,13 @@ impl eframe::App for ContextApp {
                                 if matches!(e.category, ErrorCategory::Spelling) {
                                     return e.word.to_lowercase() == cursor_word;
                                 }
-                                // Grammar errors: match if cursor word is in the same
-                                // paragraph's sentence. Check all «word» in explanation.
+                                // Grammar errors: match cursor word against the specific error_word
                                 if matches!(e.category, ErrorCategory::Grammar) {
-                                    // Must be same paragraph
                                     if !cursor_para.is_empty() && e.paragraph_id != cursor_para {
                                         return false;
                                     }
-                                    // Check all «flagged» words in explanation
-                                    let expl = &e.explanation;
-                                    let mut pos = 0;
-                                    while let Some(start) = expl[pos..].find('«') {
-                                        let abs_start = pos + start + '«'.len_utf8();
-                                        if let Some(end) = expl[abs_start..].find('»') {
-                                            let flagged = &expl[abs_start..abs_start + end];
-                                            if flagged.to_lowercase() == cursor_word {
-                                                return true;
-                                            }
-                                            pos = abs_start + end + '»'.len_utf8();
-                                        } else {
-                                            break;
-                                        }
+                                    if !e.error_word.is_empty() {
+                                        return e.error_word.to_lowercase() == cursor_word;
                                     }
                                 }
                                 false
@@ -5468,10 +5583,24 @@ impl eframe::App for ContextApp {
                             }
                             "goto" => {
                                 let error = &self.writing_errors[idx];
+                                // Find the specific error word to select
+                                let goto_word = if !error.error_word.is_empty() {
+                                    error.error_word.clone()
+                                } else {
+                                    error.word.clone()
+                                };
+                                let para_id = error.paragraph_id.clone();
+                                log!("GOTO: select '{}' in paragraph '{}'", goto_word, para_id);
+                                // Try paragraph-based selection first (add-in), fall back to range
+                                if !para_id.is_empty() && self.manager.select_word_in_paragraph(&goto_word, &para_id) {
+                                    log!("GOTO: select_word_in_paragraph succeeded");
+                                    // No screen position from add-in — skip window move
+                                }
+                                // Fall back to character range selection (Windows COM)
+                                else {
                                 let start = error.doc_offset;
                                 let end = start + error.sentence_context.chars().count();
-                                log!("GOTO: selecting range {}..{} for '{}'", start, end,
-                                    trunc(&error.sentence_context, 50));
+                                log!("GOTO: fallback selecting range {}..{}", start, end);
                                 match self.manager.select_range(start, end) {
                                     Some((x, y)) => {
                                         log!("GOTO: select_range returned ({}, {})", x, y);
@@ -5500,6 +5629,7 @@ impl eframe::App for ContextApp {
                                         log!("GOTO: select_range returned None");
                                     }
                                 }
+                                } // end else (fallback)
                             }
                             _ => {}
                         }
