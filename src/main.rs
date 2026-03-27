@@ -11,6 +11,7 @@ mod tts;
 pub mod user_dict;
 pub mod spelling_scorer;
 pub mod llm_actor;
+pub mod compound_walker;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
