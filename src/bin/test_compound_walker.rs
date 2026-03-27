@@ -20,74 +20,130 @@ fn main() {
     let analyzer = mtag::Analyzer::new(dict_path.to_str().unwrap())
         .expect("Failed to load analyzer");
 
-    // Check which compound words are already in the dictionary
-    println!("\n=== Dictionary check ===");
+    // Check 200 compound words — find which are NOT in dictionary
+    println!("\n=== Dictionary check (finding productive compounds) ===");
     let check_words = vec![
-        "kjøkkenbord", "fotballkamp", "arbeidsplass", "skolegård",
-        "frokostbord", "middagspris", "vårtilbud", "sommervarme",
-        "skrivebord", "soverom", "togstasjon", "busstopp",
-        "sykkelvei", "barneskole", "matbutikk", "bilverksted",
+        // Nature combinations
+        "fjellvann", "skogbrann", "elvemunning", "fjordbunn", "innsjøfisk",
+        "havørn", "bregnevekst", "moseklump", "steinrøys", "sanddyne",
+        "snøfonn", "isflak", "vindkast", "regnbyge", "tåkebank",
+        "soloppgang", "måneskinnstur", "nordlyskveld", "frostgrense", "flomfare",
+        // Kitchen/food combinations
+        "kyllingfilet", "laksebit", "potetstappe", "løksuppe", "brøddeig",
+        "eplemos", "jordbærgrøt", "bringebærsaft", "blåbærpai", "havresmuler",
+        "kaffekanne", "tekopp", "smørkniv", "osteskive", "syltetøyglass",
+        "krydderhylle", "kjøkkenbenk", "oppvaskkum", "stekepanne", "bakebrett",
+        // Work/school combinations
+        "mattelekse", "engelsklærer", "skolekantine", "eksamensperiode", "karakterbok",
+        "kontorlandskap", "møteinnkalling", "prosjektrapport", "kundemøte", "fakturagebyr",
+        "jobbsøknad", "ferieplan", "lønnsøkning", "overtidsbetaling", "pensjonssparing",
+        "stillingsbeskrivelse", "kompetanseheving", "medarbeidersamtale", "sykefravær", "arbeidsmiljølov",
+        // Home/daily life
+        "sengeteppe", "putevår", "gardintrapp", "lampeskjerm", "bordplate",
+        "skapshylle", "gulvmatte", "veggklokke", "taklysekrone", "dørvrider",
+        "vaskemaskinslange", "tørketrommelen", "støvsugerpose", "oppvaskmiddelet", "rengjøringsklut",
+        "søppelkasse", "papirkurv", "resirkuleringsstasjonen", "kompostbinge", "avfallssortering",
+        // Sports/hobbies
+        "fotballtrening", "håndballbane", "skiløype", "sykkelritt", "svømmestevne",
+        "treningsprogram", "styrkeøvelse", "kondisjonstrening", "yogamatte", "kampresultat",
+        "musikkinstrument", "fiolinstreng", "trommeundervisning", "gitarakkord", "pianostemmer",
+        "malerkost", "tegnestift", "leirfigur", "garnhespe", "symaskinsnål",
+        // Tech/modern
+        "nettmøte", "skjermtid", "passordbytte", "programvareoppdatering", "datakrasj",
+        "ladekabel", "batterilevetid", "skriverdriveren", "musematte", "tastaturlayout",
+        "strømmetjeneste", "podkastepisode", "nyhetsvarsel", "innboksen", "spamfilter",
+        "videomøte", "filopplasting", "skylagringstjeneste", "krypteringsalgoritme", "autentiseringsmetode",
+        // Weather/seasons
+        "vårrengjøring", "sommeravslutning", "høstferie", "vintersolverv",
+        "regnværsdag", "solskinnshelg", "snøværsvarsel", "vindstyrke",
+        "temperaturfall", "gradestokken", "fuktighetsmåler", "barometerstanden",
+        // Transport
+        "togbillett", "busskort", "sykkelhjul", "bilverkstedet", "fergekai",
+        "flyplasshotell", "taxiregning", "trikkeholdeplass", "tunnelåpning", "motorveiavkjørsel",
+        "parkeringsbøter", "fartskontroll", "trafikklysregulering", "fotgjengerfelt", "sykkelfeltet",
+        // Body/health
+        "hodepine", "magesmerte", "ryggsmerter", "kneoperasjon", "tannlegebesøk",
+        "blodprøve", "røntgenundersøkelse", "allergitest", "vaksinering", "reseptbelagt",
+        "treningsøkt", "søvnkvalitet", "stressnivå", "blodtrykksmåling", "kolesterolnivå",
     ];
+    let mut not_in_dict = Vec::new();
+    let mut in_count = 0;
     for w in &check_words {
         let in_fst = analyzer.has_word(w);
-        println!("  {:20} {}", w, if in_fst { "✓ IN dictionary" } else { "✗ NOT in dictionary" });
+        if !in_fst {
+            not_in_dict.push(*w);
+            println!("  {:30} ✗ NOT in dictionary", w);
+        } else {
+            in_count += 1;
+        }
     }
-    println!();
+    println!("  {} in dictionary, {} NOT in dictionary\n", in_count, not_in_dict.len());
 
-    // (input, expected_in_results, description)
+    // (input_misspelled, expected_correct, description)
+    // Focus on productive compounds NOT in dictionary, with dyslexic errors.
+    // Expected word must appear in top 50 results.
     let tests: Vec<(&str, Vec<&str>, &str)> = vec![
-        // === Single words (baseline) ===
-        ("kjøkken", vec!["kjøkken"], "exact single word"),
-        ("sjøkken", vec!["kjøkken"], "fuzzy single: s→k"),
-        ("bord", vec!["bord"], "short word, exact"),
-        ("bort", vec!["bord", "bort"], "short word, fuzzy"),
+        // === Baseline: single words + known compounds ===
+        ("sjøkken", vec!["kjøkken"], "single: s→k"),
+        ("kjøkkenbort", vec!["kjøkkenbord"], "known compound: t→d"),
+        ("sjøkkenbord", vec!["kjøkkenbord"], "known compound: sj→kj"),
+        ("sjøkkenbort", vec!["kjøkkenbord"], "known compound: both parts"),
 
-        // === Two-part compounds, exact ===
-        ("kjøkkenbord", vec!["kjøkkenbord"], "exact: kjøkken+bord"),
-        ("fotballkamp", vec!["fotballkamp"], "exact: fotball+kamp"),
-        ("arbeidsplass", vec!["arbeidsplass"], "exact: arbeid+s+plass"),
-        ("skolegård", vec!["skolegård"], "exact: skole+gård"),
+        // === Productive compounds NOT in dictionary — error in part 1 ===
+        ("innsjefisk", vec!["innsjøfisk"], "productive: e→ø in innsjø"),
+        ("kyllingsfilet", vec!["kyllingfilet"], "productive: extra s"),
+        ("lakzebit", vec!["laksebit"], "productive: z→s"),
+        ("jordbergrøt", vec!["jordbærgrøt"], "productive: e→æ in bær"),
+        ("skollekantine", vec!["skolekantine"], "productive: ll→l"),
+        ("eksamennsperiode", vec!["eksamensperiode"], "productive: nn→n"),
+        ("prosjektrapport", vec!["prosjektrapport"], "productive: exact (in result)"),
+        ("fakturaggebyr", vec!["fakturagebyr"], "productive: gg→g"),
+        ("netbuttikk", vec!["nettbutikk"], "productive: t→tt, tt→t"),
+        ("lekssehjlep", vec!["leksehjelp"], "productive: hj swap"),
 
-        // === Error in first part ===
-        ("sjøkkenbord", vec!["kjøkkenbord"], "part1: sj→kj in kjøkkenbord"),
-        ("fotbalskamp", vec!["fotballkamp"], "part1: missing l in fotball"),
-        ("skollegård", vec!["skolegård"], "part1: ll→l in skole"),
+        // === Productive compounds NOT in dictionary — error in part 2 ===
+        ("innsjøfissk", vec!["innsjøfisk"], "productive: ss→s in fisk"),
+        ("kyllingfilét", vec!["kyllingfilet"], "productive: é→e"),
+        ("osteskivve", vec!["osteskive"], "productive: vv→v"),
+        ("svømmestevnne", vec!["svømmestevne"], "productive: nn→n"),
+        ("kampressultat", vec!["kampresultat"], "productive: ss→s"),
+        ("passordbytte", vec!["passordbytte"], "productive: exact"),
+        ("ladekabbel", vec!["ladekabel"], "productive: bb→b"),
+        ("nyhettsvarsel", vec!["nyhetsvarsel"], "productive: tt→t"),
+        ("busskort", vec!["busskort"], "productive: exact compound"),
 
-        // === Error in second part ===
-        ("kjøkkenbort", vec!["kjøkkenbord"], "part2: t→d in bord"),
-        ("fotballkamb", vec!["fotballkamp"], "part2: b→p in kamp"),
-        ("skolegårt", vec!["skolegård"], "part2: t→d in gård"),
+        // === Productive compounds — errors in BOTH parts ===
+        ("innsjefissk", vec!["innsjøfisk"], "both: e→ø + ss→s"),
+        ("kyllingsfilét", vec!["kyllingfilet"], "both: extra s + é→e"),
+        ("taklysekronne", vec!["taklysekrone"], "both: nn→n"),
 
-        // === Errors in BOTH parts ===
-        ("sjøkkenbort", vec!["kjøkkenbord"], "both: sj→kj + t→d"),
+        // === Phonetic errors (å↔o, ø↔e, æ↔a) in productive compounds ===
+        ("frostgrennse", vec!["frostgrense"], "phonetic: nn→n"),
+        ("nordlyskvell", vec!["nordlyskveld"], "phonetic: l→ld"),
+        ("temperaturfel", vec!["temperaturfall"], "phonetic: e→a in fall"),
+        ("sommeravsluttning", vec!["sommeravslutning"], "phonetic: tt→t"),
+        ("solvskinnshellg", vec!["solskinnshelg"], "phonetic: v→ø, ll→l"),
 
-        // === Binding letter 's' ===
-        ("arbeidsplasss", vec!["arbeidsplass"], "binding s: extra s"),
+        // === Binding letter errors ===
+        ("møteinknalling", vec!["møteinnkalling"], "binding: n→nn"),
+        ("rengjøringklut", vec!["rengjøringsklut"], "binding: missing s"),
+        ("treningsstuddo", vec!["treningsstudio"], "binding: dd→d, o→io"),
 
-        // === Phonetic å↔o/u in compounds ===
-        ("gåttebord", vec!["guttebord"], "phonetic: å→u in gutte"),
-        ("lekeplaas", vec!["lekeplass"], "missing s in plass"),
-        ("barnehagge", vec!["barnehage"], "double consonant: gg→g"),
+        // === Modern/tech compounds ===
+        ("skjermtitt", vec!["skjermtid"], "tech: tt→d"),
+        ("datakrasj", vec!["datakrasj"], "tech: exact"),
+        ("videomette", vec!["videomøte"], "tech: e→ø"),
+        ("strømetjeneste", vec!["strømmetjeneste"], "tech: missing m"),
 
-        // === Productive compounds NOT in dictionary ===
-        ("frokostbort", vec!["frokostbord"], "productive: frokost+bord t→d"),
-        ("middagspris", vec!["middagspris"], "productive: middag+s+pris"),
-        ("vårtilbud", vec!["vårtilbud"], "productive: vår+tilbud"),
-        ("sommervarme", vec!["sommervarme"], "productive: sommer+varme"),
-        ("skrivebort", vec!["skrivebord"], "productive: skrive+bord t→d"),
-        ("togstassjon", vec!["togstasjon"], "productive: tog+stasjon ss→s"),
-        ("busstop", vec!["busstopp"], "productive: buss+topp missing p"),
-        ("sykkelveien", vec!["sykkelveien"], "productive: sykkel+veien"),
-        ("barneskole", vec!["barneskole"], "productive: barne+skole"),
-        ("matbuttikk", vec!["matbutikk"], "productive: mat+butikk tt→t"),
+        // === Three-part productive compounds ===
+        ("vaskemaskinslannge", vec!["vaskemaskinslange"], "3-part: nn→n"),
+        ("flyplashotell", vec!["flyplasshotell"], "3-part: missing s"),
 
-        // === Dyslexic-style errors ===
-        ("sjokkolade", vec!["sjokolade"], "double k: kk→k"),
-        ("informassjon", vec!["informasjon"], "double s: ss→s"),
-        ("datamaskinn", vec!["datamaskin"], "extra n at end"),
-
-        // === Three-part compounds ===
-        ("barnehageplass", vec!["barnehageplass"], "three-part: barne+hage+plass"),
+        // === Double consonant confusion ===
+        ("jogamatte", vec!["yogamatte"], "double: j→y"),
+        ("leerfigur", vec!["leirfigur"], "double: ee→ei"),
+        ("allergittes", vec!["allergitest"], "double: tt→t, extra s"),
+        ("sevnkvalitet", vec!["søvnkvalitet"], "phonetic: e→ø"),
     ];
 
     let mut pass = 0;
@@ -98,8 +154,10 @@ fn main() {
         let results = compound_fuzzy_walk(&fst, &input.to_lowercase());
         let elapsed = t.elapsed();
 
-        let result_words: Vec<&str> = results.iter().map(|r| r.compound_word.as_str()).collect();
-        let found = expected.iter().any(|exp| result_words.contains(exp));
+        let result_words: Vec<&str> = results.iter().take(50).map(|r| r.compound_word.as_str()).collect();
+        let found_rank = expected.iter().find_map(|exp| {
+            result_words.iter().position(|r| r == exp).map(|pos| (exp, pos + 1))
+        });
 
         let top3: Vec<String> = results.iter().take(3)
             .map(|r| {
@@ -110,12 +168,13 @@ fn main() {
             })
             .collect();
 
-        if found {
-            println!("  PASS ({:>5?}): {} → [{}]", elapsed, desc, top3.join(", "));
+        if let Some((word, rank)) = found_rank {
+            println!("  PASS #{:<3} ({:>5?}): {} → {} | top3: [{}]",
+                rank, elapsed, desc, word, top3.join(", "));
             pass += 1;
         } else {
-            println!("  FAIL ({:>5?}): {} — input='{}' got [{}] expected {:?}",
-                elapsed, desc, input, top3.join(", "), expected);
+            println!("  FAIL      ({:>5?}): {} — input='{}' got [{}] expected {:?} (not in top {})",
+                elapsed, desc, input, top3.join(", "), expected, results.len().min(50));
             fail += 1;
         }
     }

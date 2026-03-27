@@ -284,7 +284,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
         std::mem::swap(&mut current_states, &mut next_states);
         next_states.clear();
 
-        if results.len() >= 20 { break; } // enough results
+        if results.len() >= 50 { break; } // enough results
     }
 
     results.sort_by_key(|r| r.total_edits);
