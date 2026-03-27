@@ -555,7 +555,7 @@ pub fn score_and_rerank(
             }
         } else {
             for err in errs {
-                if !err.suggestion.is_empty() && err.suggestion != candidate {
+                if !err.suggestion.is_empty() && err.suggestion != candidate && !err.suggestion.contains('|') {
                     let sug = err.suggestion.to_lowercase();
                     if seen.insert(sug.clone()) {
                         grammar_suggested.insert(sug.clone());
