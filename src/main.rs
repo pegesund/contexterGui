@@ -3115,9 +3115,20 @@ impl ContextApp {
 
                 // Check each sentence: skip if already processed (hash unchanged)
                 for sentence_text in &sentences {
-                    // Include paragraph_id in hash so identical sentences in
-                    // different paragraphs are processed independently
                     let sent_h = hash_str(&format!("{}|{}", p.paragraph_id, sentence_text));
+
+                    // Queue for LLM BEFORE the hash check (LLM uses its own dedup)
+                    let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
+                        || sentence_text.ends_with('?') || sentence_text.ends_with(':');
+                    if self.llm_enabled && is_complete {
+                        let llm_hash = hash_str(&format!("llm|{}|{}", p.paragraph_id, sentence_text));
+                        if !self.llm_checked_hashes.contains(&llm_hash) {
+                            self.llm_queue.push((sentence_text.to_string(), p.paragraph_id.clone()));
+                            self.llm_queue_hashes.push(llm_hash);
+                            self.llm_last_queue_time = Instant::now();
+                        }
+                    }
+
                     if self.processed_sentence_hashes.contains(&sent_h)
                         || self.grammar_inflight.contains(&sent_h) {
                         continue; // Already processed or in-flight, skip
@@ -3135,27 +3146,12 @@ impl ContextApp {
                     });
 
                     // Send to grammar actor for spelling + grammar checking.
-                    // Complete sentences: always send (grammar + spelling).
-                    // Incomplete sentences: only send on initial scan (first_seen),
-                    // not during active typing (avoids flooding the actor).
-                    let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
-                        || sentence_text.ends_with('?') || sentence_text.ends_with(':');
                     let first_seen = !self.paragraph_sentence_hashes.contains_key(&p.paragraph_id);
                     if is_complete || first_seen {
                         let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                         uw.extend(email_skip_words.iter().cloned());
                         actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
                         self.grammar_inflight.insert(sent_h);
-                    }
-
-                    // Queue for LLM correction (complete sentences only, not already checked)
-                    if self.llm_enabled && is_complete {
-                        let llm_hash = hash_str(&format!("llm|{}|{}", p.paragraph_id, sentence_text));
-                        if !self.llm_checked_hashes.contains(&llm_hash) {
-                            self.llm_queue.push((sentence_text.to_string(), p.paragraph_id.clone()));
-                            self.llm_queue_hashes.push(llm_hash);
-                            self.llm_last_queue_time = Instant::now();
-                        }
                     }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
