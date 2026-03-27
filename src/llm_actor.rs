@@ -139,6 +139,22 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
         }
     };
 
+    // Log token usage and cost
+    let prompt_tokens = outer["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+    let completion_tokens = outer["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    let total_tokens = outer["usage"]["total_tokens"].as_u64().unwrap_or(0);
+    let cost = outer["usage"]["cost"].as_f64().unwrap_or(0.0);
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(std::env::temp_dir().join("acatts-rust.log")) {
+            let _ = writeln!(f, "LLM usage: {} sentences, prompt={}tok completion={}tok total={}tok cost=${:.6}",
+                req.sentences.len(), prompt_tokens, completion_tokens, total_tokens, cost);
+        }
+    }
+    eprintln!("LLM: {}tok (prompt={} completion={}) cost=${:.6} for {} sentences",
+        total_tokens, prompt_tokens, completion_tokens, cost, req.sentences.len());
+
     let content = match outer["choices"][0]["message"]["content"].as_str() {
         Some(c) => c,
         None => {
