@@ -226,85 +226,22 @@ fn worker_loop(
             }
 
             BertRequest::SpellingScore { id, context_before, context_after, candidates } => {
-                // Use the existing score_spelling() from nostos-cognio — batched_forward, ~24ms
-                let scored = match spelling::score_spelling(&mut model, &context_before, &context_after, &candidates) {
-                    Ok(result) => result.scored_candidates,
-                    Err(_) => Vec::new(),
+                // Build ortho-scored candidates for the shared scorer
+                let ortho_candidates: Vec<(String, f32)> = candidates.iter()
+                    .map(|c| (c.clone(), 0.5)) // default ortho — real scores come from main thread
+                    .collect();
+                let sentence = format!("{}{}", context_before, context_after);
+                let mut grammar_check = |sentences: &[String]| -> Vec<Vec<nostos_cognio::grammar::types::GrammarError>> {
+                    if let Some(ref gs) = grammar_sender {
+                        crate::grammar_actor::grammar_batch_via_sender(gs, sentences)
+                    } else {
+                        sentences.iter().map(|_| Vec::new()).collect()
+                    }
                 };
-                // Grammar filter: check candidates in context.
-                // If grammar error has a suggestion, replace candidate with the corrected form.
-                // This turns "kjøkken" → "kjøkkenet" when grammar says "kjøkken mitt" is wrong.
-                let scored = if let Some(ref gs) = grammar_sender {
-                    if !scored.is_empty() {
-                        let last_start = context_before.rfind(|c: char| ".!?".contains(c))
-                            .map(|i| i + 1).unwrap_or(0);
-                        let fragment = context_before[last_start..].trim();
-                        let sentences: Vec<String> = scored.iter()
-                            .map(|(c, _)| if context_after.is_empty() {
-                                format!("{} {}.", fragment, c)
-                            } else {
-                                format!("{} {} {}", fragment, c, context_after.trim_start())
-                            })
-                            .collect();
-                        let results = crate::grammar_actor::grammar_batch_via_sender(gs, &sentences);
-                        let mut corrected: Vec<(String, f32)> = Vec::new();
-                        let mut seen_corrected = std::collections::HashSet::new();
-                        for ((candidate, score), errs) in scored.into_iter().zip(results.iter()) {
-                            if errs.is_empty() {
-                                // No errors — keep as-is
-                                if seen_corrected.insert(candidate.clone()) {
-                                    corrected.push((candidate, score));
-                                }
-                            } else {
-                                // Grammar error — check if there's a suggestion we can use
-                                for err in errs {
-                                    if !err.suggestion.is_empty() && err.suggestion != candidate {
-                                        let sug = err.suggestion.to_lowercase();
-                                        if seen_corrected.insert(sug.clone()) {
-                                            corrected.push((sug, score));
-                                        }
-                                    }
-                                }
-                                // Also keep the original (BERT might still prefer it)
-                                if seen_corrected.insert(candidate.clone()) {
-                                    corrected.push((candidate, score * 0.8)); // slight penalty
-                                }
-                            }
-                        }
-                        if corrected.is_empty() {
-                            match spelling::score_spelling(&mut model, &context_before, &context_after, &candidates) {
-                                Ok(result) => result.scored_candidates,
-                                Err(_) => Vec::new(),
-                            }
-                        } else {
-                            // Re-score with BERT including the grammar-corrected forms
-                            let all_candidates: Vec<String> = corrected.iter().map(|(c, _)| c.clone()).collect();
-                            match spelling::score_spelling(&mut model, &context_before, &context_after, &all_candidates) {
-                                Ok(result) => result.scored_candidates,
-                                Err(_) => corrected,
-                            }
-                        }
-                    } else { scored }
-                } else { scored };
-                // Hybrid: full sentence scoring on top 5 for better accuracy (~200ms × 5)
-                let scored = if scored.len() > 1 {
-                    let top5: Vec<String> = scored.iter().take(5).map(|(c, _)| c.clone()).collect();
-                    let sentence = format!("{}{}", context_before, context_after);
-                    let mut reranked: Vec<(String, f32)> = top5.iter().map(|candidate| {
-                        let corrected = if let Some(pos) = sentence.to_lowercase().find(&candidates.first().map(|c| c.to_lowercase()).unwrap_or_default()) {
-                            // Can't find misspelled word in context — just use boundary score
-                            format!("{}{}{}", &sentence[..pos], candidate, &sentence[pos..])
-                        } else {
-                            format!("{}{}{}", context_before, candidate, context_after)
-                        };
-                        let sent_score = sentence_score(&mut model, &corrected);
-                        (candidate.clone(), sent_score)
-                    }).collect();
-                    reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    reranked
-                } else {
-                    scored
-                };
+                let scored = crate::spelling_scorer::score_and_rerank(
+                    &mut model, &mut grammar_check, &ortho_candidates,
+                    &context_before, &context_after, &sentence,
+                );
                 let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
                 repaint_ctx.request_repaint();
             }

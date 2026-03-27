@@ -9,6 +9,7 @@ mod platform;
 mod stt;
 mod tts;
 pub mod user_dict;
+pub mod spelling_scorer;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
@@ -3077,13 +3078,16 @@ impl ContextApp {
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     // Exact sentence match — keep
-                    if new_sentence_set.contains(&e.sentence_context.to_lowercase()) { return true; }
+                    let e_sent_lower = e.sentence_context.to_lowercase();
+                    if new_sentence_set.contains(&e_sent_lower) { return true; }
                     // For spelling errors: keep if the misspelled word is still in the paragraph
                     if matches!(e.category, ErrorCategory::Spelling) {
                         let word_lower = e.word.to_lowercase();
                         if para_text_lower.contains(&word_lower) { return true; }
                     }
-                    log!("  Removing stale error: word='{}' sentence='{}'", e.word, trunc(&e.sentence_context, 40));
+                    log!("  Removing stale error: word='{}' sentence='{}' (not in set: {:?})",
+                        e.word, trunc(&e.sentence_context, 60),
+                        new_sentence_set.iter().take(3).map(|s| trunc(s, 40)).collect::<Vec<_>>());
                     false
                 });
                 if self.writing_errors.len() < before_count {
