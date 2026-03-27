@@ -5715,13 +5715,15 @@ impl eframe::App for ContextApp {
                                             .color(egui::Color32::from_rgb(0, 120, 60)),
                                     );
                                 }
-                                // Explanation
-                                if let Some(alt_idx) = first_alt {
-                                    ui.label(
-                                        egui::RichText::new(&self.writing_errors[alt_idx].explanation)
-                                            .size(10.0)
-                                            .color(egui::Color32::from_rgb(100, 100, 100)),
-                                    );
+                                // Explanation (skip entirely for LLM corrections)
+                                if error.rule_name != "llm_correction" {
+                                    if let Some(alt_idx) = first_alt {
+                                        ui.label(
+                                            egui::RichText::new(&self.writing_errors[alt_idx].explanation)
+                                                .size(10.0)
+                                                .color(egui::Color32::from_rgb(100, 100, 100)),
+                                        );
+                                    }
                                 }
                             } else {
                                 // Spelling error — buttons on top, then word/suggestion stacked
