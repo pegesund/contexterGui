@@ -5764,11 +5764,14 @@ impl eframe::App for ContextApp {
                                             .color(egui::Color32::from_rgb(0, 120, 60)),
                                     );
                                 }
-                                ui.label(
-                                    egui::RichText::new(&error.explanation)
-                                        .size(10.0)
-                                        .color(egui::Color32::from_rgb(80, 80, 80)),
-                                );
+                                // Skip raw explanation for LLM corrections (shown in 💡 diff view)
+                                if error.rule_name != "llm_correction" {
+                                    ui.label(
+                                        egui::RichText::new(&error.explanation)
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(80, 80, 80)),
+                                    );
+                                }
                             }
                         });
                         if is_focused && !self.focused_error_scroll_done {
@@ -6205,7 +6208,8 @@ impl eframe::App for ContextApp {
                                     }
                                     ui.add_space(12.0);
 
-                                    // Explanation
+                                    // Explanation (skip for LLM corrections — diff tooltips explain)
+                                    if rule_name != "llm_correction" {
                                     ui.label(
                                         egui::RichText::new("Forklaring:")
                                             .size(14.0)
@@ -6213,11 +6217,14 @@ impl eframe::App for ContextApp {
                                             .color(egui::Color32::from_rgb(50, 50, 50)),
                                     );
                                     ui.add_space(4.0);
+                                    }
+                                    if rule_name != "llm_correction" {
                                     ui.label(
                                         egui::RichText::new(&explanation)
                                             .size(14.0)
                                             .color(egui::Color32::from_rgb(30, 30, 30)),
                                     );
+                                    }
 
                                     // Examples
                                     if !wrong.is_empty() {
