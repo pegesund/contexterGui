@@ -9,7 +9,7 @@ const API_URL: &str = "https://router.requesty.ai/v1/chat/completions";
 const API_KEY: &str = "rqsty-sk-ITUDt2zDS9Clb8OtNi8xJUZPkXxGErbOFD4chcu0qPjQr4QfW0Zg/1gdMLeC2A6myVqvckRD5Xd25DqHL4OLb46EKssNfZDGc26RiYn0QA4=";
 const MODEL: &str = "deepseek/deepseek-chat";
 
-const SYSTEM_PROMPT: &str = "Du er en norsk korrekturleser. Korriger grammatikk og stavefeil. Svar KUN med JSON-array. For hver setning: {\"corrected\": \"den korrigerte setningen\"} eller {\"ok\": true} hvis korrekt.";
+const SYSTEM_PROMPT: &str = "Du er en norsk korrekturleser. Korriger grammatikk og stavefeil. Svar KUN med JSON-array. For hver setning: {\"corrected\": \"den korrigerte setningen\", \"explanation\": \"kort forklaring\"} eller {\"ok\": true} hvis korrekt.";
 
 pub struct LlmRequest {
     pub request_id: u64,
@@ -177,8 +177,9 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
         let corrected = result["corrected"].as_str().unwrap_or("").to_string();
         if corrected.is_empty() || corrected == *original { continue; }
 
-        // Build explanation by describing the difference
-        let explanation = format!("AI: «{}» → «{}»", original, corrected);
+        let explanation = result["explanation"].as_str()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| format!("AI: «{}» → «{}»", original, corrected));
 
         {
             use std::io::Write;
