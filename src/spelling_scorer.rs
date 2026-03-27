@@ -415,11 +415,12 @@ pub fn score_and_rerank(
     // Build ortho map from original candidates
     let ortho_map: HashMap<String, f32> = candidates.iter().cloned().collect();
 
-    // Apply ortho weighting
+    // Apply ortho weighting (trim any BPE space artifacts)
     let mut weighted: Vec<(String, f32)> = boundary_scored.iter().map(|(c, bert_score)| {
-        let ortho = ortho_map.get(c.as_str()).copied().unwrap_or(0.5);
-        let eff = if grammar_suggested.contains(c) { 1.0 } else { ortho };
-        (c.clone(), bert_score * eff.sqrt())
+        let ct = c.trim().to_string();
+        let ortho = ortho_map.get(ct.as_str()).copied().unwrap_or(0.5);
+        let eff = if grammar_suggested.contains(&ct) { 1.0 } else { ortho };
+        (ct, bert_score * eff.sqrt())
     }).collect();
     weighted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -437,6 +438,7 @@ pub fn score_and_rerank(
 
         let sentence_lower = sentence.to_lowercase();
         let word_lower = all_cands.first().map(|c| c.to_lowercase()).unwrap_or_default();
+        let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
         let mut reranked: Vec<(String, f32)> = top_set.iter().map(|candidate| {
             let corrected_sent = if let Some(pos) = sentence_lower.find(&word_lower) {
                 format!("{}{}{}", &sentence_lower[..pos], candidate, &sentence_lower[pos + word_lower.len()..])
