@@ -147,24 +147,43 @@ fn score_candidates(
         }
     }
 
-    // Grammar filter (same as app: walk up to 50 candidates by ortho score)
+    // Grammar filter: check candidates, use grammar suggestions when available
+    // "kjøkken" → grammar says error with suggestion "kjøkkenet" → use that
     let mut passing: Vec<(String, f32)> = Vec::new();
+    let mut seen_passing = HashSet::new();
     for (candidate, score) in ortho_scored.iter().take(100) {
-        // Skip hyphenated candidates when misspelled word has no hyphen
-        if !word_lower.contains('-') && candidate.contains('-') {
-            continue;
-        }
+        if !word_lower.contains('-') && candidate.contains('-') { continue; }
         if !checker.has_word(candidate) { continue; }
         let corrected = sentence.to_lowercase().replacen(&word_lower, candidate, 1);
         let errors = checker.check_sentence(&corrected);
         println!("  grammar: '{}' score={:.3} → {} errors", candidate, score, errors.len());
         if errors.is_empty() {
-            passing.push((candidate.clone(), *score));
+            if seen_passing.insert(candidate.clone()) {
+                passing.push((candidate.clone(), *score));
+            }
+        } else {
+            // Use grammar suggestion — it's the grammatically correct form of a valid candidate
+            // Give it a high ortho score (it came from a proper correction chain)
+            for err in &errors {
+                if !err.suggestion.is_empty() && err.suggestion != *candidate {
+                    let sug = err.suggestion.to_lowercase();
+                    println!("  grammar suggests: '{}' → '{}'", candidate, sug);
+                    if seen_passing.insert(sug.clone()) {
+                        edit_distances.insert(sug.clone(), 1); // treat as distance 1 (came from valid chain)
+                        passing.push((sug, 1.0)); // high ortho score
+                    }
+                }
+            }
         }
     }
 
     // Re-rank top grammar-valid candidates with sentence-level BERT scoring.
     // Multiply by ortho_sim so words that look nothing like the misspelling don't win.
+    // Grammar-suggested candidates (ortho_score=1.0) get a boost — they're confirmed correct.
+    let grammar_suggested: HashSet<String> = passing.iter()
+        .filter(|(_, s)| (*s - 1.0).abs() < 0.01)
+        .map(|(c, _)| c.clone())
+        .collect();
     if passing.len() > 1 {
         let sentence_lower = sentence.to_lowercase();
         let mut rescored: Vec<(String, f32)> = Vec::new();
@@ -187,9 +206,14 @@ fn score_candidates(
             if candidate.chars().next() == Some(word_first) {
                 ortho_sim += 0.15;
             }
-            // Use sqrt(ortho) to soften the penalty — let BERT have more influence
-            let final_score = sent_score * ortho_sim.sqrt();
-            println!("  sentence-score: '{}' → {:.3} × sqrt(ortho {:.2}) = {:.3}", candidate, sent_score, ortho_sim, final_score);
+            // Grammar-suggested candidates: full ortho + 1.2x bonus (confirmed correct form)
+            let effective_ortho = if grammar_suggested.contains(candidate) { 1.0 } else { ortho_sim };
+            let grammar_bonus = if grammar_suggested.contains(candidate) { 1.2 } else { 1.0 };
+            let final_score = sent_score * effective_ortho.sqrt() * grammar_bonus;
+            println!("  sentence-score: '{}' → {:.3} × sqrt(ortho {:.2}{}) = {:.3}",
+                candidate, sent_score, effective_ortho,
+                if grammar_suggested.contains(candidate) { " grammar-boosted" } else { "" },
+                final_score);
             rescored.push((candidate.clone(), final_score));
         }
         rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -269,7 +293,7 @@ fn try_split_function_word(word: &str, checker: &nostos_cognio::grammar::swipl_c
 
 fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let training = base.join("../../contexter-repo/training-data");
+    let training = base.join("../contexter-repo/training-data");
 
     let onnx_path = training.join("onnx/norbert4_base_int8.onnx");
     let tok_path = training.join("onnx/tokenizer.json");
@@ -278,10 +302,14 @@ fn main() {
         .expect("Failed to load model");
     println!("Loaded. Vocab: {}", model.vocab_size());
 
-    let dict_path = base.join("../../rustSpell/mtag-rs/data/fullform_bm.mfst");
-    let grammar_rules_path = base.join("../../syntaxer/grammar_rules.pl");
-    let syntaxer_dir = base.join("../../syntaxer");
-    let swipl_dll = "C:/Program Files/swipl/bin/libswipl.dll";
+    let dict_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+    let grammar_rules_path = base.join("../syntaxer/grammar_rules.pl");
+    let syntaxer_dir = base.join("../syntaxer");
+    let swipl_dll = if cfg!(target_os = "macos") {
+        "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib"
+    } else {
+        "C:/Program Files/swipl/bin/libswipl.dll"
+    };
     let mut checker = nostos_cognio::grammar::swipl_checker::SwiGrammarChecker::new(
         swipl_dll,
         dict_path.to_str().unwrap(),
@@ -311,6 +339,8 @@ fn main() {
         ("Barna fikk boller og bbrus.", "bbrus", "brus"),
         // BERT must rank "godterier" over "lotterier" in context
         ("Barna fikk gåtterier.", "gåtterier", "godterier|godteri"),
+        // First-char wrong + needs inflection: sjøkken → kjøkkenet (via kjøkken + grammar)
+        ("Jeg har mange gryter på sjøkken mitt.", "sjøkken", "kjøkken|kjøkkenet"),
     ];
 
     let mut pass = 0;

@@ -231,7 +231,9 @@ fn worker_loop(
                     Ok(result) => result.scored_candidates,
                     Err(_) => Vec::new(),
                 };
-                // Grammar filter: remove candidates that produce grammar errors in context
+                // Grammar filter: check candidates in context.
+                // If grammar error has a suggestion, replace candidate with the corrected form.
+                // This turns "kjøkken" → "kjøkkenet" when grammar says "kjøkken mitt" is wrong.
                 let scored = if let Some(ref gs) = grammar_sender {
                     if !scored.is_empty() {
                         let last_start = context_before.rfind(|c: char| ".!?".contains(c))
@@ -245,18 +247,42 @@ fn worker_loop(
                             })
                             .collect();
                         let results = crate::grammar_actor::grammar_batch_via_sender(gs, &sentences);
-                        let filtered: Vec<(String, f32)> = scored.into_iter().zip(results.iter())
-                            .filter(|(_, errs)| errs.is_empty())
-                            .map(|(c, _)| c)
-                            .collect();
-                        if filtered.is_empty() {
-                            // All failed grammar — return original BERT-scored list unfiltered
+                        let mut corrected: Vec<(String, f32)> = Vec::new();
+                        let mut seen_corrected = std::collections::HashSet::new();
+                        for ((candidate, score), errs) in scored.into_iter().zip(results.iter()) {
+                            if errs.is_empty() {
+                                // No errors — keep as-is
+                                if seen_corrected.insert(candidate.clone()) {
+                                    corrected.push((candidate, score));
+                                }
+                            } else {
+                                // Grammar error — check if there's a suggestion we can use
+                                for err in errs {
+                                    if !err.suggestion.is_empty() && err.suggestion != candidate {
+                                        let sug = err.suggestion.to_lowercase();
+                                        if seen_corrected.insert(sug.clone()) {
+                                            corrected.push((sug, score));
+                                        }
+                                    }
+                                }
+                                // Also keep the original (BERT might still prefer it)
+                                if seen_corrected.insert(candidate.clone()) {
+                                    corrected.push((candidate, score * 0.8)); // slight penalty
+                                }
+                            }
+                        }
+                        if corrected.is_empty() {
                             match spelling::score_spelling(&mut model, &context_before, &context_after, &candidates) {
                                 Ok(result) => result.scored_candidates,
                                 Err(_) => Vec::new(),
                             }
                         } else {
-                            filtered
+                            // Re-score with BERT including the grammar-corrected forms
+                            let all_candidates: Vec<String> = corrected.iter().map(|(c, _)| c.clone()).collect();
+                            match spelling::score_spelling(&mut model, &context_before, &context_after, &all_candidates) {
+                                Ok(result) => result.scored_candidates,
+                                Err(_) => corrected,
+                            }
                         }
                     } else { scored }
                 } else { scored };

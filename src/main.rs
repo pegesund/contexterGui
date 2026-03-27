@@ -2202,6 +2202,53 @@ impl ContextApp {
             }
         }
 
+        // Source 10: First-character swap — try replacing first char with every letter
+        // Catches "sjøkken" → "kjøkken" where first char is wrong but rest is correct
+        if word_lower.len() >= 3 {
+            if let Some(analyzer) = &self.analyzer {
+                let rest = &word_lower[word_first.len_utf8()..];
+                for c in "abcdefghijklmnopqrstuvwxyzæøå".chars() {
+                    if c == word_first { continue; }
+                    let candidate = format!("{}{}", c, rest);
+                    if analyzer.has_word(&candidate) && seen.insert(candidate.clone()) {
+                        edit_distances.insert(candidate.clone(), 1);
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+
+        // Source 11: Inflected forms of candidates — for each candidate lemma,
+        // add its inflections so BERT can pick the grammatically correct form.
+        // "kjøkken" → also adds "kjøkkenet", "kjøkkenene" etc.
+        {
+            use mtag::types::{Pos, Tag};
+            if let Some(analyzer) = &self.analyzer {
+                let base_candidates: Vec<String> = candidates.clone();
+                for base in &base_candidates {
+                    if let Some(readings) = analyzer.dict_lookup(base) {
+                        for r in &readings {
+                            if !matches!(r.pos, Pos::Subst) { continue; }
+                            // Add definite and plural forms
+                            for tag in &[Tag::Be, Tag::Fl] {
+                                let forms = analyzer.forms_for_lemma(&r.lemma, &Pos::Subst, tag);
+                                for form in forms {
+                                    let fl = form.to_lowercase();
+                                    if fl != word_lower && fl.len() >= 2 && seen.insert(fl.clone()) {
+                                        let dist = levenshtein_distance(&word_lower, &fl);
+                                        if dist <= 4 {
+                                            edit_distances.insert(fl.clone(), dist);
+                                            candidates.push(fl);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         log!("find_spelling_suggestions: {} raw candidates for '{}'", candidates.len(), word_lower);
 
         // ── Phase 2: Ortho score all candidates ──
@@ -2270,7 +2317,7 @@ impl ContextApp {
 
             let mut checked = 0;
             for (candidate, score) in &ortho_scored {
-                if checked >= 8 { break; } // keep low to avoid GUI freeze
+                if checked >= 15 { break; }
 
                 // Skip hyphenated candidates when misspelled word has no hyphen
                 if !word_lower.contains('-') && candidate.contains('-') {
