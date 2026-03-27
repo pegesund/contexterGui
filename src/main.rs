@@ -3280,9 +3280,21 @@ impl ContextApp {
             for c in &resp.corrections {
                 if c.corrected == c.original { continue; }
 
-                // Find the word that changed
-                let error_word = find_diff_word(&c.original, &c.corrected);
-                log!("LLM correction: '{}' (error_word='{}') para={}", c.explanation, error_word, trunc(&c.paragraph_id, 10));
+                // Build summary and find first changed word
+                let error_word = if let Some((from, _)) = c.changes.first() {
+                    from.clone()
+                } else {
+                    find_diff_word(&c.original, &c.corrected)
+                };
+                let explanation = if c.changes.len() == 1 {
+                    let (from, to) = &c.changes[0];
+                    format!("«{}» → «{}»", from, to)
+                } else if c.changes.len() > 1 {
+                    format!("Flere endringer ({})", c.changes.len())
+                } else {
+                    format!("AI: «{}» → «{}»", error_word, c.corrected)
+                };
+                log!("LLM correction: '{}' changes={} para={}", explanation, c.changes.len(), trunc(&c.paragraph_id, 10));
 
                 // Remove ALL existing local errors for this sentence (LLM replaces them)
                 // Clear underlines for removed errors
@@ -3305,7 +3317,7 @@ impl ContextApp {
                     category: ErrorCategory::Grammar,
                     word: c.original.clone(),
                     suggestion: c.corrected.clone(),
-                    explanation: c.explanation.clone(),
+                    explanation,
                     rule_name: "llm_correction".to_string(),
                     sentence_context: c.original.clone(),
                     doc_offset: 0,
@@ -5528,12 +5540,18 @@ impl eframe::App for ContextApp {
                     // AI fix-all button + spinner
                     ui.horizontal(|ui| {
                         if self.llm_waiting {
-                            // Animated spinner: rotating dots
-                            let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                            let idx = (self.llm_waiting_since.elapsed().as_millis() / 100) as usize % dots.len();
-                            ui.label(egui::RichText::new(dots[idx]).size(14.0).color(egui::Color32::from_rgb(0, 120, 200)));
-                            ui.label(egui::RichText::new("AI korrigerer...").size(11.0).color(egui::Color32::from_rgb(0, 120, 200)));
-                            ctx.request_repaint_after(Duration::from_millis(100)); // animate
+                            let elapsed = self.llm_waiting_since.elapsed().as_secs();
+                            let phases = ["🔄", "🔃"];
+                            let phase = phases[(elapsed as usize) % phases.len()];
+                            let pulse = if (self.llm_waiting_since.elapsed().as_millis() / 500) % 2 == 0 {
+                                egui::Color32::from_rgb(0, 120, 220)
+                            } else {
+                                egui::Color32::from_rgb(60, 160, 240)
+                            };
+                            ui.label(egui::RichText::new(phase).size(16.0));
+                            ui.label(egui::RichText::new(format!("AI korrigerer... ({}s)", elapsed))
+                                .size(12.0).strong().color(pulse));
+                            ctx.request_repaint_after(Duration::from_millis(500));
                         } else {
                             let err_count = self.writing_errors.iter()
                                 .filter(|e| !e.ignored && e.rule_name != "llm_correction")
@@ -5984,7 +6002,9 @@ impl eframe::App for ContextApp {
                 let fix_idx = *fix_idx;
                 let suggestion = suggestion.clone();
                 let error_word = self.writing_errors[fix_idx].word.clone();
-                let corrected_sentence = if !suggestion.is_empty() {
+                let corrected_sentence = if rule_name == "llm_correction" && !suggestion.is_empty() {
+                    suggestion.clone() // LLM suggestion is already the full corrected sentence
+                } else if !suggestion.is_empty() {
                     sentence.replacen(&error_word, &suggestion, 1)
                 } else {
                     String::new()
@@ -6047,36 +6067,99 @@ impl eframe::App for ContextApp {
                                     );
                                     ui.add_space(14.0);
 
-                                    // Original sentence (red) and corrected (green)
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_rgb(255, 245, 245))
-                                        .inner_margin(10.0)
-                                        .corner_radius(6.0)
-                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 180, 180)))
-                                        .show(ui, |ui| {
-                                            ui.set_max_width(max_w - 40.0);
-                                            ui.label(
-                                                egui::RichText::new(&sentence)
-                                                    .size(15.0)
-                                                    .strikethrough()
-                                                    .color(egui::Color32::from_rgb(180, 50, 50)),
-                                            );
-                                        });
-                                    ui.add_space(4.0);
-                                    if !corrected_sentence.is_empty() {
+                                    // Word-level diff for LLM corrections, standard for others
+                                    if rule_name == "llm_correction" && !corrected_sentence.is_empty() {
                                         egui::Frame::new()
-                                            .fill(egui::Color32::from_rgb(240, 255, 245))
+                                            .fill(egui::Color32::from_rgb(250, 250, 255))
+                                            .inner_margin(12.0)
+                                            .corner_radius(6.0)
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 200, 220)))
+                                            .show(ui, |ui| {
+                                                ui.set_max_width(max_w - 40.0);
+                                                // Word-level diff: red strikethrough for changed, green for corrections
+                                                let orig_words: Vec<&str> = sentence.split_whitespace().collect();
+                                                let corr_words: Vec<&str> = corrected_sentence.split_whitespace().collect();
+                                                let job = egui::text::LayoutJob::default();
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let mut oi = 0;
+                                                    let mut ci = 0;
+                                                    while oi < orig_words.len() || ci < corr_words.len() {
+                                                        if oi < orig_words.len() && ci < corr_words.len()
+                                                            && orig_words[oi].to_lowercase() == corr_words[ci].to_lowercase() {
+                                                            // Same word — normal
+                                                            ui.label(egui::RichText::new(orig_words[oi]).size(14.0));
+                                                            oi += 1;
+                                                            ci += 1;
+                                                        } else {
+                                                            // Find how many words differ
+                                                            // Simple: consume original words until we find a match with corrected
+                                                            let mut skip_orig = 0;
+                                                            let mut skip_corr = 0;
+                                                            // Try to re-sync by looking ahead
+                                                            let mut found = false;
+                                                            for ahead in 1..5 {
+                                                                if ci + ahead < corr_words.len() && oi < orig_words.len()
+                                                                    && orig_words[oi].to_lowercase() == corr_words[ci + ahead].to_lowercase() {
+                                                                    skip_corr = ahead; found = true; break;
+                                                                }
+                                                                if oi + ahead < orig_words.len() && ci < corr_words.len()
+                                                                    && orig_words[oi + ahead].to_lowercase() == corr_words[ci].to_lowercase() {
+                                                                    skip_orig = ahead; found = true; break;
+                                                                }
+                                                            }
+                                                            if !found { skip_orig = 1; skip_corr = 1; }
+                                                            // Show removed words in red strikethrough
+                                                            for _ in 0..skip_orig {
+                                                                if oi < orig_words.len() {
+                                                                    ui.label(egui::RichText::new(orig_words[oi]).size(14.0)
+                                                                        .strikethrough().color(egui::Color32::from_rgb(200, 50, 50)));
+                                                                    oi += 1;
+                                                                }
+                                                            }
+                                                            // Show added words in green bold
+                                                            for _ in 0..skip_corr {
+                                                                if ci < corr_words.len() {
+                                                                    ui.label(egui::RichText::new(corr_words[ci]).size(14.0)
+                                                                        .strong().color(egui::Color32::from_rgb(0, 140, 50)));
+                                                                    ci += 1;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                    } else {
+                                        // Standard: original (red) and corrected (green)
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(255, 245, 245))
                                             .inner_margin(10.0)
                                             .corner_radius(6.0)
-                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 220, 190)))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 180, 180)))
                                             .show(ui, |ui| {
                                                 ui.set_max_width(max_w - 40.0);
                                                 ui.label(
-                                                    egui::RichText::new(&corrected_sentence)
+                                                    egui::RichText::new(&sentence)
                                                         .size(15.0)
-                                                        .color(egui::Color32::from_rgb(0, 120, 50)),
+                                                        .strikethrough()
+                                                        .color(egui::Color32::from_rgb(180, 50, 50)),
                                                 );
                                             });
+                                        ui.add_space(4.0);
+                                        if !corrected_sentence.is_empty() {
+                                            egui::Frame::new()
+                                                .fill(egui::Color32::from_rgb(240, 255, 245))
+                                                .inner_margin(10.0)
+                                                .corner_radius(6.0)
+                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 220, 190)))
+                                                .show(ui, |ui| {
+                                                    ui.set_max_width(max_w - 40.0);
+                                                    ui.label(
+                                                        egui::RichText::new(&corrected_sentence)
+                                                            .size(15.0)
+                                                            .color(egui::Color32::from_rgb(0, 120, 50)),
+                                                    );
+                                                });
+                                        }
                                     }
                                     ui.add_space(12.0);
 

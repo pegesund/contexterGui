@@ -9,7 +9,7 @@ const API_URL: &str = "https://router.requesty.ai/v1/chat/completions";
 const API_KEY: &str = "rqsty-sk-ITUDt2zDS9Clb8OtNi8xJUZPkXxGErbOFD4chcu0qPjQr4QfW0Zg/1gdMLeC2A6myVqvckRD5Xd25DqHL4OLb46EKssNfZDGc26RiYn0QA4=";
 const MODEL: &str = "deepseek/deepseek-chat";
 
-const SYSTEM_PROMPT: &str = "Du er en norsk korrekturleser. Korriger grammatikk og stavefeil. Svar KUN med JSON-array. For hver setning: {\"corrected\": \"den korrigerte setningen\", \"explanation\": \"kort forklaring\"} eller {\"ok\": true} hvis korrekt.";
+const SYSTEM_PROMPT: &str = "Du er en norsk korrekturleser. Korriger ALLE grammatikk- og stavefeil. Svar med en JSON-array (ingen markdown, ingen annen tekst). For hver setning:\n- Korrekt: {\"ok\": true}\n- Feil: {\"corrected\": \"hele setningen korrigert\", \"changes\": [{\"from\": \"feil ord/frase\", \"to\": \"riktig ord/frase\"}]}. List ALLE endringer, også stavefeil.";
 
 pub struct LlmRequest {
     pub request_id: u64,
@@ -20,7 +20,7 @@ pub struct LlmRequest {
 pub struct LlmCorrection {
     pub original: String,
     pub corrected: String,
-    pub explanation: String,
+    pub changes: Vec<(String, String)>, // (from, to) pairs
     pub paragraph_id: String,
 }
 
@@ -177,9 +177,14 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
         let corrected = result["corrected"].as_str().unwrap_or("").to_string();
         if corrected.is_empty() || corrected == *original { continue; }
 
-        let explanation = result["explanation"].as_str()
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| format!("AI: «{}» → «{}»", original, corrected));
+        // Parse per-change list
+        let changes: Vec<(String, String)> = result["changes"].as_array()
+            .map(|arr| arr.iter().filter_map(|c| {
+                let from = c["from"].as_str()?.to_string();
+                let to = c["to"].as_str()?.to_string();
+                Some((from, to))
+            }).collect())
+            .unwrap_or_default();
 
         {
             use std::io::Write;
@@ -192,7 +197,7 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
         corrections.push(LlmCorrection {
             original: original.clone(),
             corrected,
-            explanation,
+            changes,
             paragraph_id: para_id.clone(),
         });
     }
