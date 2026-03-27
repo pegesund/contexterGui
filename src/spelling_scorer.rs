@@ -321,21 +321,24 @@ pub fn generate_spelling_candidates(
     passing
 }
 
-/// Full sentence scoring: mask each word, sum BERT's prediction logits.
+/// Score a candidate word in context. Same as boundary scorer but called
+/// with the full corrected sentence for context.
+/// This is used for the hybrid re-ranking step.
 pub fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
     let words: Vec<&str> = sentence.split_whitespace().collect();
     if words.is_empty() { return f32::NEG_INFINITY; }
     let mut total: f32 = 0.0;
     let mut scored_count: usize = 0;
     for i in 0..words.len() {
+        let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
+        if word_clean.is_empty() { continue; }
         let masked: String = words.iter().enumerate()
             .map(|(j, w)| if j == i { "<mask>" } else { *w })
             .collect::<Vec<_>>().join(" ");
         if let Ok((logits, _)) = model.single_forward(&masked) {
-            let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
-            // Use encode() to get first BPE token — handles multi-token words
             if let Ok(enc) = model.tokenizer.encode(format!(" {}", word_clean.to_lowercase()), false) {
-                if let Some(&first_id) = enc.get_ids().first() {
+                let ids = enc.get_ids();
+                if let Some(&first_id) = ids.first() {
                     total += logits[first_id as usize];
                     scored_count += 1;
                 }
@@ -427,31 +430,42 @@ pub fn score_and_rerank(
     }).collect();
     weighted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Step 3: Hybrid — full sentence scoring on top 5
+    // Step 3: Hybrid — sentence scoring on top candidates
+    // Only score single-token candidates with sentence_score (multi-token get inflated prefix logits)
+    // For multi-token candidates, keep the boundary score
     if weighted.len() > 1 {
         let mut top_set: Vec<String> = Vec::new();
         let mut top_seen = HashSet::new();
-        // Merge boundary top 5 + ortho top 5
         for (c, _) in weighted.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
         for (c, _) in candidates.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
-
+        let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
         let sentence_lower = sentence.to_lowercase();
         let word_lower = all_cands.first().map(|c| c.to_lowercase()).unwrap_or_default();
-        let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
+        let weighted_map: HashMap<String, f32> = weighted.iter().cloned().collect();
         let mut reranked: Vec<(String, f32)> = top_set.iter().map(|candidate| {
-            let corrected_sent = if let Some(pos) = sentence_lower.find(&word_lower) {
-                format!("{}{}{}", &sentence_lower[..pos], candidate, &sentence_lower[pos + word_lower.len()..])
+            // Check if candidate is a single BPE token
+            let n_tokens = model.tokenizer.encode(format!(" {}", candidate.to_lowercase()), false)
+                .ok().map(|enc| enc.get_ids().len()).unwrap_or(0);
+            if n_tokens == 1 {
+                // Single token: sentence scoring is accurate
+                let corrected_sent = if let Some(pos) = sentence_lower.find(&word_lower) {
+                    format!("{}{}{}", &sentence_lower[..pos], candidate, &sentence_lower[pos + word_lower.len()..])
+                } else {
+                    format!("{}{}{}", context_before, candidate, context_after)
+                };
+                let sent_score = sentence_score(model, &corrected_sent);
+                let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
+                let eff = if grammar_suggested.contains(candidate) { 1.0 } else { ortho };
+                (candidate.clone(), sent_score * eff.sqrt())
             } else {
-                format!("{}{}{}", context_before, candidate, context_after)
-            };
-            let sent_score = sentence_score(model, &corrected_sent);
-            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
-            let eff = if grammar_suggested.contains(candidate) { 1.0 } else { ortho };
-            (candidate.clone(), sent_score * eff.sqrt())
+                // Multi-token: keep boundary+ortho score (sentence scoring gives inflated prefix)
+                let boundary = weighted_map.get(candidate.as_str()).copied().unwrap_or(0.0);
+                (candidate.clone(), boundary)
+            }
         }).collect();
         reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         reranked
