@@ -505,7 +505,19 @@ pub fn score_and_rerank(
         }
         let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
         let sentence_lower = sentence.to_lowercase();
-        let word_lower = all_cands.first().map(|c| c.to_lowercase()).unwrap_or_default();
+        // Extract misspelled word from gap between context_before and context_after
+        let ctx_before_lower = context_before.to_lowercase();
+        let ctx_after_lower = context_after.to_lowercase();
+        let word_lower = if let Some(pos) = sentence_lower.find(&ctx_before_lower) {
+            let after_before = pos + ctx_before_lower.len();
+            if let Some(apos) = sentence_lower[after_before..].find(&ctx_after_lower.trim_start()) {
+                sentence_lower[after_before..after_before + apos].trim().to_string()
+            } else {
+                sentence_lower[after_before..].trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace()).to_string()
+            }
+        } else {
+            all_cands.first().map(|c| c.to_lowercase()).unwrap_or_default()
+        };
         let weighted_map: HashMap<String, f32> = weighted.iter().cloned().collect();
         let mut reranked: Vec<(String, f32)> = top_set.iter().map(|candidate| {
             // Check if candidate is a single BPE token
@@ -517,10 +529,8 @@ pub fn score_and_rerank(
                 format!("{}{}{}", context_before, candidate, context_after)
             };
             let sent_score = if n_tokens == 1 {
-                // Single token: standard sentence scoring
                 sentence_score(model, &corrected_sent)
             } else {
-                // Multi-token: score each subword token at its position
                 subword_score(model, &corrected_sent, candidate)
             };
             let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
