@@ -286,6 +286,25 @@ fn worker_loop(
                         }
                     } else { scored }
                 } else { scored };
+                // Hybrid: full sentence scoring on top 5 for better accuracy (~200ms × 5)
+                let scored = if scored.len() > 1 {
+                    let top5: Vec<String> = scored.iter().take(5).map(|(c, _)| c.clone()).collect();
+                    let sentence = format!("{}{}", context_before, context_after);
+                    let mut reranked: Vec<(String, f32)> = top5.iter().map(|candidate| {
+                        let corrected = if let Some(pos) = sentence.to_lowercase().find(&candidates.first().map(|c| c.to_lowercase()).unwrap_or_default()) {
+                            // Can't find misspelled word in context — just use boundary score
+                            format!("{}{}{}", &sentence[..pos], candidate, &sentence[pos..])
+                        } else {
+                            format!("{}{}{}", context_before, candidate, context_after)
+                        };
+                        let sent_score = sentence_score(&mut model, &corrected);
+                        (candidate.clone(), sent_score)
+                    }).collect();
+                    reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    reranked
+                } else {
+                    scored
+                };
                 let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
                 repaint_ctx.request_repaint();
             }
@@ -463,4 +482,27 @@ fn mlm_forward_impl(model: &mut Model, masked_text: &str, top_k: usize) -> Vec<(
         }
     }
     predictions
+}
+
+/// Full sentence scoring: mask each word, sum BERT's prediction logits.
+/// More accurate than boundary scoring but ~200ms per sentence.
+fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    if words.is_empty() { return f32::NEG_INFINITY; }
+    let mut total: f32 = 0.0;
+    for i in 0..words.len() {
+        let masked: String = words.iter().enumerate()
+            .map(|(j, w)| if j == i { "<mask>" } else { *w })
+            .collect::<Vec<_>>().join(" ");
+        if let Ok((logits, _)) = model.single_forward(&masked) {
+            let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
+            let token_with_g = format!("Ġ{}", word_clean.to_lowercase());
+            let tid = model.tokenizer.token_to_id(&token_with_g)
+                .or_else(|| model.tokenizer.token_to_id(&word_clean.to_lowercase()));
+            if let Some(id) = tid {
+                total += logits[id as usize];
+            }
+        }
+    }
+    total / words.len() as f32
 }

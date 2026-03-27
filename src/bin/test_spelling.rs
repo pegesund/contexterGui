@@ -177,47 +177,65 @@ fn score_candidates(
         }
     }
 
-    // Re-rank top grammar-valid candidates with sentence-level BERT scoring.
-    // Multiply by ortho_sim so words that look nothing like the misspelling don't win.
-    // Grammar-suggested candidates (ortho_score=1.0) get a boost — they're confirmed correct.
+    // Re-rank using score_spelling — the exact same function the BERT worker uses.
+    // Uses boundary scoring: "context_before<mask> context_after" + first-token logit.
     let grammar_suggested: HashSet<String> = passing.iter()
         .filter(|(_, s)| (*s - 1.0).abs() < 0.01)
         .map(|(c, _)| c.clone())
         .collect();
+    println!("  Grammar-valid: {} candidates", passing.len());
     if passing.len() > 1 {
         let sentence_lower = sentence.to_lowercase();
-        let mut rescored: Vec<(String, f32)> = Vec::new();
-        for (candidate, _) in passing.iter().take(30) {
+        let (context_before, context_after) = if let Some(pos) = sentence_lower.find(&word_lower) {
+            (sentence_lower[..pos].to_string(), sentence_lower[pos + word_lower.len()..].to_string())
+        } else {
+            (sentence_lower.clone(), String::new())
+        };
+
+        // Step 1: Fast boundary scoring (score_spelling) — rank all candidates (~24ms)
+        let all_candidates: Vec<String> = passing.iter().take(30).map(|(c, _)| c.clone()).collect();
+        let ortho_map: HashMap<String, f32> = passing.iter().cloned().collect();
+        let boundary_ranked = match nostos_cognio::spelling::score_spelling(model, &context_before, &context_after, &all_candidates) {
+            Ok(result) => {
+                let mut ranked: Vec<(String, f32)> = result.scored_candidates.iter().map(|(c, bs)| {
+                    let ortho = ortho_map.get(c.as_str()).copied().unwrap_or(0.5);
+                    let eff = if grammar_suggested.contains(c) { 1.0 } else { ortho };
+                    (c.clone(), bs * eff.sqrt())
+                }).collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                ranked
+            }
+            Err(_) => passing.clone(),
+        };
+
+        // Step 2: Full sentence scoring on top 5 (~200ms × 5 = ~1s)
+        // Merge boundary top + ortho top to avoid missing good candidates
+        let mut top_set: Vec<String> = Vec::new();
+        let mut top_seen = HashSet::new();
+        for (c, _) in boundary_ranked.iter().take(3) {
+            if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
+        }
+        // Also add top ortho candidates (they may have high sentence scores)
+        for (c, _) in passing.iter().take(3) {
+            if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
+        }
+        let top3 = top_set;
+        println!("  Boundary top 3: {:?}", top3.iter().zip(boundary_ranked.iter().take(3)).map(|(c, (_, s))| format!("{}({:.1})", c, s)).collect::<Vec<_>>());
+        let mut final_ranked: Vec<(String, f32)> = Vec::new();
+        for candidate in &top3 {
             let corrected = sentence_lower.replacen(&word_lower, candidate, 1);
             let sent_score = bert_sentence_score(model, &corrected);
-            // Compute ortho_sim for weighting
-            let w_tri = trigrams(candidate);
-            let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
-            let max_t = word_trigrams.len().max(w_tri.len()).max(1);
-            let trigram_sim = common as f32 / max_t as f32;
-            let prefix_len = word_lower.chars().zip(candidate.chars())
-                .take_while(|(a, b)| a == b).count();
-            let max_len = word_lower.chars().count().max(candidate.chars().count()).max(1);
-            let prefix_sim = prefix_len as f32 / max_len as f32;
-            let edit_sim = edit_distances.get(candidate.as_str())
-                .map(|d| match d { 1 => 0.85_f32, 2 => 0.65, 3 => 0.45, _ => 0.0 })
-                .unwrap_or(0.0);
-            let mut ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
-            if candidate.chars().next() == Some(word_first) {
-                ortho_sim += 0.15;
-            }
-            // Grammar-suggested candidates: full ortho + 1.2x bonus (confirmed correct form)
-            let effective_ortho = if grammar_suggested.contains(candidate) { 1.0 } else { ortho_sim };
-            let grammar_bonus = if grammar_suggested.contains(candidate) { 1.2 } else { 1.0 };
-            let final_score = sent_score * effective_ortho.sqrt() * grammar_bonus;
-            println!("  sentence-score: '{}' → {:.3} × sqrt(ortho {:.2}{}) = {:.3}",
-                candidate, sent_score, effective_ortho,
-                if grammar_suggested.contains(candidate) { " grammar-boosted" } else { "" },
+            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
+            let eff = if grammar_suggested.contains(candidate) { 1.0 } else { ortho };
+            let final_score = sent_score * eff.sqrt();
+            println!("  full-sentence: '{}' sent={:.3} × sqrt(ortho {:.2}{}) = {:.3}",
+                candidate, sent_score, eff,
+                if grammar_suggested.contains(candidate) { " grammar" } else { "" },
                 final_score);
-            rescored.push((candidate.clone(), final_score));
+            final_ranked.push((candidate.clone(), final_score));
         }
-        rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        passing = rescored;
+        final_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        passing = final_ranked;
     }
 
     if !passing.is_empty() { passing } else { ortho_scored }
