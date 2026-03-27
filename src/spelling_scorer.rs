@@ -349,6 +349,67 @@ pub fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
     total / scored_count as f32
 }
 
+/// Score a multi-token candidate by masking each subword token individually.
+/// "Katten sitter på stolen" with candidate "sitter" (tokens: "s", "itter"):
+///   - Mask "s": "Katten <mask> itter på stolen" → logit for "s"
+///   - Mask "itter": "Katten s <mask> på stolen" → logit for "itter"
+///   - Sum both → total score for "sitter"
+pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 {
+    // Tokenize full sentence to get token IDs and find candidate position
+    let enc = match model.tokenizer.encode(sentence.to_string(), false) {
+        Ok(e) => e,
+        Err(_) => return f32::NEG_INFINITY,
+    };
+    let sent_ids: Vec<u32> = enc.get_ids().to_vec();
+
+    // Tokenize candidate to get its subword tokens
+    let cand_enc = match model.tokenizer.encode(format!(" {}", candidate.to_lowercase()), false) {
+        Ok(e) => e,
+        Err(_) => return f32::NEG_INFINITY,
+    };
+    let cand_ids: Vec<u32> = cand_enc.get_ids().to_vec();
+    if cand_ids.is_empty() { return f32::NEG_INFINITY; }
+
+    // Find where candidate tokens appear in sentence tokens
+    let mut start_pos = None;
+    for i in 0..sent_ids.len().saturating_sub(cand_ids.len() - 1) {
+        if sent_ids[i] == cand_ids[0] {
+            let matches = cand_ids.iter().enumerate().all(|(k, &cid)| {
+                i + k < sent_ids.len() && sent_ids[i + k] == cid
+            });
+            if matches {
+                start_pos = Some(i);
+                break;
+            }
+        }
+    }
+
+    let start = match start_pos {
+        Some(s) => s,
+        None => return f32::NEG_INFINITY,
+    };
+
+    // Mask each subword token and sum logits
+    let mask_id = model.tokenizer.token_to_id("<mask>").unwrap_or(4);
+    let mut total: f32 = 0.0;
+    let mut scored: usize = 0;
+    for k in 0..cand_ids.len() {
+        let pos = start + k;
+        if pos >= sent_ids.len() { break; }
+        let mut masked_ids = sent_ids.clone();
+        masked_ids[pos] = mask_id;
+        // Build masked text from token IDs
+        let masked_text = model.tokenizer.decode(&masked_ids, true)
+            .unwrap_or_default();
+        if let Ok((logits, _)) = model.single_forward(&masked_text) {
+            total += logits[cand_ids[k] as usize];
+            scored += 1;
+        }
+    }
+    if scored == 0 { return f32::NEG_INFINITY; }
+    total / scored as f32
+}
+
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.
 /// `grammar_check` takes sentences and returns errors per sentence.
 pub fn score_and_rerank(
@@ -450,22 +511,21 @@ pub fn score_and_rerank(
             // Check if candidate is a single BPE token
             let n_tokens = model.tokenizer.encode(format!(" {}", candidate.to_lowercase()), false)
                 .ok().map(|enc| enc.get_ids().len()).unwrap_or(0);
-            if n_tokens == 1 {
-                // Single token: sentence scoring is accurate
-                let corrected_sent = if let Some(pos) = sentence_lower.find(&word_lower) {
-                    format!("{}{}{}", &sentence_lower[..pos], candidate, &sentence_lower[pos + word_lower.len()..])
-                } else {
-                    format!("{}{}{}", context_before, candidate, context_after)
-                };
-                let sent_score = sentence_score(model, &corrected_sent);
-                let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
-                let eff = if grammar_suggested.contains(candidate) { 1.0 } else { ortho };
-                (candidate.clone(), sent_score * eff.sqrt())
+            let corrected_sent = if let Some(pos) = sentence_lower.find(&word_lower) {
+                format!("{}{}{}", &sentence_lower[..pos], candidate, &sentence_lower[pos + word_lower.len()..])
             } else {
-                // Multi-token: keep boundary+ortho score (sentence scoring gives inflated prefix)
-                let boundary = weighted_map.get(candidate.as_str()).copied().unwrap_or(0.0);
-                (candidate.clone(), boundary)
-            }
+                format!("{}{}{}", context_before, candidate, context_after)
+            };
+            let sent_score = if n_tokens == 1 {
+                // Single token: standard sentence scoring
+                sentence_score(model, &corrected_sent)
+            } else {
+                // Multi-token: score each subword token at its position
+                subword_score(model, &corrected_sent, candidate)
+            };
+            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
+            let eff = if grammar_suggested.contains(candidate) { 1.0 } else { ortho };
+            (candidate.clone(), sent_score * eff.sqrt())
         }).collect();
         reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         reranked
