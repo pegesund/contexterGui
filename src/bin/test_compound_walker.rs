@@ -18,27 +18,57 @@ fn main() {
 
     // (input, expected_in_results, description)
     let tests: Vec<(&str, Vec<&str>, &str)> = vec![
-        // Single word, no compound
+        // === Single words (baseline) ===
         ("kjøkken", vec!["kjøkken"], "exact single word"),
-        ("sjøkken", vec!["kjøkken"], "fuzzy single word (s→k)"),
+        ("sjøkken", vec!["kjøkken"], "fuzzy single: s→k"),
 
-        // Two-part compound, exact
+        // === Two-part compounds, exact ===
         ("kjøkkenbord", vec!["kjøkkenbord"], "exact compound"),
-
-        // Two-part compound, error in first part
-        ("sjøkkenbord", vec!["kjøkkenbord"], "error in part 1 (s→k)"),
-
-        // Two-part compound, error in second part
-        ("kjøkkenbort", vec!["kjøkkenbord"], "error in part 2 (t→d)"),
-
-        // Two-part compound, errors in BOTH parts
-        ("sjøkkenbort", vec!["kjøkkenbord"], "errors in both parts"),
-
-        // Binding letter 's'
+        ("fotballkamp", vec!["fotballkamp"], "exact: fotball+kamp"),
         ("arbeidsplass", vec!["arbeidsplass"], "exact with binding s"),
+        ("skolegård", vec!["skolegård"], "exact: skole+gård"),
 
-        // Phonetic confusion in compound
-        ("fotballag", vec!["fotballag"], "football team"),
+        // === Error in first part ===
+        ("sjøkkenbord", vec!["kjøkkenbord"], "part1 error: sj→kj"),
+        ("fotbalskamp", vec!["fotballkamp"], "part1 error: missing l"),
+        ("skollegård", vec!["skolegård"], "part1 error: ll→l"),
+
+        // === Error in second part ===
+        ("kjøkkenbort", vec!["kjøkkenbord"], "part2 error: t→d"),
+        ("fotballkamb", vec!["fotballkamp"], "part2 error: b→p"),
+        ("skolegårt", vec!["skolegård"], "part2 error: t→d"),
+
+        // === Errors in BOTH parts ===
+        ("sjøkkenbort", vec!["kjøkkenbord"], "both parts: sj→kj + t→d"),
+        ("fotbalskamb", vec!["fotballkamp"], "both parts: l missing + b→p"),
+
+        // === Binding letter 's' ===
+        ("arbeidsplas", vec!["arbeidsplass"], "binding s: missing final s"),
+        ("arbeidsplasss", vec!["arbeidsplass"], "binding s: extra s"),
+
+        // === Phonetic confusions in compounds ===
+        ("gåttebord", vec!["guttebord"], "phonetic: å→u in part1"),
+        ("lekeplaas", vec!["lekeplass"], "phonetic: missing s"),
+        ("barnehagge", vec!["barnehage"], "double consonant: gg→g"),
+
+        // === Common Norwegian compound misspellings ===
+        ("datamaskin", vec!["datamaskin"], "exact: data+maskin"),
+        ("datamaskinn", vec!["datamaskin"], "extra n at end"),
+        ("helsesøster", vec!["helsesøster"], "exact: helse+søster"),
+        ("husholding", vec!["husholdning"], "missing n: holdning"),
+
+        // === Three-part compounds ===
+        ("barnehageplass", vec!["barnehageplass"], "three-part: barne+hage+plass"),
+
+        // === Dyslexic-style errors ===
+        ("sjokkolade", vec!["sjokolade"], "double k: kk→k"),
+        ("biblåtek", vec!["bibliotek"], "phonetic: io→å"),
+        ("restourang", vec!["restaurant"], "phonetic: au→ou"),
+        ("informassjon", vec!["informasjon"], "double s: ss→s"),
+
+        // === Edge cases ===
+        ("bord", vec!["bord"], "short word, exact"),
+        ("bort", vec!["bord", "bort"], "short word, fuzzy"),
     ];
 
     let mut pass = 0;

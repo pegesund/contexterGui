@@ -157,6 +157,10 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
             if state.input_pos < input_bytes.len() {
                 let inp_byte = input_bytes[state.input_pos];
 
+                // Check if input is at a 2-byte UTF-8 char (Norwegian å,ø,æ = 0xC3 + XX)
+                let inp_is_multibyte = inp_byte == 0xC3 && state.input_pos + 1 < input_bytes.len();
+                let inp_char_len = if inp_is_multibyte { 2 } else { 1 };
+
                 // Try all FST transitions
                 for trans in node.transitions() {
                     if trans.inp == inp_byte {
@@ -185,6 +189,44 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                             parts: state.parts.clone(),
                             total_edits: state.total_edits,
                         });
+                    }
+
+                    // UTF-8 aware substitution: 2-byte input char (å,ø,æ) ↔ 1-byte FST char
+                    // Count as 1 edit instead of 2
+                    if inp_is_multibyte && trans.inp != 0xC3 {
+                        // Input has 2-byte char, FST has 1-byte char
+                        // Skip both input bytes, take FST byte → 1 edit
+                        let mut wb = state.word_bytes.clone();
+                        wb.push(trans.inp);
+                        next_states.push(WalkState {
+                            fst_addr: trans.addr,
+                            input_pos: state.input_pos + 2, // skip both bytes of å/ø/æ
+                            edits: state.edits + 1,
+                            word_bytes: wb,
+                            word_start: state.word_start,
+                            parts: state.parts.clone(),
+                            total_edits: state.total_edits,
+                        });
+                    }
+                    if !inp_is_multibyte && trans.inp == 0xC3 {
+                        // Input has 1-byte char, FST starts 2-byte char
+                        // Follow the 0xC3 transition, then try all continuations consuming 1 input byte
+                        let next_node = fst.node(trans.addr);
+                        for trans2 in next_node.transitions() {
+                            // This completes the 2-byte FST char; consume 1 input byte → 1 edit
+                            let mut wb = state.word_bytes.clone();
+                            wb.push(0xC3);
+                            wb.push(trans2.inp);
+                            next_states.push(WalkState {
+                                fst_addr: trans2.addr,
+                                input_pos: state.input_pos + 1, // consume 1 input byte
+                                edits: state.edits + 1,
+                                word_bytes: wb,
+                                word_start: state.word_start,
+                                parts: state.parts.clone(),
+                                total_edits: state.total_edits,
+                            });
+                        }
                     }
 
                     // Delete (FST byte not in input) — advance FST only, +1 edit
