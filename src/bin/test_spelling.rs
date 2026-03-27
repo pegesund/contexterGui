@@ -61,6 +61,10 @@ fn main() {
         ("Barna fikk gåtterier.", "gåtterier", "godterier|godteri"),
         // First-char wrong + grammar inflection: sjøkken → kjøkkenet
         ("Jeg har mange gryter på sjøkken mitt.", "sjøkken", "kjøkken|kjøkkenet"),
+        // Phonetic substitutions (dyslexic patterns)
+        ("Det var et gott år.", "gott", "godt"),              // silent d: tt→dt
+        ("Jeg vil lare meg norsk.", "lare", "lære"),          // a→æ
+        ("Hun herte ikke.", "herte", "hørte"),                // e→ø
     ];
 
     let mut pass = 0;

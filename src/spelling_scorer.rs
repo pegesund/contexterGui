@@ -273,6 +273,61 @@ pub fn generate_spelling_candidates(
         }
     }
 
+    // Source 12: Phonetic substitutions for dyslexic users
+    // Norwegian-specific sound confusions where UTF-8 byte distance exceeds char distance
+    {
+        const PHONETIC_SUBS: &[(&str, &str)] = &[
+            // Vowel confusions (å,ø,æ are 2-byte UTF-8 → extra byte edit cost in FST)
+            ("å", "o"), ("o", "å"),
+            ("ø", "e"), ("e", "ø"),
+            ("æ", "a"), ("a", "æ"),
+            ("æ", "e"),
+            ("y", "i"), ("i", "y"),
+            // Silent consonant patterns
+            ("dt", "tt"), ("tt", "dt"),
+            ("ld", "ll"), ("ll", "ld"),
+            ("nd", "nn"), ("nn", "nd"),
+            // Silent initial consonant
+            ("gj", "j"), ("j", "gj"),
+            ("hj", "j"), ("j", "hj"),
+            ("hv", "v"), ("v", "hv"),
+        ];
+
+        // Single substitution pass
+        let mut phonetic_candidates: Vec<String> = Vec::new();
+        for &(from, to) in PHONETIC_SUBS {
+            let mut pos = 0;
+            while let Some(idx) = word_lower[pos..].find(from) {
+                let abs_idx = pos + idx;
+                let result = format!("{}{}{}", &word_lower[..abs_idx], to, &word_lower[abs_idx + from.len()..]);
+                if result != word_lower && analyzer.has_word(&result) && seen.insert(result.clone()) {
+                    edit_distances.insert(result.clone(), 1);
+                    candidates.push(result.clone());
+                    phonetic_candidates.push(result);
+                }
+                pos = abs_idx + from.len();
+            }
+        }
+
+        // Two-step phonetic chain: apply a second substitution to results of the first
+        // Catches "gåtterier" → "gotterier" (å→o) → "godterier" (tt→dt)
+        let chain_candidates = phonetic_candidates.clone();
+        for base in &chain_candidates {
+            for &(from, to) in PHONETIC_SUBS {
+                let mut pos = 0;
+                while let Some(idx) = base[pos..].find(from) {
+                    let abs_idx = pos + idx;
+                    let result = format!("{}{}{}", &base[..abs_idx], to, &base[abs_idx + from.len()..]);
+                    if result != word_lower && result != *base && analyzer.has_word(&result) && seen.insert(result.clone()) {
+                        edit_distances.insert(result.clone(), 2);
+                        candidates.push(result);
+                    }
+                    pos = abs_idx + from.len();
+                }
+            }
+        }
+    }
+
     // Phase 2: Ortho score
     let mut ortho_scored: Vec<(String, f32)> = Vec::new();
     for w in &candidates {
@@ -502,7 +557,7 @@ pub fn score_and_rerank(
         for (c, _) in weighted.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
-        for (c, _) in candidates.iter().take(8) {
+        for (c, _) in candidates.iter().take(12) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
         let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
