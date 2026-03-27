@@ -326,21 +326,24 @@ pub fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
     let words: Vec<&str> = sentence.split_whitespace().collect();
     if words.is_empty() { return f32::NEG_INFINITY; }
     let mut total: f32 = 0.0;
+    let mut scored_count: usize = 0;
     for i in 0..words.len() {
         let masked: String = words.iter().enumerate()
             .map(|(j, w)| if j == i { "<mask>" } else { *w })
             .collect::<Vec<_>>().join(" ");
         if let Ok((logits, _)) = model.single_forward(&masked) {
             let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
-            let token_with_g = format!("Ġ{}", word_clean.to_lowercase());
-            let tid = model.tokenizer.token_to_id(&token_with_g)
-                .or_else(|| model.tokenizer.token_to_id(&word_clean.to_lowercase()));
-            if let Some(id) = tid {
-                total += logits[id as usize];
+            // Use encode() to get first BPE token — handles multi-token words
+            if let Ok(enc) = model.tokenizer.encode(format!(" {}", word_clean.to_lowercase()), false) {
+                if let Some(&first_id) = enc.get_ids().first() {
+                    total += logits[first_id as usize];
+                    scored_count += 1;
+                }
             }
         }
     }
-    total / words.len() as f32
+    if scored_count == 0 { return f32::NEG_INFINITY; }
+    total / scored_count as f32
 }
 
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.
