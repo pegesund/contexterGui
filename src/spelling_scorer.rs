@@ -466,62 +466,48 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
         }
     };
 
-    // Build masked texts by string manipulation — no decode/re-encode roundtrip.
-    // For candidate "godterier" (tokens: [Ġgod, ter, ier]) in "barna fikk godterier.":
-    //   k=0: "barna fikk <mask>terier."
-    //   k=1: "barna fikk god<mask>ier."
-    //   k=2: "barna fikk godter<mask>."
-    let cand_lower = candidate.to_lowercase();
-    let sent_lower = sentence.to_lowercase();
-    let cand_pos = match sent_lower.find(&cand_lower) {
-        Some(p) => p,
+    // Direct token-level masking — no text decode/re-encode roundtrip.
+    // Encode the full sentence with special tokens (CLS/SEP), find candidate tokens,
+    // mask each one in the token array, forward pass with raw IDs.
+    let enc_full = match model.tokenizer.encode(sentence.to_string(), true) {
+        Ok(e) => e,
+        Err(_) => return f32::NEG_INFINITY,
+    };
+    let full_ids: Vec<u32> = enc_full.get_ids().to_vec();
+
+    // Find candidate tokens in the full encoding (with special tokens)
+    let mut start_s = None;
+    for i in 0..full_ids.len().saturating_sub(cand_ids.len().saturating_sub(1)) {
+        if full_ids[i] == cand_ids[0] {
+            let matches = cand_ids.iter().enumerate().all(|(k, &cid)| {
+                i + k < full_ids.len() && full_ids[i + k] == cid
+            });
+            if matches {
+                start_s = Some(i);
+                break;
+            }
+        }
+    }
+    let start_pos = match start_s {
+        Some(s) => s,
         None => return f32::NEG_INFINITY,
     };
 
-    // Decode each subword to get its text
-    let mut subword_texts: Vec<String> = Vec::new();
-    for &tid in &cand_ids {
-        let decoded = model.tokenizer.decode(&[tid], true).unwrap_or_default();
-        subword_texts.push(decoded);
-    }
-
-    let before_cand = &sentence[..cand_pos];
-    let after_cand = &sentence[cand_pos + cand_lower.len()..];
-
-    // The first subword has Ġ prefix (word-initial), subsequent ones don't.
-    // When masking a middle token, the <mask> must be glued to the prefix (no space).
-    // The Ġ prefix in the first decoded subword becomes a space — strip it.
-    let subword_texts: Vec<String> = subword_texts.iter().enumerate()
-        .map(|(i, t)| if i == 0 { t.trim_start().to_string() } else { t.clone() })
-        .collect();
-
+    let mask_id = model.tokenizer.token_to_id("<mask>").unwrap_or(4);
     let mut total: f32 = 0.0;
     let mut scored: usize = 0;
     for k in 0..cand_ids.len() {
-        let prefix: String = subword_texts[..k].concat();
-        let suffix: String = subword_texts[k+1..].concat();
-        // For k=0: "before <mask>suffix after" (space before mask for word-initial)
-        // For k>0: "before prefix<mask>suffix after" (no space, continuation)
-        let masked_text = if k == 0 {
-            format!("{}<mask>{}{}", before_cand, suffix, after_cand)
-        } else {
-            format!("{}{}<mask>{}{}", before_cand, prefix, suffix, after_cand)
-        };
-        if let Ok((logits, _)) = model.single_forward(&masked_text) {
+        let pos = start_pos + k;
+        if pos >= full_ids.len() { break; }
+        let mut masked = full_ids.clone();
+        masked[pos] = mask_id;
+        if let Ok((logits, _)) = model.forward_ids(&masked, pos) {
             total += logits[cand_ids[k] as usize];
             scored += 1;
         }
     }
     if scored == 0 { return f32::NEG_INFINITY; }
-    let avg = total / scored as f32;
-    // Multi-token words get inflated subword scores (each token is predicted in context
-    // of the other tokens). Apply a gentle penalty so single-token candidates
-    // (which are real dictionary entries) are preferred when scores are close.
-    if cand_ids.len() > 1 {
-        avg * 0.82
-    } else {
-        avg
-    }
+    total / scored as f32
 }
 
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.
@@ -614,11 +600,13 @@ pub fn score_and_rerank(
         for (c, _) in weighted.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
-        for (c, _) in candidates.iter().take(12) {
+        for (c, _) in candidates.iter().take(15) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
         let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
         let sentence_lower = sentence.to_lowercase();
+        // Use original casing for BERT (case-sensitive model)
+        let sentence_cased = sentence.to_string();
         // Extract misspelled word from gap between context_before and context_after
         let ctx_before_lower = context_before.to_lowercase();
         let ctx_after_lower = context_after.to_lowercase();
@@ -637,16 +625,12 @@ pub fn score_and_rerank(
             // Check if candidate is a single BPE token
             let n_tokens = model.tokenizer.encode(format!(" {}", candidate.to_lowercase()), false)
                 .ok().map(|enc| enc.get_ids().len()).unwrap_or(0);
-            let corrected_sent = if let Some(pos) = sentence_lower.find(&word_lower) {
-                format!("{}{}{}", &sentence_lower[..pos], candidate, &sentence_lower[pos + word_lower.len()..])
+            let corrected_sent = if let Some(pos) = sentence_cased.to_lowercase().find(&word_lower) {
+                format!("{}{}{}", &sentence_cased[..pos], candidate, &sentence_cased[pos + word_lower.len()..])
             } else {
                 format!("{}{}{}", context_before, candidate, context_after)
             };
-            let sent_score = if n_tokens == 1 {
-                sentence_score(model, &corrected_sent, candidate)
-            } else {
-                subword_score(model, &corrected_sent, candidate)
-            };
+            let sent_score = subword_score(model, &corrected_sent, candidate);
             let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
             let eff = if grammar_suggested.contains(candidate) { 1.0 } else { ortho };
             (candidate.clone(), sent_score * eff.sqrt())
