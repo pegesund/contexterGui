@@ -748,6 +748,8 @@ struct ContextApp {
     /// Open suggestions (any word) for fill-in-the-blank mode
     open_completions: Vec<Completion>,
     last_completed_prefix: String,
+    /// Timestamp when last CompleteWord was dispatched (for round-trip measurement)
+    last_completion_dispatch: Instant,
     /// Keep window large briefly after replacement so it doesn't shrink instantly
     last_replace_time: Instant,
     /// Cache: (masked_sentence, logits) from single_forward — reused when only prefix changes
@@ -1247,6 +1249,7 @@ impl ContextApp {
             completions: Vec::new(),
             open_completions: Vec::new(),
             last_completed_prefix: String::new(),
+            last_completion_dispatch: Instant::now(),
             last_replace_time: Instant::now() - Duration::from_secs(10),
             cached_forward: None,
             cached_right_column: None,
@@ -1775,9 +1778,10 @@ impl ContextApp {
         // Process the one completion result
         if let Some((cache_key, left, right)) = last_completion {
             {
-                    log!("BERT completion received: {} left [{}] | {} right [{}]",
+                    log!("BERT completion received: {} left [{}] | {} right [{}] (round-trip: {}ms)",
                         left.len(), left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
-                        right.len(), right.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "));
+                        right.len(), right.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
+                        self.last_completion_dispatch.elapsed().as_millis());
                     // Completions arrive already dictionary + grammar filtered from worker thread
                     // Apply document-frequency and user-dict boosting, then re-sort
                     {
@@ -3503,7 +3507,7 @@ impl ContextApp {
                 // Quality controls BPE extension depth and candidate count
                 // 0: single-token only (~200ms), 1: 1 step (~800ms), 2: full (~2s)
                 let (top_n, max_steps) = match self.quality {
-                    0 => (5, 0),
+                    0 => (5, 1),
                     1 => (5, 1),
                     _ => (5, 3),
                 };
@@ -4592,16 +4596,28 @@ impl eframe::App for ContextApp {
                             .map(|a| a.prefix_lookup(&prefix_lower, 100)
                                 .into_iter().map(|w| w.to_lowercase()).collect())
                             .unwrap_or_default();
-                        let context_for_cw = {
+                        let context_for_cw = if self.quality >= 2 {
+                            // Høyest kvalitet: use full paragraph text for better context
+                            let para_text = self.paragraph_texts.get(&self.context.paragraph_id)
+                                .cloned()
+                                .unwrap_or_else(|| self.context.sentence.clone());
+                            para_text.strip_suffix(prefix).unwrap_or(&para_text).trim_end().to_string()
+                        } else {
                             let sentence = &self.context.sentence;
                             sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end().to_string()
                         };
                         let (top_n, max_steps) = match self.quality {
-                            0 => (15, 0),
+                            0 => (15, 1),
                             1 => (15, 1),
                             _ => (15, 3),
                         };
-                        log!("Sending CompleteWord: ctx='{}' prefix='{}'", &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix);
+                        log!("Sending CompleteWord: ctx='{}' prefix='{}' [queues: spell={} pend_bert={} gram_inflight={} gram_q={}]",
+                            &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix,
+                            self.spelling_queue.len(),
+                            self.pending_spelling_bert.len() + self.pending_grammar_bert.len() + self.pending_consonant_bert.len(),
+                            self.grammar_inflight.len(),
+                            self.grammar_queue.len());
+                        self.last_completion_dispatch = Instant::now();
                         let cancel_clone = cancel.clone();
                         let sentence_clone = self.context.sentence.clone();
                         worker.send(|id| bert_worker::BertRequest::CompleteWord {
@@ -6106,11 +6122,25 @@ impl eframe::App for ContextApp {
                         .size(12.0)
                         .color(egui::Color32::from_rgb(100, 100, 100)),
                 );
-                ui.label(
-                    egui::RichText::new(format!("Kvalitet: {} (0=rask, 1=balansert, 2=full)", self.quality))
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(100, 100, 100)),
-                );
+                {
+                    let quality_label = match self.quality {
+                        0 => "Raskere",
+                        1 => "Normal",
+                        _ => "Høyeste kvalitet",
+                    };
+                    let mut selected = self.quality as usize;
+                    egui::ComboBox::from_id_salt("quality_combo")
+                        .selected_text(egui::RichText::new(quality_label).size(11.0))
+                        .width(120.0)
+                        .show_index(ui, &mut selected, 3, |i| {
+                            match i { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" }.to_string()
+                        });
+                    if selected as u8 != self.quality {
+                        self.quality = selected as u8;
+                        self.debounce_ms = if self.quality == 0 { 100 } else { 150 };
+                        log!("Quality changed to {}", self.quality);
+                    }
+                }
                 if self.grammar_completion {
                     ui.label(
                         egui::RichText::new("Grammatikkfilter: PÅ")
@@ -6629,7 +6659,7 @@ fn main() -> eframe::Result {
             .position(|a| a == "--quality")
             .and_then(|i| args.get(i + 1))
             .and_then(|v| v.parse().ok())
-            .unwrap_or(2)
+            .unwrap_or(1) // default: Normal (1)
     };
     if grammar_completion {
         eprintln!("Grammar completion: ON");
@@ -6637,7 +6667,8 @@ fn main() -> eframe::Result {
     if use_swipl {
         eprintln!("SWI-Prolog engine: ON");
     }
-    eprintln!("Quality: {} (0=fast ~200ms, 1=balanced ~800ms, 2=full ~2s)", quality);
+    let quality_name = match quality { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" };
+    eprintln!("Quality: {} ({})", quality, quality_name);
 
     // Initialize TTS engine (platform-specific)
     setup_platform.init_tts();
