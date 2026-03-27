@@ -321,14 +321,15 @@ pub fn generate_spelling_candidates(
     passing
 }
 
-/// Score a candidate word in context. Same as boundary scorer but called
-/// with the full corrected sentence for context.
-/// This is used for the hybrid re-ranking step.
-pub fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
+/// Score a candidate word in sentence context.
+/// Masks each word and sums logits, weighting the TARGET word position 3x.
+/// `target` is the candidate word to emphasize (the one that differs between candidates).
+pub fn sentence_score(model: &mut Model, sentence: &str, target: &str) -> f32 {
     let words: Vec<&str> = sentence.split_whitespace().collect();
     if words.is_empty() { return f32::NEG_INFINITY; }
+    let target_lower = target.to_lowercase();
     let mut total: f32 = 0.0;
-    let mut scored_count: usize = 0;
+    let mut weight_sum: f32 = 0.0;
     for i in 0..words.len() {
         let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
         if word_clean.is_empty() { continue; }
@@ -339,14 +340,15 @@ pub fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
             if let Ok(enc) = model.tokenizer.encode(format!(" {}", word_clean.to_lowercase()), false) {
                 let ids = enc.get_ids();
                 if let Some(&first_id) = ids.first() {
-                    total += logits[first_id as usize];
-                    scored_count += 1;
+                    let w = 1.0_f32; // equal weight for all positions
+                    total += logits[first_id as usize] * w;
+                    weight_sum += w;
                 }
             }
         }
     }
-    if scored_count == 0 { return f32::NEG_INFINITY; }
-    total / scored_count as f32
+    if weight_sum == 0.0 { return f32::NEG_INFINITY; }
+    total / weight_sum
 }
 
 /// Score a multi-token candidate by masking each subword token individually.
@@ -529,7 +531,7 @@ pub fn score_and_rerank(
                 format!("{}{}{}", context_before, candidate, context_after)
             };
             let sent_score = if n_tokens == 1 {
-                sentence_score(model, &corrected_sent)
+                sentence_score(model, &corrected_sent, candidate)
             } else {
                 subword_score(model, &corrected_sent, candidate)
             };
