@@ -1320,7 +1320,7 @@ impl ContextApp {
             llm_last_queue_time: Instant::now(),
             llm_checked_hashes: std::collections::HashSet::new(),
             llm_sent_count: Vec::new(),
-            llm_enabled: false,
+            llm_enabled: true,
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
             pending_spelling_bert: Vec::new(),
@@ -3291,11 +3291,20 @@ impl ContextApp {
                 let error_word = find_diff_word(&c.original, &c.corrected);
                 log!("LLM correction: '{}' (error_word='{}') para={}", c.explanation, error_word, trunc(&c.paragraph_id, 10));
 
-                // Remove existing local grammar errors for this sentence (LLM replaces them)
+                // Remove ALL existing local errors for this sentence (LLM replaces them)
+                // Clear underlines for removed errors
+                for e in &self.writing_errors {
+                    if e.paragraph_id == c.paragraph_id
+                        && e.sentence_context.to_lowercase() == c.original.to_lowercase()
+                        && e.underlined
+                    {
+                        let w = if !e.error_word.is_empty() { &e.error_word } else { &e.word };
+                        self.manager.clear_underline_word(w, &e.paragraph_id);
+                    }
+                }
                 self.writing_errors.retain(|e| {
                     !(e.paragraph_id == c.paragraph_id
-                        && e.sentence_context.to_lowercase() == c.original.to_lowercase()
-                        && matches!(e.category, ErrorCategory::Grammar))
+                        && e.sentence_context.to_lowercase() == c.original.to_lowercase())
                 });
 
                 // Add LLM correction
