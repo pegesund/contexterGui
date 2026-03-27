@@ -10,6 +10,7 @@ mod stt;
 mod tts;
 pub mod user_dict;
 pub mod spelling_scorer;
+pub mod llm_actor;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
@@ -831,6 +832,14 @@ struct ContextApp {
     grammar_queue_total: usize,
     /// Whether a grammar scan is in progress (shows indicator in UI)
     grammar_scanning: bool,
+    /// LLM grammar correction
+    llm_actor: Option<llm_actor::LlmActorHandle>,
+    llm_queue: Vec<(String, String)>,       // (sentence, paragraph_id)
+    llm_queue_hashes: Vec<u64>,             // hashes of queued sentences
+    llm_last_queue_time: Instant,           // for idle detection
+    llm_checked_hashes: std::collections::HashSet<u64>,
+    llm_sent_count: Vec<Instant>,           // rate limiting (rolling hour)
+    llm_enabled: bool,
     /// Cooldown after a fix — don't prune errors until canvas has repainted with new text
     /// Recently fixed words — don't re-detect these as errors (cleared when fresh text arrives from extension)
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
@@ -1305,6 +1314,13 @@ impl ContextApp {
             grammar_queue: Vec::new(),
             grammar_queue_total: 0,
             grammar_scanning: false,
+            llm_actor: None, // spawned after egui context is available
+            llm_queue: Vec::new(),
+            llm_queue_hashes: Vec::new(),
+            llm_last_queue_time: Instant::now(),
+            llm_checked_hashes: std::collections::HashSet::new(),
+            llm_sent_count: Vec::new(),
+            llm_enabled: false,
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
             pending_spelling_bert: Vec::new(),
@@ -2964,6 +2980,9 @@ impl ContextApp {
                 self.paragraph_texts.clear();
                 self.last_doc_text.clear();
                 self.grammar_inflight.clear();
+                self.llm_checked_hashes.clear();
+                self.llm_queue.clear();
+                self.llm_queue_hashes.clear();
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3129,6 +3148,16 @@ impl ContextApp {
                         self.grammar_inflight.insert(sent_h);
                     }
 
+                    // Queue for LLM correction (complete sentences only, not already checked)
+                    if self.llm_enabled && is_complete {
+                        let llm_hash = hash_str(&format!("llm|{}|{}", p.paragraph_id, sentence_text));
+                        if !self.llm_checked_hashes.contains(&llm_hash) {
+                            self.llm_queue.push((sentence_text.to_string(), p.paragraph_id.clone()));
+                            self.llm_queue_hashes.push(llm_hash);
+                            self.llm_last_queue_time = Instant::now();
+                        }
+                    }
+
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
                 }
 
@@ -3220,6 +3249,78 @@ impl ContextApp {
         }
         if self.grammar_queue.is_empty() {
             self.grammar_scanning = false;
+        }
+    }
+
+    /// Dispatch queued sentences to LLM actor in batches.
+    fn dispatch_llm_batch(&mut self) {
+        if !self.llm_enabled || self.llm_queue.is_empty() { return; }
+        // Spawn actor lazily (needs egui context)
+        if self.llm_actor.is_none() { return; }
+
+        let idle = self.llm_last_queue_time.elapsed() >= Duration::from_secs(2);
+        let full = self.llm_queue.len() >= 5;
+        if !idle && !full { return; }
+
+        // Rate limit: 300 sentences/hour
+        self.llm_sent_count.retain(|t| t.elapsed() < Duration::from_secs(3600));
+        let batch_size = self.llm_queue.len().min(10);
+        if self.llm_sent_count.len() + batch_size > 300 {
+            log!("LLM rate limit: {}/300 sentences this hour", self.llm_sent_count.len());
+            return;
+        }
+
+        let batch: Vec<_> = self.llm_queue.drain(..batch_size).collect();
+        let hashes: Vec<_> = self.llm_queue_hashes.drain(..batch_size).collect();
+        for _ in 0..batch_size { self.llm_sent_count.push(Instant::now()); }
+
+        log!("LLM dispatch: {} sentences (rate: {}/300)", batch_size, self.llm_sent_count.len());
+        if let Some(actor) = &mut self.llm_actor {
+            actor.send(batch, hashes);
+        }
+    }
+
+    /// Poll LLM actor for correction results.
+    fn poll_llm_responses(&mut self) {
+        let actor = match &self.llm_actor { Some(a) => a, None => return };
+        while let Some(resp) = actor.try_recv() {
+            for c in &resp.corrections {
+                if c.corrected == c.original { continue; }
+
+                // Find the word that changed
+                let error_word = find_diff_word(&c.original, &c.corrected);
+                log!("LLM correction: '{}' (error_word='{}') para={}", c.explanation, error_word, trunc(&c.paragraph_id, 10));
+
+                // Remove existing local grammar errors for this sentence (LLM replaces them)
+                self.writing_errors.retain(|e| {
+                    !(e.paragraph_id == c.paragraph_id
+                        && e.sentence_context.to_lowercase() == c.original.to_lowercase()
+                        && matches!(e.category, ErrorCategory::Grammar))
+                });
+
+                // Add LLM correction
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Grammar,
+                    word: c.original.clone(),
+                    suggestion: c.corrected.clone(),
+                    explanation: c.explanation.clone(),
+                    rule_name: "llm_correction".to_string(),
+                    sentence_context: c.original.clone(),
+                    doc_offset: 0,
+                    position: 0,
+                    ignored: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false,
+                    paragraph_id: c.paragraph_id.clone(),
+                    error_word: error_word.clone(),
+                });
+
+                for b in &self.manager.bridges {
+                    b.underline_word(&error_word, &c.paragraph_id, "#0000FF");
+                }
+            }
+            for h in &resp.checked_hashes {
+                self.llm_checked_hashes.insert(*h);
+            }
         }
     }
 
@@ -3622,6 +3723,24 @@ impl ContextApp {
 /// Only splits after known prepositions/adverbs/conjunctions — these never
 /// form legitimate compounds, so if the remainder is a dictionary word,
 /// the split is correct.
+/// Find the first word that differs between two sentences.
+fn find_diff_word(original: &str, corrected: &str) -> String {
+    let orig_words: Vec<&str> = original.split_whitespace().collect();
+    let corr_words: Vec<&str> = corrected.split_whitespace().collect();
+    for (o, c) in orig_words.iter().zip(corr_words.iter()) {
+        if o.to_lowercase() != c.to_lowercase() {
+            return o.trim_matches(|c: char| c.is_ascii_punctuation()).to_string();
+        }
+    }
+    // Length differs — last word of shorter
+    if orig_words.len() != corr_words.len() {
+        if let Some(w) = orig_words.last().or(corr_words.last()) {
+            return w.trim_matches(|c: char| c.is_ascii_punctuation()).to_string();
+        }
+    }
+    original.split_whitespace().next().unwrap_or(original).to_string()
+}
+
 fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer) -> Option<String> {
     // Norwegian function words that are commonly glued to the next word.
     // Sorted longest-first so "etter" matches before "et".
@@ -3981,6 +4100,11 @@ impl eframe::App for ContextApp {
             log!("Grammar actor spawning (SWI-Prolog loads on actor thread)");
         }
 
+        // Spawn LLM actor on first update
+        if self.llm_actor.is_none() {
+            self.llm_actor = Some(llm_actor::spawn_llm_actor(ctx.clone()));
+        }
+
         // Poll grammar actor for results (non-blocking)
         self.poll_grammar_responses();
         if let Some(actor) = &self.grammar_actor {
@@ -3989,6 +4113,10 @@ impl eframe::App for ContextApp {
         // Drain changed paragraphs from Word Add-in and send to grammar actor
         // (must run BEFORE JSON build so deletions are reflected immediately)
         self.process_addin_changed_paragraphs();
+
+        // LLM grammar correction: dispatch batches and poll responses
+        self.dispatch_llm_batch();
+        self.poll_llm_responses();
 
         // Update errors JSON for /errors endpoint
         {
@@ -6198,6 +6326,12 @@ impl eframe::App for ContextApp {
                             .size(12.0)
                             .color(egui::Color32::from_rgb(0, 120, 60)),
                     );
+                }
+                ui.checkbox(&mut self.llm_enabled, egui::RichText::new("AI-korrigering").size(11.0));
+                if self.llm_enabled {
+                    self.llm_sent_count.retain(|t| t.elapsed() < Duration::from_secs(3600));
+                    ui.label(egui::RichText::new(format!("({}/300 denne timen)", self.llm_sent_count.len()))
+                        .size(10.0).color(egui::Color32::from_rgb(100, 100, 100)));
                 }
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Talegjenkjenning:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
