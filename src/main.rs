@@ -834,12 +834,10 @@ struct ContextApp {
     grammar_scanning: bool,
     /// LLM grammar correction
     llm_actor: Option<llm_actor::LlmActorHandle>,
-    llm_queue: Vec<(String, String)>,       // (sentence, paragraph_id)
-    llm_queue_hashes: Vec<u64>,             // hashes of queued sentences
-    llm_last_queue_time: Instant,           // for idle detection
     llm_checked_hashes: std::collections::HashSet<u64>,
     llm_sent_count: Vec<Instant>,           // rate limiting (rolling hour)
-    llm_enabled: bool,
+    llm_waiting: bool,                      // spinner: waiting for LLM response
+    llm_waiting_since: Instant,             // when we started waiting
     /// Cooldown after a fix — don't prune errors until canvas has repainted with new text
     /// Recently fixed words — don't re-detect these as errors (cleared when fresh text arrives from extension)
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
@@ -1314,13 +1312,11 @@ impl ContextApp {
             grammar_queue: Vec::new(),
             grammar_queue_total: 0,
             grammar_scanning: false,
-            llm_actor: None, // spawned after egui context is available
-            llm_queue: Vec::new(),
-            llm_queue_hashes: Vec::new(),
-            llm_last_queue_time: Instant::now(),
+            llm_actor: None,
             llm_checked_hashes: std::collections::HashSet::new(),
             llm_sent_count: Vec::new(),
-            llm_enabled: true,
+            llm_waiting: false,
+            llm_waiting_since: Instant::now(),
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
             pending_spelling_bert: Vec::new(),
@@ -2981,8 +2977,7 @@ impl ContextApp {
                 self.last_doc_text.clear();
                 self.grammar_inflight.clear();
                 self.llm_checked_hashes.clear();
-                self.llm_queue.clear();
-                self.llm_queue_hashes.clear();
+                self.llm_waiting = false;
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -3117,17 +3112,8 @@ impl ContextApp {
                 for sentence_text in &sentences {
                     let sent_h = hash_str(&format!("{}|{}", p.paragraph_id, sentence_text));
 
-                    // Queue for LLM BEFORE the hash check (LLM uses its own dedup)
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
-                    if self.llm_enabled && is_complete {
-                        let llm_hash = hash_str(&format!("llm|{}|{}", p.paragraph_id, sentence_text));
-                        if !self.llm_checked_hashes.contains(&llm_hash) {
-                            self.llm_queue.push((sentence_text.to_string(), p.paragraph_id.clone()));
-                            self.llm_queue_hashes.push(llm_hash);
-                            self.llm_last_queue_time = Instant::now();
-                        }
-                    }
 
                     if self.processed_sentence_hashes.contains(&sent_h)
                         || self.grammar_inflight.contains(&sent_h) {
@@ -3248,31 +3234,42 @@ impl ContextApp {
         }
     }
 
-    /// Dispatch queued sentences to LLM actor in batches.
-    fn dispatch_llm_batch(&mut self) {
-        if !self.llm_enabled || self.llm_queue.is_empty() { return; }
-        // Spawn actor lazily (needs egui context)
-        if self.llm_actor.is_none() { return; }
+    /// Send all current error sentences to LLM for AI correction (button-triggered).
+    fn dispatch_llm_fix_all(&mut self) {
+        if self.llm_actor.is_none() || self.llm_waiting { return; }
 
-        let idle = self.llm_last_queue_time.elapsed() >= Duration::from_secs(2);
-        let full = self.llm_queue.len() >= 5;
-        if !idle && !full { return; }
+        // Collect unique sentences from current errors
+        let mut seen = std::collections::HashSet::new();
+        let mut batch: Vec<(String, String)> = Vec::new();
+        let mut hashes: Vec<u64> = Vec::new();
+        for e in &self.writing_errors {
+            if e.ignored || e.sentence_context.is_empty() { continue; }
+            if e.rule_name == "llm_correction" { continue; } // already LLM-corrected
+            let llm_hash = hash_str(&format!("llm|{}|{}", e.paragraph_id, e.sentence_context));
+            if self.llm_checked_hashes.contains(&llm_hash) { continue; }
+            if !seen.insert(llm_hash) { continue; }
+            batch.push((e.sentence_context.clone(), e.paragraph_id.clone()));
+            hashes.push(llm_hash);
+        }
+
+        if batch.is_empty() { return; }
 
         // Rate limit: 300 sentences/hour
         self.llm_sent_count.retain(|t| t.elapsed() < Duration::from_secs(3600));
-        let batch_size = self.llm_queue.len().min(10);
+        let batch_size = batch.len().min(10);
         if self.llm_sent_count.len() + batch_size > 300 {
             log!("LLM rate limit: {}/300 sentences this hour", self.llm_sent_count.len());
             return;
         }
-
-        let batch: Vec<_> = self.llm_queue.drain(..batch_size).collect();
-        let hashes: Vec<_> = self.llm_queue_hashes.drain(..batch_size).collect();
+        let batch: Vec<_> = batch.into_iter().take(batch_size).collect();
+        let hashes: Vec<_> = hashes.into_iter().take(batch_size).collect();
         for _ in 0..batch_size { self.llm_sent_count.push(Instant::now()); }
 
-        log!("LLM dispatch: {} sentences (rate: {}/300)", batch_size, self.llm_sent_count.len());
+        log!("LLM fix-all: {} sentences (rate: {}/300)", batch_size, self.llm_sent_count.len());
         if let Some(actor) = &mut self.llm_actor {
             actor.send(batch, hashes);
+            self.llm_waiting = true;
+            self.llm_waiting_since = Instant::now();
         }
     }
 
@@ -3326,6 +3323,7 @@ impl ContextApp {
             for h in &resp.checked_hashes {
                 self.llm_checked_hashes.insert(*h);
             }
+            self.llm_waiting = false;
         }
     }
 
@@ -4119,8 +4117,7 @@ impl eframe::App for ContextApp {
         // (must run BEFORE JSON build so deletions are reflected immediately)
         self.process_addin_changed_paragraphs();
 
-        // LLM grammar correction: dispatch batches and poll responses
-        self.dispatch_llm_batch();
+        // LLM grammar correction: poll responses (dispatch is button-triggered)
         self.poll_llm_responses();
 
         // Update errors JSON for /errors endpoint
@@ -5528,6 +5525,30 @@ impl eframe::App for ContextApp {
                     );
                 } else {
 
+                    // AI fix-all button + spinner
+                    ui.horizontal(|ui| {
+                        if self.llm_waiting {
+                            // Animated spinner: rotating dots
+                            let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                            let idx = (self.llm_waiting_since.elapsed().as_millis() / 100) as usize % dots.len();
+                            ui.label(egui::RichText::new(dots[idx]).size(14.0).color(egui::Color32::from_rgb(0, 120, 200)));
+                            ui.label(egui::RichText::new("AI korrigerer...").size(11.0).color(egui::Color32::from_rgb(0, 120, 200)));
+                            ctx.request_repaint_after(Duration::from_millis(100)); // animate
+                        } else {
+                            let err_count = self.writing_errors.iter()
+                                .filter(|e| !e.ignored && e.rule_name != "llm_correction")
+                                .count();
+                            if err_count > 0 {
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("✨ AI-korriger alle").size(11.0)
+                                ).min_size(egui::vec2(0.0, 18.0))).clicked() {
+                                    self.dispatch_llm_fix_all();
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+
                     let mut action: Option<(usize, &str)> = None;
 
                     // Group grammar errors by (sentence_context, doc_offset)
@@ -6331,12 +6352,6 @@ impl eframe::App for ContextApp {
                             .size(12.0)
                             .color(egui::Color32::from_rgb(0, 120, 60)),
                     );
-                }
-                ui.checkbox(&mut self.llm_enabled, egui::RichText::new("AI-korrigering").size(11.0));
-                if self.llm_enabled {
-                    self.llm_sent_count.retain(|t| t.elapsed() < Duration::from_secs(3600));
-                    ui.label(egui::RichText::new(format!("({}/300 denne timen)", self.llm_sent_count.len()))
-                        .size(10.0).color(egui::Color32::from_rgb(100, 100, 100)));
                 }
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Talegjenkjenning:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
