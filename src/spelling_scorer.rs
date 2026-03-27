@@ -37,7 +37,12 @@ pub fn trigrams(word: &str) -> Vec<String> {
 }
 
 /// Try splitting a word into function_word + remainder.
+/// Returns None if the word is already a valid dictionary word (no split needed).
 pub fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer) -> Option<String> {
+    // Don't split valid compound words (avstand, tilstand, imorgen, etc.)
+    if analyzer.has_word(&word.to_lowercase()) {
+        return None;
+    }
     const FUNCTION_WORDS: &[&str] = &[
         "gjennom", "mellom", "under", "etter", "langs", "rundt",
         "foran", "bortover", "innover", "utover",
@@ -353,8 +358,10 @@ pub fn score_and_rerank(
     let all_cands: Vec<String> = candidates.iter().take(30).map(|(c, _)| c.clone()).collect();
 
     // Step 1: Boundary scoring (~24ms)
-    let scored = match spelling::score_spelling(model, context_before, context_after, &all_cands) {
-        Ok(result) => result.scored_candidates,
+    let scored: Vec<(String, f32)> = match spelling::score_spelling(model, context_before, context_after, &all_cands) {
+        Ok(result) => result.scored_candidates.into_iter()
+            .map(|(c, s)| (c.trim().to_string(), s)) // trim BPE artifacts
+            .collect(),
         Err(_) => return candidates.to_vec(),
     };
 
@@ -399,8 +406,9 @@ pub fn score_and_rerank(
 
     // Re-score corrected candidates with boundary scorer
     let all_corrected: Vec<String> = corrected.iter().map(|(c, _)| c.clone()).collect();
-    let boundary_scored = match spelling::score_spelling(model, context_before, context_after, &all_corrected) {
-        Ok(result) => result.scored_candidates,
+    let boundary_scored: Vec<(String, f32)> = match spelling::score_spelling(model, context_before, context_after, &all_corrected) {
+        Ok(result) => result.scored_candidates.into_iter()
+            .map(|(c, s)| (c.trim().to_string(), s)).collect(),
         Err(_) => corrected,
     };
 
@@ -419,11 +427,11 @@ pub fn score_and_rerank(
     if weighted.len() > 1 {
         let mut top_set: Vec<String> = Vec::new();
         let mut top_seen = HashSet::new();
-        // Merge boundary top 3 + ortho top 3
-        for (c, _) in weighted.iter().take(3) {
+        // Merge boundary top 5 + ortho top 5
+        for (c, _) in weighted.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
-        for (c, _) in candidates.iter().take(3) {
+        for (c, _) in candidates.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
 
