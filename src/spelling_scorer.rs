@@ -466,25 +466,62 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
         }
     };
 
-    // Mask each subword token and sum logits
-    let mask_id = model.tokenizer.token_to_id("<mask>").unwrap_or(4);
+    // Build masked texts by string manipulation — no decode/re-encode roundtrip.
+    // For candidate "godterier" (tokens: [Ġgod, ter, ier]) in "barna fikk godterier.":
+    //   k=0: "barna fikk <mask>terier."
+    //   k=1: "barna fikk god<mask>ier."
+    //   k=2: "barna fikk godter<mask>."
+    let cand_lower = candidate.to_lowercase();
+    let sent_lower = sentence.to_lowercase();
+    let cand_pos = match sent_lower.find(&cand_lower) {
+        Some(p) => p,
+        None => return f32::NEG_INFINITY,
+    };
+
+    // Decode each subword to get its text
+    let mut subword_texts: Vec<String> = Vec::new();
+    for &tid in &cand_ids {
+        let decoded = model.tokenizer.decode(&[tid], true).unwrap_or_default();
+        subword_texts.push(decoded);
+    }
+
+    let before_cand = &sentence[..cand_pos];
+    let after_cand = &sentence[cand_pos + cand_lower.len()..];
+
+    // The first subword has Ġ prefix (word-initial), subsequent ones don't.
+    // When masking a middle token, the <mask> must be glued to the prefix (no space).
+    // The Ġ prefix in the first decoded subword becomes a space — strip it.
+    let subword_texts: Vec<String> = subword_texts.iter().enumerate()
+        .map(|(i, t)| if i == 0 { t.trim_start().to_string() } else { t.clone() })
+        .collect();
+
     let mut total: f32 = 0.0;
     let mut scored: usize = 0;
     for k in 0..cand_ids.len() {
-        let pos = start + k;
-        if pos >= sent_ids.len() { break; }
-        let mut masked_ids = sent_ids.clone();
-        masked_ids[pos] = mask_id;
-        // Build masked text from token IDs
-        let masked_text = model.tokenizer.decode(&masked_ids, true)
-            .unwrap_or_default();
+        let prefix: String = subword_texts[..k].concat();
+        let suffix: String = subword_texts[k+1..].concat();
+        // For k=0: "before <mask>suffix after" (space before mask for word-initial)
+        // For k>0: "before prefix<mask>suffix after" (no space, continuation)
+        let masked_text = if k == 0 {
+            format!("{}<mask>{}{}", before_cand, suffix, after_cand)
+        } else {
+            format!("{}{}<mask>{}{}", before_cand, prefix, suffix, after_cand)
+        };
         if let Ok((logits, _)) = model.single_forward(&masked_text) {
             total += logits[cand_ids[k] as usize];
             scored += 1;
         }
     }
     if scored == 0 { return f32::NEG_INFINITY; }
-    total / scored as f32
+    let avg = total / scored as f32;
+    // Multi-token words get inflated subword scores (each token is predicted in context
+    // of the other tokens). Apply a gentle penalty so single-token candidates
+    // (which are real dictionary entries) are preferred when scores are close.
+    if cand_ids.len() > 1 {
+        avg * 0.82
+    } else {
+        avg
+    }
 }
 
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.
