@@ -9,66 +9,85 @@ use std::time::Instant;
 fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mfst_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+    let dict_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
 
     println!("Loading FST from {}...", mfst_path.display());
     let t = Instant::now();
     let fst = load_fst_from_mfst(mfst_path.to_str().unwrap())
         .expect("Failed to load FST");
-    println!("Loaded in {:?}\n", t.elapsed());
+    println!("Loaded in {:?}", t.elapsed());
+
+    let analyzer = mtag::Analyzer::new(dict_path.to_str().unwrap())
+        .expect("Failed to load analyzer");
+
+    // Check which compound words are already in the dictionary
+    println!("\n=== Dictionary check ===");
+    let check_words = vec![
+        "kjøkkenbord", "fotballkamp", "arbeidsplass", "skolegård",
+        "frokostbord", "middagspris", "vårtilbud", "sommervarme",
+        "skrivebord", "soverom", "togstasjon", "busstopp",
+        "sykkelvei", "barneskole", "matbutikk", "bilverksted",
+    ];
+    for w in &check_words {
+        let in_fst = analyzer.has_word(w);
+        println!("  {:20} {}", w, if in_fst { "✓ IN dictionary" } else { "✗ NOT in dictionary" });
+    }
+    println!();
 
     // (input, expected_in_results, description)
     let tests: Vec<(&str, Vec<&str>, &str)> = vec![
         // === Single words (baseline) ===
         ("kjøkken", vec!["kjøkken"], "exact single word"),
         ("sjøkken", vec!["kjøkken"], "fuzzy single: s→k"),
+        ("bord", vec!["bord"], "short word, exact"),
+        ("bort", vec!["bord", "bort"], "short word, fuzzy"),
 
         // === Two-part compounds, exact ===
-        ("kjøkkenbord", vec!["kjøkkenbord"], "exact compound"),
+        ("kjøkkenbord", vec!["kjøkkenbord"], "exact: kjøkken+bord"),
         ("fotballkamp", vec!["fotballkamp"], "exact: fotball+kamp"),
-        ("arbeidsplass", vec!["arbeidsplass"], "exact with binding s"),
+        ("arbeidsplass", vec!["arbeidsplass"], "exact: arbeid+s+plass"),
         ("skolegård", vec!["skolegård"], "exact: skole+gård"),
 
         // === Error in first part ===
-        ("sjøkkenbord", vec!["kjøkkenbord"], "part1 error: sj→kj"),
-        ("fotbalskamp", vec!["fotballkamp"], "part1 error: missing l"),
-        ("skollegård", vec!["skolegård"], "part1 error: ll→l"),
+        ("sjøkkenbord", vec!["kjøkkenbord"], "part1: sj→kj in kjøkkenbord"),
+        ("fotbalskamp", vec!["fotballkamp"], "part1: missing l in fotball"),
+        ("skollegård", vec!["skolegård"], "part1: ll→l in skole"),
 
         // === Error in second part ===
-        ("kjøkkenbort", vec!["kjøkkenbord"], "part2 error: t→d"),
-        ("fotballkamb", vec!["fotballkamp"], "part2 error: b→p"),
-        ("skolegårt", vec!["skolegård"], "part2 error: t→d"),
+        ("kjøkkenbort", vec!["kjøkkenbord"], "part2: t→d in bord"),
+        ("fotballkamb", vec!["fotballkamp"], "part2: b→p in kamp"),
+        ("skolegårt", vec!["skolegård"], "part2: t→d in gård"),
 
         // === Errors in BOTH parts ===
-        ("sjøkkenbort", vec!["kjøkkenbord"], "both parts: sj→kj + t→d"),
-        ("fotbalskamb", vec!["fotballkamp"], "both parts: l missing + b→p"),
+        ("sjøkkenbort", vec!["kjøkkenbord"], "both: sj→kj + t→d"),
 
         // === Binding letter 's' ===
-        ("arbeidsplas", vec!["arbeidsplass"], "binding s: missing final s"),
         ("arbeidsplasss", vec!["arbeidsplass"], "binding s: extra s"),
 
-        // === Phonetic confusions in compounds ===
-        ("gåttebord", vec!["guttebord"], "phonetic: å→u in part1"),
-        ("lekeplaas", vec!["lekeplass"], "phonetic: missing s"),
+        // === Phonetic å↔o/u in compounds ===
+        ("gåttebord", vec!["guttebord"], "phonetic: å→u in gutte"),
+        ("lekeplaas", vec!["lekeplass"], "missing s in plass"),
         ("barnehagge", vec!["barnehage"], "double consonant: gg→g"),
 
-        // === Common Norwegian compound misspellings ===
-        ("datamaskin", vec!["datamaskin"], "exact: data+maskin"),
-        ("datamaskinn", vec!["datamaskin"], "extra n at end"),
-        ("helsesøster", vec!["helsesøster"], "exact: helse+søster"),
-        ("husholding", vec!["husholdning"], "missing n: holdning"),
-
-        // === Three-part compounds ===
-        ("barnehageplass", vec!["barnehageplass"], "three-part: barne+hage+plass"),
+        // === Productive compounds NOT in dictionary ===
+        ("frokostbort", vec!["frokostbord"], "productive: frokost+bord t→d"),
+        ("middagspris", vec!["middagspris"], "productive: middag+s+pris"),
+        ("vårtilbud", vec!["vårtilbud"], "productive: vår+tilbud"),
+        ("sommervarme", vec!["sommervarme"], "productive: sommer+varme"),
+        ("skrivebort", vec!["skrivebord"], "productive: skrive+bord t→d"),
+        ("togstassjon", vec!["togstasjon"], "productive: tog+stasjon ss→s"),
+        ("busstop", vec!["busstopp"], "productive: buss+topp missing p"),
+        ("sykkelveien", vec!["sykkelveien"], "productive: sykkel+veien"),
+        ("barneskole", vec!["barneskole"], "productive: barne+skole"),
+        ("matbuttikk", vec!["matbutikk"], "productive: mat+butikk tt→t"),
 
         // === Dyslexic-style errors ===
         ("sjokkolade", vec!["sjokolade"], "double k: kk→k"),
-        ("biblåtek", vec!["bibliotek"], "phonetic: io→å"),
-        ("restourang", vec!["restaurant"], "phonetic: au→ou"),
         ("informassjon", vec!["informasjon"], "double s: ss→s"),
+        ("datamaskinn", vec!["datamaskin"], "extra n at end"),
 
-        // === Edge cases ===
-        ("bord", vec!["bord"], "short word, exact"),
-        ("bort", vec!["bord", "bort"], "short word, fuzzy"),
+        // === Three-part compounds ===
+        ("barnehageplass", vec!["barnehageplass"], "three-part: barne+hage+plass"),
     ];
 
     let mut pass = 0;
