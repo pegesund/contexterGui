@@ -428,6 +428,7 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
     if cand_ids.is_empty() { return f32::NEG_INFINITY; }
 
     // Find where candidate tokens appear in sentence tokens
+    // Try exact match first, then fuzzy (first token match only)
     let mut start_pos = None;
     for i in 0..sent_ids.len().saturating_sub(cand_ids.len() - 1) {
         if sent_ids[i] == cand_ids[0] {
@@ -440,10 +441,29 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
             }
         }
     }
+    // Fallback: if exact match fails, find the candidate word in the sentence text
+    // and use its character position to estimate the token position
+    if start_pos.is_none() {
+        let sent_lower = sentence.to_lowercase();
+        let cand_lower = candidate.to_lowercase();
+        if let Some(char_pos) = sent_lower.find(&cand_lower) {
+            // Count tokens before this character position
+            let prefix = &sentence[..char_pos];
+            if let Ok(prefix_enc) = model.tokenizer.encode(prefix.to_string(), false) {
+                let tok_pos = prefix_enc.get_ids().len();
+                if tok_pos + cand_ids.len() <= sent_ids.len() {
+                    start_pos = Some(tok_pos);
+                }
+            }
+        }
+    }
 
     let start = match start_pos {
         Some(s) => s,
-        None => return f32::NEG_INFINITY,
+        None => {
+            // Last resort: fall back to sentence_score
+            return sentence_score(model, sentence, candidate);
+        }
     };
 
     // Mask each subword token and sum logits
