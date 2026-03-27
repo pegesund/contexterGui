@@ -502,7 +502,7 @@ pub fn score_and_rerank(
         for (c, _) in weighted.iter().take(5) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
-        for (c, _) in candidates.iter().take(5) {
+        for (c, _) in candidates.iter().take(8) {
             if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
         }
         let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();

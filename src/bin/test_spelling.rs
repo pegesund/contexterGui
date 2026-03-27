@@ -88,6 +88,12 @@ fn main() {
         });
         if expected_in_pool {
             println!("  ✓ expected word IS in candidate pool");
+            // Show expected word's position and ortho score
+            for alt in &expected_alts {
+                if let Some((pos, (_, score))) = candidates.iter().enumerate().find(|(_, (c, _))| c == &alt.to_lowercase()) {
+                    println!("    '{}' at Phase1 rank #{} ortho={:.3}", alt, pos + 1, score);
+                }
+            }
         } else {
             println!("  ✗ expected word NOT in candidate pool!");
         }
