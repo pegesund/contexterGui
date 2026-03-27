@@ -855,6 +855,8 @@ struct ContextApp {
     suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
     /// Rule info popup: (rule_name, explanation, sentence_context, fix_idx, suggestion)
     rule_info_window: Option<(String, String, String, usize, String)>,
+    /// LLM changes for the currently open rule_info_window (from, to, why)
+    rule_info_llm_changes: Vec<(String, String, String)>,
     // OCR clipboard monitoring
     ocr: Option<ocr::OcrClipboard>,
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
@@ -1325,6 +1327,7 @@ impl ContextApp {
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
+            rule_info_llm_changes: Vec::new(),
             ocr: match ocr::OcrClipboard::new() {
                 Ok(o) => { eprintln!("OCR clipboard monitor ready"); Some(o) }
                 Err(e) => { eprintln!("OCR not available: {}", e); None }
@@ -3281,14 +3284,15 @@ impl ContextApp {
                 if c.corrected == c.original { continue; }
 
                 // Build summary and find first changed word
-                let error_word = if let Some((from, _)) = c.changes.first() {
+                let error_word = if let Some((from, _, _)) = c.changes.first() {
                     from.clone()
                 } else {
                     find_diff_word(&c.original, &c.corrected)
                 };
                 let explanation = if c.changes.len() == 1 {
-                    let (from, to) = &c.changes[0];
-                    format!("«{}» → «{}»", from, to)
+                    let (from, to, why) = &c.changes[0];
+                    if why.is_empty() { format!("«{}» → «{}»", from, to) }
+                    else { format!("«{}» → «{}»: {}", from, to, why) }
                 } else if c.changes.len() > 1 {
                     format!("Flere endringer ({})", c.changes.len())
                 } else {
@@ -3312,12 +3316,18 @@ impl ContextApp {
                         && e.sentence_context.to_lowercase() == c.original.to_lowercase())
                 });
 
+                // Encode changes as JSON in explanation for 💡 popup
+                let changes_json = serde_json::to_string(&c.changes.iter()
+                    .map(|(f, t, w)| serde_json::json!({"from": f, "to": t, "why": w}))
+                    .collect::<Vec<_>>()).unwrap_or_default();
+                let full_explanation = format!("LLM_CHANGES:{}\n{}", changes_json, explanation);
+
                 // Add LLM correction
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Grammar,
                     word: c.original.clone(),
                     suggestion: c.corrected.clone(),
-                    explanation,
+                    explanation: full_explanation,
                     rule_name: "llm_correction".to_string(),
                     sentence_context: c.original.clone(),
                     doc_offset: 0,
@@ -5666,6 +5676,23 @@ impl eframe::App for ContextApp {
                                     }
                                     if icon_button(ui, "💡", "Vis regelinfo") {
                                         let fix_idx = first_alt.unwrap_or(idx);
+                                        // Extract LLM changes if present
+                                        self.rule_info_llm_changes = if err_expl.starts_with("LLM_CHANGES:") {
+                                            let json_end = err_expl.find('\n').unwrap_or(err_expl.len());
+                                            let json_str = &err_expl[12..json_end];
+                                            serde_json::from_str::<Vec<serde_json::Value>>(json_str)
+                                                .unwrap_or_default()
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    let from = v["from"].as_str()?.to_string();
+                                                    let to = v["to"].as_str()?.to_string();
+                                                    let why = v["why"].as_str().unwrap_or("").to_string();
+                                                    Some((from, to, why))
+                                                })
+                                                .collect()
+                                        } else {
+                                            Vec::new()
+                                        };
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                     }
                                     if icon_button(ui, "▶", "Vis i dokument") {
@@ -5997,7 +6024,12 @@ impl eframe::App for ContextApp {
                 let mut do_close = false;
                 let (rule_name, explanation, sentence, fix_idx, suggestion) = self.rule_info_window.as_ref().unwrap();
                 let rule_name = rule_name.clone();
-                let explanation = explanation.clone();
+                // Strip LLM_CHANGES: prefix from explanation for display
+                let explanation = if explanation.starts_with("LLM_CHANGES:") {
+                    explanation.find('\n').map(|p| &explanation[p+1..]).unwrap_or("").to_string()
+                } else {
+                    explanation.clone()
+                };
                 let sentence = sentence.clone();
                 let fix_idx = *fix_idx;
                 let suggestion = suggestion.clone();
@@ -6108,19 +6140,29 @@ impl eframe::App for ContextApp {
                                                                 }
                                                             }
                                                             if !found { skip_orig = 1; skip_corr = 1; }
-                                                            // Show removed words in red strikethrough
+                                                            // Find matching explanation from LLM changes
+                                                            let removed_text: String = (0..skip_orig)
+                                                                .filter_map(|k| orig_words.get(oi + k))
+                                                                .cloned().collect::<Vec<_>>().join(" ");
+                                                            let tooltip = self.rule_info_llm_changes.iter()
+                                                                .find(|(from, _, _)| removed_text.to_lowercase().contains(&from.to_lowercase()))
+                                                                .map(|(_, _, why)| why.as_str())
+                                                                .unwrap_or("");
+                                                            // Show removed words in red strikethrough (with tooltip)
                                                             for _ in 0..skip_orig {
                                                                 if oi < orig_words.len() {
-                                                                    ui.label(egui::RichText::new(orig_words[oi]).size(14.0)
+                                                                    let r = ui.label(egui::RichText::new(orig_words[oi]).size(14.0)
                                                                         .strikethrough().color(egui::Color32::from_rgb(200, 50, 50)));
+                                                                    if !tooltip.is_empty() { r.on_hover_text(tooltip); }
                                                                     oi += 1;
                                                                 }
                                                             }
-                                                            // Show added words in green bold
+                                                            // Show added words in green bold (with tooltip)
                                                             for _ in 0..skip_corr {
                                                                 if ci < corr_words.len() {
-                                                                    ui.label(egui::RichText::new(corr_words[ci]).size(14.0)
+                                                                    let r = ui.label(egui::RichText::new(corr_words[ci]).size(14.0)
                                                                         .strong().color(egui::Color32::from_rgb(0, 140, 50)));
+                                                                    if !tooltip.is_empty() { r.on_hover_text(tooltip); }
                                                                     ci += 1;
                                                                 }
                                                             }

@@ -9,7 +9,7 @@ const API_URL: &str = "https://router.requesty.ai/v1/chat/completions";
 const API_KEY: &str = "rqsty-sk-ITUDt2zDS9Clb8OtNi8xJUZPkXxGErbOFD4chcu0qPjQr4QfW0Zg/1gdMLeC2A6myVqvckRD5Xd25DqHL4OLb46EKssNfZDGc26RiYn0QA4=";
 const MODEL: &str = "deepseek/deepseek-chat";
 
-const SYSTEM_PROMPT: &str = "Du er en norsk korrekturleser. Korriger ALLE grammatikk- og stavefeil. Svar med en JSON-array (ingen markdown, ingen annen tekst). For hver setning:\n- Korrekt: {\"ok\": true}\n- Feil: {\"corrected\": \"hele setningen korrigert\", \"changes\": [{\"from\": \"feil ord/frase\", \"to\": \"riktig ord/frase\"}]}. List ALLE endringer, også stavefeil.";
+const SYSTEM_PROMPT: &str = "Du er en norsk korrekturleser. Korriger ALLE grammatikk- og stavefeil. Svar med en JSON-array (ingen markdown, ingen annen tekst). For hver setning:\n- Korrekt: {\"ok\": true}\n- Feil: {\"corrected\": \"hele setningen korrigert\", \"changes\": [{\"from\": \"feil\", \"to\": \"riktig\", \"why\": \"kort forklaring\"}]}. List ALLE endringer.";
 
 pub struct LlmRequest {
     pub request_id: u64,
@@ -20,7 +20,7 @@ pub struct LlmRequest {
 pub struct LlmCorrection {
     pub original: String,
     pub corrected: String,
-    pub changes: Vec<(String, String)>, // (from, to) pairs
+    pub changes: Vec<(String, String, String)>, // (from, to, why) triples
     pub paragraph_id: String,
 }
 
@@ -177,12 +177,13 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
         let corrected = result["corrected"].as_str().unwrap_or("").to_string();
         if corrected.is_empty() || corrected == *original { continue; }
 
-        // Parse per-change list
-        let changes: Vec<(String, String)> = result["changes"].as_array()
+        // Parse per-change list with explanations
+        let changes: Vec<(String, String, String)> = result["changes"].as_array()
             .map(|arr| arr.iter().filter_map(|c| {
                 let from = c["from"].as_str()?.to_string();
                 let to = c["to"].as_str()?.to_string();
-                Some((from, to))
+                let why = c["why"].as_str().unwrap_or("").to_string();
+                Some((from, to, why))
             }).collect())
             .unwrap_or_default();
 
