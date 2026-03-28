@@ -44,8 +44,10 @@ fn ortho_score(input: &str, candidate: &str) -> f32 {
     // 4. Length similarity — penalize very different lengths
     let len_ratio = inp.len().min(cand.len()) as f32 / max_len as f32;
 
-    // Combined: prefix 35%, suffix 25%, trigrams 25%, length 15%
-    prefix_ratio * 0.35 + suffix_ratio * 0.25 + trigram_dice * 0.25 + len_ratio * 0.15
+    // Combined: prefix 40%, trigrams 35%, length 15%, suffix 10%
+    // Suffix weight low — inflection is handled by post-BERT swap.
+    // High suffix penalizes corrections where the last char IS the error.
+    prefix_ratio * 0.40 + trigram_dice * 0.35 + len_ratio * 0.15 + suffix_ratio * 0.10
 }
 
 fn main() {
@@ -282,7 +284,7 @@ fn main() {
                 let bert = avg - penalty;
                 let ortho = ortho_score(&input_lower, w);
                 let bert_norm = (bert / 25.0).clamp(0.0, 1.0);
-                let combined = bert_norm * 7.0 + ortho * 3.0;
+                let combined = bert_norm * 8.0 + ortho * 2.0;
                 (*w, combined, bert, ortho)
             })
             .collect();
