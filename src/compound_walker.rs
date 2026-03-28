@@ -87,6 +87,28 @@ fn needs_binding_s(word: &[u8]) -> bool {
     word.ends_with(b"leik")
 }
 
+/// Quick exact-match walk from root for the remaining input bytes.
+/// Returns all accepting words found (word, end_pos) without any edits.
+/// Used as a lookahead to bypass beam pruning for exact second parts.
+fn exact_walk_from_root<D: AsRef<[u8]>>(fst: &Fst<D>, input: &[u8], start: usize) -> Vec<(String, usize)> {
+    let mut results = Vec::new();
+    let mut node = fst.root();
+    let mut wb = Vec::new();
+    for i in start..input.len() {
+        if let Some(idx) = node.find_input(input[i]) {
+            let trans = node.transition(idx);
+            wb.push(trans.inp);
+            node = fst.node(trans.addr);
+            if node.is_final() && wb.len() >= MIN_PART_BYTES {
+                results.push((String::from_utf8_lossy(&wb).to_string(), i + 1));
+            }
+        } else {
+            break;
+        }
+    }
+    results
+}
+
 /// Walk the FST to find compound word decompositions for the input.
 /// Returns decompositions sorted by total edit distance (best first).
 pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
@@ -134,6 +156,84 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                 let mut new_parts = state.parts.clone();
                 new_parts.push(new_part);
                 let new_total = state.total_edits + state.edits;
+
+                // Extend-and-match: at 0-edit accepting states, try extending
+                // by 1 DELETE byte to reach a LONGER word, then check if
+                // remaining input matches exactly. Bypasses beam pruning
+                // for cases like "strøm"→"strømme"+tjeneste.
+                // Only at 0-edit states to avoid flooding results.
+                if state.edits == 0
+                    && new_total + 1 <= MAX_TOTAL_EDITS
+                    && state.input_pos + 5 <= input_bytes.len()
+                    && new_parts.len() <= MAX_PARTS
+                {
+                    for trans in node.transitions() {
+                        let ext_node = fst.node(trans.addr);
+                        // 1 delete: check if extension + match reaches final
+                        if state.input_pos < input_bytes.len() {
+                            let inp = input_bytes[state.input_pos];
+                            if let Some(idx) = ext_node.find_input(inp) {
+                                let t2 = ext_node.transition(idx);
+                                let n2 = fst.node(t2.addr);
+                                if n2.is_final() {
+                                    // Extended word found (1 edit: delete trans.inp)
+                                    let mut ewb = state.word_bytes.clone();
+                                    ewb.push(trans.inp);
+                                    ewb.push(inp);
+                                    let ext_word = String::from_utf8_lossy(&ewb).to_string();
+                                    let ext_end = state.input_pos + 1;
+                                    let ext_edits = state.edits + 1;
+                                    let ext_total = state.total_edits + ext_edits;
+                                    // Check if remaining input matches a word from root
+                                    if ext_end < input_bytes.len() {
+                                        for (w2, end2) in exact_walk_from_root(fst, input_bytes, ext_end) {
+                                            if end2 == input_bytes.len() {
+                                                let mut ext_parts = state.parts.clone();
+                                                ext_parts.push(CompoundPart {
+                                                    matched_word: ext_word.clone(),
+                                                    input_start: state.word_start,
+                                                    input_end: ext_end,
+                                                    edits: ext_edits,
+                                                });
+                                                ext_parts.push(CompoundPart {
+                                                    matched_word: w2.clone(),
+                                                    input_start: ext_end,
+                                                    input_end: end2,
+                                                    edits: 0,
+                                                });
+                                                let compound = ext_parts.iter().map(|p| p.matched_word.as_str()).collect::<String>();
+                                                if ext_parts.len() <= MAX_PARTS && seen_compounds.insert(compound.clone()) {
+                                                    results.push(CompoundResult {
+                                                        parts: ext_parts,
+                                                        total_edits: ext_total,
+                                                        compound_word: compound,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    } else if ext_end == input_bytes.len() {
+                                        // Extended word consumes all input
+                                        let mut ext_parts = state.parts.clone();
+                                        ext_parts.push(CompoundPart {
+                                            matched_word: ext_word.clone(),
+                                            input_start: state.word_start,
+                                            input_end: ext_end,
+                                            edits: ext_edits,
+                                        });
+                                        let compound = ext_parts.iter().map(|p| p.matched_word.as_str()).collect::<String>();
+                                        if seen_compounds.insert(compound.clone()) {
+                                            results.push(CompoundResult {
+                                                parts: ext_parts,
+                                                total_edits: ext_total,
+                                                compound_word: compound,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if state.input_pos == input_bytes.len() {
                     // Complete match — all input consumed
@@ -385,7 +485,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
         std::mem::swap(&mut current_states, &mut next_states);
         next_states.clear();
 
-        if results.len() >= 100 { break; } // enough results
+        if results.len() >= 200 { break; } // enough results
     }
 
     // Sort by (total_edits, part_count) — prefer fewer parts at same edit distance
