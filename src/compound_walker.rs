@@ -158,6 +158,10 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                 // Validate ALL compound parts are real words:
                 // Must be in wordfreq (freq ≥ 10) OR recognized by analyzer.
                 // Filters junk like "innsjøe", "efisk", "øs", "ikt".
+                // Reject parts with hyphens or other non-alphabetic chars
+                if matched.contains('-') || matched.contains('.') || matched.contains(' ') {
+                    // Skip to ADVANCE — not a valid compound part
+                } else {
                 let in_wf = wordfreq.map_or(true, |wf| wf.contains_key(&matched));
                 let in_dict = is_valid_word.map_or(true, |check| check(&matched));
                 let is_real_word = in_wf || in_dict;
@@ -344,6 +348,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     }
                 }
               } // is_real_word
+              } // hyphen check
             }
 
             // ADVANCE: Levenshtein moves
