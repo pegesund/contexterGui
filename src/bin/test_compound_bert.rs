@@ -10,20 +10,27 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Orthographic similarity between misspelled input and candidate compound.
-/// Combines prefix match (weighted high — dyslexics get beginnings right),
+/// Combines prefix match, suffix match (preserves user's intended inflection),
 /// character trigram overlap, and length similarity.
 fn ortho_score(input: &str, candidate: &str) -> f32 {
     let inp = input.as_bytes();
     let cand = candidate.as_bytes();
+    let max_len = inp.len().max(cand.len()).max(1);
 
-    // 1. Common prefix length (normalized) — most important for dyslexia
+    // 1. Common prefix length — dyslexics get beginnings right
     let prefix_len = inp.iter().zip(cand.iter())
         .take_while(|(a, b)| a == b)
         .count();
-    let max_len = inp.len().max(cand.len()).max(1);
     let prefix_ratio = prefix_len as f32 / max_len as f32;
 
-    // 2. Character trigram Dice coefficient — overall sequence overlap
+    // 2. Common suffix length — preserves user's intended inflection
+    // "fakturaggebyr" ends in "byr" → "fakturagebyr" (byr=match) beats "fakturagebyret" (ret=no match)
+    let suffix_len = inp.iter().rev().zip(cand.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix_ratio = suffix_len as f32 / max_len as f32;
+
+    // 3. Character trigram Dice coefficient — overall sequence overlap
     let trigram_dice = if inp.len() >= 3 && cand.len() >= 3 {
         let inp_tri: HashSet<&[u8]> = inp.windows(3).collect();
         let cand_tri: HashSet<&[u8]> = cand.windows(3).collect();
@@ -34,11 +41,11 @@ fn ortho_score(input: &str, candidate: &str) -> f32 {
         0.0
     };
 
-    // 3. Length similarity — penalize very different lengths
+    // 4. Length similarity — penalize very different lengths
     let len_ratio = inp.len().min(cand.len()) as f32 / max_len as f32;
 
-    // Combined: prefix 50%, trigrams 35%, length 15%
-    prefix_ratio * 0.50 + trigram_dice * 0.35 + len_ratio * 0.15
+    // Combined: prefix 35%, suffix 25%, trigrams 25%, length 15%
+    prefix_ratio * 0.35 + suffix_ratio * 0.25 + trigram_dice * 0.25 + len_ratio * 0.15
 }
 
 fn main() {
@@ -201,6 +208,41 @@ fn main() {
         total_bert_ms += bert_ms;
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Post-BERT: if top result and another candidate are the SAME WORD
+        // (same root, different inflection), prefer the one whose suffix
+        // matches the input. E.g., input "gebyr" → pick "gebyr" over "gebyret".
+        if scored.len() >= 2 {
+            let top = scored[0].0;
+            let top_bytes = top.as_bytes();
+            let inp_bytes = input_lower.as_bytes();
+
+            for i in 1..scored.len().min(10) {
+                let alt = scored[i].0;
+                let alt_bytes = alt.as_bytes();
+
+                // Same word = share 80%+ of shorter word as common prefix
+                let common = top_bytes.iter().zip(alt_bytes.iter())
+                    .take_while(|(a, b)| a == b).count();
+                // Same word = one is a prefix of the other, or they differ
+                // only in the very last byte (e.g., osteskive/osteskiva)
+                let shorter = top_bytes.len().min(alt_bytes.len());
+                if shorter == 0 || common + 1 < shorter {
+                    continue; // different words
+                }
+
+                // Same root — compare suffix match to input
+                let top_suffix: usize = top_bytes.iter().rev().zip(inp_bytes.iter().rev())
+                    .take_while(|(a, b)| a == b).count();
+                let alt_suffix: usize = alt_bytes.iter().rev().zip(inp_bytes.iter().rev())
+                    .take_while(|(a, b)| a == b).count();
+
+                if alt_suffix > top_suffix {
+                    scored.swap(0, i);
+                    break;
+                }
+            }
+        }
 
         let bert_top1 = scored[0].0;
         let found = expected.iter().any(|exp| *exp == bert_top1);
