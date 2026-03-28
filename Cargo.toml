@@ -96,3 +96,7 @@ path = "src/test_bert_spelling.rs"
 [[bin]]
 name = "test-bert-bench"
 path = "src/test_bert_bench.rs"
+
+[[bin]]
+name = "test-compound-bert"
+path = "src/bin/test_compound_bert.rs"

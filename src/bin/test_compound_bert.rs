@@ -1,0 +1,189 @@
+/// Test compound walker + BERT re-ranking.
+/// For each misspelled compound word, generates candidates via the walker,
+/// then uses BERT subword_score to pick the best one in context.
+
+use acatts_rust::compound_walker::{compound_fuzzy_walk, load_fst_from_mfst};
+use acatts_rust::spelling_scorer::subword_score;
+use nostos_cognio::model::Model;
+use std::path::PathBuf;
+use std::time::Instant;
+
+fn main() {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mfst_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+    let dict_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+    let wf_path = base.join("../contexter-repo/training-data/wordfreq.tsv");
+    let training = base.join("../contexter-repo/training-data");
+
+    println!("Loading FST...");
+    let fst = load_fst_from_mfst(mfst_path.to_str().unwrap())
+        .expect("Failed to load FST");
+
+    let analyzer = mtag::Analyzer::new(dict_path.to_str().unwrap())
+        .expect("Failed to load analyzer");
+
+    let wordfreq = nostos_cognio::wordfreq::load_wordfreq(wf_path.as_path(), 10);
+
+    let onnx_path = training.join("onnx/norbert4_base_int8.onnx");
+    let tok_path = training.join("onnx/tokenizer.json");
+    println!("Loading NorBERT4...");
+    let mut model = Model::load(onnx_path.to_str().unwrap(), tok_path.to_str().unwrap())
+        .expect("Failed to load model");
+    println!("Loaded. Vocab: {}\n", model.vocab_size());
+
+    let word_check = |w: &str| -> bool {
+        if let Some(readings) = analyzer.dict_lookup(w) {
+            readings.iter().any(|r| r.pos != mtag::types::Pos::Prop)
+        } else {
+            false
+        }
+    };
+    let noun_check = |w: &str| -> bool {
+        if let Some(readings) = analyzer.dict_lookup(w) {
+            readings.iter().any(|r| r.pos == mtag::types::Pos::Subst)
+        } else {
+            false
+        }
+    };
+
+    // (sentence_with_misspelling, misspelled_word, expected_correct, description)
+    let tests: Vec<(&str, &str, Vec<&str>, &str)> = vec![
+        // === Baseline: single words + known compounds ===
+        ("Vi renoverte sjøkken i fjor.", "sjøkken", vec!["kjøkken"], "single: s→k"),
+        ("Maten står på kjøkkenbort.", "kjøkkenbort", vec!["kjøkkenbord"], "known compound: t→d"),
+        ("Vi kjøpte nytt sjøkkenbord.", "sjøkkenbord", vec!["kjøkkenbord"], "known compound: sj→kj"),
+        ("Maten står på sjøkkenbort.", "sjøkkenbort", vec!["kjøkkenbord"], "known compound: both parts"),
+
+        // === Productive compounds — error in part 1 ===
+        ("Vi fanget innsjefisk i går.", "innsjefisk", vec!["innsjøfisk"], "productive: e→ø in innsjø"),
+        ("Jeg kjøpte kyllingsfilet til middag.", "kyllingsfilet", vec!["kyllingfilet"], "productive: extra s"),
+        ("Hun spiste en lakzebit til lunsj.", "lakzebit", vec!["laksebit"], "productive: z→s"),
+        ("Bestemor laget jordbergrøt.", "jordbergrøt", vec!["jordbærgrøt"], "productive: e→æ in bær"),
+        ("Vi spiste lunsj i skollekantine.", "skollekantine", vec!["skolekantine"], "productive: ll→l"),
+        ("Det er eksamennsperiode på skolen.", "eksamennsperiode", vec!["eksamensperiode"], "productive: nn→n"),
+        ("Han leverte prosjektrapport i dag.", "prosjektrapport", vec!["prosjektrapport"], "productive: exact"),
+        ("Vi betalte fakturaggebyr.", "fakturaggebyr", vec!["fakturagebyr"], "productive: gg→g"),
+        ("Åpne en netbuttikk på nett.", "netbuttikk", vec!["nettbutikk"], "productive: t→tt, tt→t"),
+        ("Eleven trenger lekssehjlep.", "lekssehjlep", vec!["leksehjelp"], "productive: hj swap"),
+
+        // === Productive compounds — error in part 2 ===
+        ("Vi fanget innsjøfissk i vannet.", "innsjøfissk", vec!["innsjøfisk"], "productive: ss→s in fisk"),
+        ("Hun stekte kyllingfilét til middag.", "kyllingfilét", vec!["kyllingfilet"], "productive: é→e"),
+        ("Legg osteskivve på brødet.", "osteskivve", vec!["osteskive"], "productive: vv→v"),
+        ("Barna var på svømmestevnne.", "svømmestevnne", vec!["svømmestevne"], "productive: nn→n"),
+        ("Laget vant kampressultat.", "kampressultat", vec!["kampresultat"], "productive: ss→s"),
+        ("Husk å endre passordbytte.", "passordbytte", vec!["passordbytte"], "productive: exact"),
+        ("Vi kjøpte ny ladekabbel.", "ladekabbel", vec!["ladekabel"], "productive: bb→b"),
+        ("Det kom et nyhettsvarsel.", "nyhettsvarsel", vec!["nyhetsvarsel"], "productive: tt→t"),
+        ("Han mistet busskort.", "busskort", vec!["busskort"], "productive: exact compound"),
+
+        // === Productive compounds — errors in BOTH parts ===
+        ("Vi fanget innsjefissk i elva.", "innsjefissk", vec!["innsjøfisk"], "both: e→ø + ss→s"),
+        ("Hun kjøpte kyllingsfilét.", "kyllingsfilét", vec!["kyllingfilet", "kyllingsfilet"], "both: extra s + é→e"),
+        ("Den gamle taklysekronne var pen.", "taklysekronne", vec!["taklysekrone"], "both: nn→n"),
+
+        // === Phonetic errors ===
+        ("Elven nådde frostgrennse.", "frostgrennse", vec!["frostgrense"], "phonetic: nn→n"),
+        ("De så nordlyskvell på himmelen.", "nordlyskvell", vec!["nordlyskveld"], "phonetic: l→ld"),
+        ("Det var et brått temperaturfel.", "temperaturfel", vec!["temperaturfall"], "phonetic: e→a in fall"),
+        ("Vi hadde sommeravsluttning på skolen.", "sommeravsluttning", vec!["sommeravslutning"], "phonetic: tt→t"),
+        ("Det ble en fin solvskinnshellg.", "solvskinnshellg", vec!["solskinnshelg"], "phonetic: v→ø, ll→l"),
+
+        // === Binding letter errors ===
+        ("Sjekk møteinknalling i kalenderen.", "møteinknalling", vec!["møteinnkalling"], "binding: n→nn"),
+        ("Bruk en rengjøringklut.", "rengjøringklut", vec!["rengjøringsklut"], "binding: missing s"),
+        ("De trener i treningsstuddo.", "treningsstuddo", vec!["treningsstudio"], "binding: dd→d, o→io"),
+
+        // === Modern/tech compounds ===
+        ("Barna har for mye skjermtitt.", "skjermtitt", vec!["skjermtid"], "tech: tt→d"),
+        ("Det var et datakrasj på serveren.", "datakrasj", vec!["datakrasj"], "tech: exact"),
+        ("Vi hadde videomette i dag.", "videomette", vec!["videomøte"], "tech: e→ø"),
+        ("Bruk en strømetjeneste for musikk.", "strømetjeneste", vec!["strømmetjeneste"], "tech: missing m"),
+
+        // === Three-part compounds ===
+        ("Sjekk vaskemaskinslannge bak.", "vaskemaskinslannge", vec!["vaskemaskinslange"], "3-part: nn→n"),
+        ("Vi bodde på flyplashotell.", "flyplashotell", vec!["flyplasshotell"], "3-part: missing s"),
+
+        // === Double consonant confusion ===
+        ("Hun trener på jogamatte.", "jogamatte", vec!["yogamatte"], "double: j→y"),
+        ("Barnet laget leerfigur.", "leerfigur", vec!["leirfigur"], "double: ee→ei"),
+        ("Hun tok en allergittes.", "allergittes", vec!["allergitest"], "double: tt→t, extra s"),
+        ("Han har dårlig sevnkvalitet.", "sevnkvalitet", vec!["søvnkvalitet"], "phonetic: e→ø"),
+    ];
+
+    let mut pass = 0;
+    let mut fail = 0;
+    let mut total_walker_ms = 0.0_f64;
+    let mut total_bert_ms = 0.0_f64;
+
+    for (sentence, misspelled, expected, desc) in &tests {
+        // Step 1: Compound walker — get candidates
+        let t_walk = Instant::now();
+        let results = compound_fuzzy_walk(
+            &fst, &misspelled.to_lowercase(),
+            Some(&wordfreq), Some(&word_check), Some(&noun_check),
+        );
+        let walk_ms = t_walk.elapsed().as_secs_f64() * 1000.0;
+        total_walker_ms += walk_ms;
+
+        // Take top 20 candidates for BERT scoring
+        let candidates: Vec<&str> = results.iter()
+            .take(20)
+            .map(|r| r.compound_word.as_str())
+            .collect();
+
+        if candidates.is_empty() {
+            println!("  FAIL ({:>5.1}ms + 0ms): {} — no candidates", walk_ms, desc);
+            fail += 1;
+            continue;
+        }
+
+        // Step 2: BERT re-ranking — score each candidate in sentence context
+        let bert_sentence = sentence.to_lowercase().replace(
+            &misspelled.to_lowercase(), "PLACEHOLDER"
+        );
+
+        let t_bert = Instant::now();
+        let mut scored: Vec<(&str, f32)> = candidates.iter()
+            .map(|&cand| {
+                let s = bert_sentence.replace("PLACEHOLDER", cand);
+                let score = subword_score(&mut model, &s, cand);
+                (cand, score)
+            })
+            .collect();
+        let bert_ms = t_bert.elapsed().as_secs_f64() * 1000.0;
+        total_bert_ms += bert_ms;
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let bert_top1 = scored[0].0;
+        let found = expected.iter().any(|exp| *exp == bert_top1);
+
+        let top3: Vec<String> = scored.iter().take(3)
+            .map(|(w, s)| format!("{}({:.1})", w, s))
+            .collect();
+
+        if found {
+            println!("  PASS ({:>5.1}ms+{:>5.1}ms): {} → {} | [{}]",
+                walk_ms, bert_ms, desc, bert_top1, top3.join(", "));
+            pass += 1;
+        } else {
+            // Check if expected is anywhere in BERT-ranked list
+            let bert_rank = expected.iter().find_map(|exp| {
+                scored.iter().position(|(w, _)| w == exp).map(|p| p + 1)
+            });
+            let rank_info = bert_rank.map_or("not in top 20".to_string(), |r| format!("#{}", r));
+            println!("  FAIL ({:>5.1}ms+{:>5.1}ms): {} — bert#1='{}' expected {:?} ({}) | [{}]",
+                walk_ms, bert_ms, desc, bert_top1, expected, rank_info, top3.join(", "));
+            fail += 1;
+        }
+    }
+
+    println!("\nResults: {}/{} passed", pass, pass + fail);
+    println!("Avg walker: {:.1}ms, avg BERT: {:.1}ms, avg total: {:.1}ms",
+        total_walker_ms / tests.len() as f64,
+        total_bert_ms / tests.len() as f64,
+        (total_walker_ms + total_bert_ms) / tests.len() as f64,
+    );
+    if fail > 0 { std::process::exit(1); }
+}
