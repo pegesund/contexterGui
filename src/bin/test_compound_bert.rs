@@ -5,8 +5,41 @@
 use acatts_rust::compound_walker::{compound_fuzzy_walk, load_fst_from_mfst};
 use acatts_rust::spelling_scorer::subword_score;
 use nostos_cognio::model::Model;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
+
+/// Orthographic similarity between misspelled input and candidate compound.
+/// Combines prefix match (weighted high — dyslexics get beginnings right),
+/// character trigram overlap, and length similarity.
+fn ortho_score(input: &str, candidate: &str) -> f32 {
+    let inp = input.as_bytes();
+    let cand = candidate.as_bytes();
+
+    // 1. Common prefix length (normalized) — most important for dyslexia
+    let prefix_len = inp.iter().zip(cand.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let max_len = inp.len().max(cand.len()).max(1);
+    let prefix_ratio = prefix_len as f32 / max_len as f32;
+
+    // 2. Character trigram Dice coefficient — overall sequence overlap
+    let trigram_dice = if inp.len() >= 3 && cand.len() >= 3 {
+        let inp_tri: HashSet<&[u8]> = inp.windows(3).collect();
+        let cand_tri: HashSet<&[u8]> = cand.windows(3).collect();
+        let common = inp_tri.intersection(&cand_tri).count();
+        let total = inp_tri.len() + cand_tri.len();
+        if total > 0 { 2.0 * common as f32 / total as f32 } else { 0.0 }
+    } else {
+        0.0
+    };
+
+    // 3. Length similarity — penalize very different lengths
+    let len_ratio = inp.len().min(cand.len()) as f32 / max_len as f32;
+
+    // Combined: prefix 50%, trigrams 35%, length 15%
+    prefix_ratio * 0.50 + trigram_dice * 0.35 + len_ratio * 0.15
+}
 
 fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -138,17 +171,30 @@ fn main() {
             continue;
         }
 
-        // Step 2: BERT re-ranking — score each candidate in sentence context
+        // Step 2: BERT re-ranking + orthographic similarity
         let bert_sentence = sentence.to_lowercase().replace(
             &misspelled.to_lowercase(), "PLACEHOLDER"
         );
+        let input_lower = misspelled.to_lowercase();
+
+        // Get edit distance for each candidate from walker results
+        let edit_map: std::collections::HashMap<&str, u32> = results.iter()
+            .map(|r| (r.compound_word.as_str(), r.total_edits))
+            .collect();
 
         let t_bert = Instant::now();
-        let mut scored: Vec<(&str, f32)> = candidates.iter()
+        let mut scored: Vec<(&str, f32, f32, f32)> = candidates.iter()
             .map(|&cand| {
                 let s = bert_sentence.replace("PLACEHOLDER", cand);
-                let score = subword_score(&mut model, &s, cand);
-                (cand, score)
+                let bert = subword_score(&mut model, &s, cand);
+                let ortho = ortho_score(&input_lower, cand);
+                // Compound score: BERT picks the right word in context,
+                // ortho similarity is a bonus (prefix + trigram match).
+                // No edit distance penalty — the input IS wrong, corrections
+                // with edits should compete equally with exact decompositions.
+                let bert_norm = (bert / 25.0).clamp(0.0, 1.0);
+                let combined = bert_norm * 7.0 + ortho * 3.0;
+                (cand, combined, bert, ortho)
             })
             .collect();
         let bert_ms = t_bert.elapsed().as_secs_f64() * 1000.0;
@@ -160,7 +206,7 @@ fn main() {
         let found = expected.iter().any(|exp| *exp == bert_top1);
 
         let top3: Vec<String> = scored.iter().take(3)
-            .map(|(w, s)| format!("{}({:.1})", w, s))
+            .map(|(w, combined, bert, ortho)| format!("{}({:.1}b={:.1}o={:.2})", w, combined, bert, ortho))
             .collect();
 
         if found {
@@ -170,7 +216,7 @@ fn main() {
         } else {
             // Check if expected is anywhere in BERT-ranked list
             let bert_rank = expected.iter().find_map(|exp| {
-                scored.iter().position(|(w, _)| w == exp).map(|p| p + 1)
+                scored.iter().position(|(w, _, _, _)| w == exp).map(|p| p + 1)
             });
             let rank_info = bert_rank.map_or("not in top 20".to_string(), |r| format!("#{}", r));
             println!("  FAIL ({:>5.1}ms+{:>5.1}ms): {} — bert#1='{}' expected {:?} ({}) | [{}]",
