@@ -10,6 +10,7 @@ fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mfst_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
     let dict_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+    let wf_path = base.join("../contexter-repo/training-data/wordfreq.tsv");
 
     println!("Loading FST from {}...", mfst_path.display());
     let t = Instant::now();
@@ -19,6 +20,9 @@ fn main() {
 
     let analyzer = mtag::Analyzer::new(dict_path.to_str().unwrap())
         .expect("Failed to load analyzer");
+
+    let wordfreq = nostos_cognio::wordfreq::load_wordfreq(wf_path.as_path(), 10);
+    println!("Loaded wordfreq: {} words", wordfreq.len());
 
     // Check 200 compound words — find which are NOT in dictionary
     println!("\n=== Dictionary check (finding productive compounds) ===");
@@ -146,12 +150,23 @@ fn main() {
         ("sevnkvalitet", vec!["søvnkvalitet"], "phonetic: e→ø"),
     ];
 
+    // Detailed dump for 3 hard cases
+    for word in &["netbuttikk", "lekssehjlep", "allergittes"] {
+        let r = compound_fuzzy_walk(&fst, word, Some(&wordfreq));
+        println!("\n  === {} ({} results) ===", word, r.len());
+        for (i, x) in r.iter().take(10).enumerate() {
+            let parts: Vec<String> = x.parts.iter()
+                .map(|p| format!("{}({})", p.matched_word, p.edits)).collect();
+            println!("    #{}: {} [{}] e={}", i+1, x.compound_word, parts.join("+"), x.total_edits);
+        }
+    }
+
     let mut pass = 0;
     let mut fail = 0;
 
     for (input, expected, desc) in &tests {
         let t = Instant::now();
-        let results = compound_fuzzy_walk(&fst, &input.to_lowercase());
+        let results = compound_fuzzy_walk(&fst, &input.to_lowercase(), Some(&wordfreq));
         let elapsed = t.elapsed();
 
         let result_words: Vec<&str> = results.iter().take(50).map(|r| r.compound_word.as_str()).collect();

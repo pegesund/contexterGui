@@ -5,7 +5,7 @@
 //! like "kjøkkenbord" = "kjøkken" + "bord" even when misspelled.
 
 use fst::raw::{CompiledAddr, Fst, Node};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
 
 /// A matched part of a compound word.
@@ -114,6 +114,7 @@ fn exact_walk_from_root<D: AsRef<[u8]>>(fst: &Fst<D>, input: &[u8], start: usize
 pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
     fst: &Fst<D>,
     input: &str,
+    wordfreq: Option<&HashMap<String, u64>>,
 ) -> Vec<CompoundResult> {
     let input_bytes = input.as_bytes();
     let root_addr = fst.root().addr();
@@ -145,8 +146,18 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
             let node = fst.node(state.fst_addr);
 
             // FORK: at accepting states (found a complete word part)
+            // Only accept parts that are real words (in wordfreq with freq ≥ 10)
             if node.is_final() && state.word_bytes.len() >= MIN_PART_BYTES {
                 let matched = String::from_utf8_lossy(&state.word_bytes).to_string();
+                // Only validate short parts (≤3 chars) against wordfreq —
+                // short FST entries are often junk (abbreviations, interjections)
+                // while longer words (4+ chars) are almost always real.
+                let is_real_word = if matched.chars().count() <= 3 {
+                    wordfreq.map_or(true, |wf| wf.contains_key(&matched))
+                } else {
+                    true
+                };
+              if is_real_word {
                 let new_part = CompoundPart {
                     matched_word: matched.clone(),
                     input_start: state.word_start,
@@ -300,6 +311,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                         });
                     }
                 }
+              } // is_real_word
             }
 
             // ADVANCE: Levenshtein moves
