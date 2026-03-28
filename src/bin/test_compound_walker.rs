@@ -24,7 +24,23 @@ fn main() {
     let wordfreq = nostos_cognio::wordfreq::load_wordfreq(wf_path.as_path(), 10);
     println!("Loaded wordfreq: {} words", wordfreq.len());
 
-    let word_check = |w: &str| -> bool { analyzer.has_word(w) };
+    // Validate: word must be in dictionary AND not ONLY a proper noun
+    let word_check = |w: &str| -> bool {
+        if let Some(readings) = analyzer.dict_lookup(w) {
+            readings.iter().any(|r| r.pos != mtag::types::Pos::Prop)
+        } else {
+            false
+        }
+    };
+
+    // Last part of compound must be a noun (not verb, adverb, name, etc.)
+    let noun_check = |w: &str| -> bool {
+        if let Some(readings) = analyzer.dict_lookup(w) {
+            readings.iter().any(|r| r.pos == mtag::types::Pos::Subst)
+        } else {
+            false
+        }
+    };
 
     // Check 200 compound words — find which are NOT in dictionary
     println!("\n=== Dictionary check (finding productive compounds) ===");
@@ -154,7 +170,7 @@ fn main() {
 
     // Detailed dump for 3 hard cases
     for word in &["netbuttikk", "lekssehjlep", "allergittes"] {
-        let r = compound_fuzzy_walk(&fst, word, Some(&wordfreq), Some(&word_check));
+        let r = compound_fuzzy_walk(&fst, word, Some(&wordfreq), Some(&word_check), Some(&noun_check));
         println!("\n  === {} ({} results) ===", word, r.len());
         for (i, x) in r.iter().take(10).enumerate() {
             let parts: Vec<String> = x.parts.iter()
@@ -168,7 +184,7 @@ fn main() {
 
     for (input, expected, desc) in &tests {
         let t = Instant::now();
-        let results = compound_fuzzy_walk(&fst, &input.to_lowercase(), Some(&wordfreq), Some(&word_check));
+        let results = compound_fuzzy_walk(&fst, &input.to_lowercase(), Some(&wordfreq), Some(&word_check), Some(&noun_check));
         let elapsed = t.elapsed();
 
         let result_words: Vec<&str> = results.iter().take(50).map(|r| r.compound_word.as_str()).collect();

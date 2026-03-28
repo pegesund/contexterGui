@@ -116,6 +116,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
     input: &str,
     wordfreq: Option<&HashMap<String, u64>>,
     is_valid_word: Option<&dyn Fn(&str) -> bool>,
+    is_noun: Option<&dyn Fn(&str) -> bool>,
 ) -> Vec<CompoundResult> {
     let input_bytes = input.as_bytes();
     let root_addr = fst.root().addr();
@@ -206,7 +207,9 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                                     // Check if remaining input matches a word from root
                                     if ext_end < input_bytes.len() {
                                         for (w2, end2) in exact_walk_from_root(fst, input_bytes, ext_end) {
-                                            if end2 == input_bytes.len() {
+                                            if end2 == input_bytes.len()
+                                                && is_noun.map_or(true, |check| check(&w2))
+                                            {
                                                 let mut ext_parts = state.parts.clone();
                                                 ext_parts.push(CompoundPart {
                                                     matched_word: ext_word.clone(),
@@ -230,7 +233,9 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                                                 }
                                             }
                                         }
-                                    } else if ext_end == input_bytes.len() {
+                                    } else if ext_end == input_bytes.len()
+                                        && is_noun.map_or(true, |check| check(&ext_word))
+                                    {
                                         // Extended word consumes all input
                                         let mut ext_parts = state.parts.clone();
                                         ext_parts.push(CompoundPart {
@@ -256,8 +261,11 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
 
                 if state.input_pos == input_bytes.len() {
                     // Complete match — all input consumed
-                    // For 3+ part compounds, require ALL parts to be reasonably
-                    // frequent (≥50) to prevent junk like "aller+gitt+øs"
+                    // Last part must be a noun (not verb, name, adverb etc.)
+                    let last_is_noun = is_noun.map_or(true, |check| {
+                        check(&new_parts.last().unwrap().matched_word)
+                    });
+                    // For 3+ part compounds, require ALL parts freq ≥ 50
                     let parts_ok = if new_parts.len() >= 3 {
                         new_parts.iter().all(|p| {
                             wordfreq.map_or(true, |wf|
@@ -266,7 +274,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     } else {
                         true
                     };
-                    if parts_ok {
+                    if last_is_noun && parts_ok {
                         let compound = new_parts.iter().map(|p| p.matched_word.as_str()).collect::<String>();
                         if seen_compounds.insert(compound.clone()) {
                             results.push(CompoundResult {
