@@ -123,6 +123,10 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
     let mut results: Vec<CompoundResult> = Vec::new();
     let mut seen_compounds: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Short inputs: 2 parts max (3-part is almost always junk)
+    // Long inputs (15+ bytes): allow 3 parts for real compounds like "vaskemaskinslange"
+    let max_parts = if input_bytes.len() >= 15 { MAX_PARTS } else { 2 };
+
     // Initialize with root state
     let initial = WalkState {
         fst_addr: root_addr,
@@ -185,7 +189,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                 if state.edits == 0
                     && new_total + 1 <= MAX_TOTAL_EDITS
                     && state.input_pos + 5 <= input_bytes.len()
-                    && new_parts.len() <= MAX_PARTS
+                    && new_parts.len() <= max_parts
                 {
                     for trans in node.transitions() {
                         let ext_node = fst.node(trans.addr);
@@ -284,7 +288,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                             });
                         }
                     }
-                } else if new_parts.len() < MAX_PARTS {
+                } else if new_parts.len() < max_parts {
                     // Restart from root for next part
                     next_states.push(WalkState {
                         fst_addr: root_addr,
