@@ -204,10 +204,17 @@ fn main() {
         // One base forward pass with <mask> at word position, then score
         // each candidate's tokens. BERT sees only surrounding context,
         // NOT the compound's internal structure.
-        let sent_lower = sentence.to_lowercase();
-        let ctx_parts: Vec<&str> = sent_lower.splitn(2, &input_lower).collect();
+        // Keep original casing — BERT is case-sensitive!
+        // "Vi renoverte" gives much better scores than "vi renoverte"
+        let sent_for_bert = sentence.to_string();
+        // Find the misspelled word position case-insensitively
+        let lower_sent = sentence.to_lowercase();
+        let word_pos = lower_sent.find(&input_lower).unwrap_or(0);
+        let before = &sentence[..word_pos];
+        let after = &sentence[word_pos + misspelled.len()..];
+        let ctx_parts: Vec<&str> = vec![before, after];
         let ctx_before = ctx_parts[0].trim_end();
-        let ctx_after = ctx_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
+        let ctx_after = ctx_parts[1].trim_start();
 
         // Tokenize each candidate
         let cand_tokens: Vec<(&str, Vec<u32>)> = candidates.iter()
