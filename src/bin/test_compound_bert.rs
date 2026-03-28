@@ -261,10 +261,15 @@ fn main() {
             }
         }
 
-        // Normalize by token count + combine with ortho
+        // Score = average logit per token, penalized for extra tokens.
+        // Multi-token words get inflated scores because BERT easily
+        // predicts continuations. Penalty: -1.5 per extra token.
+        // A 1-token word (in BERT's vocab) is one BERT knows well.
         let mut scored: Vec<(&str, f32, f32, f32)> = cand_tokens.iter().enumerate()
             .map(|(i, (w, ids))| {
-                let bert = scores[i] / ids.len() as f32;
+                let avg = scores[i] / ids.len() as f32;
+                let penalty = (ids.len() as f32 - 1.0) * 1.5;
+                let bert = avg - penalty;
                 let ortho = ortho_score(&input_lower, w);
                 let bert_norm = (bert / 25.0).clamp(0.0, 1.0);
                 let combined = bert_norm * 7.0 + ortho * 3.0;
