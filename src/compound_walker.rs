@@ -500,8 +500,21 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
         if results.len() >= 200 { break; } // enough results
     }
 
-    // Sort by (total_edits, part_count) — prefer fewer parts at same edit distance
-    results.sort_by_key(|r| (r.total_edits, r.parts.len()));
+    // Sort by (total_edits, part_count, -min_frequency)
+    // At equal edits and parts, prefer decompositions where all parts are common
+    results.sort_by(|a, b| {
+        let ord = a.total_edits.cmp(&b.total_edits);
+        if ord != std::cmp::Ordering::Equal { return ord; }
+        let ord = a.parts.len().cmp(&b.parts.len());
+        if ord != std::cmp::Ordering::Equal { return ord; }
+        // Higher minimum frequency = better (more likely real compound)
+        let freq = |r: &CompoundResult| -> u64 {
+            r.parts.iter()
+                .map(|p| wordfreq.and_then(|wf| wf.get(&p.matched_word).copied()).unwrap_or(0))
+                .min().unwrap_or(0)
+        };
+        freq(b).cmp(&freq(a))
+    });
     results
 }
 
