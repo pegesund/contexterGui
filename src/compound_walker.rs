@@ -292,24 +292,33 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     });
 
                     // Try skipping binding letters (s, e) present in input
+                    // Binding 'e': only after consonants (laks→lakse OK, innsjø→innsjøe NOT OK)
+                    // Binding 's': always allowed (handled by morphological rules too)
                     if state.input_pos < input_bytes.len()
                         && BINDING_LETTERS.contains(&input_bytes[state.input_pos])
                     {
-                        let binding_char = input_bytes[state.input_pos] as char;
-                        let mut parts_with_binding = new_parts.clone();
-                        if let Some(last) = parts_with_binding.last_mut() {
-                            last.matched_word.push(binding_char);
-                            last.input_end = state.input_pos + 1;
+                        let bl = input_bytes[state.input_pos];
+                        let last_byte = state.word_bytes.last().copied().unwrap_or(0);
+                        let after_vowel = matches!(last_byte, b'a' | b'e' | b'i' | b'o' | b'u' | b'y'
+                            | 0xA5 | 0xA6 | 0xB8); // å, æ, ø continuation bytes
+                        let bind_ok = bl == b's' || !after_vowel;
+                        if bind_ok {
+                            let binding_char = bl as char;
+                            let mut parts_with_binding = new_parts.clone();
+                            if let Some(last) = parts_with_binding.last_mut() {
+                                last.matched_word.push(binding_char);
+                                last.input_end = state.input_pos + 1;
+                            }
+                            next_states.push(WalkState {
+                                fst_addr: root_addr,
+                                input_pos: state.input_pos + 1,
+                                edits: 0,
+                                word_bytes: Vec::new(),
+                                word_start: state.input_pos + 1,
+                                parts: parts_with_binding,
+                                total_edits: new_total,
+                            });
                         }
-                        next_states.push(WalkState {
-                            fst_addr: root_addr,
-                            input_pos: state.input_pos + 1,
-                            edits: 0,
-                            word_bytes: Vec::new(),
-                            word_start: state.input_pos + 1,
-                            parts: parts_with_binding,
-                            total_edits: new_total,
-                        });
                     }
 
                     // Try INSERTING binding -s- when morphology requires it

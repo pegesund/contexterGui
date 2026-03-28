@@ -91,6 +91,20 @@ fn main() {
         }
     };
 
+    // Debug: check "innsjøefisk" decomposition in walker
+    {
+        let r = compound_fuzzy_walk(&fst, "innsjefisk", Some(&wordfreq), Some(&word_check), Some(&noun_check));
+        println!("  === innsjefisk: results containing 'efisk' ===");
+        for x in r.iter().filter(|x| x.compound_word.contains("efisk")).take(5) {
+            let parts: Vec<String> = x.parts.iter()
+                .map(|p| format!("'{}' (e={})", p.matched_word, p.edits)).collect();
+            println!("    {} [{}] total_edits={}", x.compound_word, parts.join(" + "), x.total_edits);
+        }
+        if r.iter().all(|x| !x.compound_word.contains("efisk")) {
+            println!("    (none found)");
+        }
+    }
+
     // (sentence_with_misspelling, misspelled_word, expected_correct, description)
     let tests: Vec<(&str, &str, Vec<&str>, &str)> = vec![
         // === Baseline: single words + known compounds ===
