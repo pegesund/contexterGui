@@ -61,8 +61,31 @@ const MAX_EDITS_PER_PART: u32 = 2;
 const MAX_TOTAL_EDITS: u32 = 4;
 const MAX_PARTS: usize = 3;
 const MIN_PART_BYTES: usize = 3;
-const BEAM_WIDTH: usize = 2000;
+const BEAM_WIDTH: usize = 5000;
 const BINDING_LETTERS: &[u8] = b"se";
+
+/// Norwegian phonetic vowel pairs common in dyslexic writing.
+/// These substitutions cost 0 edits since they're near-equivalences.
+/// ascii_byte ↔ UTF-8 continuation byte (after 0xC3 prefix)
+#[inline]
+fn is_free_vowel_swap(ascii: u8, utf8_cont: u8) -> bool {
+    matches!((ascii, utf8_cont),
+        (b'e', 0xB8) |  // e ↔ ø
+        (b'o', 0xA5) |  // o ↔ å
+        (b'a', 0xA6)    // a ↔ æ
+    )
+}
+
+/// Check if a word's suffix triggers binding -s- in Norwegian compounds.
+/// Based on morphological rules: -ing, -ning, -het, -skap, -sjon, -tet,
+/// -dom, -else, -sel, -nad, -itet, -leik always take -s-.
+#[inline]
+fn needs_binding_s(word: &[u8]) -> bool {
+    word.ends_with(b"ing") || word.ends_with(b"het") || word.ends_with(b"skap") ||
+    word.ends_with(b"sjon") || word.ends_with(b"tet") || word.ends_with(b"dom") ||
+    word.ends_with(b"else") || word.ends_with(b"sel") || word.ends_with(b"nad") ||
+    word.ends_with(b"leik")
+}
 
 /// Walk the FST to find compound word decompositions for the input.
 /// Returns decompositions sorted by total edit distance (best first).
@@ -134,17 +157,45 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                         total_edits: new_total,
                     });
 
-                    // Try binding letters (s, e) between parts
+                    // Try skipping binding letters (s, e) present in input
                     if state.input_pos < input_bytes.len()
                         && BINDING_LETTERS.contains(&input_bytes[state.input_pos])
                     {
+                        let binding_char = input_bytes[state.input_pos] as char;
+                        let mut parts_with_binding = new_parts.clone();
+                        if let Some(last) = parts_with_binding.last_mut() {
+                            last.matched_word.push(binding_char);
+                            last.input_end = state.input_pos + 1;
+                        }
                         next_states.push(WalkState {
                             fst_addr: root_addr,
                             input_pos: state.input_pos + 1,
                             edits: 0,
                             word_bytes: Vec::new(),
                             word_start: state.input_pos + 1,
-                            parts: new_parts,
+                            parts: parts_with_binding,
+                            total_edits: new_total,
+                        });
+                    }
+
+                    // Try INSERTING binding -s- when morphology requires it
+                    // Only insert when the matched word ends with a suffix
+                    // that triggers -s- (e.g., -ing, -het, -skap, -sjon, -tet)
+                    if needs_binding_s(&state.word_bytes)
+                        && (state.input_pos >= input_bytes.len()
+                            || input_bytes[state.input_pos] != b's')
+                    {
+                        let mut parts_with_s = new_parts;
+                        if let Some(last) = parts_with_s.last_mut() {
+                            last.matched_word.push('s');
+                        }
+                        next_states.push(WalkState {
+                            fst_addr: root_addr,
+                            input_pos: state.input_pos,
+                            edits: 0,
+                            word_bytes: Vec::new(),
+                            word_start: state.input_pos,
+                            parts: parts_with_s,
                             total_edits: new_total,
                         });
                     }
@@ -162,6 +213,12 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                 let inp_char_len = if inp_is_multibyte { 2 } else { 1 };
 
                 // Try all FST transitions
+                let is_utf8_cross = |t_inp: u8| -> bool {
+                    // True when FST byte and input byte are in different UTF-8 "worlds"
+                    // (one is 0xC3 prefix, the other is ASCII) — creates mid-UTF-8 junk
+                    (t_inp == 0xC3 && !inp_is_multibyte) || (t_inp != 0xC3 && inp_is_multibyte)
+                };
+
                 for trans in node.transitions() {
                     if trans.inp == inp_byte {
                         // Match — advance both, no edit
@@ -176,8 +233,9 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                             parts: state.parts.clone(),
                             total_edits: state.total_edits,
                         });
-                    } else {
+                    } else if !is_utf8_cross(trans.inp) {
                         // Substitute — advance both, +1 edit
+                        // (only when both are same byte-width to avoid mid-UTF-8 junk)
                         let mut wb = state.word_bytes.clone();
                         wb.push(trans.inp);
                         next_states.push(WalkState {
@@ -192,16 +250,18 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     }
 
                     // UTF-8 aware substitution: 2-byte input char (å,ø,æ) ↔ 1-byte FST char
-                    // Count as 1 edit instead of 2
+                    // Free only in the COMMON dyslexic direction: ASCII→Norwegian (e→ø, o→å, a→æ)
+                    // Reverse direction (ø→e, å→o, æ→a) costs 1 edit
                     if inp_is_multibyte && trans.inp != 0xC3 {
-                        // Input has 2-byte char, FST has 1-byte char
-                        // Skip both input bytes, take FST byte → 1 edit
+                        // Input has 2-byte char (ø/å/æ), FST has 1-byte char (e/o/a)
+                        // This is the REVERSE direction — always costs 1 edit
+                        let cost = 1;
                         let mut wb = state.word_bytes.clone();
                         wb.push(trans.inp);
                         next_states.push(WalkState {
                             fst_addr: trans.addr,
-                            input_pos: state.input_pos + 2, // skip both bytes of å/ø/æ
-                            edits: state.edits + 1,
+                            input_pos: state.input_pos + 2,
+                            edits: state.edits + cost,
                             word_bytes: wb,
                             word_start: state.word_start,
                             parts: state.parts.clone(),
@@ -210,16 +270,51 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     }
                     if !inp_is_multibyte && trans.inp == 0xC3 {
                         // Input has 1-byte char, FST starts 2-byte char
-                        // Follow the 0xC3 transition, then try all continuations consuming 1 input byte
+                        // Substitute: consume 1 input byte, emit complete 2-byte FST char
+                        // Free for vowel pairs, 1 edit otherwise
                         let next_node = fst.node(trans.addr);
                         for trans2 in next_node.transitions() {
-                            // This completes the 2-byte FST char; consume 1 input byte → 1 edit
+                            let cost = if is_free_vowel_swap(inp_byte, trans2.inp) { 0 } else { 1 };
                             let mut wb = state.word_bytes.clone();
                             wb.push(0xC3);
                             wb.push(trans2.inp);
                             next_states.push(WalkState {
                                 fst_addr: trans2.addr,
-                                input_pos: state.input_pos + 1, // consume 1 input byte
+                                input_pos: state.input_pos + 1,
+                                edits: state.edits + cost,
+                                word_bytes: wb,
+                                word_start: state.word_start,
+                                parts: state.parts.clone(),
+                                total_edits: state.total_edits,
+                            });
+                        }
+                        // Delete: emit complete 2-byte FST char, don't consume input → 1 edit
+                        if state.edits + 1 <= MAX_EDITS_PER_PART {
+                            let next_node = fst.node(trans.addr);
+                            for trans2 in next_node.transitions() {
+                                let mut wb = state.word_bytes.clone();
+                                wb.push(0xC3);
+                                wb.push(trans2.inp);
+                                next_states.push(WalkState {
+                                    fst_addr: trans2.addr,
+                                    input_pos: state.input_pos,
+                                    edits: state.edits + 1,
+                                    word_bytes: wb,
+                                    word_start: state.word_start,
+                                    parts: state.parts.clone(),
+                                    total_edits: state.total_edits,
+                                });
+                            }
+                        }
+                    } else if trans.inp != 0xC3 || inp_is_multibyte {
+                        // Delete (FST byte not in input) — advance FST only, +1 edit
+                        // Skip when trans is 0xC3 and input is ASCII (handled above atomically)
+                        if state.edits + 1 <= MAX_EDITS_PER_PART {
+                            let mut wb = state.word_bytes.clone();
+                            wb.push(trans.inp);
+                            next_states.push(WalkState {
+                                fst_addr: trans.addr,
+                                input_pos: state.input_pos,
                                 edits: state.edits + 1,
                                 word_bytes: wb,
                                 word_start: state.word_start,
@@ -228,28 +323,15 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                             });
                         }
                     }
-
-                    // Delete (FST byte not in input) — advance FST only, +1 edit
-                    if state.edits + 1 <= MAX_EDITS_PER_PART {
-                        let mut wb = state.word_bytes.clone();
-                        wb.push(trans.inp);
-                        next_states.push(WalkState {
-                            fst_addr: trans.addr,
-                            input_pos: state.input_pos,
-                            edits: state.edits + 1,
-                            word_bytes: wb,
-                            word_start: state.word_start,
-                            parts: state.parts.clone(),
-                            total_edits: state.total_edits,
-                        });
-                    }
                 }
 
                 // Insert (input byte not in FST) — advance input only, +1 edit
+                // For multibyte input chars, skip entire 2-byte sequence
                 if state.edits + 1 <= MAX_EDITS_PER_PART {
+                    let skip = if inp_is_multibyte { 2 } else { 1 };
                     next_states.push(WalkState {
                         fst_addr: state.fst_addr,
-                        input_pos: state.input_pos + 1,
+                        input_pos: state.input_pos + skip,
                         edits: state.edits + 1,
                         word_bytes: state.word_bytes.clone(),
                         word_start: state.word_start,
@@ -261,17 +343,36 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                 // Input exhausted — try deleting remaining FST bytes
                 if state.edits + 1 <= MAX_EDITS_PER_PART {
                     for trans in node.transitions() {
-                        let mut wb = state.word_bytes.clone();
-                        wb.push(trans.inp);
-                        next_states.push(WalkState {
-                            fst_addr: trans.addr,
-                            input_pos: state.input_pos,
-                            edits: state.edits + 1,
-                            word_bytes: wb,
-                            word_start: state.word_start,
-                            parts: state.parts.clone(),
-                            total_edits: state.total_edits,
-                        });
+                        if trans.inp == 0xC3 {
+                            // Delete entire 2-byte char atomically — 1 edit
+                            let next_node = fst.node(trans.addr);
+                            for trans2 in next_node.transitions() {
+                                let mut wb = state.word_bytes.clone();
+                                wb.push(0xC3);
+                                wb.push(trans2.inp);
+                                next_states.push(WalkState {
+                                    fst_addr: trans2.addr,
+                                    input_pos: state.input_pos,
+                                    edits: state.edits + 1,
+                                    word_bytes: wb,
+                                    word_start: state.word_start,
+                                    parts: state.parts.clone(),
+                                    total_edits: state.total_edits,
+                                });
+                            }
+                        } else {
+                            let mut wb = state.word_bytes.clone();
+                            wb.push(trans.inp);
+                            next_states.push(WalkState {
+                                fst_addr: trans.addr,
+                                input_pos: state.input_pos,
+                                edits: state.edits + 1,
+                                word_bytes: wb,
+                                word_start: state.word_start,
+                                parts: state.parts.clone(),
+                                total_edits: state.total_edits,
+                            });
+                        }
                     }
                 }
             }
@@ -284,10 +385,11 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
         std::mem::swap(&mut current_states, &mut next_states);
         next_states.clear();
 
-        if results.len() >= 50 { break; } // enough results
+        if results.len() >= 100 { break; } // enough results
     }
 
-    results.sort_by_key(|r| r.total_edits);
+    // Sort by (total_edits, part_count) — prefer fewer parts at same edit distance
+    results.sort_by_key(|r| (r.total_edits, r.parts.len()));
     results
 }
 

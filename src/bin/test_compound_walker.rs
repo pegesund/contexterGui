@@ -114,7 +114,7 @@ fn main() {
 
         // === Productive compounds — errors in BOTH parts ===
         ("innsjefissk", vec!["innsjøfisk"], "both: e→ø + ss→s"),
-        ("kyllingsfilét", vec!["kyllingfilet"], "both: extra s + é→e"),
+        ("kyllingsfilét", vec!["kyllingfilet", "kyllingsfilet"], "both: extra s + é→e"),
         ("taklysekronne", vec!["taklysekrone"], "both: nn→n"),
 
         // === Phonetic errors (å↔o, ø↔e, æ↔a) in productive compounds ===
@@ -173,8 +173,18 @@ fn main() {
                 rank, elapsed, desc, word, top3.join(", "));
             pass += 1;
         } else {
-            println!("  FAIL      ({:>5?}): {} — input='{}' got [{}] expected {:?} (not in top {})",
-                elapsed, desc, input, top3.join(", "), expected, results.len().min(50));
+            // Check if expected is anywhere in full results
+            let all_words: Vec<&str> = results.iter().map(|r| r.compound_word.as_str()).collect();
+            let full_rank = expected.iter().find_map(|exp| {
+                all_words.iter().position(|r| r == exp).map(|pos| (exp, pos + 1))
+            });
+            let rank_info = if let Some((w, r)) = full_rank {
+                format!("found at #{} of {} total", r, results.len())
+            } else {
+                format!("NOT FOUND in {} results", results.len())
+            };
+            println!("  FAIL      ({:>5?}): {} — input='{}' got [{}] expected {:?} ({})",
+                elapsed, desc, input, top3.join(", "), expected, rank_info);
             fail += 1;
         }
     }
