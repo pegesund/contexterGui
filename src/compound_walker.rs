@@ -248,13 +248,25 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
 
                 if state.input_pos == input_bytes.len() {
                     // Complete match — all input consumed
-                    let compound = new_parts.iter().map(|p| p.matched_word.as_str()).collect::<String>();
-                    if seen_compounds.insert(compound.clone()) {
-                        results.push(CompoundResult {
-                            parts: new_parts.clone(),
-                            total_edits: new_total,
-                            compound_word: compound,
-                        });
+                    // For 3+ part compounds, require ALL parts to be reasonably
+                    // frequent (≥50) to prevent junk like "aller+gitt+øs"
+                    let parts_ok = if new_parts.len() >= 3 {
+                        new_parts.iter().all(|p| {
+                            wordfreq.map_or(true, |wf|
+                                wf.get(&p.matched_word).copied().unwrap_or(0) >= 50)
+                        })
+                    } else {
+                        true
+                    };
+                    if parts_ok {
+                        let compound = new_parts.iter().map(|p| p.matched_word.as_str()).collect::<String>();
+                        if seen_compounds.insert(compound.clone()) {
+                            results.push(CompoundResult {
+                                parts: new_parts.clone(),
+                                total_edits: new_total,
+                                compound_word: compound,
+                            });
+                        }
                     }
                 } else if new_parts.len() < MAX_PARTS {
                     // Restart from root for next part
@@ -450,6 +462,38 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                         parts: state.parts.clone(),
                         total_edits: state.total_edits,
                     });
+                }
+
+                // Transposition (Damerau): swap adjacent input bytes [a,b] → FST [b,a]
+                // Counts as 1 edit instead of 2 substitutions
+                if !inp_is_multibyte
+                    && state.input_pos + 1 < input_bytes.len()
+                    && state.edits + 1 <= MAX_EDITS_PER_PART
+                {
+                    let a = inp_byte;
+                    let b = input_bytes[state.input_pos + 1];
+                    if a != b && b != 0xC3 {
+                        // Try FST path [b, a] (swapped order)
+                        if let Some(idx1) = node.find_input(b) {
+                            let t1 = node.transition(idx1);
+                            let mid = fst.node(t1.addr);
+                            if let Some(idx2) = mid.find_input(a) {
+                                let t2 = mid.transition(idx2);
+                                let mut wb = state.word_bytes.clone();
+                                wb.push(b);
+                                wb.push(a);
+                                next_states.push(WalkState {
+                                    fst_addr: t2.addr,
+                                    input_pos: state.input_pos + 2,
+                                    edits: state.edits + 1,
+                                    word_bytes: wb,
+                                    word_start: state.word_start,
+                                    parts: state.parts.clone(),
+                                    total_edits: state.total_edits,
+                                });
+                            }
+                        }
+                    }
                 }
             } else {
                 // Input exhausted — try deleting remaining FST bytes
