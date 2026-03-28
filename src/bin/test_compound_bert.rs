@@ -78,9 +78,14 @@ fn main() {
             false
         }
     };
+    // Last compound part must be PRIMARILY a noun.
+    // "finsk" has 4 adj + 2 subst readings → primarily adjective → reject
+    // "fisk" has 1 subst + 1 verb → primarily noun → accept
     let noun_check = |w: &str| -> bool {
         if let Some(readings) = analyzer.dict_lookup(w) {
-            readings.iter().any(|r| r.pos == mtag::types::Pos::Subst)
+            let noun_count = readings.iter().filter(|r| r.pos == mtag::types::Pos::Subst).count();
+            let adj_count = readings.iter().filter(|r| r.pos == mtag::types::Pos::Adj).count();
+            noun_count > 0 && noun_count >= adj_count
         } else {
             false
         }
