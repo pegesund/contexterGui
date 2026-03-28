@@ -187,14 +187,33 @@ fn main() {
         let walk_ms = t_walk.elapsed().as_secs_f64() * 1000.0;
         total_walker_ms += walk_ms;
 
-        // Pre-BERT: walker's top 20 candidates (by edit distance + freq ranking)
+        // Pre-BERT candidate selection:
+        // 1. Walker's top 20 (by edit distance)
+        // 2. From top 50: boost compounds where first part has 0 edits
+        //    and second part is a common word (freq ≥ 100).
+        //    Catches "temperaturfall" (fall=common) over "temperaturfil".
         let input_lower = misspelled.to_lowercase();
         let mut seen = HashSet::new();
-        let candidates: Vec<&str> = results.iter()
+        let mut candidates: Vec<&str> = results.iter()
             .take(20)
             .map(|r| r.compound_word.as_str().trim())
             .filter(|w| !w.is_empty() && seen.insert(*w))
             .collect();
+        // Lift candidates with exact first part + common second part
+        for r in results.iter().take(50) {
+            if candidates.len() >= 25 { break; }
+            let w = r.compound_word.as_str().trim();
+            if w.is_empty() || !seen.insert(w) { continue; }
+            // Check: first part 0 edits, last part is a common word
+            if r.parts.len() >= 2 {
+                let first_ok = r.parts[0].edits == 0;
+                let last = &r.parts[r.parts.len() - 1].matched_word;
+                let last_freq = wordfreq.get(last).copied().unwrap_or(0);
+                if first_ok && last_freq >= 100 {
+                    candidates.push(w);
+                }
+            }
+        }
 
         if candidates.is_empty() {
             println!("  FAIL ({:>5.1}ms + 0ms): {} — no candidates", walk_ms, desc);
@@ -321,10 +340,11 @@ fn main() {
                 // Same word = share 80%+ of shorter word as common prefix
                 let common = top_bytes.iter().zip(alt_bytes.iter())
                     .take_while(|(a, b)| a == b).count();
-                // Same word = one is a prefix of the other, or they differ
-                // only in the very last byte (e.g., osteskive/osteskiva)
+                // Same word = one must be a prefix of the other (inflection
+                // adds suffix: bord→bordet, grense→grensen), or they differ
+                // in only the last byte (osteskive/osteskiva)
                 let shorter = top_bytes.len().min(alt_bytes.len());
-                if shorter == 0 || common + 1 < shorter {
+                if shorter == 0 || common < shorter {
                     continue; // different words
                 }
 
