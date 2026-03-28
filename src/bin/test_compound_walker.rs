@@ -169,7 +169,7 @@ fn main() {
     ];
 
     // Detailed dump for 3 hard cases
-    for word in &["netbuttikk", "lekssehjlep", "allergittes"] {
+    for word in &["netbuttikk", "lekssehjlep", "allergittes", "temperaturfel"] {
         let r = compound_fuzzy_walk(&fst, word, Some(&wordfreq), Some(&word_check), Some(&noun_check));
         println!("\n  === {} ({} results) ===", word, r.len());
         for (i, x) in r.iter().take(10).enumerate() {
