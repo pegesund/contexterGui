@@ -212,35 +212,94 @@ fn main() {
             continue;
         }
 
-        // Step 2: BERT re-ranking + orthographic similarity
-        let bert_sentence = sentence.to_lowercase().replace(
-            &input_lower, "PLACEHOLDER"
-        );
+        // Step 2: BERT re-ranking using production approach
+        // One base forward pass with <mask> at word position, then score
+        // each candidate's tokens. BERT sees only surrounding context,
+        // NOT the compound's internal structure.
+        let sent_lower = sentence.to_lowercase();
+        let ctx_parts: Vec<&str> = sent_lower.splitn(2, &input_lower).collect();
+        let ctx_before = ctx_parts[0].trim_end();
+        let ctx_after = ctx_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
 
-        // Get edit distance for each candidate from walker results
-        let edit_map: std::collections::HashMap<&str, u32> = results.iter()
-            .map(|r| (r.compound_word.as_str(), r.total_edits))
+        // Tokenize each candidate
+        let cand_tokens: Vec<(&str, Vec<u32>)> = candidates.iter()
+            .filter_map(|&c| {
+                let enc = model.tokenizer.encode(format!(" {}", c), false).ok()?;
+                let ids: Vec<u32> = enc.get_ids().to_vec();
+                if ids.is_empty() { None } else { Some((c, ids)) }
+            })
             .collect();
 
         let t_bert = Instant::now();
-        let mut scored: Vec<(&str, f32, f32, f32)> = candidates.iter()
-            .map(|&cand| {
-                let s = bert_sentence.replace("PLACEHOLDER", cand);
-                let bert = subword_score(&mut model, &s, cand);
-                let ortho = ortho_score(&input_lower, cand);
-                // Compound score: BERT picks the right word in context,
-                // ortho similarity is a bonus (prefix + trigram match).
-                // No edit distance penalty — the input IS wrong, corrections
-                // with edits should compete equally with exact decompositions.
+
+        // Base forward pass: "<ctx_before> <mask> <ctx_after>"
+        let masked_sent = format!("{} <mask> {}", ctx_before, ctx_after);
+        let base_logits = model.single_forward(&masked_sent)
+            .map(|(logits, _)| logits)
+            .unwrap_or_default();
+
+        // First-token score from base logits (free — just a lookup)
+        let mut scores: Vec<f32> = cand_tokens.iter()
+            .map(|(_, ids)| {
+                if base_logits.is_empty() { 0.0 }
+                else { base_logits[ids[0] as usize] }
+            })
+            .collect();
+
+        // Multi-token scoring: incremental prefix + mask
+        let max_tokens = cand_tokens.iter().map(|(_, ids)| ids.len()).max().unwrap_or(1);
+        for t in 1..max_tokens {
+            let to_score: Vec<usize> = cand_tokens.iter().enumerate()
+                .filter(|(_, (_, ids))| ids.len() > t)
+                .map(|(i, _)| i)
+                .collect();
+            if to_score.is_empty() { break; }
+
+            // Batch all candidates that need token t scored
+            let batch_texts: Vec<String> = to_score.iter()
+                .map(|&i| {
+                    let partial = model.tokenizer.decode(&cand_tokens[i].1[..t], false)
+                        .unwrap_or_default();
+                    format!("{} {}<mask> {}", ctx_before, partial.trim(), ctx_after)
+                })
+                .collect();
+
+            if let Ok((batch_logits, _)) = model.batched_forward(&batch_texts) {
+                for (k, &i) in to_score.iter().enumerate() {
+                    if k < batch_logits.len() {
+                        scores[i] += batch_logits[k][cand_tokens[i].1[t] as usize];
+                    }
+                }
+            }
+        }
+
+        // Normalize by token count + combine with ortho
+        let mut scored: Vec<(&str, f32, f32, f32)> = cand_tokens.iter().enumerate()
+            .map(|(i, (w, ids))| {
+                let bert = scores[i] / ids.len() as f32;
+                let ortho = ortho_score(&input_lower, w);
                 let bert_norm = (bert / 25.0).clamp(0.0, 1.0);
                 let combined = bert_norm * 7.0 + ortho * 3.0;
-                (cand, combined, bert, ortho)
+                (*w, combined, bert, ortho)
             })
             .collect();
         let bert_ms = t_bert.elapsed().as_secs_f64() * 1000.0;
         total_bert_ms += bert_ms;
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Anti-typo: if top result is near-exact match of the misspelling
+        // (ortho ≥ 0.95) but BERT scores another candidate 2+ points higher,
+        // the exact match is probably the typo — trust BERT.
+        // E.g., "kyllingsfilet"(b=10.4,o=1.0) → swap to "kyllingfilet"(b=14.5)
+        if scored.len() >= 2 && scored[0].3 >= 0.95 {
+            for i in 1..scored.len().min(5) {
+                if scored[i].2 > scored[0].2 + 2.0 {
+                    scored.swap(0, i);
+                    break;
+                }
+            }
+        }
 
         // Post-BERT: if top result and another candidate are the SAME WORD
         // (same root, different inflection), prefer the one whose suffix
