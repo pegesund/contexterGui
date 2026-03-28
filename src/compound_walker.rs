@@ -155,21 +155,12 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
             // Only accept parts that are real words (in wordfreq with freq ≥ 10)
             if node.is_final() && state.word_bytes.len() >= MIN_PART_BYTES {
                 let matched = String::from_utf8_lossy(&state.word_bytes).to_string();
-                // Validate compound parts are real words:
-                // ≤3 chars: must be in wordfreq (strict — filters junk like øs, ikt)
-                // 4-5 chars: must be in wordfreq OR recognized by analyzer
-                //            (catches krasj, klut not in wordfreq)
-                // 6+ chars: accepted (almost always real words)
-                let char_len = matched.chars().count();
-                let is_real_word = if char_len <= 3 {
-                    wordfreq.map_or(true, |wf| wf.contains_key(&matched))
-                } else if char_len <= 5 {
-                    let in_wf = wordfreq.map_or(true, |wf| wf.contains_key(&matched));
-                    let in_dict = is_valid_word.map_or(true, |check| check(&matched));
-                    in_wf || in_dict
-                } else {
-                    true
-                };
+                // Validate ALL compound parts are real words:
+                // Must be in wordfreq (freq ≥ 10) OR recognized by analyzer.
+                // Filters junk like "innsjøe", "efisk", "øs", "ikt".
+                let in_wf = wordfreq.map_or(true, |wf| wf.contains_key(&matched));
+                let in_dict = is_valid_word.map_or(true, |check| check(&matched));
+                let is_real_word = in_wf || in_dict;
               if is_real_word {
                 let new_part = CompoundPart {
                     matched_word: matched.clone(),

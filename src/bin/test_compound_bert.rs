@@ -171,31 +171,26 @@ fn main() {
         let walk_ms = t_walk.elapsed().as_secs_f64() * 1000.0;
         total_walker_ms += walk_ms;
 
-        // Combine two selection strategies to get candidates for BERT:
-        // 1. Walker's top 20 (by edit distance — catches BERT-friendly candidates)
-        // 2. Ortho-reranked top 50 → top 20 (by prefix/trigram — catches similar-looking ones)
-        // Union + dedup gives BERT a diverse set to score.
+        // Pre-BERT candidate selection (20 total):
+        // 15 from walker's top (by edit distance — keeps corrections with binding letters etc.)
+        // + 5 from ortho-reranked top 50 (lifts similar-looking candidates from deeper in list)
         let input_lower = misspelled.to_lowercase();
         let mut seen = HashSet::new();
-        // Strategy 1: walker's top 20
-        let walker_top: Vec<&str> = results.iter()
-            .take(20)
+        let mut candidates: Vec<&str> = results.iter()
+            .take(15)
             .map(|r| r.compound_word.as_str())
             .filter(|w| seen.insert(*w))
             .collect();
-        // Strategy 2: ortho-reranked from top 50
+        // Fill remaining slots from ortho-reranked top 50
         let mut top50: Vec<(&str, f32)> = results.iter()
             .take(50)
             .map(|r| (r.compound_word.as_str(), ortho_score(&input_lower, &r.compound_word)))
             .collect();
         top50.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let ortho_top: Vec<&str> = top50.iter()
-            .filter(|(w, _)| seen.insert(*w))
-            .take(10)
-            .map(|(w, _)| *w)
-            .collect();
-        let mut candidates = walker_top;
-        candidates.extend(ortho_top);
+        for (w, _) in &top50 {
+            if candidates.len() >= 20 { break; }
+            if seen.insert(*w) { candidates.push(w); }
+        }
 
         if candidates.is_empty() {
             println!("  FAIL ({:>5.1}ms + 0ms): {} — no candidates", walk_ms, desc);
