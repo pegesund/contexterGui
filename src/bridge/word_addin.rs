@@ -31,7 +31,7 @@ pub struct ChangedParagraph {
 
 pub struct WordAddinBridge {
     cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>>,
-    reply_queue: Arc<Mutex<Vec<String>>>,
+    reply_queue: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Reset flag — set when add-in sends /reset (new document or reload)
     reset_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Current document name — used to detect document switches
@@ -50,12 +50,13 @@ impl WordAddinBridge {
     /// Start the HTTP server and return the bridge.
     /// Always succeeds — the add-in connects later.
     pub fn new() -> Self {
+        // Clear log on startup
+        let _ = std::fs::write("/tmp/word_addin_bridge.log", "");
         let cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>> =
             Arc::new(Mutex::new(None));
-        // Queue a rescan command so the add-in re-sends all paragraphs on first connect
-        let reply_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(
-            vec![r#"{"action":"rescan"}"#.to_string()]
-        ));
+        // Per-document reply queues
+        let reply_queue: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
         let changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>> = Arc::new(Mutex::new(Vec::new()));
         let deleted_paragraphs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -181,8 +182,10 @@ impl WordAddinBridge {
     }
 
     fn push_reply(&self, json: String) {
+        let doc = self.current_doc_name.lock().map(|d| d.clone()).unwrap_or_default();
+        log_to_file(&format!("PUSH to queue[{}]: {}", doc, json));
         if let Ok(mut q) = self.reply_queue.lock() {
-            q.push(json);
+            q.entry(doc).or_insert_with(Vec::new).push(json);
         }
     }
 }
@@ -360,14 +363,18 @@ impl TextBridge for WordAddinBridge {
     }
 
     fn push_reply(&self, json: &str) {
+        let doc = self.current_doc_name.lock().map(|d| d.clone()).unwrap_or_default();
+        log_to_file(&format!("PUSH to queue[{}]: {}", doc, json));
         if let Ok(mut q) = self.reply_queue.lock() {
-            q.push(json.to_string());
+            q.entry(doc).or_insert_with(Vec::new).push(json.to_string());
         }
     }
 
     fn push_reply_urgent(&self, json: &str) {
+        let doc = self.current_doc_name.lock().map(|d| d.clone()).unwrap_or_default();
+        log_to_file(&format!("PUSH URGENT to queue[{}]: {}", doc, json));
         if let Ok(mut q) = self.reply_queue.lock() {
-            q.insert(0, json.to_string());
+            q.entry(doc).or_insert_with(Vec::new).insert(0, json.to_string());
         }
     }
 }
@@ -377,7 +384,7 @@ impl TextBridge for WordAddinBridge {
 fn handle_request_rw<S: Read + Write>(
     stream: &mut S,
     cached_context: &Arc<Mutex<Option<(CursorContext, Instant)>>>,
-    reply_queue: &Arc<Mutex<Vec<String>>>,
+    reply_queue: &Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
     changed_paragraphs: &Arc<Mutex<Vec<ChangedParagraph>>>,
     deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
     reset_requested: &Arc<std::sync::atomic::AtomicBool>,
@@ -446,7 +453,8 @@ fn handle_request_rw<S: Read + Write>(
         return;
     }
 
-    // Strip query string from path
+    // Parse query string before stripping
+    let query_string: &str = path.splitn(2, '?').nth(1).unwrap_or("");
     let path = path.split('?').next().unwrap_or(path);
 
     match (method, path) {
@@ -500,27 +508,26 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
-        ("GET", p) if p.starts_with("/reply") => {
-            // Only return replies to the active document
-            let req_doc = p.strip_prefix("/reply?doc=")
-                .map(|d| d.replace("%3A", ":").replace("%2F", "/").replace("%20", " ").replace("%25", "%"))
-                .unwrap_or_default();
-            let is_active = if req_doc.is_empty() {
-                true
-            } else if let Ok(current) = current_doc_name.lock() {
-                current.is_empty() || *current == req_doc
+        ("GET", "/reply") => {
+            // Each document has its own reply queue
+            let req_doc = if query_string.starts_with("doc=") {
+                query_string[4..].replace("%3A", ":").replace("%2F", "/").replace("%20", " ").replace("%25", "%")
             } else {
-                true
+                String::new()
             };
-            let json = if is_active {
-                if let Ok(mut q) = reply_queue.lock() {
-                    if q.is_empty() {
+            let json = if let Ok(mut q) = reply_queue.lock() {
+                let keys: Vec<String> = q.keys().cloned().collect();
+                if let Some(doc_queue) = q.get_mut(&req_doc) {
+                    if doc_queue.is_empty() {
                         "{}".to_string()
                     } else {
-                        let j = q.remove(0);
-                        log_to_file(&format!("REPLY sending: {}", j));
+                        let j = doc_queue.remove(0);
+                        log_to_file(&format!("REPLY [{}] sending: {}", req_doc, j));
                         j
                     }
+                } else if !keys.is_empty() {
+                    log_to_file(&format!("POLL miss: req='{}' queues={:?}", req_doc, keys));
+                    "{}".to_string()
                 } else {
                     "{}".to_string()
                 }
@@ -540,7 +547,8 @@ fn handle_request_rw<S: Read + Write>(
             // Only accept from the active document
             let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
             let is_active = if doc_name.is_empty() {
-                true // no doc name = legacy, accept
+                // No doc name = old add-in, only accept if no active doc set yet
+                if let Ok(current) = current_doc_name.lock() { current.is_empty() } else { false }
             } else if let Ok(current) = current_doc_name.lock() {
                 current.is_empty() || *current == doc_name
             } else {
@@ -548,10 +556,13 @@ fn handle_request_rw<S: Read + Write>(
             };
             if is_active {
                 if let Some(sentences) = parse_changed_json(&body) {
+                    log_to_file(&format!("CHANGED accepted: doc='{}' {} paragraphs", doc_name, sentences.len()));
                     if let Ok(mut lock) = changed_paragraphs.lock() {
                         lock.extend(sentences);
                     }
                 }
+            } else {
+                log_to_file(&format!("CHANGED rejected: doc='{}'", doc_name));
             }
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",
@@ -576,18 +587,26 @@ fn handle_request_rw<S: Read + Write>(
         }
 
         ("POST", "/reset") => {
-            reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Store document name from reset so we know which doc is active
             let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
-            if !doc_name.is_empty() {
-                if let Ok(mut current) = current_doc_name.lock() {
-                    crate::log!("RESET from doc: '{}'", doc_name);
-                    *current = doc_name;
+            // Only accept reset from active document or first doc to connect
+            let is_active_reset = if let Ok(current) = current_doc_name.lock() {
+                current.is_empty() || *current == doc_name
+            } else {
+                false
+            };
+            if is_active_reset {
+                reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+                if !doc_name.is_empty() {
+                    if let Ok(mut current) = current_doc_name.lock() {
+                        log_to_file(&format!("RESET accepted: doc='{}'", doc_name));
+                        *current = doc_name;
+                    }
                 }
-            }
-            // Clear reply queue so stale underlines from old document don't leak
-            if let Ok(mut q) = reply_queue.lock() {
-                q.clear();
+                if let Ok(mut q) = reply_queue.lock() {
+                    q.clear();
+                }
+            } else {
+                log_to_file(&format!("RESET rejected: doc='{}' (not active)", doc_name));
             }
             eprintln!("HTTP /reset: clearing all state");
             let response = format!(
@@ -600,7 +619,8 @@ fn handle_request_rw<S: Read + Write>(
         // Test endpoint: push a command to the add-in reply queue
         ("POST", "/push-reply") => {
             if let Ok(mut q) = reply_queue.lock() {
-                q.push(body.clone());
+                let doc = current_doc_name.lock().map(|d| d.clone()).unwrap_or_default();
+                q.entry(doc).or_insert_with(Vec::new).push(body.clone());
             }
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",

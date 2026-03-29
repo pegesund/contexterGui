@@ -659,10 +659,7 @@ function doReplaceAtCursor(prefix, replacement) {
                 body: JSON.stringify({msg: "REPLACE OK: prefix='" + prefix + "' → '" + replacement + "' at pos=" + bestPos + " before='" + text + "' after='" + newText + "'"})
             }).catch(function(){});
             para.insertText(newText, "Replace");
-            return ctx.sync().then(function () {
-                para.getRange("End").select();
-                return ctx.sync();
-            });
+            return ctx.sync();
         });
     }).catch(function (e) {
         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
