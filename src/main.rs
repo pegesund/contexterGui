@@ -4858,8 +4858,9 @@ impl eframe::App for ContextApp {
                             1 => (15, 1),
                             _ => (15, 3),
                         };
+                        let ctx_tail: String = context_for_cw.chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
                         log!("Sending CompleteWord: ctx='{}' prefix='{}' [queues: spell={} pend_bert={} gram_inflight={} gram_q={}]",
-                            &context_for_cw[context_for_cw.len().saturating_sub(30)..], prefix,
+                            ctx_tail, prefix,
                             self.spelling_queue.len(),
                             self.pending_spelling_bert.len() + self.pending_grammar_bert.len() + self.pending_consonant_bert.len(),
                             self.grammar_inflight.len(),
