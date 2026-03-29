@@ -746,6 +746,8 @@ struct ContextApp {
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
+    /// Raw FST for compound word decomposition (Source 13)
+    compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>>,
     embedding_store: Option<Arc<EmbeddingStore>>,
     completions: Vec<Completion>,
     /// Open suggestions (any word) for fill-in-the-blank mode
@@ -1190,6 +1192,10 @@ impl ContextApp {
                 None
             }
         };
+        // Load raw FST for compound word walker (Source 13)
+        let compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>> =
+            compound_walker::load_fst_from_mfst(dict_path().to_str().unwrap())
+                .ok().map(|f| Arc::new(f));
 
         // Spawn heavy model loading on background threads
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
@@ -1241,6 +1247,7 @@ impl ContextApp {
             last_caret_pos: None,
             checker: None,
             analyzer,
+            compound_fst,
             grammar_actor: None,
             grammar_errors: Vec::new(),
             last_checked_sentence: String::new(),
@@ -1256,6 +1263,7 @@ impl ContextApp {
             prefix_index: None,
             baselines: None,
             wordfreq: None,
+            compound_fst: None,
             embedding_store: None,
             completions: Vec::new(),
             open_completions: Vec::new(),
@@ -2266,6 +2274,38 @@ impl ContextApp {
             }
         }
 
+        // Source 13: Compound walker — decompose misspelled compound words
+        // Only for words ≥ 7 chars (compounds are long)
+        let mut compound_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if word_lower.len() >= 7 {
+            if let (Some(ref fst), Some(ref analyzer)) = (&self.compound_fst, &self.analyzer) {
+                let word_check = |w: &str| -> bool {
+                    analyzer.dict_lookup(w).map_or(false, |rs|
+                        rs.iter().any(|r| r.pos != mtag::types::Pos::Prop))
+                };
+                let noun_check = |w: &str| -> bool {
+                    analyzer.dict_lookup(w).map_or(false, |rs| {
+                        let n = rs.iter().filter(|r| r.pos == mtag::types::Pos::Subst).count();
+                        let a = rs.iter().filter(|r| r.pos == mtag::types::Pos::Adj).count();
+                        n > 0 && n >= a
+                    })
+                };
+                let results = compound_walker::compound_fuzzy_walk(
+                    fst, &word_lower,
+                    self.wordfreq.as_deref(),
+                    Some(&word_check), Some(&noun_check),
+                );
+                for r in results.iter().take(10) {
+                    let cw = r.compound_word.to_lowercase();
+                    if seen.insert(cw.clone()) {
+                        edit_distances.insert(cw.clone(), r.total_edits);
+                        compound_candidates.insert(cw.clone());
+                        candidates.push(cw);
+                    }
+                }
+            }
+        }
+
         log!("find_spelling_suggestions: {} raw candidates for '{}'", candidates.len(), word_lower);
 
         // ── Phase 2: Ortho score all candidates ──
@@ -2341,14 +2381,18 @@ impl ContextApp {
                     continue;
                 }
 
-                // Dictionary check: every word must exist in standard or user dict
-                let ud = &self.user_dict;
-                let words: Vec<&str> = candidate.split_whitespace().collect();
-                if words.iter().any(|w| {
-                    !analyzer.has_word(w)
-                    && !ud.as_ref().map_or(false, |u| u.has_word(w))
-                }) {
-                    continue;
+                // Compound walker candidates are pre-validated (each part checked
+                // against wordfreq + analyzer + noun). Skip dictionary filter for them.
+                if !compound_candidates.contains(candidate) {
+                    // Dictionary check: every word must exist in standard or user dict
+                    let ud = &self.user_dict;
+                    let words: Vec<&str> = candidate.split_whitespace().collect();
+                    if words.iter().any(|w| {
+                        !analyzer.has_word(w)
+                        && !ud.as_ref().map_or(false, |u| u.has_word(w))
+                    }) {
+                        continue;
+                    }
                 }
 
                 checked += 1;
