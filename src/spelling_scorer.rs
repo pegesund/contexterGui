@@ -507,11 +507,7 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
         }
     }
     if scored == 0 { return f32::NEG_INFINITY; }
-    let avg = total / scored as f32;
-    // Multi-token penalty: BERT easily predicts continuations (ne→i, nei→but)
-    // which inflates scores for junk multi-token words. Penalize 3+ tokens.
-    let penalty = (scored as f32 - 2.0).max(0.0) * 2.0;
-    avg - penalty
+    total / scored as f32
 }
 
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.

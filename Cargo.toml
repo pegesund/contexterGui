@@ -100,3 +100,15 @@ path = "src/test_bert_bench.rs"
 [[bin]]
 name = "test-compound-bert"
 path = "src/bin/test_compound_bert.rs"
+
+[[bin]]
+name = "test-suggest"
+path = "src/bin/test_suggest.rs"
+
+[[bin]]
+name = "test-right-completions"
+path = "src/bin/test_right_completions.rs"
+
+[[bin]]
+name = "test-complete-i"
+path = "src/bin/test_complete_i.rs"

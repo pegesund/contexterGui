@@ -118,7 +118,7 @@ pub fn spawn_bert_worker(
     repaint_ctx: egui::Context,
     build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
-    build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
+    build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, Option<&nostos_cognio::baseline::Baselines>, Option<&mtag::Analyzer>) -> Vec<Completion>,
     prefix_index: Arc<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq_shared: Option<Arc<HashMap<String, u64>>>,
@@ -151,7 +151,7 @@ fn worker_loop(
     tx: mpsc::Sender<BertResponse>,
     build_bpe: fn(&mut Model, &str, &str, &[(u32, String)], &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, bool, &AtomicBool) -> Vec<Completion>,
     build_mtag: fn(&mut Model, &str, &[String], &[f32], bool, &AtomicBool) -> Vec<Completion>,
-    build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>) -> Vec<Completion>,
+    build_right: fn(&Model, &[f32], Option<&HashMap<String, u64>>, &HashSet<String>, &HashSet<String>, Option<&nostos_cognio::baseline::Baselines>, Option<&mtag::Analyzer>) -> Vec<Completion>,
     prefix_index: Arc<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq_shared: Option<Arc<HashMap<String, u64>>>,
@@ -219,7 +219,7 @@ fn worker_loop(
                 if cancel.load(Ordering::Acquire) { continue; }
 
                 let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
-                let right = build_right(&model, &logits, wordfreq.as_deref(), &nearby_words, &left_words);
+                let right = build_right(&model, &logits, wordfreq.as_deref(), &nearby_words, &left_words, baselines.as_deref(), analyzer.as_deref());
 
                 let _ = tx.send(BertResponse::Completion { id, cache_key, left, right });
                 repaint_ctx.request_repaint();

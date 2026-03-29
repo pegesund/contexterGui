@@ -1143,11 +1143,30 @@ fn build_right_completions(
     wordfreq: Option<&HashMap<String, u64>>,
     nearby_words: &std::collections::HashSet<String>,
     left_words: &std::collections::HashSet<String>,
+    baselines: Option<&Baselines>,
+    analyzer: Option<&mtag::Analyzer>,
 ) -> Vec<Completion> {
     let is_valid = |w: &str| -> bool {
         let key = w.to_lowercase();
         if nearby_words.contains(&key) { return false; }
-        wordfreq.map_or(true, |wf| wf.contains_key(&key))
+        if !wordfreq.map_or(true, |wf| wf.contains_key(&key)) { return false; }
+        // mtag filter: only Norwegian words (removes Danish/English junk)
+        if let Some(az) = analyzer {
+            if !az.has_word(&key) { return false; }
+        }
+        true
+    };
+
+    // PMI: subtract baseline to demote generically common words,
+    // boost contextually relevant ones. "is" is common everywhere (demoted),
+    // "idrett" is specific to sports context (boosted).
+    let pmi_logits: Vec<f32> = if let Some(bl) = baselines {
+        logits.iter().enumerate().map(|(i, &raw)| {
+            let base = if i < bl.sentence.len() { bl.sentence[i] } else { 0.0 };
+            raw + 1.0 * (raw - base)
+        }).collect()
+    } else {
+        logits.to_vec()
     };
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1161,7 +1180,7 @@ fn build_right_completions(
             if decoded.is_empty() || decoded.len() <= 1 { return None; }
             if !is_valid(&decoded) || left_words.contains(&decoded) { return None; }
             if !seen.insert(decoded.clone()) { return None; }
-            Some((decoded, logits[i]))
+            Some((decoded, pmi_logits[i]))
         })
         .collect();
     all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
