@@ -253,6 +253,11 @@ fn worker_loop(
             }
 
             BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text, cancel, sentence } => {
+                // For right column: extract context before <mask> from masked_text
+                // "Om våren liker jeg <mask> best." → "Om våren liker jeg"
+                // This puts BERT's <mask> at the CURRENT WORD, not at end of sentence
+                let right_context = masked_text.split("<mask>").next()
+                    .unwrap_or(&context).trim_end().to_string();
                 if cancel.load(Ordering::Acquire) { continue; }
                 {
                     use std::io::Write;
@@ -281,7 +286,7 @@ fn worker_loop(
                 // No point running left+right both with prefix=''.
                 let (left_raw, right_raw) = if prefix.is_empty() {
                     let right = match complete_word(
-                        &mut model, &context, "", pi,
+                        &mut model, &right_context, "", pi,
                         baselines.as_deref(), wordfreq_shared.as_deref(),
                         fallback_ref, prefix_ref, embedding_store.as_deref(),
                         1.0, 10.0, 15, 0,
@@ -317,7 +322,7 @@ fn worker_loop(
                         }
                     }
                     let right = match complete_word(
-                        &mut model, &context, "", pi,
+                        &mut model, &right_context, "", pi,
                         baselines.as_deref(), wordfreq_shared.as_deref(),
                         fallback_ref, prefix_ref, embedding_store.as_deref(),
                         1.0, 10.0, 15, 0,
