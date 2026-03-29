@@ -68,7 +68,7 @@ function hashString(str) {
 
 function initialScan() {
     // Clear all old errors on Rust side (new document or reload)
-    var docName = (Office.context.document && Office.context.document.url) || "unsaved";
+    var docName = documentId;
     fetch(BRIDGE_URL + "/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -342,7 +342,7 @@ function doSelectionRead() {
                     word: result.wordAtCursor,
                     cursorStart: sel.start,
                     paragraphId: para.uniqueLocalId,
-                    documentName: (Office.context.document && Office.context.document.url) || ("doc-" + para.uniqueLocalId)
+                    documentName: documentId
                 })
             }).then(function (resp) {
                 return resp.json();
