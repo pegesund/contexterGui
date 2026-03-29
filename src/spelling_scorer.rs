@@ -507,7 +507,11 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
         }
     }
     if scored == 0 { return f32::NEG_INFINITY; }
-    total / scored as f32
+    let avg = total / scored as f32;
+    // Multi-token penalty: BERT easily predicts continuations (ne→i, nei→but)
+    // which inflates scores for junk multi-token words. Penalize 3+ tokens.
+    let penalty = (scored as f32 - 2.0).max(0.0) * 2.0;
+    avg - penalty
 }
 
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.
@@ -622,9 +626,6 @@ pub fn score_and_rerank(
         };
         let weighted_map: HashMap<String, f32> = weighted.iter().cloned().collect();
         let mut reranked: Vec<(String, f32)> = top_set.iter().map(|candidate| {
-            // Check if candidate is a single BPE token
-            let n_tokens = model.tokenizer.encode(format!(" {}", candidate.to_lowercase()), false)
-                .ok().map(|enc| enc.get_ids().len()).unwrap_or(0);
             let corrected_sent = if let Some(pos) = sentence_cased.to_lowercase().find(&word_lower) {
                 format!("{}{}{}", &sentence_cased[..pos], candidate, &sentence_cased[pos + word_lower.len()..])
             } else {
