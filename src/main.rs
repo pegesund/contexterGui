@@ -1263,7 +1263,6 @@ impl ContextApp {
             prefix_index: None,
             baselines: None,
             wordfreq: None,
-            compound_fst: None,
             embedding_store: None,
             completions: Vec::new(),
             open_completions: Vec::new(),
@@ -2278,7 +2277,7 @@ impl ContextApp {
         // Only for words ≥ 7 chars (compounds are long)
         let mut compound_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
         if word_lower.len() >= 7 {
-            if let (Some(ref fst), Some(ref analyzer)) = (&self.compound_fst, &self.analyzer) {
+            if let (Some(fst), Some(analyzer)) = (&self.compound_fst, &self.analyzer) {
                 let word_check = |w: &str| -> bool {
                     analyzer.dict_lookup(w).map_or(false, |rs|
                         rs.iter().any(|r| r.pos != mtag::types::Pos::Prop))
@@ -5044,7 +5043,7 @@ impl eframe::App for ContextApp {
 
         // Window sizing (scaled)
         let s = self.ui_scale;
-        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !self.open_completions.is_empty();
+        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
         let win_h = s * if self.selected_tab >= 1 {
             250.0
