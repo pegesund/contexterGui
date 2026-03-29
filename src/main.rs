@@ -4122,41 +4122,8 @@ impl eframe::App for ContextApp {
                         let word = c.word.clone();
                         let col = self.selected_column;
                         log!("TAB SELECT: '{}' col={} for prefix '{}'", word, col, prefix);
-                        #[cfg(target_os = "macos")]
-                        {
-                            // Left column: select prefix and replace. Right column: append.
-                            let plen = if col == 0 { prefix.chars().count() } else { 0 };
-                            let repl = if col == 0 {
-                                format!("{} ", word)
-                            } else if prefix.is_empty() {
-                                format!("{} ", word)
-                            } else {
-                                format!(" {} ", word)
-                            };
-                            let app_handle = self.app_handle;
-                            std::thread::spawn(move || {
-                                // Return focus to Word (egui had focus for selection mode)
-                                if let Some(pid) = app_handle {
-                                    let _ = std::process::Command::new("osascript").arg("-e")
-                                        .arg(format!(
-                                            r#"tell application "System Events"
-                                                set frontProcess to first application process whose unix id is {}
-                                                set frontmost of frontProcess to true
-                                            end tell"#, pid))
-                                        .output();
-                                    std::thread::sleep(std::time::Duration::from_millis(50));
-                                }
-                                if plen > 0 {
-                                    let _ = std::process::Command::new("osascript").arg("-e")
-                                        .arg("tell application \"System Events\" to key code 123 using {shift down, option down}")
-                                        .output();
-                                }
-                                let _ = std::process::Command::new("osascript").arg("-e")
-                                    .arg(format!("tell application \"System Events\" to keystroke \"{}\"",
-                                        repl.replace('\\', "\\\\").replace('"', "\\\"")))
-                                    .output();
-                            });
-                        }
+                        // JS paragraph rewrite via bridge
+                        self.manager.replace_word(&format!("{}|{}", prefix, word));
                         self.selection_mode = false;
                         self.platform.set_tab_intercept(false);
                         self.selected_completion = None;
@@ -5521,41 +5488,8 @@ impl eframe::App for ContextApp {
                     if let Some((word, col)) = clicked_word {
                         let prefix = self.context.word.clone();
                         log!("CLICKED word: '{}' col={} replacing '{}'", word, col, prefix);
-                        #[cfg(target_os = "macos")]
-                        {
-                            // Left column: select prefix and replace. Right column: append.
-                            let plen = if col == 0 { prefix.chars().count() } else { 0 };
-                            let repl = if col == 0 {
-                                format!("{} ", word)
-                            } else if prefix.is_empty() {
-                                format!("{} ", word)
-                            } else {
-                                format!(" {} ", word)
-                            };
-                            let app_handle = self.app_handle;
-                            std::thread::spawn(move || {
-                                // Return focus to Word (click may have stolen it)
-                                if let Some(pid) = app_handle {
-                                    let _ = std::process::Command::new("osascript").arg("-e")
-                                        .arg(format!(
-                                            r#"tell application "System Events"
-                                                set frontProcess to first application process whose unix id is {}
-                                                set frontmost of frontProcess to true
-                                            end tell"#, pid))
-                                        .output();
-                                    std::thread::sleep(std::time::Duration::from_millis(50));
-                                }
-                                if plen > 0 {
-                                    let _ = std::process::Command::new("osascript").arg("-e")
-                                        .arg("tell application \"System Events\" to key code 123 using {shift down, option down}")
-                                        .output();
-                                }
-                                let _ = std::process::Command::new("osascript").arg("-e")
-                                    .arg(format!("tell application \"System Events\" to keystroke \"{}\"",
-                                        repl.replace('\\', "\\\\").replace('"', "\\\"")))
-                                    .output();
-                            });
-                        }
+                        // JS paragraph rewrite via bridge
+                        self.manager.replace_word(&format!("{}|{}", prefix, word));
                         self.completions.clear();
                         self.open_completions.clear();
                         self.selected_completion = None;

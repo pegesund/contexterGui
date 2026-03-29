@@ -19,6 +19,11 @@ Trace the actual code path. Add targeted logging. Find the exact line.
 - Never rescan the whole document on every keystroke
 - Never use timeouts as fixes
 - Bash command timeouts: max 15 seconds, preferably 5 seconds. NEVER 10 minutes.
+- NEVER switch technical approach without discussing with user first
+- NEVER revert entire files with git checkout — it destroys other fixes
+- When an approach doesn't work, DEBUG it — don't switch to a different approach
+- Always log to file when debugging JS/bridge issues — never guess
+- Word completion insert: use JS paragraph rewrite, NOT AppleScript keystrokes, NOT find-and-replace
 
 ## Running the app
 

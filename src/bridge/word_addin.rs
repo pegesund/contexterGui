@@ -450,6 +450,13 @@ fn handle_request_rw<S: Read + Write>(
     let path = path.split('?').next().unwrap_or(path);
 
     match (method, path) {
+        ("POST", "/log") => {
+            let msg = extract_json_string(&body, "msg").unwrap_or_default();
+            log_to_file(&format!("JS: {}", msg));
+            let response = format!("HTTP/1.1 200 OK\r\n{}Content-Length: 2\r\n\r\n{{}}", cors);
+            let _ = stream.write_all(response.as_bytes());
+            return;
+        }
         ("POST", "/context") => {
             // Check if document changed — compare documentName
             let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();

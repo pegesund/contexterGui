@@ -406,7 +406,13 @@ function pollReplies() {
             if (data.action === "replace" && data.expected && data.text) {
                 doReplace(data.expected, data.text, data.paragraphId);
             } else if (data.action === "replaceWord" && data.text) {
-                doReplaceCurrentWord(data.text);
+                // text format: "prefix|replacement" — find prefix in paragraph, replace with replacement
+                var parts = data.text.split("|");
+                if (parts.length === 2) {
+                    doReplaceAtCursor(parts[0], parts[1]);
+                } else {
+                    doReplaceAtCursor(data.text, data.text);
+                }
             } else if (data.action === "underline" && data.word) {
                 doUnderline(data.word, data.paragraphId, data.color || "red");
             } else if (data.action === "clearParagraphUnderlines" && data.paragraphId) {
@@ -592,32 +598,73 @@ function doClearAllUnderlines() {
 }
 
 function doReplaceAtCursor(prefix, replacement) {
+    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({msg: "doReplaceAtCursor ENTER: prefix='" + prefix + "' replacement='" + replacement + "' paraId=" + lastCursorParaId + " cursor=" + lastCursorInPara})
+    }).catch(function(){});
     if (!prefix) {
         Word.run(function (ctx) {
-            ctx.document.getSelection().insertText(replacement + " ", "End");
-            return ctx.sync();
-        }).catch(function () {});
+            var sel = ctx.document.getSelection();
+            var para = sel.paragraphs.getFirst();
+            para.load("text");
+            return ctx.sync().then(function () {
+                var textBefore = para.text;
+                sel.insertText(replacement + " ", "End");
+                return ctx.sync().then(function () {
+                    para.load("text");
+                    return ctx.sync().then(function () {
+                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                            body: JSON.stringify({msg: "INSERT: from='" + textBefore + "' to='" + para.text + "' replacement='" + replacement + "'"})
+                        }).catch(function(){});
+                    });
+                });
+            });
+        }).catch(function (e) {
+            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({msg: "INSERT ERROR: " + e})
+            }).catch(function(){});
+        });
         return;
     }
-    // Prefix exists: get paragraph text, rewrite with replacement at cursor position
-    var paraId = lastCursorParaId;
-    var cursorPos = lastCursorInPara;
-    if (!paraId || cursorPos < prefix.length) return;
+    // Find prefix in paragraph text and replace it
+    var cursorPos = lastCursorInPara || 0;
 
     Word.run(function (ctx) {
-        var para = ctx.document.getParagraphByUniqueLocalId(paraId);
+        var para = ctx.document.getSelection().paragraphs.getFirst();
         para.load("text");
         return ctx.sync().then(function () {
             var text = para.text;
-            var before = text.substring(0, cursorPos - prefix.length);
-            var after = text.substring(cursorPos);
-            var newText = before + replacement + " " + after;
+            // Find the occurrence of prefix closest to cursor position
+            var bestPos = -1;
+            var bestDist = 999999;
+            var searchFrom = 0;
+            while (true) {
+                var pos = text.indexOf(prefix, searchFrom);
+                if (pos < 0) break;
+                var dist = Math.abs(pos - cursorPos);
+                if (dist < bestDist) { bestDist = dist; bestPos = pos; }
+                searchFrom = pos + 1;
+            }
+            if (bestPos < 0) {
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "REPLACE FAIL: prefix='" + prefix + "' not found in text='" + text + "' cursor=" + cursorPos})
+                }).catch(function(){});
+                return ctx.sync();
+            }
+            var before = text.substring(0, bestPos);
+            var after = text.substring(bestPos + prefix.length);
+            var space = (after.length > 0 && after[0] !== " " && after[0] !== "." && after[0] !== ",") ? " " : "";
+            var newText = before + replacement + space + after;
+            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({msg: "REPLACE OK: prefix='" + prefix + "' → '" + replacement + "' at pos=" + bestPos + " before='" + text + "' after='" + newText + "'"})
+            }).catch(function(){});
             para.insertText(newText, "Replace");
-            // Put cursor after inserted word
-            // cursorPos was at end of prefix, new cursor = before.length + replacement.length + 1
             return ctx.sync();
         });
-    }).catch(function (e) { console.log("replaceAtCursor error:", e); });
+    }).catch(function (e) {
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "REPLACE ERROR: " + e})
+        }).catch(function(){});
+    });
 }
 
 function doReplaceCurrentWord(replacement) {
