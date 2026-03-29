@@ -306,7 +306,7 @@ function doSelectionRead() {
             if (paragraphMap[paraId] === undefined || paragraphMap[paraId] !== currentHash) {
                 if (paragraphMap[paraId] !== currentHash) {
                     paragraphMap[paraId] = currentHash;
-                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText }]);
+                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText, cursorStart: cursorInPara }]);
                 }
                 if (paragraphMap[paraId] === undefined) {
                     scheduleRescan();
