@@ -617,9 +617,14 @@ function doReplaceAtCursor(prefix, replacement) {
                 fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                     body: JSON.stringify({msg: "INSERT: from='" + text + "' to='" + newText + "' replacement='" + replacement + "' at pos=" + pos})
                 }).catch(function(){});
+                var cursorTarget = before.length + replacement.length + space.length;
                 var inserted = para.insertText(newText, "Replace");
+                para.load("uniqueLocalId");
                 return ctx.sync().then(function () {
                     inserted.select("End");
+                    var paraId = para.uniqueLocalId || "";
+                    paragraphMap[paraId] = hashString(newText);
+                    sendChangedParagraphs([{ paragraphId: paraId, text: newText, cursorStart: cursorTarget }]);
                     return ctx.sync();
                 });
             });
@@ -667,9 +672,15 @@ function doReplaceAtCursor(prefix, replacement) {
             fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                 body: JSON.stringify({msg: "REPLACE OK: prefix='" + prefix + "' → '" + replacement + "' at pos=" + bestPos + " before='" + text + "' after='" + newText + "'"})
             }).catch(function(){});
+            var cursorTarget = before.length + replacement.length + space.length;
             var inserted = para.insertText(newText, "Replace");
+            para.load("uniqueLocalId");
             return ctx.sync().then(function () {
                 inserted.select("End");
+                // Send updated paragraph to Rust
+                var paraId = para.uniqueLocalId || "";
+                paragraphMap[paraId] = hashString(newText);
+                sendChangedParagraphs([{ paragraphId: paraId, text: newText, cursorStart: cursorTarget }]);
                 return ctx.sync();
             });
         });

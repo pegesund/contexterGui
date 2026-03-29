@@ -287,17 +287,21 @@ fn worker_loop(
                 // Right column: use full masked sentence with single_forward
                 // to predict alternatives for the CURRENT word position.
                 // "Fotball er en <mask> idrett." → predicts "spennende, morsom, interessant"
-                let right_from_mask = |model: &mut Model, masked: &str, left_words: &HashSet<String>| -> Vec<Completion> {
+                let right_from_mask = |model: &mut Model, masked: &str, left_words: &HashSet<String>, use_pmi: bool| -> Vec<Completion> {
                     let logits = match model.single_forward(masked) {
                         Ok((l, _)) => l,
                         Err(_) => return vec![],
                     };
-                    // PMI: subtract baseline to demote generic words (og, for, id)
-                    let pmi_logits: Vec<f32> = if let Some(bl) = baselines.as_deref() {
-                        logits.iter().enumerate().map(|(i, &raw)| {
-                            let base = if i < bl.sentence.len() { bl.sentence[i] } else { 0.0 };
-                            raw + 0.7 * (raw - base)
-                        }).collect()
+                    // PMI: only for mid-sentence (fill-in-the-blank), not next-word prediction
+                    let scored_logits: Vec<f32> = if use_pmi {
+                        if let Some(bl) = baselines.as_deref() {
+                            logits.iter().enumerate().map(|(i, &raw)| {
+                                let base = if i < bl.sentence.len() { bl.sentence[i] } else { 0.0 };
+                                raw + 0.7 * (raw - base)
+                            }).collect()
+                        } else {
+                            logits
+                        }
                     } else {
                         logits
                     };
@@ -307,11 +311,11 @@ fn worker_loop(
                         .filter_map(|(i, _)| {
                             let w = model.tokenizer.decode(&[i as u32], false)
                                 .unwrap_or_default().trim().to_lowercase();
-                            if w.len() < 3 || left_words.contains(&w) { return None; }
+                            if w.len() < 2 || left_words.contains(&w) { return None; }
                             // Must be in analyzer (Norwegian words only)
                             let in_dict = analyzer.as_ref().map_or(true, |a| a.has_word(&w));
                             if !in_dict { return None; }
-                            Some((w, pmi_logits[i]))
+                            Some((w, scored_logits[i]))
                         })
                         .collect();
                     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -321,7 +325,16 @@ fn worker_loop(
                 };
 
                 let (left_raw, right_raw) = if prefix.is_empty() {
-                    let right = right_from_mask(&mut model, &masked_text, &HashSet::new());
+                    // Empty prefix: use complete_word with empty prefix for next-word prediction
+                    let right = match complete_word(
+                        &mut model, &context, "", pi,
+                        baselines.as_deref(), wordfreq_shared.as_deref(),
+                        fallback_ref, prefix_ref, embedding_store.as_deref(),
+                        1.0, 10.0, 15, 0,
+                    ) {
+                        Ok(r) => r,
+                        Err(_) => vec![],
+                    };
                     (vec![], right)
                 } else {
                     let left = match complete_word(
@@ -347,7 +360,7 @@ fn worker_loop(
                     let has_right_context = masked_text.split("<mask>").nth(1)
                         .map_or(false, |after| after.trim().trim_matches('.').trim().len() > 0);
                     let right = if has_right_context {
-                        right_from_mask(&mut model, &masked_text, &left_words)
+                        right_from_mask(&mut model, &masked_text, &left_words, true)
                     } else {
                         match complete_word(
                             &mut model, &right_context, "", pi,

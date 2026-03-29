@@ -20,6 +20,8 @@ fn main() {
     println!("Loaded. Vocab: {}, wordfreq: {} words\n", model.vocab_size(), wordfreq.len());
 
     let tests = vec![
+        ("Fotball er en norsk idrett <mask>.", ""),
+        ("Fotball er en norsk <mask>.", "idrett"),
         ("Fotball er en spennende <mask>.", "i"),
         ("Han liker å spise <mask>.", "m"),
         ("Vi skal på <mask> i morgen.", "t"),
