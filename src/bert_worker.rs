@@ -342,7 +342,23 @@ fn worker_loop(
                         }
                     }
                     let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
-                    let right = right_from_mask(&mut model, &masked_text, &left_words);
+                    // Use full-mask approach only when there's right context (mid-sentence).
+                    // End-of-sentence: fall back to complete_word (normal completer).
+                    let has_right_context = masked_text.split("<mask>").nth(1)
+                        .map_or(false, |after| after.trim().trim_matches('.').trim().len() > 0);
+                    let right = if has_right_context {
+                        right_from_mask(&mut model, &masked_text, &left_words)
+                    } else {
+                        match complete_word(
+                            &mut model, &right_context, "", pi,
+                            baselines.as_deref(), wordfreq_shared.as_deref(),
+                            fallback_ref, prefix_ref, embedding_store.as_deref(),
+                            1.0, 10.0, 15, 0,
+                        ) {
+                            Ok(r) => r.into_iter().filter(|c| !left_words.contains(&c.word.to_lowercase())).collect(),
+                            Err(_) => vec![],
+                        }
+                    };
                     {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
