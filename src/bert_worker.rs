@@ -284,24 +284,44 @@ fn worker_loop(
 
                 // When prefix is empty, only do ONE call (right column / open predictions).
                 // No point running left+right both with prefix=''.
-                let (left_raw, right_raw) = if prefix.is_empty() {
-                    let right = match complete_word(
-                        &mut model, &right_context, "", pi,
-                        baselines.as_deref(), wordfreq_shared.as_deref(),
-                        fallback_ref, prefix_ref, embedding_store.as_deref(),
-                        1.0, 10.0, 15, 0,
-                    ) {
-                        Ok(r) => r,
-                        Err(_) => vec![],
+                // Right column: use full masked sentence with single_forward
+                // to predict alternatives for the CURRENT word position.
+                // "Fotball er en <mask> idrett." → predicts "spennende, morsom, interessant"
+                let right_from_mask = |model: &mut Model, masked: &str, left_words: &HashSet<String>| -> Vec<Completion> {
+                    let logits = match model.single_forward(masked) {
+                        Ok((l, _)) => l,
+                        Err(_) => return vec![],
                     };
-                    {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                            .open(std::env::temp_dir().join("acatts-bert.log")) {
-                            let _ = writeln!(f, "complete_word(prefix='', right-only) → {} results in {:?}",
-                                right.len(), t_cw.elapsed());
-                        }
-                    }
+                    // PMI: subtract baseline to demote generic words (og, for, id)
+                    let pmi_logits: Vec<f32> = if let Some(bl) = baselines.as_deref() {
+                        logits.iter().enumerate().map(|(i, &raw)| {
+                            let base = if i < bl.sentence.len() { bl.sentence[i] } else { 0.0 };
+                            raw + 0.7 * (raw - base)
+                        }).collect()
+                    } else {
+                        logits
+                    };
+                    let mut scored: Vec<(String, f32)> = model.id_to_token.iter()
+                        .enumerate()
+                        .filter(|(_, tok)| tok.starts_with('\u{0120}'))  // word-initial tokens
+                        .filter_map(|(i, _)| {
+                            let w = model.tokenizer.decode(&[i as u32], false)
+                                .unwrap_or_default().trim().to_lowercase();
+                            if w.len() < 3 || left_words.contains(&w) { return None; }
+                            // Must be in analyzer (Norwegian words only)
+                            let in_dict = analyzer.as_ref().map_or(true, |a| a.has_word(&w));
+                            if !in_dict { return None; }
+                            Some((w, pmi_logits[i]))
+                        })
+                        .collect();
+                    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    scored.into_iter().take(10)
+                        .map(|(w, s)| Completion { word: w, score: s, elapsed_ms: 0.0 })
+                        .collect()
+                };
+
+                let (left_raw, right_raw) = if prefix.is_empty() {
+                    let right = right_from_mask(&mut model, &masked_text, &HashSet::new());
                     (vec![], right)
                 } else {
                     let left = match complete_word(
@@ -321,18 +341,8 @@ fn worker_loop(
                                 prefix, top_n, max_steps, left.len(), t_cw.elapsed());
                         }
                     }
-                    let right = match complete_word(
-                        &mut model, &right_context, "", pi,
-                        baselines.as_deref(), wordfreq_shared.as_deref(),
-                        fallback_ref, prefix_ref, embedding_store.as_deref(),
-                        1.0, 10.0, 15, 0,
-                    ) {
-                        Ok(r) => {
-                            let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
-                            r.into_iter().filter(|c| !left_words.contains(&c.word.to_lowercase())).collect()
-                        }
-                        Err(_) => vec![],
-                    };
+                    let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
+                    let right = right_from_mask(&mut model, &masked_text, &left_words);
                     {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
