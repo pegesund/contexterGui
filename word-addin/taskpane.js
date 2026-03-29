@@ -264,6 +264,7 @@ function sendChangedParagraphs(changed) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             type: "changed",
+            documentName: documentId,
             paragraphs: changed
         })
     }).then(function() {
@@ -399,7 +400,7 @@ function isWordChar(ch) {
 // ── Reply polling ──
 
 function pollReplies() {
-    fetch(BRIDGE_URL + "/reply")
+    fetch(BRIDGE_URL + "/reply?doc=" + encodeURIComponent(documentId))
         .then(function (resp) { return resp.json(); })
         .then(function (data) {
             if (!data || !data.action) return;
@@ -658,7 +659,10 @@ function doReplaceAtCursor(prefix, replacement) {
                 body: JSON.stringify({msg: "REPLACE OK: prefix='" + prefix + "' → '" + replacement + "' at pos=" + bestPos + " before='" + text + "' after='" + newText + "'"})
             }).catch(function(){});
             para.insertText(newText, "Replace");
-            return ctx.sync();
+            return ctx.sync().then(function () {
+                para.getRange("End").select();
+                return ctx.sync();
+            });
         });
     }).catch(function (e) {
         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},

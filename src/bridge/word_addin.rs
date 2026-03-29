@@ -500,14 +500,29 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
-        ("GET", "/reply") => {
-            let json = if let Ok(mut q) = reply_queue.lock() {
-                if q.is_empty() {
-                    "{}".to_string()
+        ("GET", p) if p.starts_with("/reply") => {
+            // Only return replies to the active document
+            let req_doc = p.strip_prefix("/reply?doc=")
+                .map(|d| d.replace("%3A", ":").replace("%2F", "/").replace("%20", " ").replace("%25", "%"))
+                .unwrap_or_default();
+            let is_active = if req_doc.is_empty() {
+                true
+            } else if let Ok(current) = current_doc_name.lock() {
+                current.is_empty() || *current == req_doc
+            } else {
+                true
+            };
+            let json = if is_active {
+                if let Ok(mut q) = reply_queue.lock() {
+                    if q.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        let j = q.remove(0);
+                        log_to_file(&format!("REPLY sending: {}", j));
+                        j
+                    }
                 } else {
-                    let j = q.remove(0);
-                    log_to_file(&format!("REPLY sending: {}", j));
-                    j
+                    "{}".to_string()
                 }
             } else {
                 "{}".to_string()
@@ -522,10 +537,20 @@ fn handle_request_rw<S: Read + Write>(
         }
 
         ("POST", "/changed") => {
-            // Parse changed sentences from paragraph events
-            if let Some(sentences) = parse_changed_json(&body) {
-                if let Ok(mut lock) = changed_paragraphs.lock() {
-                    lock.extend(sentences);
+            // Only accept from the active document
+            let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
+            let is_active = if doc_name.is_empty() {
+                true // no doc name = legacy, accept
+            } else if let Ok(current) = current_doc_name.lock() {
+                current.is_empty() || *current == doc_name
+            } else {
+                true
+            };
+            if is_active {
+                if let Some(sentences) = parse_changed_json(&body) {
+                    if let Ok(mut lock) = changed_paragraphs.lock() {
+                        lock.extend(sentences);
+                    }
                 }
             }
             let response = format!(
@@ -560,8 +585,10 @@ fn handle_request_rw<S: Read + Write>(
                     *current = doc_name;
                 }
             }
-            // Stale underlines are cleared at app startup via AppleScript.
-            // Do NOT queue clearAllUnderlines here — it races with newly applied underlines.
+            // Clear reply queue so stale underlines from old document don't leak
+            if let Ok(mut q) = reply_queue.lock() {
+                q.clear();
+            }
             eprintln!("HTTP /reset: clearing all state");
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json\r\nContent-Length: 14\r\n\r\n{{\"status\":\"ok\"}}",

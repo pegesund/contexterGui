@@ -8,6 +8,7 @@ When something doesn't work, the bug is ALWAYS in our code. Never blame:
 - External systems ("port not ready", "stale state from previous run")
 
 Trace the actual code path. Add targeted logging. Find the exact line.
+- NEVER say "preexisting" — never blame other code, just fix the bug
 
 ## Working style
 
