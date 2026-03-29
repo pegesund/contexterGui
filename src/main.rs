@@ -5158,7 +5158,7 @@ impl eframe::App for ContextApp {
             // Tab bar with painted dot indicators
             let tts_speaking = tts::is_speaking();
             let ocr_is_busy = self.ocr_receiver.is_some();
-            ui.horizontal(|ui| {
+            let header_resp = ui.horizontal(|ui| {
                 let sep = egui::Color32::from_rgb(180, 170, 140);
                 let active = egui::Color32::from_rgb(0, 70, 160);
                 let inactive = egui::Color32::from_rgb(100, 100, 100);
@@ -5338,17 +5338,9 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // --- Right side: drag area, 📌 ⚙ ✕ ---
-                let remaining = ui.available_rect_before_wrap();
-                let right_w = 80.0; // ▁ + 📌 + ⚙ + ✕
-                let drag_rect = egui::Rect::from_min_max(
-                    remaining.min,
-                    egui::pos2(remaining.max.x - right_w, remaining.max.y),
-                );
-                let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
-                if drag_resp.drag_started() && !self.follow_cursor {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
+                // --- Right side: 📌 ⚙ – ✕ ---
+                // Drag: use the full header response (interact_bg) for dragging
+                // instead of a tiny remaining rect that might be zero-width
 
                 // 📌 Follow cursor toggle
                 let pin_color = if self.follow_cursor {
@@ -5396,7 +5388,14 @@ impl eframe::App for ContextApp {
                 if close_resp.clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-            });
+            }).response;
+            // Drag the window by dragging anywhere on the header bar (when unpinned)
+            if !self.follow_cursor {
+                let header_drag = header_resp.interact(egui::Sense::drag());
+                if header_drag.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            }
 
             ui.separator();
 
