@@ -603,20 +603,24 @@ function doReplaceAtCursor(prefix, replacement) {
         body: JSON.stringify({msg: "doReplaceAtCursor ENTER: prefix='" + prefix + "' replacement='" + replacement + "' paraId=" + lastCursorParaId + " cursor=" + lastCursorInPara})
     }).catch(function(){});
     if (!prefix) {
+        // No prefix — insert at cursor using paragraph rewrite (same as non-empty prefix path)
         Word.run(function (ctx) {
-            var sel = ctx.document.getSelection();
-            var para = sel.paragraphs.getFirst();
+            var para = ctx.document.getSelection().paragraphs.getFirst();
             para.load("text");
             return ctx.sync().then(function () {
-                var textBefore = para.text;
-                sel.insertText(replacement + " ", "End");
+                var text = para.text;
+                var pos = (cursorPos !== undefined && cursorPos <= text.length) ? cursorPos : text.length;
+                var before = text.substring(0, pos);
+                var after = text.substring(pos);
+                var space = (after.length === 0 || (after[0] !== " " && after[0] !== "." && after[0] !== ",")) ? " " : "";
+                var newText = before + replacement + space + after;
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "INSERT: from='" + text + "' to='" + newText + "' replacement='" + replacement + "' at pos=" + pos})
+                }).catch(function(){});
+                var inserted = para.insertText(newText, "Replace");
                 return ctx.sync().then(function () {
-                    para.load("text");
-                    return ctx.sync().then(function () {
-                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                            body: JSON.stringify({msg: "INSERT: from='" + textBefore + "' to='" + para.text + "' replacement='" + replacement + "'"})
-                        }).catch(function(){});
-                    });
+                    inserted.select("End");
+                    return ctx.sync();
                 });
             });
         }).catch(function (e) {
@@ -641,8 +645,13 @@ function doReplaceAtCursor(prefix, replacement) {
             while (true) {
                 var pos = text.indexOf(prefix, searchFrom);
                 if (pos < 0) break;
-                var dist = Math.abs(pos - cursorPos);
-                if (dist < bestDist) { bestDist = dist; bestPos = pos; }
+                // Only match at word boundaries (not inside other words)
+                var before_ok = (pos === 0 || !isWordChar(text[pos - 1]));
+                var after_ok = (pos + prefix.length >= text.length || !isWordChar(text[pos + prefix.length]));
+                if (before_ok && after_ok) {
+                    var dist = Math.abs(pos - cursorPos);
+                    if (dist < bestDist) { bestDist = dist; bestPos = pos; }
+                }
                 searchFrom = pos + 1;
             }
             if (bestPos < 0) {
@@ -653,13 +662,16 @@ function doReplaceAtCursor(prefix, replacement) {
             }
             var before = text.substring(0, bestPos);
             var after = text.substring(bestPos + prefix.length);
-            var space = (after.length > 0 && after[0] !== " " && after[0] !== "." && after[0] !== ",") ? " " : "";
+            var space = (after.length === 0 || (after[0] !== " " && after[0] !== "." && after[0] !== ",")) ? " " : "";
             var newText = before + replacement + space + after;
             fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                 body: JSON.stringify({msg: "REPLACE OK: prefix='" + prefix + "' → '" + replacement + "' at pos=" + bestPos + " before='" + text + "' after='" + newText + "'"})
             }).catch(function(){});
-            para.insertText(newText, "Replace");
-            return ctx.sync();
+            var inserted = para.insertText(newText, "Replace");
+            return ctx.sync().then(function () {
+                inserted.select("End");
+                return ctx.sync();
+            });
         });
     }).catch(function (e) {
         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},

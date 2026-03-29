@@ -5490,6 +5490,18 @@ impl eframe::App for ContextApp {
                         log!("CLICKED word: '{}' col={} replacing '{}'", word, col, prefix);
                         // JS paragraph rewrite via bridge
                         self.manager.replace_word(&format!("{}|{}", prefix, word));
+                        // Return focus to Word
+                        let word_pid = self.manager.last_user_pid;
+                        if word_pid > 0 {
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                let _ = std::process::Command::new("osascript").arg("-e")
+                                    .arg(format!(r#"tell application "System Events"
+                                        set frontProcess to first application process whose unix id is {}
+                                        set frontmost of frontProcess to true
+                                    end tell"#, word_pid)).output();
+                            });
+                        }
                         self.completions.clear();
                         self.open_completions.clear();
                         self.selected_completion = None;

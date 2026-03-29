@@ -494,9 +494,12 @@ fn handle_request_rw<S: Read + Write>(
 
             // Parse JSON body → CursorContext
             if let Some(ctx) = parse_context_json(&body) {
+                log_to_file(&format!("CONTEXT: word='{}' sentence='{}'", ctx.word, ctx.sentence));
                 if let Ok(mut lock) = cached_context.lock() {
                     *lock = Some((ctx, Instant::now()));
                 }
+            } else {
+                log_to_file(&format!("CONTEXT parse failed: body len={}", body.len()));
             }
 
             let status = if needs_rescan { "rescan" } else { "ok" };
