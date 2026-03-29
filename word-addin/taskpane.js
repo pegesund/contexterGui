@@ -624,7 +624,9 @@ function doReplaceAtCursor(prefix, replacement) {
                     inserted.select("End");
                     var paraId = para.uniqueLocalId || "";
                     paragraphMap[paraId] = hashString(newText);
-                    sendChangedParagraphs([{ paragraphId: paraId, text: newText, cursorStart: cursorTarget }]);
+                    lastCursorInPara = cursorTarget;
+                    lastCursorParaId = paraId;
+                    sendChangedParagraphs([{ paragraphId: paraId, text: newText }]);
                     return ctx.sync();
                 });
             });
@@ -677,10 +679,11 @@ function doReplaceAtCursor(prefix, replacement) {
             para.load("uniqueLocalId");
             return ctx.sync().then(function () {
                 inserted.select("End");
-                // Send updated paragraph to Rust
                 var paraId = para.uniqueLocalId || "";
                 paragraphMap[paraId] = hashString(newText);
-                sendChangedParagraphs([{ paragraphId: paraId, text: newText, cursorStart: cursorTarget }]);
+                lastCursorInPara = cursorTarget;
+                lastCursorParaId = paraId;
+                sendChangedParagraphs([{ paragraphId: paraId, text: newText }]);
                 return ctx.sync();
             });
         });

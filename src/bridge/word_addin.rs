@@ -552,8 +552,14 @@ fn handle_request_rw<S: Read + Write>(
             let is_active = if doc_name.is_empty() {
                 // No doc name = old add-in, only accept if no active doc set yet
                 if let Ok(current) = current_doc_name.lock() { current.is_empty() } else { false }
-            } else if let Ok(current) = current_doc_name.lock() {
-                current.is_empty() || *current == doc_name
+            } else if let Ok(mut current) = current_doc_name.lock() {
+                if current.is_empty() {
+                    // First doc to send /changed — set as active
+                    *current = doc_name.clone();
+                    true
+                } else {
+                    *current == doc_name
+                }
             } else {
                 true
             };
