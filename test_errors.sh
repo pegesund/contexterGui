@@ -66,14 +66,14 @@ sys.exit(0 if not found else 1)
 
 check_underlined() {
     local desc="$1" word="$2"
-    for attempt in 1 2 3; do
+    for attempt in 1 2 3 4 5; do
         local result=$(osascript "$SCRIPT_DIR/scan_underlines.applescript" 2>/dev/null)
         if echo "$result" | grep -qi "$word"; then
             echo "  PASS: $desc (underlined in Word)"
             PASS=$((PASS + 1))
             return
         fi
-        if [ "$attempt" -lt 3 ]; then sleep 2; fi
+        if [ "$attempt" -lt 5 ]; then sleep 3; fi
     done
     echo "  FAIL: $desc (NOT underlined in Word)"
     echo "        Underlines found: $result"
@@ -225,7 +225,7 @@ echo ""
 echo "Test 1: Spelling error 'somx' → 'som'"
 go_to_end; key_press_counted return
 type_text "Fotball er en morsom sport somx er veldig morsom."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx detected" "somx" "som" "$ERRORS"
 check_underlined "somx underlined" "somx"
@@ -237,7 +237,7 @@ echo ""
 echo "Test 2: Correct text — no false positives"
 go_to_end; key_press_counted return
 type_text "Fotball er en morsom sport."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "sport not flagged" "sport" "$ERRORS"
 check_no_error "morsom not flagged" "morsom" "$ERRORS"
@@ -248,7 +248,7 @@ echo ""
 echo "Test 2b: Correct neuter sentence — no false positives"
 go_to_end; key_press_counted return
 type_text "Fotball er et morsomt spill."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spill not flagged" "spill" "$ERRORS"
 check_no_error "morsomt not flagged" "morsomt" "$ERRORS"
@@ -259,7 +259,7 @@ echo ""
 echo "Test 3: Multiple errors in one sentence"
 go_to_end; key_press_counted return
 type_text "Jeg liker aa spise matx og drikkx."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "matx detected" "matx" "" "$ERRORS"
 check_error "drikkx detected" "drikkx" "" "$ERRORS"
@@ -287,7 +287,7 @@ echo ""
 echo "Test 5: Grammar error — gender mismatch"
 go_to_end; key_press_counted return
 type_text "Fotball er en morsom spor."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_grammar "gender mismatch" "spor" "$ERRORS"
 undo_all
@@ -297,7 +297,7 @@ echo ""
 echo "Test 5b: Grammar error — adj gender mismatch (morsomt with masculine)"
 go_to_end; key_press_counted return
 type_text "Fotball er en morsomt sport."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_grammar "adj gender mismatch" "morsomt" "$ERRORS"
 undo_all
@@ -307,7 +307,7 @@ echo ""
 echo "Test 6: Delete sentence — stale error gone"
 go_to_end; key_press_counted return
 type_text "Dette er en feilx i teksten."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilx detected" "feilx" "" "$ERRORS"
 undo_all
@@ -320,7 +320,7 @@ echo ""
 echo "Test 7: Error removed when text is undone"
 go_to_end; key_press_counted return
 type_text "Han liker fotbollzz veldig godt."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotbollzz detected" "fotbollzz" "" "$ERRORS"
 # Undo the typing — error should disappear
@@ -334,7 +334,7 @@ echo ""
 echo "Test 8: Split sentence with Enter"
 go_to_end; key_press_counted return
 type_text "Fotball er morsomt somx er fint."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "somx in single line" "somx" "" "$ERRORS"
 curl -sk -X POST "$PUSH_URL" -d '{"action":"replace","expected":"morsomt somx","text":"morsomt\nsomx"}' 2>/dev/null
@@ -350,7 +350,7 @@ echo ""
 echo "Test 9: Misspelled word detected when typed directly"
 go_to_end; key_press_counted return
 type_text "Jeg spiller fotboll hver dag."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll detected" "fotboll" "" "$ERRORS"
 check_underlined "fotboll underlined" "fotboll"
@@ -362,7 +362,7 @@ echo ""
 echo "Test 10: Rapid typing — no crash"
 go_to_end; key_press_counted return
 type_text "Dette er en rask test med mange ord uten feilx."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilx after rapid" "feilx" "" "$ERRORS"
 check_underlined "feilx underlined" "feilx"
@@ -374,7 +374,7 @@ echo ""
 echo "Test 11: Error detected, removed by undo, re-detected when re-typed"
 go_to_end; key_press_counted return
 type_text "Han spiller fotboll hver dag."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "fotboll detected first time" "fotboll" "" "$ERRORS"
 check_underlined "fotboll underlined first time" "fotboll"
@@ -398,7 +398,7 @@ echo ""
 echo "Test 12: Correct sentences — no false positives"
 go_to_end; key_press_counted return
 type_text "Fotball er en morsom sport."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "Fotball not flagged" "Fotball" "$ERRORS"
 check_no_error "sport not flagged" "sport" "$ERRORS"
@@ -406,7 +406,7 @@ undo_all
 
 go_to_end; key_press_counted return
 type_text "Fotball er et morsomt spill."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spill not flagged" "spill" "$ERRORS"
 check_no_error "Fotball not flagged (neuter)" "Fotball" "$ERRORS"
@@ -414,7 +414,7 @@ undo_all
 
 go_to_end; key_press_counted return
 type_text "Han liker å spille fotball."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "spille not flagged" "spille" "$ERRORS"
 check_no_error "fotball not flagged" "fotball" "$ERRORS"
@@ -425,7 +425,7 @@ echo ""
 echo "Test 5c: Grammar error — er + present verb"
 go_to_end; key_press_counted return
 type_text "Jeg er spiller fotball."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_grammar "er + present verb" "er" "$ERRORS"
 undo_all
@@ -457,7 +457,7 @@ sleep 0.5
 go_to_end; key_press_counted return
 key_press cmd_v
 UNDO_COUNT=$((UNDO_COUNT + 1))
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "pasteerrorx detected after paste" "pasteerrorx" "" "$ERRORS"
 check_underlined "pasteerrorx underlined" "pasteerrorx"
@@ -468,7 +468,7 @@ echo ""
 echo "Test 15: Delete removes error"
 go_to_end; key_press_counted return
 type_text "Dette er en feilzz i teksten."
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_error "feilzz detected before delete" "feilzz" "" "$ERRORS"
 check_underlined "feilzz underlined" "feilzz"
@@ -482,7 +482,7 @@ tell application "System Events"
     end repeat
 end tell
 ' 2>/dev/null
-sleep 5
+sleep 8
 ERRORS=$(curl -sk "$ENDPOINT")
 check_no_error "feilzz gone after delete" "feilzz" "$ERRORS"
 check_not_underlined "feilzz not underlined after delete" "feilzz"

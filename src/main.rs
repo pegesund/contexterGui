@@ -616,6 +616,12 @@ impl BridgeManager {
         self.effective_bridge().map(|b| b.clear_all_error_underlines()).unwrap_or(false)
     }
 
+    fn underline_word(&self, word: &str, paragraph_id: &str, color: &str) -> bool {
+        let mut any = false;
+        for b in &self.bridges { any |= b.underline_word(word, paragraph_id, color); }
+        any
+    }
+
     fn clear_underline_word(&self, word: &str, paragraph_id: &str) -> bool {
         let mut any = false;
         for b in &self.bridges { any |= b.clear_underline_word(word, paragraph_id); }
@@ -2669,7 +2675,7 @@ impl ContextApp {
                 }
             };
             if should_remove && e.underlined {
-                self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                 e.underlined = false;
             }
         }
@@ -3186,13 +3192,8 @@ impl ContextApp {
                         continue; // Already processed or in-flight, skip
                     }
 
-                    // This sentence is new or changed — clear old errors and underlines
+                    // This sentence is new or changed — clear old errors (underlines stay if word still exists)
                     let sentence_lower = sentence_text.to_lowercase();
-                    for e in &self.writing_errors {
-                        if e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower && e.underlined {
-                            self.manager.clear_underline_word(&e.word, &e.paragraph_id);
-                        }
-                    }
                     self.writing_errors.retain(|e| {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
@@ -3637,13 +3638,18 @@ impl ContextApp {
         for e in &mut self.writing_errors {
             if e.ignored && e.underlined {
                 // Error was ignored — remove underline
-                self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                 e.underlined = false;
-            } else if !e.ignored && !e.underlined && e.word_doc_start < e.word_doc_end {
-                // New error — apply underline
-                let marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end);
-                log!("Underline: marking {}..{} rule={} expl='{}' ok={}",
-                    e.word_doc_start, e.word_doc_end, e.rule_name, trunc(&e.explanation, 50), marked);
+            } else if !e.ignored && !e.underlined && !e.word.is_empty() && !e.paragraph_id.is_empty() {
+                // New error — apply underline using word + paragraph ID
+                let color = match e.category {
+                    ErrorCategory::Spelling => "#FF0000",
+                    ErrorCategory::Grammar => "#0000FF",
+                    ErrorCategory::SentenceBoundary => "#0000FF",
+                };
+                let marked = self.manager.underline_word(&e.word, &e.paragraph_id, color);
+                log!("Underline: word='{}' para={} rule={} color={} ok={}",
+                    e.word, trunc(&e.paragraph_id, 10), e.rule_name, color, marked);
                 // Mark as underlined even if bridge doesn't support it (prevents spam)
                 e.underlined = true;
             }
@@ -4220,7 +4226,7 @@ impl eframe::App for ContextApp {
                 {
                     // Clear both position-based (COM) and word-based (add-in) underlines
                     if e.underlined {
-                        self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     }
                     self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     e.underlined = false;
@@ -5835,7 +5841,7 @@ impl eframe::App for ContextApp {
                                 // Clear underline immediately
                                 self.manager.clear_underline_word(&error.word, &error.paragraph_id);
                                 if error.underlined {
-                                    self.manager.clear_error_underline(error.word_doc_start, error.word_doc_end);
+                                    self.manager.clear_underline_word(&error.word, &error.paragraph_id);
                                 }
                                 if matches!(error.category, ErrorCategory::Spelling) {
                                     self.ignored_words.insert(error.word.clone());
@@ -5857,7 +5863,7 @@ impl eframe::App for ContextApp {
                                     if matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower {
                                         self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                                         if e.underlined {
-                                            self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                                            self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                                         }
                                     }
                                 }

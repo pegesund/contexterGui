@@ -76,7 +76,7 @@ function initialScan() {
     }).catch(function () {});
     paragraphMap = {};
 
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         // Disable Word's built-in proofing — NorskTale handles spelling/grammar
         try {
             var bodyRange = ctx.document.body.getRange();
@@ -113,7 +113,7 @@ function initialScan() {
         });
     }).catch(function (err) {
         setStatus("Skann feilet: " + (err.message || String(err)), "err");
-    });
+    }); });
 }
 
 // ── Paragraph events ──
@@ -125,7 +125,7 @@ function registerParagraphEvents(ctx) {
 }
 
 function onParagraphChanged(event) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var ids = event.uniqueLocalIds;
         if (!ids || ids.length === 0) return ctx.sync();
 
@@ -152,7 +152,7 @@ function onParagraphChanged(event) {
                 sendChangedParagraphs(changed);
             }
         });
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 function onParagraphAdded(event) {
@@ -168,7 +168,7 @@ function onParagraphDeleted(event) {
 /// Smart rescan: compare all current paragraphs against paragraphMap.
 /// Only sends changed/new paragraphs. Detects deleted paragraphs.
 function rescanAll() {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
@@ -228,7 +228,7 @@ function rescanAll() {
                 }
             });
         });
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 // Light paragraph count check — only loads count, not text
@@ -494,6 +494,10 @@ var wordRunQueue = [];
 var wordRunBusy = false;
 
 function enqueueWordRun(fn, priority) {
+    // Limit queue depth — drop oldest non-priority items if too long
+    if (wordRunQueue.length > 10) {
+        wordRunQueue = wordRunQueue.slice(-5);
+    }
     if (priority) {
         wordRunQueue.unshift(fn);
     } else {
@@ -535,59 +539,29 @@ function doUnderlineInScope(word, searchScope, color) {
 
 function doUnderline(word, paragraphId, color) {
     enqueueWordRun(function () {
-        if (paragraphId) {
-            // Try paragraph first, fall back to body on error
-            return Word.run(function (ctx) {
-                var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
-                var results = para.search(word, { matchCase: false, matchWholeWord: true });
-                results.load("items/font");
-                return ctx.sync().then(function () {
-                    if (results.items.length > 0) {
-                        results.items[0].font.underline = "Wave";
-                        try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
-                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                            body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
-                        }).catch(function(){});
-                    } else {
-                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                            body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' in para=" + paragraphId})
-                        }).catch(function(){});
-                    }
-                    return ctx.sync();
-                });
-            }).catch(function () {
-                // Paragraph not found — fall back to body search
-                return Word.run(function (ctx) {
-                    var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
-                    results.load("items/font");
-                    return ctx.sync().then(function () {
-                        if (results.items.length > 0) {
-                            results.items[0].font.underline = "Wave";
-                            try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
-                            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                                body: JSON.stringify({msg: "UNDERLINE OK (fallback): '" + word + "' matches=" + results.items.length})
-                            }).catch(function(){});
-                        }
-                        return ctx.sync();
-                    });
-                }).catch(function () {});
+        // Always search the document body — paragraph IDs can be stale
+        return Word.run(function (ctx) {
+            var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
+            results.load("items/font");
+            return ctx.sync().then(function () {
+                if (results.items.length > 0) {
+                    results.items[0].font.underline = "Wave";
+                    try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
+                    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                        body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
+                    }).catch(function(){});
+                } else {
+                    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                        body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' not found in body"})
+                    }).catch(function(){});
+                }
+                return ctx.sync();
             });
-        } else {
-            return Word.run(function (ctx) {
-                var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
-                results.load("items/font");
-                return ctx.sync().then(function () {
-                    if (results.items.length > 0) {
-                        results.items[0].font.underline = "Wave";
-                        try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
-                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                            body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
-                        }).catch(function(){});
-                    }
-                    return ctx.sync();
-                });
-            }).catch(function () {});
-        }
+        }).catch(function (e) {
+            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({msg: "UNDERLINE ERROR: '" + word + "' " + e})
+            }).catch(function(){});
+        });
     });
 }
 
