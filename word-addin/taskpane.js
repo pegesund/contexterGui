@@ -493,16 +493,8 @@ function doSelectWord(word, paragraphId) {
 var wordRunQueue = [];
 var wordRunBusy = false;
 
-function enqueueWordRun(fn, priority) {
-    // Limit queue depth — drop oldest non-priority items if too long
-    if (wordRunQueue.length > 10) {
-        wordRunQueue = wordRunQueue.slice(-5);
-    }
-    if (priority) {
-        wordRunQueue.unshift(fn);
-    } else {
-        wordRunQueue.push(fn);
-    }
+function enqueueWordRun(fn) {
+    wordRunQueue.push(fn);
     if (!wordRunBusy) drainWordRunQueue();
 }
 
@@ -538,9 +530,8 @@ function doUnderlineInScope(word, searchScope, color) {
 }
 
 function doUnderline(word, paragraphId, color) {
-    enqueueWordRun(function () {
-        // Always search the document body — paragraph IDs can be stale
-        return Word.run(function (ctx) {
+    // Run directly — don't queue, underlines are fast and shouldn't wait behind rescans
+    Word.run(function (ctx) {
             var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
             results.load("items/font");
             return ctx.sync().then(function () {
@@ -561,13 +552,12 @@ function doUnderline(word, paragraphId, color) {
             fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                 body: JSON.stringify({msg: "UNDERLINE ERROR: '" + word + "' " + e})
             }).catch(function(){});
-        });
     });
 }
 
 function doClearParagraphUnderlines(paragraphId) {
     if (!paragraphId) return;
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         var para;
         try { para = ctx.document.getParagraphByUniqueLocalId(paragraphId); } catch(e) { return ctx.sync(); }
         var range = para.getRange("Whole");
@@ -578,18 +568,12 @@ function doClearParagraphUnderlines(paragraphId) {
             }
             return ctx.sync();
         });
-    }).catch(function () {}); });
+    }).catch(function () {});
 }
 
 function doClearUnderline(word, paragraphId) {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
-        var searchScope;
-        if (paragraphId) {
-            try { searchScope = ctx.document.getParagraphByUniqueLocalId(paragraphId); } catch(e) { searchScope = ctx.document.body; }
-        } else {
-            searchScope = ctx.document.body;
-        }
-        var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
+    Word.run(function (ctx) {
+        var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
         results.load("items/font");
         return ctx.sync().then(function () {
             for (var i = 0; i < results.items.length; i++) {
@@ -597,7 +581,7 @@ function doClearUnderline(word, paragraphId) {
             }
             return ctx.sync();
         });
-    }).catch(function () {}); });
+    }).catch(function () {});
 }
 
 function doAppendParagraph(text) {
@@ -643,12 +627,12 @@ function doDeleteText(text) {
 }
 
 function doClearAllUnderlines() {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         var body = ctx.document.body;
         var range = body.getRange();
         range.font.underline = "None";
         return ctx.sync();
-    }).catch(function (e) { console.log("clearAllUnderlines error:", e); }); });
+    }).catch(function (e) { console.log("clearAllUnderlines error:", e); });
 }
 
 function doReplaceAtCursor(prefix, replacement) {
