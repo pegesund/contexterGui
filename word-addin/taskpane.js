@@ -76,7 +76,7 @@ function initialScan() {
     }).catch(function () {});
     paragraphMap = {};
 
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         // Disable Word's built-in proofing — NorskTale handles spelling/grammar
         try {
             var bodyRange = ctx.document.body.getRange();
@@ -113,7 +113,7 @@ function initialScan() {
         });
     }).catch(function (err) {
         setStatus("Skann feilet: " + (err.message || String(err)), "err");
-    });
+    }); });
 }
 
 // ── Paragraph events ──
@@ -125,7 +125,7 @@ function registerParagraphEvents(ctx) {
 }
 
 function onParagraphChanged(event) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var ids = event.uniqueLocalIds;
         if (!ids || ids.length === 0) return ctx.sync();
 
@@ -152,7 +152,7 @@ function onParagraphChanged(event) {
                 sendChangedParagraphs(changed);
             }
         });
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 function onParagraphAdded(event) {
@@ -168,7 +168,7 @@ function onParagraphDeleted(event) {
 /// Smart rescan: compare all current paragraphs against paragraphMap.
 /// Only sends changed/new paragraphs. Detects deleted paragraphs.
 function rescanAll() {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
@@ -228,12 +228,12 @@ function rescanAll() {
                 }
             });
         });
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 // Light paragraph count check — only loads count, not text
 function checkParagraphCount() {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
@@ -243,7 +243,7 @@ function checkParagraphCount() {
                 rescanAll();
             }
         });
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 // Debounced rescan — waits 1 second after last trigger to avoid repeated rescans
@@ -288,7 +288,7 @@ function onSelectionChanged() {
 
 function doSelectionRead() {
     selectionTimer = null;
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var sel = ctx.document.getSelection();
         var para = sel.paragraphs.getFirst();
         var paraRange = para.getRange("Start");
@@ -356,7 +356,7 @@ function doSelectionRead() {
                 setStatus("Kan ikke nå NorskTale-app", "err");
             });
         });
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 function detectSentence(paraText, cursorOffsetInPara) {
@@ -441,7 +441,7 @@ function pollReplies() {
 }
 
 function doReplace(expected, replacement, paragraphId) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         if (paragraphId) {
             var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
             var results = para.search(expected, { matchCase: false });
@@ -468,11 +468,11 @@ function doReplace(expected, replacement, paragraphId) {
                 }
             });
         }
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
 
 function doSelectWord(word, paragraphId) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var searchScope;
         if (paragraphId) {
             searchScope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
@@ -487,7 +487,7 @@ function doSelectWord(word, paragraphId) {
                 return ctx.sync();
             }
         });
-    }).catch(function (e) { console.log("selectWord error:", e); });
+    }).catch(function (e) { console.log("selectWord error:", e); }); });
 }
 
 var wordRunQueue = [];
@@ -502,8 +502,11 @@ function drainWordRunQueue() {
     if (wordRunQueue.length === 0) { wordRunBusy = false; return; }
     wordRunBusy = true;
     var fn = wordRunQueue.shift();
-    fn().then(function () { drainWordRunQueue(); }).catch(function () { drainWordRunQueue(); });
+    fn().then(function () { wordRunBusy = false; drainWordRunQueue(); }).catch(function () { wordRunBusy = false; drainWordRunQueue(); });
 }
+
+// Guard for event-driven Word.run calls — skip if queue is busy
+function isWordBusy() { return wordRunBusy || wordRunQueue.length > 0; }
 
 function doUnderline(word, paragraphId, color) {
     enqueueWordRun(function () { return Word.run(function (ctx) {
@@ -576,14 +579,14 @@ function doClearUnderline(word, paragraphId) {
 }
 
 function doAppendParagraph(text) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         ctx.document.body.insertParagraph(text, "End");
         return ctx.sync();
-    }).catch(function (e) { console.log("appendParagraph error:", e); });
+    }).catch(function (e) { console.log("appendParagraph error:", e); }); });
 }
 
 function doDeleteAfter(marker) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var body = ctx.document.body;
         var results = body.search(marker, { matchCase: false });
         results.load("items");
@@ -601,11 +604,11 @@ function doDeleteAfter(marker) {
                 });
             }
         });
-    }).catch(function (e) { console.log("deleteAfter error:", e); });
+    }).catch(function (e) { console.log("deleteAfter error:", e); }); });
 }
 
 function doDeleteText(text) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var results = ctx.document.body.search(text, { matchCase: false });
         results.load("items");
         return ctx.sync().then(function () {
@@ -614,7 +617,7 @@ function doDeleteText(text) {
             }
             return ctx.sync();
         });
-    }).catch(function (e) { console.log("deleteText error:", e); });
+    }).catch(function (e) { console.log("deleteText error:", e); }); });
 }
 
 function doClearAllUnderlines() {
@@ -632,7 +635,7 @@ function doReplaceAtCursor(prefix, replacement) {
     }).catch(function(){});
     if (!prefix) {
         // No prefix — insert at cursor using paragraph rewrite (same as non-empty prefix path)
-        Word.run(function (ctx) {
+        enqueueWordRun(function () { return Word.run(function (ctx) {
             var para = ctx.document.getSelection().paragraphs.getFirst();
             para.load("text");
             return ctx.sync().then(function () {
@@ -662,13 +665,13 @@ function doReplaceAtCursor(prefix, replacement) {
             fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                 body: JSON.stringify({msg: "INSERT ERROR: " + e})
             }).catch(function(){});
-        });
+        }); });
         return;
     }
     // Find prefix in paragraph text and replace it
     var cursorPos = lastCursorInPara || 0;
 
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var para = ctx.document.getSelection().paragraphs.getFirst();
         para.load("text");
         return ctx.sync().then(function () {
@@ -719,14 +722,14 @@ function doReplaceAtCursor(prefix, replacement) {
         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
             body: JSON.stringify({msg: "REPLACE ERROR: " + e})
         }).catch(function(){});
-    });
+    }); });
 }
 
 function doReplaceCurrentWord(replacement) {
-    Word.run(function (ctx) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
         var sel = ctx.document.getSelection();
         var wordRange = sel.getRange("Whole");
         wordRange.insertText(replacement, "Replace");
         return ctx.sync();
-    }).catch(function () {});
+    }).catch(function () {}); });
 }
