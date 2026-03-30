@@ -76,7 +76,7 @@ function initialScan() {
     }).catch(function () {});
     paragraphMap = {};
 
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         // Disable Word's built-in proofing — NorskTale handles spelling/grammar
         try {
             var bodyRange = ctx.document.body.getRange();
@@ -113,7 +113,7 @@ function initialScan() {
         });
     }).catch(function (err) {
         setStatus("Skann feilet: " + (err.message || String(err)), "err");
-    }); });
+    });
 }
 
 // ── Paragraph events ──
@@ -125,7 +125,7 @@ function registerParagraphEvents(ctx) {
 }
 
 function onParagraphChanged(event) {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         var ids = event.uniqueLocalIds;
         if (!ids || ids.length === 0) return ctx.sync();
 
@@ -152,7 +152,7 @@ function onParagraphChanged(event) {
                 sendChangedParagraphs(changed);
             }
         });
-    }).catch(function () {}); });
+    }).catch(function () {});
 }
 
 function onParagraphAdded(event) {
@@ -168,7 +168,7 @@ function onParagraphDeleted(event) {
 /// Smart rescan: compare all current paragraphs against paragraphMap.
 /// Only sends changed/new paragraphs. Detects deleted paragraphs.
 function rescanAll() {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
@@ -228,12 +228,12 @@ function rescanAll() {
                 }
             });
         });
-    }).catch(function () {}); });
+    }).catch(function () {});
 }
 
 // Light paragraph count check — only loads count, not text
 function checkParagraphCount() {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
@@ -243,7 +243,7 @@ function checkParagraphCount() {
                 rescanAll();
             }
         });
-    }).catch(function () {}); });
+    }).catch(function () {});
 }
 
 // Debounced rescan — waits 1 second after last trigger to avoid repeated rescans
@@ -288,7 +288,7 @@ function onSelectionChanged() {
 
 function doSelectionRead() {
     selectionTimer = null;
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    Word.run(function (ctx) {
         var sel = ctx.document.getSelection();
         var para = sel.paragraphs.getFirst();
         var paraRange = para.getRange("Start");
@@ -356,7 +356,7 @@ function doSelectionRead() {
                 setStatus("Kan ikke nå NorskTale-app", "err");
             });
         });
-    }).catch(function () {}); });
+    }).catch(function () {});
 }
 
 function detectSentence(paraText, cursorOffsetInPara) {
@@ -493,8 +493,12 @@ function doSelectWord(word, paragraphId) {
 var wordRunQueue = [];
 var wordRunBusy = false;
 
-function enqueueWordRun(fn) {
-    wordRunQueue.push(fn);
+function enqueueWordRun(fn, priority) {
+    if (priority) {
+        wordRunQueue.unshift(fn);
+    } else {
+        wordRunQueue.push(fn);
+    }
     if (!wordRunBusy) drainWordRunQueue();
 }
 
@@ -508,18 +512,8 @@ function drainWordRunQueue() {
 // Guard for event-driven Word.run calls — skip if queue is busy
 function isWordBusy() { return wordRunBusy || wordRunQueue.length > 0; }
 
-function doUnderline(word, paragraphId, color) {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
-        var searchScope;
-        if (paragraphId) {
-            try {
-                searchScope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
-            } catch(e) {
-                searchScope = ctx.document.body;
-            }
-        } else {
-            searchScope = ctx.document.body;
-        }
+function doUnderlineInScope(word, searchScope, color) {
+    return Word.run(function (ctx) {
         var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
         results.load("items/font");
         return ctx.sync().then(function () {
@@ -531,16 +525,70 @@ function doUnderline(word, paragraphId, color) {
                 }).catch(function(){});
             } else {
                 fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                    body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' not found in para=" + (paragraphId || "body")})
+                    body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' not found"})
                 }).catch(function(){});
             }
             return ctx.sync();
         });
-    }).catch(function (e) {
-        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({msg: "UNDERLINE ERROR: '" + word + "' " + e})
-        }).catch(function(){});
-    }); });
+    });
+}
+
+function doUnderline(word, paragraphId, color) {
+    enqueueWordRun(function () {
+        if (paragraphId) {
+            // Try paragraph first, fall back to body on error
+            return Word.run(function (ctx) {
+                var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+                var results = para.search(word, { matchCase: false, matchWholeWord: true });
+                results.load("items/font");
+                return ctx.sync().then(function () {
+                    if (results.items.length > 0) {
+                        results.items[0].font.underline = "Wave";
+                        try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
+                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                            body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
+                        }).catch(function(){});
+                    } else {
+                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                            body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' in para=" + paragraphId})
+                        }).catch(function(){});
+                    }
+                    return ctx.sync();
+                });
+            }).catch(function () {
+                // Paragraph not found — fall back to body search
+                return Word.run(function (ctx) {
+                    var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
+                    results.load("items/font");
+                    return ctx.sync().then(function () {
+                        if (results.items.length > 0) {
+                            results.items[0].font.underline = "Wave";
+                            try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
+                            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                                body: JSON.stringify({msg: "UNDERLINE OK (fallback): '" + word + "' matches=" + results.items.length})
+                            }).catch(function(){});
+                        }
+                        return ctx.sync();
+                    });
+                }).catch(function () {});
+            });
+        } else {
+            return Word.run(function (ctx) {
+                var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
+                results.load("items/font");
+                return ctx.sync().then(function () {
+                    if (results.items.length > 0) {
+                        results.items[0].font.underline = "Wave";
+                        try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
+                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                            body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
+                        }).catch(function(){});
+                    }
+                    return ctx.sync();
+                });
+            }).catch(function () {});
+        }
+    });
 }
 
 function doClearParagraphUnderlines(paragraphId) {
