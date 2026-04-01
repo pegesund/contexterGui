@@ -751,6 +751,7 @@ fn start_tab_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
             fn CFRunLoopAddSource(r:*const std::ffi::c_void,s:*const std::ffi::c_void,m:*const std::ffi::c_void);
             fn CFRunLoopRun();
             fn CGEventGetIntegerValueField(e:*const std::ffi::c_void,f:u32)->i64;
+            fn CGEventGetFlags(e:*const std::ffi::c_void)->u64;
             static kCFRunLoopCommonModes: *const std::ffi::c_void;
         }
         struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>}
@@ -761,6 +762,10 @@ fn start_tab_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
                 if et!=10{return ev;}
                 if !c.i.load(Ordering::Relaxed){return ev;}
                 if CGEventGetIntegerValueField(ev,9)!=48{return ev;}
+                // Pass through Tab if any modifier is held (Cmd+Tab, Ctrl+Tab, etc.)
+                let flags = CGEventGetFlags(ev);
+                let modifiers = flags & 0x1F0000; // Cmd, Shift, Ctrl, Option, Fn
+                if modifiers != 0 { return ev; }
                 c.p.store(true,Ordering::Relaxed);
                 std::ptr::null()
             }
