@@ -21,6 +21,26 @@ pub struct MacPlatform {
 
 impl MacPlatform {
     pub fn new() -> Self {
+        // Request accessibility permissions (prompts user if not granted)
+        unsafe {
+            use core_foundation::base::TCFType;
+            use core_foundation::boolean::CFBoolean;
+            use core_foundation::string::CFString;
+            use core_foundation::dictionary::CFDictionary;
+            unsafe extern "C" {
+                fn AXIsProcessTrustedWithOptions(options: core_foundation::base::CFTypeRef) -> bool;
+            }
+            let key = CFString::new("AXTrustedCheckOptionPrompt");
+            let dict = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFBoolean::true_value().as_CFType())]);
+            let trusted = AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as _);
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/acatts_accessibility.log") {
+                    let _ = writeln!(f, "Accessibility: trusted={}", trusted);
+                }
+            }
+        }
+
         let cached_fg = Arc::new(Mutex::new((ForegroundApp::default(), Instant::now())));
         let last_external_fg = Arc::new(Mutex::new(ForegroundApp::default()));
         let cached_selected_text = Arc::new(Mutex::new(None));

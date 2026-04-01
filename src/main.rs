@@ -4490,6 +4490,19 @@ impl eframe::App for ContextApp {
                     log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
+            // Update caret position every poll — not gated by context changes
+            {
+                let fg = self.platform.foreground_app();
+                let our_window = fg.exe_name.contains("acatts") || fg.title.contains("NorskTale");
+                if !our_window {
+                    if let Some((x, y)) = self.platform.caret_screen_position() {
+                        if x > 10 || y > 10 {
+                            self.last_caret_pos = Some((x - 100, y + 30));
+                        }
+                    }
+                }
+            }
+
             if let Some(new_ctx) = ctx_result {
                 let ctx_changed = new_ctx.word != self.context.word
                     || new_ctx.sentence != self.context.sentence
@@ -4522,16 +4535,6 @@ impl eframe::App for ContextApp {
                     self.try_update_doc_text(doc);
                 }
                 let fg = self.platform.foreground_app();
-                // Update caret position from bridge context or accessibility API
-                if let Some((x, y)) = new_ctx.caret_pos {
-                    if x != 0 || y != 0 {
-                        self.last_caret_pos = Some((x, y));
-                    }
-                } else if let Some((x, y)) = self.platform.caret_screen_position() {
-                    // macOS: caret position via accessibility API
-                    // Position: slightly below caret, shifted 30% left of cursor
-                    self.last_caret_pos = Some((x - 100, y + 30));
-                }
                 // Only update context if we got something useful — don't overwrite
                 // good context with empty when our own window is focused
                 if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
