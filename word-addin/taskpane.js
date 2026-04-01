@@ -323,11 +323,6 @@ function doSelectionRead() {
 
             var result = detectSentence(paraText, cursorInPara);
 
-            // Reject stale reads: empty word near a recent non-empty word position
-            if (result.wordAtCursor === "" && lastSentWord !== ""
-                && Math.abs(sel.start - lastSelStart) < 5) {
-                return;
-            }
             lastSelStart = sel.start;
             lastSentWord = result.wordAtCursor;
 
@@ -667,6 +662,10 @@ function doReplaceAtCursor(prefix, replacement) {
                     lastCursorInPara = cursorTarget;
                     lastCursorParaId = paraId;
                     sendChangedParagraphs([{ paragraphId: paraId, text: newText }]);
+                    lastSentKey = "";
+                    lastSentWord = "";
+                    lastSelStart = -1;
+                    setTimeout(onSelectionChanged, 200);
                     return ctx.sync();
                 });
             });
@@ -724,6 +723,11 @@ function doReplaceAtCursor(prefix, replacement) {
                 lastCursorInPara = cursorTarget;
                 lastCursorParaId = paraId;
                 sendChangedParagraphs([{ paragraphId: paraId, text: newText }]);
+                // Reset context guards so post-insert update gets through
+                lastSentKey = "";
+                lastSentWord = "";
+                lastSelStart = -1;
+                setTimeout(onSelectionChanged, 200);
                 return ctx.sync();
             });
         });
