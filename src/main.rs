@@ -5044,7 +5044,7 @@ impl eframe::App for ContextApp {
             150.0
         };
         let win_w = s * if self.selected_tab == 0 {
-            220.0
+            242.0
         } else {
             420.0
         };
@@ -5311,9 +5311,17 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // --- Right side: 📌 ⚙ – ✕ ---
-                // Drag: use the full header response (interact_bg) for dragging
-                // instead of a tiny remaining rect that might be zero-width
+                // --- Right side: drag area, 📌 ⚙ – ✕ ---
+                let remaining = ui.available_rect_before_wrap();
+                let right_w = 80.0; // 📌 + ⚙ + – + ✕
+                let drag_rect = egui::Rect::from_min_max(
+                    remaining.min,
+                    egui::pos2(remaining.max.x - right_w, remaining.max.y),
+                );
+                let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
+                if drag_resp.drag_started() && !self.follow_cursor {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
 
                 // 📌 Follow cursor toggle
                 let pin_color = if self.follow_cursor {
