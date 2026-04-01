@@ -5064,6 +5064,7 @@ impl eframe::App for ContextApp {
 
         if self.follow_cursor && self.goto_freeze_until.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
                 let pos_y = if (y as f32 + win_h) > screen_h {
