@@ -4490,15 +4490,13 @@ impl eframe::App for ContextApp {
                     log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
-            // Update caret position every poll — not gated by context changes
+            // Update caret position — only when a text app is foreground (not our window, not terminal)
             {
                 let fg = self.platform.foreground_app();
-                let our_window = fg.exe_name.contains("acatts") || fg.title.contains("NorskTale");
-                if !our_window {
+                let kind = self.platform.classify_app(&fg);
+                if kind == platform::AppKind::Word || kind == platform::AppKind::Browser {
                     if let Some((x, y)) = self.platform.caret_screen_position() {
-                        if x > 10 || y > 10 {
-                            self.last_caret_pos = Some((x - 100, y + 30));
-                        }
+                        self.last_caret_pos = Some((x, y + 49));
                     }
                 }
             }
