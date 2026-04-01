@@ -294,11 +294,14 @@ function doSelectionRead() {
         var paraRange = para.getRange("Start");
         var beforeCursor = paraRange.expandTo(sel.getRange("Start"));
         sel.load("start");
+        paraRange.load("start");
         para.load("text,uniqueLocalId");
         beforeCursor.load("text");
         return ctx.sync().then(function () {
             var paraText = para.text;
-            var cursorInPara = beforeCursor.text.length;
+            // Use sel.start - paraRange.start for accurate cursor position (includes trailing spaces)
+            var cursorInPara = sel.start - paraRange.start;
+            if (cursorInPara < 0) cursorInPara = beforeCursor.text.length;
             if (cursorInPara > paraText.length) cursorInPara = paraText.length;
 
             // Check if paragraph is new or changed (paste/cut/drag) — trigger rescan
