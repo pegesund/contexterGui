@@ -15,7 +15,8 @@ const WD_WORD: i32 = 2;
 const OBJID_NATIVEOM: u32 = 0xFFFFFFF0;
 const WD_UNDERLINE_WAVY: i32 = 11;
 const WD_UNDERLINE_NONE: i32 = 0;
-const WD_COLOR_RED: i32 = 0x0000FF; // BGR format: red = 0x0000FF
+const WD_COLOR_RED: i32 = 0x0000FF;  // BGR format: red = 0x0000FF
+const WD_COLOR_BLUE: i32 = 0xFF0000; // BGR format: blue = 0xFF0000
 const WD_NORWEGIAN_BOKMAL: i32 = 1044; // wdNorwegianBokmal language ID
 
 // --- Raw VARIANT helpers (COM ABI layout) ---
@@ -747,7 +748,7 @@ impl TextBridge for WordComBridge {
         .unwrap_or(false)
     }
 
-    fn mark_error_underline(&self, char_start: usize, char_end: usize) -> bool {
+    fn mark_error_underline(&self, char_start: usize, char_end: usize, color: super::ErrorUnderlineColor) -> bool {
         (|| -> Result<bool> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
             let doc = app.get_dispatch("ActiveDocument")?;
@@ -755,7 +756,11 @@ impl TextBridge for WordComBridge {
             let range = unsafe { extract_dispatch(&range_v)? };
             let font = range.get_dispatch("Font")?;
             font.put("Underline", make_i4(WD_UNDERLINE_WAVY))?;
-            font.put("UnderlineColor", make_i4(WD_COLOR_RED))?;
+            let bgr_color = match color {
+                super::ErrorUnderlineColor::Red => WD_COLOR_RED,
+                super::ErrorUnderlineColor::Blue => WD_COLOR_BLUE,
+            };
+            font.put("UnderlineColor", make_i4(bgr_color))?;
             Ok(true)
         })().unwrap_or(false)
     }

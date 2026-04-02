@@ -631,8 +631,8 @@ impl BridgeManager {
         }
     }
 
-    fn mark_error_underline(&self, char_start: usize, char_end: usize) -> bool {
-        self.effective_bridge().map(|b| b.mark_error_underline(char_start, char_end)).unwrap_or(false)
+    fn mark_error_underline(&self, char_start: usize, char_end: usize, color: bridge::ErrorUnderlineColor) -> bool {
+        self.effective_bridge().map(|b| b.mark_error_underline(char_start, char_end, color)).unwrap_or(false)
     }
 
     fn clear_error_underline(&self, char_start: usize, char_end: usize) -> bool {
@@ -3695,9 +3695,14 @@ impl ContextApp {
                         e.word, trunc(&e.paragraph_id, 10), e.rule_name, color, marked);
                 } else if e.word_doc_start < e.word_doc_end {
                     // Windows COM path: underline using character range
-                    let marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end);
-                    log!("Underline: range {}..{} for '{}' rule={} ok={}",
-                        e.word_doc_start, e.word_doc_end, trunc(&e.word, 30), e.rule_name, marked);
+                    let ul_color = match e.category {
+                        ErrorCategory::Spelling => bridge::ErrorUnderlineColor::Red,
+                        _ => bridge::ErrorUnderlineColor::Blue,
+                    };
+                    let marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end, ul_color);
+                    log!("Underline: range {}..{} for '{}' rule={} color={:?} ok={}",
+                        e.word_doc_start, e.word_doc_end, trunc(&e.word, 30), e.rule_name,
+                        match ul_color { bridge::ErrorUnderlineColor::Red => "red", _ => "blue" }, marked);
                 }
                 e.underlined = true;
             }

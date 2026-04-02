@@ -14,6 +14,13 @@ pub struct CursorContext {
     pub paragraph_id: String,
 }
 
+/// Underline color for error marking.
+#[derive(Clone, Copy)]
+pub enum ErrorUnderlineColor {
+    Red,   // Spelling errors
+    Blue,  // Grammar errors
+}
+
 /// Abstraction for reading/writing text in the focused application.
 ///
 /// Implementations:
@@ -65,8 +72,8 @@ pub trait TextBridge {
     /// Set the foreground window handle (called by BridgeManager before read_context).
     fn set_fg_hwnd(&self, _hwnd: isize) {}
 
-    /// Mark a character range with red wavy underline (spelling/grammar error).
-    fn mark_error_underline(&self, _char_start: usize, _char_end: usize) -> bool { false }
+    /// Mark a character range with wavy underline. Color: red for spelling, blue for grammar.
+    fn mark_error_underline(&self, _char_start: usize, _char_end: usize, _color: ErrorUnderlineColor) -> bool { false }
 
     /// Remove red wavy underline from a character range.
     fn clear_error_underline(&self, _char_start: usize, _char_end: usize) -> bool { false }

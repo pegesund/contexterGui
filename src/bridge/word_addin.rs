@@ -285,7 +285,7 @@ impl TextBridge for WordAddinBridge {
         None
     }
 
-    fn mark_error_underline(&self, char_start: usize, char_end: usize) -> bool {
+    fn mark_error_underline(&self, char_start: usize, char_end: usize, _color: super::ErrorUnderlineColor) -> bool {
         let json = format!(
             r#"{{"action":"underline","start":{},"end":{}}}"#,
             char_start, char_end
