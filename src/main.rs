@@ -451,24 +451,10 @@ impl BridgeManager {
             }
         }
 
-        // Our window is foreground — return cached context if available.
-        // If no cached context, try Word COM directly (works regardless of focus).
+        // Our window is foreground — return cached context.
+        // NEVER try COM calls here — causes tight loop freeze.
         if our_window_focused {
-            if self.last_context.is_some() {
-                return self.last_context.clone();
-            }
-            for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name().contains("Word") {
-                    if let Some(ctx) = bridge.read_context() {
-                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                            self.active_idx = i;
-                            self.last_context = Some(ctx.clone());
-                            return Some(ctx);
-                        }
-                    }
-                }
-            }
-            return None;
+            return self.last_context.clone();
         }
 
         // Only activate for supported programs: Word, Edge, Chrome, Notepad
@@ -778,6 +764,8 @@ struct ContextApp {
     pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
+    last_grammar_ctx_key: String,
+    last_known_cursor_offset: Option<usize>,
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
@@ -1317,6 +1305,8 @@ impl ContextApp {
             pending_incomplete_sentence: None,
             grammar_inflight: std::collections::HashSet::new(),
             paragraph_texts: std::collections::HashMap::new(),
+            last_grammar_ctx_key: String::new(),
+            last_known_cursor_offset: None,
             prefix_index: None,
             baselines: None,
             wordfreq: None,
@@ -2098,6 +2088,10 @@ impl ContextApp {
     fn upgrade_spelling_suggestions(&mut self) {
         if !self.bert_ready { return; }
 
+        // Skip upgrade — find_spelling_suggestions is too slow for main thread.
+        // Grammar actor already provides suggestions; BERT re-ranking happens async.
+        return;
+        #[allow(unreachable_code)]
         let to_upgrade: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
             .filter(|(_, e)| {
                 matches!(e.category, ErrorCategory::Spelling)
@@ -2157,12 +2151,14 @@ impl ContextApp {
         let mut seen = std::collections::HashSet::new();
         let mut edit_distances: HashMap<String, u32> = HashMap::new();
 
+        let _t_total = Instant::now();
         {
             let analyzer = match &self.analyzer {
                 Some(a) => a,
                 None => return Vec::new(),
             };
 
+            let _t = Instant::now();
             // Source 1: Fuzzy Levenshtein matches (distance 2)
             for (w, dist) in analyzer.fuzzy_lookup(&word_lower, 2) {
                 let wl = w.to_lowercase();
@@ -2846,14 +2842,8 @@ impl ContextApp {
             return;
         }
 
-        // Try incremental paragraph-based scanning (uses ParaID for change detection).
-        // Only falls through to full-doc scan if bridge doesn't support read_paragraphs.
-        if let Some(paragraphs) = self.manager.effective_bridge()
-            .and_then(|b| b.read_paragraphs())
-        {
-            self.update_grammar_errors_incremental(paragraphs);
-            return;
-        }
+        // DISABLED: incremental scanning causes freeze.
+        // Fall through to original full-doc path below.
         // Called on paste/cut/move only — not on every keystroke.
         // Queue processing happens at word boundaries in the main poll loop.
 
@@ -3150,6 +3140,10 @@ impl ContextApp {
     /// Process a few words from the spelling queue per call.
     /// Keeps UI responsive when many words need checking (e.g. English text).
     fn process_spelling_queue(&mut self) {
+        // DISABLED: check_spelling runs find_spelling_suggestions on main thread = freeze
+        // Grammar actor handles spelling detection via unknown words.
+        return;
+        #[allow(unreachable_code)]
         let mut processed = 0;
         while let Some(item) = self.spelling_queue.first().cloned() {
             self.spelling_queue.remove(0);
@@ -3724,7 +3718,9 @@ impl ContextApp {
                         continue;
                     }
                 }
+                let _t_spell = Instant::now();
                 let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
+                log!("find_spelling_suggestions('{}') took {}ms", word, _t_spell.elapsed().as_millis());
                 // Pick best ortho+dict candidate (grammar filtering happens async in BERT worker)
                 if let Some((best, score)) = suggestions.first().cloned() {
                     if !best.is_empty() {
@@ -3751,8 +3747,6 @@ impl ContextApp {
     fn sync_error_underlines(&mut self) {
         // Compute positions for errors that don't have them yet
         for e in &mut self.writing_errors {
-            log!("SYNC_UL: word='{}' start={} end={} underlined={} ignored={} para='{}'",
-                trunc(&e.word, 20), e.word_doc_start, e.word_doc_end, e.underlined, e.ignored, trunc(&e.paragraph_id, 10));
             if e.word_doc_start == 0 && e.word_doc_end == 0 && !e.ignored {
                 // For spelling errors, word = the misspelled word
                 // For grammar errors, word = whole sentence — extract error word from explanation
@@ -4261,7 +4255,6 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-
         // In selection mode: handle keys at the top, set skip_processing flag
         let mut skip_processing = false;
         if self.selection_mode {
@@ -4326,19 +4319,19 @@ impl eframe::App for ContextApp {
             self.llm_actor = Some(llm_actor::spawn_llm_actor(ctx.clone()));
         }
 
-        // Poll grammar actor for results (non-blocking)
+        
         self.poll_grammar_responses();
-        // Always sync underlines — errors may have been added by grammar actor or spelling queue
-        self.sync_error_underlines();
+       
         if let Some(actor) = &self.grammar_actor {
         }
 
-        // Drain changed paragraphs from Word Add-in and send to grammar actor
-        // (must run BEFORE JSON build so deletions are reflected immediately)
+        
         self.process_addin_changed_paragraphs();
+       
 
-        // LLM grammar correction: poll responses (dispatch is button-triggered)
+        
         self.poll_llm_responses();
+       
 
         // Update errors JSON for /errors endpoint
         {
@@ -4667,7 +4660,9 @@ impl eframe::App for ContextApp {
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
 
+            
             let ctx_result = self.manager.read_context();
+           
             if ctx_result.is_none() {
                 // Only log once per second to avoid spam
                 static LAST_NONE_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -4698,15 +4693,16 @@ impl eframe::App for ContextApp {
                 // Update caret position from bridge context (Windows fallback)
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
-                        log!("CARET from bridge: ({}, {})", x, y);
                         self.last_caret_pos = Some((x, y));
                     }
-                } else {
-                    log!("CARET: None from bridge");
                 }
                 let ctx_changed = new_ctx.word != self.context.word
                     || new_ctx.sentence != self.context.sentence
                     || new_ctx.masked_sentence != self.context.masked_sentence;
+                // Track cursor offset for paragraph scanning when our window has focus
+                if let Some(off) = new_ctx.cursor_doc_offset {
+                    self.last_known_cursor_offset = Some(off);
+                }
                 if ctx_changed {
                 log!("Context: word='{}' sentence='{}' masked={} offset={:?}",
                     trunc(&new_ctx.word, 20), trunc(&new_ctx.sentence, 40),
@@ -4730,7 +4726,6 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
-                // Update full doc text now — Word is confirmed foreground
                 if let Some(doc) = self.manager.read_full_document() {
                     self.try_update_doc_text(doc);
                 }
@@ -4882,11 +4877,13 @@ impl eframe::App for ContextApp {
                 if let Some(ref w) = spell_word {
                     if *w != self.last_spell_checked_word {
                         let errors_before = self.writing_errors.len();
-                        log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, trunc(&sentence, 50), cursor_off);
-                        {
-                            let para_id = self.context.paragraph_id.clone();
-                            self.check_spelling(w, &sentence, &para_id, 0);
-                        }
+                        // DISABLED: check_spelling runs find_spelling_suggestions on main thread = freeze
+                        // Grammar actor already handles spelling via unknown words.
+                        // log!("Word boundary spell check: '{}' in '{}' (cursor_off={})", w, trunc(&sentence, 50), cursor_off);
+                        // {
+                        //     let para_id = self.context.paragraph_id.clone();
+                        //     self.check_spelling(w, &sentence, &para_id, 0);
+                        // }
                         self.last_spell_checked_word = w.clone();
                         // If a new error was found, highlight it (don't auto-switch tab)
                         if self.writing_errors.len() > errors_before {
@@ -4931,10 +4928,11 @@ impl eframe::App for ContextApp {
                     .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»').to_string());
                 if let Some(ref w) = spell_word {
                     if !w.is_empty() {
-                        {
-                            let para_id = self.context.paragraph_id.clone();
-                            self.check_spelling(w, &sentence, &para_id, 0);
-                        }
+                        // DISABLED: check_spelling freezes main thread
+                        // {
+                        //     let para_id = self.context.paragraph_id.clone();
+                        //     self.check_spelling(w, &sentence, &para_id, 0);
+                        // }
                     }
                 }
                 self.validate_consonant_checks();
@@ -5295,13 +5293,9 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Always keep repainting — we need to poll context from background
-        // threads and render BERT results even when Word has focus.
-        if self.grammar_scanning {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
+        // Repaint at 200ms interval — fast enough for responsive UI, avoids burning CPU.
+        // NEVER use request_repaint() (no delay) — causes tight loop with COM calls.
+        ctx.request_repaint_after(Duration::from_millis(200));
 
         // Style
         // Clear the default background so transparency works

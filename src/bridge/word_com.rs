@@ -440,20 +440,20 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        // Read text from Word via COM. Caret position is optional — when our
-        // always-on-top window has focus, Word's caret disappears but the
-        // text and cursor position are still available via COM.
-        let caret_pos = self.caret_pos(); // None when our window has focus — OK
+        // ONLY read text if Word has a visible blinking caret.
+        // No caret = our window has focus = skip COM calls (BridgeManager returns cached context).
+        // This prevents hundreds of COM calls per second when our always-on-top window is active.
+        let caret_pos = self.caret_pos();
+        if caret_pos.is_none() {
+            return None;
+        }
         match self.get_raw_text() {
             Ok((raw, cursor_offset)) => {
                 let mut ctx = super::build_context(&raw, caret_pos);
                 ctx.cursor_doc_offset = Some(cursor_offset);
                 Some(ctx)
             }
-            Err(e) => {
-                log!("Word COM get_raw_text failed: {:?}", e);
-                None
-            }
+            Err(_) => None,
         }
     }
 
@@ -470,6 +470,24 @@ impl TextBridge for WordComBridge {
         let context_v = doc.call("Range", &[make_i4(range_start), make_i4(cursor_pos)]).ok()?;
         let context_range = unsafe { extract_dispatch(&context_v).ok()? };
         context_range.get_string("Text").ok()
+    }
+
+    fn read_paragraph_at(&self, cursor_offset: usize) -> Option<(String, String, usize)> {
+        (|| -> Result<(String, String, usize)> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let range_v = doc.call("Range", &[make_i4(cursor_offset as i32), make_i4(cursor_offset as i32)])?;
+            let range = unsafe { extract_dispatch(&range_v)? };
+            range.call("Expand", &[make_i4(4)])?; // wdParagraph = 4
+            let start = unsafe { extract_i32(&range.get("Start")?)? } as usize;
+            let text = range.get_string("Text")?;
+            let text = text.trim_end_matches('\r').replace('\r', " ");
+            let paragraphs = range.get_dispatch("Paragraphs")?;
+            let first_v = paragraphs.call("Item", &[make_i4(1)])?;
+            let first = unsafe { extract_dispatch(&first_v)? };
+            let para_id = unsafe { extract_i32(&first.get("ParaID")?)? };
+            Ok((para_id.to_string(), text, start))
+        })().ok()
     }
 
     fn read_paragraphs(&self) -> Option<Vec<(String, String, usize)>> {
