@@ -316,11 +316,16 @@ fn find_word_doc_range(error_word: &str, sentence_ctx: &str, doc_offset: usize) 
 // --- Data paths ---
 
 fn data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contexter-repo/training-data")
+    // Try both Mac layout (../contexter-repo) and Windows layout (../../contexter-repo)
+    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contexter-repo/training-data");
+    if mac.exists() { return mac; }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contexter-repo/training-data")
 }
 
 fn dict_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rustSpell/mtag-rs/data/fullform_bm.mfst")
+    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+    if mac.exists() { return mac; }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rustSpell/mtag-rs/data/fullform_bm.mfst")
 }
 
 fn compound_data_path() -> PathBuf {
@@ -440,10 +445,24 @@ impl BridgeManager {
             }
         }
 
-        // Our window is foreground — keep using whatever bridge was already active.
-        // NEVER switch bridges when our window is focused.
+        // Our window is foreground — return cached context if available.
+        // If no cached context, try Word COM directly (works regardless of focus).
         if our_window_focused {
-            return self.last_context.clone();
+            if self.last_context.is_some() {
+                return self.last_context.clone();
+            }
+            for (i, bridge) in self.bridges.iter().enumerate() {
+                if bridge.name().contains("Word") {
+                    if let Some(ctx) = bridge.read_context() {
+                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                            self.active_idx = i;
+                            self.last_context = Some(ctx.clone());
+                            return Some(ctx);
+                        }
+                    }
+                }
+            }
+            return None;
         }
 
         // Only activate for supported programs: Word, Edge, Chrome, Notepad
@@ -4535,6 +4554,15 @@ impl eframe::App for ContextApp {
             }
 
             if let Some(new_ctx) = ctx_result {
+                // Update caret position from bridge context (Windows fallback)
+                if let Some((x, y)) = new_ctx.caret_pos {
+                    if x != 0 || y != 0 {
+                        log!("CARET from bridge: ({}, {})", x, y);
+                        self.last_caret_pos = Some((x, y));
+                    }
+                } else {
+                    log!("CARET: None from bridge");
+                }
                 let ctx_changed = new_ctx.word != self.context.word
                     || new_ctx.sentence != self.context.sentence
                     || new_ctx.masked_sentence != self.context.masked_sentence;
@@ -4795,6 +4823,13 @@ impl eframe::App for ContextApp {
                 // Dedup: use sentence (masked text) as the stable key — prefix bounces don't re-trigger
                 let sentence_key = masked.clone();
                 let needs_completion = cache_key != self.last_completed_prefix;
+                static COMP_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let tick = COMP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if tick < 5 || (needs_completion && tick % 100 == 0) {
+                    log!("COMPLETION prefix='{}' needs={} bert={} masked_len={} elapsed={}ms",
+                        prefix, needs_completion, self.bert_worker.is_some(),
+                        masked.len(), self.last_context_change.elapsed().as_millis());
+                }
 
                 if needs_completion && cache_key != self.dispatched_key {
                     // Context or prefix changed — reset debounce timer, cancel in-flight
@@ -5100,12 +5135,18 @@ impl eframe::App for ContextApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
-                let pos_y = if (y as f32 + win_h) > screen_h {
-                    y as f32 - win_h - 30.0
+                // DPI scaling: caret position from GetGUIThreadInfo is in physical pixels,
+                // egui uses logical pixels. Scale down by DPI factor.
+                let dpi_scale = ctx.pixels_per_point();
+                let lx = x as f32 / dpi_scale;
+                let ly = y as f32 / dpi_scale;
+                let pos_y = if (ly + win_h) > screen_h {
+                    ly - win_h - 30.0
                 } else {
-                    y as f32
+                    ly
                 };
-                let pos_x = (x as f32).min(screen_w - win_w).max(0.0);
+                let pos_y = pos_y.max(0.0).min(screen_h - win_h);
+                let pos_x = lx.min(screen_w - win_w).max(0.0);
 
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     egui::pos2(pos_x, pos_y),
