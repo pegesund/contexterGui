@@ -2,6 +2,8 @@
 //! Uses pix2text ONNX models (encoder + decoder) to produce LaTeX,
 //! then latext_no to convert to Norwegian readable text.
 
+use super::latext_no;
+
 use std::sync::mpsc;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::TensorRef;
