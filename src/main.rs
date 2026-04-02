@@ -459,7 +459,11 @@ impl BridgeManager {
             }
             for (i, bridge) in self.bridges.iter().enumerate() {
                 if bridge.name().contains("Word") {
-                    if let Some(ctx) = bridge.read_context() {
+                    let t0 = std::time::Instant::now();
+                    let ctx_opt = bridge.read_context();
+                    let ms = t0.elapsed().as_millis();
+                    if ms > 100 { log!("BLOCKED read_context(our_window_focused) took {}ms", ms); }
+                    if let Some(ctx) = ctx_opt {
                         if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                             self.active_idx = i;
                             self.last_context = Some(ctx.clone());
@@ -778,6 +782,8 @@ struct ContextApp {
     pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
+    last_known_cursor_offset: Option<usize>, // persists cursor position when our window has focus
+    last_grammar_ctx_key: String, // dedup: skip COM call when context unchanged
     prefix_index: Option<PrefixIndex>,
     baselines: Option<Arc<Baselines>>,
     wordfreq: Option<Arc<HashMap<String, u64>>>,
@@ -1317,6 +1323,8 @@ impl ContextApp {
             pending_incomplete_sentence: None,
             grammar_inflight: std::collections::HashSet::new(),
             paragraph_texts: std::collections::HashMap::new(),
+            last_known_cursor_offset: None,
+            last_grammar_ctx_key: String::new(),
             prefix_index: None,
             baselines: None,
             wordfreq: None,
@@ -1719,7 +1727,10 @@ impl ContextApp {
             return;
         }
 
+        let t_spell = Instant::now();
         let suggestions = self.find_spelling_suggestions(&clean, sentence_ctx);
+        let spell_ms = t_spell.elapsed().as_millis();
+        if spell_ms > 100 { log!("BLOCKED find_spelling_suggestions('{}') took {}ms", clean, spell_ms); }
         // Fix up doc_offset on any pending BERT re-ranking request
         if let Some(pending) = self.pending_spelling_bert.last_mut() {
             if pending.error_doc_offset == 0 {
@@ -2847,13 +2858,27 @@ impl ContextApp {
         }
 
         // Try incremental paragraph-based scanning (uses ParaID for change detection).
-        // Only falls through to full-doc scan if bridge doesn't support read_paragraphs.
-        if let Some(paragraphs) = self.manager.effective_bridge()
-            .and_then(|b| b.read_paragraphs())
-        {
-            self.update_grammar_errors_incremental(paragraphs);
-            return;
+        // Throttled to every 2 seconds to avoid blocking UI with COM calls.
+        // Read ONLY the paragraph at cursor — triggered by context change.
+        // Use last known cursor offset (persists when our window has focus).
+        // Only read paragraph when context actually changed (word/sentence different).
+        // This avoids COM calls on every frame.
+        let ctx_key = format!("{}|{}", self.context.word, self.context.sentence);
+        if ctx_key == self.last_grammar_ctx_key {
+            return; // nothing changed — skip COM call
         }
+        self.last_grammar_ctx_key = ctx_key;
+
+        let cursor_off = self.context.cursor_doc_offset
+            .or(self.last_known_cursor_offset);
+        if let Some(off) = cursor_off {
+            if let Some(para) = self.manager.effective_bridge()
+                .and_then(|b| b.read_paragraph_at(off))
+            {
+                self.update_grammar_errors_incremental(vec![para]);
+            }
+        }
+        return;
         // Called on paste/cut/move only — not on every keystroke.
         // Queue processing happens at word boundaries in the main poll loop.
 
@@ -3751,8 +3776,6 @@ impl ContextApp {
     fn sync_error_underlines(&mut self) {
         // Compute positions for errors that don't have them yet
         for e in &mut self.writing_errors {
-            log!("SYNC_UL: word='{}' start={} end={} underlined={} ignored={} para='{}'",
-                trunc(&e.word, 20), e.word_doc_start, e.word_doc_end, e.underlined, e.ignored, trunc(&e.paragraph_id, 10));
             if e.word_doc_start == 0 && e.word_doc_end == 0 && !e.ignored {
                 // For spelling errors, word = the misspelled word
                 // For grammar errors, word = whole sentence — extract error word from explanation
@@ -4261,7 +4284,6 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-
         // In selection mode: handle keys at the top, set skip_processing flag
         let mut skip_processing = false;
         if self.selection_mode {
@@ -4328,13 +4350,11 @@ impl eframe::App for ContextApp {
 
         // Poll grammar actor for results (non-blocking)
         self.poll_grammar_responses();
-        // Always sync underlines — errors may have been added by grammar actor or spelling queue
         self.sync_error_underlines();
         if let Some(actor) = &self.grammar_actor {
         }
 
         // Drain changed paragraphs from Word Add-in and send to grammar actor
-        // (must run BEFORE JSON build so deletions are reflected immediately)
         self.process_addin_changed_paragraphs();
 
         // LLM grammar correction: poll responses (dispatch is button-triggered)
@@ -4695,14 +4715,15 @@ impl eframe::App for ContextApp {
             }
 
             if let Some(new_ctx) = ctx_result {
+                // Track cursor offset for paragraph scanning when our window has focus
+                if let Some(off) = new_ctx.cursor_doc_offset {
+                    self.last_known_cursor_offset = Some(off);
+                }
                 // Update caret position from bridge context (Windows fallback)
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
-                        log!("CARET from bridge: ({}, {})", x, y);
                         self.last_caret_pos = Some((x, y));
                     }
-                } else {
-                    log!("CARET: None from bridge");
                 }
                 let ctx_changed = new_ctx.word != self.context.word
                     || new_ctx.sentence != self.context.sentence
@@ -5244,6 +5265,7 @@ impl eframe::App for ContextApp {
 
       } // end if !skip_processing
 
+
         // Window sizing (scaled)
         let s = self.ui_scale;
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
@@ -5295,13 +5317,9 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Always keep repainting — we need to poll context from background
-        // threads and render BERT results even when Word has focus.
-        if self.grammar_scanning {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
+        // Repaint at a reasonable interval — 200ms is enough for responsive UI
+        // without burning CPU. NEVER use request_repaint() (no delay) in a loop.
+        ctx.request_repaint_after(Duration::from_millis(200));
 
         // Style
         // Clear the default background so transparency works

@@ -85,6 +85,10 @@ pub trait TextBridge {
     /// Used for incremental document scanning — only changed paragraphs need processing.
     fn read_paragraphs(&self) -> Option<Vec<(String, String, usize)>> { None }
 
+    /// Read the single paragraph at cursor position. Returns (para_id, text, char_start).
+    /// Fast — only 1 paragraph, ~3 COM calls.
+    fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> { None }
+
     /// Mark a word with colored wavy underline by searching within a paragraph.
     fn underline_word(&self, _word: &str, _paragraph_id: &str, _color: &str) -> bool { false }
 

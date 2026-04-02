@@ -19,7 +19,8 @@ Trace the actual code path. Add targeted logging. Find the exact line.
 - When replacing code, DELETE the old path completely — no fallbacks, no duplicates
 - Never rewrite existing working code — search and reuse
 - Never rescan the whole document on every keystroke
-- Never use timeouts as fixes
+- Never use timeouts/timers as fixes — NEVER poll on a timer, NEVER do periodic full scans
+- Never rescan the full document — read ONLY the paragraph at cursor (the one that changed)
 - Bash command timeouts: max 15 seconds, preferably 5 seconds. NEVER 10 minutes.
 - NEVER switch technical approach without discussing with user first
 - NEVER revert entire files with git checkout — it destroys other fixes

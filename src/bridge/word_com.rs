@@ -494,6 +494,27 @@ impl TextBridge for WordComBridge {
         })().ok()
     }
 
+    fn read_paragraph_at(&self, cursor_offset: usize) -> Option<(String, String, usize)> {
+        (|| -> Result<(String, String, usize)> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            // Get the Range at cursor, then expand to paragraph
+            let range_v = doc.call("Range", &[make_i4(cursor_offset as i32), make_i4(cursor_offset as i32)])?;
+            let range = unsafe { extract_dispatch(&range_v)? };
+            // Expand range to full paragraph: wdParagraph = 4
+            range.call("Expand", &[make_i4(4)])?;
+            let start = unsafe { extract_i32(&range.get("Start")?)? } as usize;
+            let text = range.get_string("Text")?;
+            let text = text.trim_end_matches('\r').replace('\r', " ");
+            // Get ParaID from the paragraph containing the range
+            let paragraphs = range.get_dispatch("Paragraphs")?;
+            let first_v = paragraphs.call("Item", &[make_i4(1)])?;
+            let first = unsafe { extract_dispatch(&first_v)? };
+            let para_id = unsafe { extract_i32(&first.get("ParaID")?)? };
+            Ok((para_id.to_string(), text, start))
+        })().ok()
+    }
+
     fn read_full_document(&self) -> Option<String> {
         if self.caret_pos().is_none() { return None; }
         let app = self.get_app()?;
