@@ -39,7 +39,9 @@ def main():
     # Connect to Word
     word = win32com.client.Dispatch("Word.Application")
     doc = word.ActiveDocument
-    print(f"Document: {doc.Name} ({doc.Content.Text[:50].strip()}...)")
+    # Save original document text for restoration
+    orig_text = doc.Content.Text.rstrip("\r\n")
+    print(f"Document: {doc.Name} ({orig_text[:50].strip()}...)")
 
     # Step 1: Activate Word and position cursor
     print("\n1. Activating Word...")
@@ -93,11 +95,17 @@ def main():
 
     print(f"   Errors: {json.dumps(errors, indent=2, ensure_ascii=False)[:500]}")
 
-    # Step 3: Check underlines
+    # Step 3: Check underlines — poll until they appear
     print("\n3. Checking underlines in Word...")
-    time.sleep(2)  # Give time for underline sync
-    underlined = get_underlined_words(doc)
-    print(f"   Underlined words: {len(underlined)}")
+    underlined = []
+    for attempt in range(10):
+        underlined = get_underlined_words(doc)
+        if underlined:
+            print(f"   {len(underlined)} underlines found after {attempt + 1}s")
+            break
+        time.sleep(1)
+    else:
+        print("   0 underlines after 10s")
     for text, ul, color in underlined:
         ul_name = {11: "wavy", 1: "single", 0: "none"}.get(ul, f"type={ul}")
         print(f"   '{text}' — {ul_name} color={color}")
@@ -114,9 +122,9 @@ def main():
     elif n_errors == 0:
         print(f"FAIL: 0 errors detected")
 
-    # Cleanup: undo the typed text
-    print("\nCleaning up...")
-    doc.Undo(3)  # undo TypeText + TypeParagraph + maybe more
+    # Cleanup: restore original document
+    print("\nCleaning up — restoring original document...")
+    doc.Content.Text = orig_text + "\r"
     print("Done.")
 
 if __name__ == "__main__":
