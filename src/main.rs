@@ -4518,13 +4518,18 @@ impl eframe::App for ContextApp {
                     log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
-            // Update caret position — only when a text app is foreground (not our window, not terminal)
+            // Update caret position — platform-specific or from bridge context
             {
                 let fg = self.platform.foreground_app();
                 let kind = self.platform.classify_app(&fg);
                 if kind == platform::AppKind::Word || kind == platform::AppKind::Browser {
+                    // Try platform API first (macOS), fall back to bridge caret_pos (Windows)
                     if let Some((x, y)) = self.platform.caret_screen_position() {
                         self.last_caret_pos = Some((x, y + 49));
+                    } else if let Some(ref ctx) = ctx_result {
+                        if let Some((x, y)) = ctx.caret_pos {
+                            self.last_caret_pos = Some((x, y));
+                        }
                     }
                 }
             }

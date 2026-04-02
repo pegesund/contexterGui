@@ -439,19 +439,20 @@ impl TextBridge for WordComBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        // ONLY read text if user has a visible blinking caret in the document.
-        // No caret = user hasn't clicked into the document = do NOT process.
-        let caret_pos = self.caret_pos();
-        if caret_pos.is_none() {
-            return None;
-        }
+        // Read text from Word via COM. Caret position is optional — when our
+        // always-on-top window has focus, Word's caret disappears but the
+        // text and cursor position are still available via COM.
+        let caret_pos = self.caret_pos(); // None when our window has focus — OK
         match self.get_raw_text() {
             Ok((raw, cursor_offset)) => {
                 let mut ctx = super::build_context(&raw, caret_pos);
                 ctx.cursor_doc_offset = Some(cursor_offset);
                 Some(ctx)
             }
-            Err(_) => None,
+            Err(e) => {
+                log!("Word COM get_raw_text failed: {:?}", e);
+                None
+            }
         }
     }
 
