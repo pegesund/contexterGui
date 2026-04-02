@@ -3430,7 +3430,7 @@ impl ContextApp {
                     doc_offset: 0,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: !c.paragraph_id.is_empty(), pinned: false,
                     paragraph_id: c.paragraph_id.clone(),
                     error_word: error_word.clone(),
                 });
@@ -3454,6 +3454,9 @@ impl ContextApp {
         };
 
         while let Some(resp) = actor.try_recv() {
+            log!("Grammar response: sentence='{}' errors={} unknown={} para='{}'",
+                trunc(&resp.sentence, 40), resp.errors.len(), resp.unknown_words.len(),
+                trunc(&resp.paragraph_id, 10));
             let sent_h = if resp.paragraph_id.is_empty() {
                 hash_str(&resp.sentence)
             } else {
@@ -3509,7 +3512,7 @@ impl ContextApp {
                             doc_offset: resp.doc_offset,
                             position: i,
                             ignored: false,
-                            word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
+                            word_doc_start: 0, word_doc_end: 0, underlined: !resp.paragraph_id.is_empty(), pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
                         });
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
@@ -3529,7 +3532,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: !resp.paragraph_id.is_empty(), pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
                     });
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
@@ -3581,7 +3584,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: unk.position,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: !resp.paragraph_id.is_empty(), pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
                     });
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
@@ -3641,6 +3644,8 @@ impl ContextApp {
     fn sync_error_underlines(&mut self) {
         // Compute positions for errors that don't have them yet
         for e in &mut self.writing_errors {
+            log!("SYNC_UL: word='{}' start={} end={} underlined={} ignored={} para='{}'",
+                trunc(&e.word, 20), e.word_doc_start, e.word_doc_end, e.underlined, e.ignored, trunc(&e.paragraph_id, 10));
             if e.word_doc_start == 0 && e.word_doc_end == 0 && !e.ignored {
                 // For spelling errors, word = the misspelled word
                 // For grammar errors, word = whole sentence — extract error word from explanation
@@ -3671,19 +3676,29 @@ impl ContextApp {
         for e in &mut self.writing_errors {
             if e.ignored && e.underlined {
                 // Error was ignored — remove underline
-                self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                if !e.paragraph_id.is_empty() {
+                    self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                } else if e.word_doc_start < e.word_doc_end {
+                    self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                }
                 e.underlined = false;
-            } else if !e.ignored && !e.underlined && !e.word.is_empty() && !e.paragraph_id.is_empty() {
-                // New error — apply underline using word + paragraph ID
-                let color = match e.category {
-                    ErrorCategory::Spelling => "#FF0000",
-                    ErrorCategory::Grammar => "#0000FF",
-                    ErrorCategory::SentenceBoundary => "#0000FF",
-                };
-                let marked = self.manager.underline_word(&e.word, &e.paragraph_id, color);
-                log!("Underline: word='{}' para={} rule={} color={} ok={}",
-                    e.word, trunc(&e.paragraph_id, 10), e.rule_name, color, marked);
-                // Mark as underlined even if bridge doesn't support it (prevents spam)
+            } else if !e.ignored && !e.underlined && !e.word.is_empty() {
+                if !e.paragraph_id.is_empty() {
+                    // Mac Add-in path: underline using word + paragraph ID
+                    let color = match e.category {
+                        ErrorCategory::Spelling => "#FF0000",
+                        ErrorCategory::Grammar => "#0000FF",
+                        ErrorCategory::SentenceBoundary => "#0000FF",
+                    };
+                    let marked = self.manager.underline_word(&e.word, &e.paragraph_id, color);
+                    log!("Underline: word='{}' para={} rule={} color={} ok={}",
+                        e.word, trunc(&e.paragraph_id, 10), e.rule_name, color, marked);
+                } else if e.word_doc_start < e.word_doc_end {
+                    // Windows COM path: underline using character range
+                    let marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end);
+                    log!("Underline: range {}..{} for '{}' rule={} ok={}",
+                        e.word_doc_start, e.word_doc_end, trunc(&e.word, 30), e.rule_name, marked);
+                }
                 e.underlined = true;
             }
         }
@@ -4201,6 +4216,8 @@ impl eframe::App for ContextApp {
 
         // Poll grammar actor for results (non-blocking)
         self.poll_grammar_responses();
+        // Always sync underlines — errors may have been added by grammar actor or spelling queue
+        self.sync_error_underlines();
         if let Some(actor) = &self.grammar_actor {
         }
 
