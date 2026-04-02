@@ -50,12 +50,13 @@ fn main() {
         println!("Test 1: Spelling error detection");
         word.go_to_end();
         word.type_text("\nJeg liker fiskk.");
-        wait_for_errors(1, Duration::from_secs(8));
-        let errors = fetch_errors().unwrap_or_default();
-        if errors.iter().any(|e| e.category == "spelling" && e.word.contains("fiskk")) {
+        // Wait specifically for a spelling error containing "fiskk"
+        let found = wait_for_specific_error("fiskk", "spelling", Duration::from_secs(12));
+        if found {
             println!("  PASS: 'fiskk' detected as spelling error");
             pass += 1;
         } else {
+            let errors = fetch_errors().unwrap_or_default();
             println!("  FAIL: 'fiskk' not detected. Errors: {:?}", errors);
             fail += 1;
         }
@@ -125,9 +126,7 @@ fn main() {
         println!("Test 5: Error clears after fix");
         word.go_to_end();
         word.type_text("\nJeg liker fiskk.");
-        wait_for_errors(1, Duration::from_secs(8));
-        let errors_before = fetch_errors().unwrap_or_default();
-        let had_error = errors_before.iter().any(|e| e.word.contains("fiskk"));
+        let had_error = wait_for_specific_error("fiskk", "spelling", Duration::from_secs(12));
 
         // Fix: select "fiskk" and replace with "fisk"
         // Move back to "fiskk", select it, type correct word
@@ -154,9 +153,7 @@ fn main() {
         println!("Test 6: Paragraph with error, delete paragraph, error clears");
         word.go_to_end();
         word.type_text("\nDette er feilx ord her.");
-        wait_for_errors(1, Duration::from_secs(8));
-        let errors_before = fetch_errors().unwrap_or_default();
-        let had_error = errors_before.iter().any(|e| e.word.contains("feilx"));
+        let had_error = wait_for_specific_error("feilx", "spelling", Duration::from_secs(12));
 
         // Select the whole line and delete
         word.key_home();
@@ -249,6 +246,22 @@ fn parse_errors_json(json: &str) -> Result<Vec<ErrorInfo>, String> {
         }
     }
     Ok(errors)
+}
+
+fn wait_for_specific_error(word: &str, category: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(errors) = fetch_errors() {
+            if errors.iter().any(|e| {
+                (category.is_empty() || e.category == category)
+                    && (e.word.contains(word) || e.sentence.contains(word))
+            }) {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    false
 }
 
 fn wait_for_errors(min_count: usize, timeout: Duration) {

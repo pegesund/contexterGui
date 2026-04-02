@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 13px; padding: 8px; color: #333; }
+    .status { padding: 8px; border-radius: 4px; margin-bottom: 8px; }
+    .connected { background: #e8f5e9; color: #2e7d32; }
+    .waiting { background: #fff3e0; color: #e65100; }
+    .error { background: #ffebee; color: #c62828; }
+    #log { font-size: 11px; color: #666; max-height: 200px; overflow-y: auto; }
+    h3 { margin: 0 0 8px 0; font-size: 15px; }
+  </style>
+</head>
+<body>
+  <h3>NorskTale</h3>
+  <div id="status" class="status waiting">Kobler til...</div>
+  <div id="log"></div>
+
+  <script>
+    var pollInterval = 3000; // ms between polls
+    var extensionConnected = false;
+    var lastText = "";
+
+    function log(msg) {
+      var el = document.getElementById("log");
+      var line = document.createElement("div");
+      line.textContent = new Date().toLocaleTimeString() + " " + msg;
+      el.insertBefore(line, el.firstChild);
+      // Keep log short
+      while (el.children.length > 20) el.removeChild(el.lastChild);
+    }
+
+    function setStatus(cls, text) {
+      var el = document.getElementById("status");
+      el.className = "status " + cls;
+      el.textContent = text;
+    }
+
+    // Listen for acknowledgment from content script
+    window.addEventListener("message", function(e) {
+      if (e.data && e.data.type === "norsktale-gdocs-ack") {
+        extensionConnected = true;
+        setStatus("connected", "Tilkoblet NorskTale");
+      }
+      if (e.data && e.data.type === "norsktale-gdocs-replace") {
+        // Replacement request from NorskTale
+        setStatus("connected", "Erstatter: " + e.data.find + " → " + e.data.replace);
+        log("Erstatter: start=" + e.data.start + " end=" + e.data.end + " '" + e.data.find + "' → '" + e.data.replace + "'");
+        try {
+          google.script.run
+            .withSuccessHandler(function(result) {
+              log("Erstatning utført: " + result);
+              setStatus("connected", "Tilkoblet NorskTale");
+            })
+            .withFailureHandler(function(err) {
+              log("FEIL: " + (err ? err.message : "ukjent"));
+              setStatus("error", "Erstatning feilet: " + (err ? err.message : "ukjent"));
+            })
+            .applyReplacement(e.data.start, e.data.end, e.data.replace);
+        } catch(ex) {
+          log("Exception: " + ex);
+          setStatus("error", "Exception: " + ex);
+        }
+      }
+    });
+
+    function pollDocument() {
+      google.script.run
+        .withSuccessHandler(function(data) {
+          if (!data || !data.text) {
+            setStatus("waiting", "Tomt dokument");
+            setTimeout(pollDocument, pollInterval);
+            return;
+          }
+
+          var key = data.text + "|" + data.cursorStart;
+          if (key !== lastText) {
+            lastText = key;
+            window.top.postMessage({
+              type: "norsktale-gdocs-text",
+              text: data.text,
+              cursorStart: data.cursorStart,
+              cursorEnd: data.cursorEnd
+            }, "*");
+            log("Sendt: «" + data.text.substring(0, 60) + "…» markør: " + data.cursorStart);
+          }
+
+          if (!extensionConnected) {
+            setStatus("waiting", "Venter på NorskTale-utvidelsen...");
+          }
+          setTimeout(pollDocument, pollInterval);
+        })
+        .withFailureHandler(function(err) {
+          var msg = err ? (err.message || JSON.stringify(err)) : "ukjent feil";
+          setStatus("error", "Feil: " + msg);
+          log("Feil: " + msg);
+          setTimeout(pollDocument, pollInterval * 2);
+        })
+        .getDocumentData();
+    }
+
+    // Start polling
+    pollDocument();
+  </script>
+</body>
+</html>
