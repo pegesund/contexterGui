@@ -528,6 +528,12 @@ impl TextBridge for WordComBridge {
     }
 
     fn replace_word(&self, new_text: &str) -> bool {
+        // The Mac Word Add-in sends "prefix|replacement" format. Extract replacement only.
+        let replacement = if let Some((_prefix, word)) = new_text.split_once('|') {
+            word
+        } else {
+            new_text
+        };
         (|| -> Result<()> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
             let selection = app.get_dispatch("Selection")?;
@@ -566,8 +572,8 @@ impl TextBridge for WordComBridge {
                 // No word at cursor — insert the word at cursor position
                 let insert_range_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(cursor_pos)])?;
                 let insert_range = unsafe { extract_dispatch(&insert_range_v) }?;
-                insert_range.put("Text", make_bstr(&format!("{} ", new_text)))?;
-                let new_end = cursor_pos + new_text.chars().count() as i32 + 1;
+                insert_range.put("Text", make_bstr(&format!("{} ", replacement)))?;
+                let new_end = cursor_pos + replacement.chars().count() as i32 + 1;
                 let cursor_v = doc.call("Range", &[make_i4(new_end), make_i4(new_end)])?;
                 let cursor_range = unsafe { extract_dispatch(&cursor_v) }?;
                 cursor_range.call("Select", &[])?;
@@ -579,9 +585,9 @@ impl TextBridge for WordComBridge {
             let word_end = range_start + word_end_off as i32;
             let word_range_v = doc.call("Range", &[make_i4(word_start), make_i4(word_end)])?;
             let word_range = unsafe { extract_dispatch(&word_range_v) }?;
-            word_range.put("Text", make_bstr(new_text))?;
+            word_range.put("Text", make_bstr(replacement))?;
             // Move cursor to end of inserted word
-            let new_end = word_start + new_text.chars().count() as i32;
+            let new_end = word_start + replacement.chars().count() as i32;
             let cursor_v = doc.call("Range", &[make_i4(new_end), make_i4(new_end)])?;
             let cursor_range = unsafe { extract_dispatch(&cursor_v) }?;
             cursor_range.call("Select", &[])?;
