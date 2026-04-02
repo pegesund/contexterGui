@@ -472,6 +472,28 @@ impl TextBridge for WordComBridge {
         context_range.get_string("Text").ok()
     }
 
+    fn read_paragraphs(&self) -> Option<Vec<(String, String, usize)>> {
+        (|| -> Result<Vec<(String, String, usize)>> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let paragraphs = doc.get_dispatch("Paragraphs")?;
+            let count = unsafe { extract_i32(&paragraphs.get("Count")?)? };
+            let mut result = Vec::with_capacity(count as usize);
+            for i in 1..=count {
+                let para_v = paragraphs.call("Item", &[make_i4(i)])?;
+                let para = unsafe { extract_dispatch(&para_v)? };
+                let para_id = unsafe { extract_i32(&para.get("ParaID")?)? };
+                let range = para.get_dispatch("Range")?;
+                let start = unsafe { extract_i32(&range.get("Start")?)? } as usize;
+                let text = range.get_string("Text")?;
+                // Strip trailing \r (Word paragraph separator)
+                let text = text.trim_end_matches('\r').replace('\r', " ");
+                result.push((para_id.to_string(), text, start));
+            }
+            Ok(result)
+        })().ok()
+    }
+
     fn read_full_document(&self) -> Option<String> {
         if self.caret_pos().is_none() { return None; }
         let app = self.get_app()?;

@@ -2737,14 +2737,121 @@ impl ContextApp {
         });
     }
 
+    /// Incremental paragraph-based document scanning using ParaID.
+    /// Only processes paragraphs whose text changed since last scan.
+    fn update_grammar_errors_incremental(&mut self, paragraphs: Vec<(String, String, usize)>) {
+        let current_ids: std::collections::HashSet<String> = paragraphs.iter().map(|(id, _, _)| id.clone()).collect();
+
+        // Detect deleted paragraphs — remove their errors and sentence hashes
+        let old_ids: Vec<String> = self.paragraph_texts.keys().cloned().collect();
+        for old_id in &old_ids {
+            if !current_ids.contains(old_id) {
+                log!("Para deleted: {}", old_id);
+                self.paragraph_texts.remove(old_id);
+                if let Some(hashes) = self.paragraph_sentence_hashes.remove(old_id) {
+                    for h in &hashes {
+                        self.processed_sentence_hashes.remove(h);
+                    }
+                }
+                // Remove errors for this paragraph
+                self.writing_errors.retain(|e| e.paragraph_id != *old_id);
+            }
+        }
+
+        // Process each paragraph — only if text changed
+        for (para_id, text, char_start) in &paragraphs {
+            let text_trimmed = text.trim();
+            if text_trimmed.is_empty() { continue; }
+
+            // Check if paragraph text changed
+            let changed = match self.paragraph_texts.get(para_id) {
+                Some(old_text) => old_text != text_trimmed,
+                None => true, // new paragraph
+            };
+            if !changed { continue; }
+
+            log!("Para changed: id={} offset={} text='{}'", para_id, char_start, trunc(text_trimmed, 50));
+            self.paragraph_texts.insert(para_id.clone(), text_trimmed.to_string());
+
+            // Clear old sentence hashes for this paragraph
+            if let Some(old_hashes) = self.paragraph_sentence_hashes.remove(para_id) {
+                for h in &old_hashes {
+                    self.processed_sentence_hashes.remove(h);
+                }
+            }
+
+            // Remove stale errors for this paragraph
+            self.writing_errors.retain(|e| {
+                if e.paragraph_id == *para_id { return false; }
+                // Also remove errors whose sentence is no longer in this paragraph
+                if e.doc_offset >= *char_start && e.doc_offset < char_start + text.len() {
+                    return false;
+                }
+                true
+            });
+
+            // Split into sentences and queue for grammar checking
+            let sentences = split_sentences(text_trimmed);
+            let mut new_hashes = Vec::new();
+            for sent in &sentences {
+                let sent_trimmed = sent.trim();
+                if sent_trimmed.is_empty() { continue; }
+                let sent_h = hash_str(&format!("{}|{}", para_id, sent_trimmed));
+                new_hashes.push(sent_h);
+
+                if self.processed_sentence_hashes.contains(&sent_h) {
+                    continue; // already checked and clean
+                }
+
+                // Queue for grammar checking
+                self.grammar_queue.push((sent_trimmed.to_string(), *char_start));
+
+                // Queue words for spelling
+                let mut word_pos = *char_start;
+                for word in sent_trimmed.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
+                    if !clean.is_empty() && clean.len() >= 2 {
+                        self.spelling_queue.push(SpellingQueueItem {
+                            word: clean.to_string(),
+                            sentence_ctx: sent_trimmed.to_string(),
+                            paragraph_id: para_id.clone(),
+                        });
+                    }
+                    word_pos += word.len() + 1;
+                }
+            }
+            self.paragraph_sentence_hashes.insert(para_id.clone(), new_hashes);
+        }
+
+        // Update full doc text for other consumers (completion context etc.)
+        let full_text = paragraphs.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>().join(" ");
+        if !full_text.is_empty() {
+            self.last_doc_text = full_text;
+        }
+
+        if !self.grammar_queue.is_empty() {
+            self.grammar_scanning = true;
+            self.grammar_queue_total = self.grammar_queue.len();
+            self.process_grammar_queue();
+        }
+    }
+
     /// Prepare grammar scan: read document, split sentences, compute offsets, fill queue.
     /// This is fast (no SWI/BERT calls) and runs every poll when document changes.
     /// The actual per-sentence grammar checking happens incrementally in process_grammar_queue().
     fn update_grammar_errors(&mut self) {
         // When Word Add-in is active, sentence detection and error management
         // is handled by the add-in (process_addin_changed_paragraphs).
-        // Skip the old full-doc scanning approach.
         if self.manager.bridges.iter().any(|b| b.name() == "Word Add-in") {
+            return;
+        }
+
+        // Try incremental paragraph-based scanning (uses ParaID for change detection).
+        // Only falls through to full-doc scan if bridge doesn't support read_paragraphs.
+        if let Some(paragraphs) = self.manager.effective_bridge()
+            .and_then(|b| b.read_paragraphs())
+        {
+            self.update_grammar_errors_incremental(paragraphs);
             return;
         }
         // Called on paste/cut/move only — not on every keystroke.

@@ -81,6 +81,10 @@ pub trait TextBridge {
     /// Clear ALL error underlines in the document (cleanup on exit).
     fn clear_all_error_underlines(&self) -> bool { false }
 
+    /// Read all paragraphs with stable IDs. Returns (para_id, text, char_start).
+    /// Used for incremental document scanning — only changed paragraphs need processing.
+    fn read_paragraphs(&self) -> Option<Vec<(String, String, usize)>> { None }
+
     /// Mark a word with colored wavy underline by searching within a paragraph.
     fn underline_word(&self, _word: &str, _paragraph_id: &str, _color: &str) -> bool { false }
 
