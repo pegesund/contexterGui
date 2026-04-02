@@ -329,15 +329,21 @@ fn dict_path() -> PathBuf {
 }
 
 fn compound_data_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/compound_data.pl")
+    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/compound_data.pl");
+    if mac.exists() { return mac; }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/compound_data.pl")
 }
 
 fn grammar_rules_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/grammar_rules.pl")
+    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/grammar_rules.pl");
+    if mac.exists() { return mac; }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/grammar_rules.pl")
 }
 
 fn syntaxer_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer")
+    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer");
+    if mac.exists() { return mac; }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer")
 }
 
 // --- Bridge manager: picks the best available bridge ---
@@ -758,6 +764,8 @@ struct ContextApp {
     grammar_actor: Option<grammar_actor::GrammarActorHandle>,
     grammar_errors: Vec<GrammarError>,
     last_checked_sentence: String,
+    /// Shared errors JSON for HTTP /errors endpoint (test verification)
+    shared_errors_json: std::sync::Arc<std::sync::Mutex<String>>,
     // Word completer — BERT model lives in dedicated worker thread (no lock contention)
     bert_worker: Option<bert_worker::BertWorkerHandle>,
     bert_ready: bool,
@@ -1299,6 +1307,7 @@ impl ContextApp {
             grammar_actor: None,
             grammar_errors: Vec::new(),
             last_checked_sentence: String::new(),
+            shared_errors_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
             bert_worker: None,
             bert_ready: false,
             completion_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -4220,6 +4229,9 @@ impl eframe::App for ContextApp {
                 .join(","));
             for bridge in &self.manager.bridges {
                 bridge.update_errors_json(&json);
+            }
+            if let Ok(mut shared) = self.shared_errors_json.lock() {
+                *shared = json;
             }
         }
 
@@ -7223,7 +7235,25 @@ fn main() -> eframe::Result {
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                Ok(Box::new(ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab)))
+                let app = ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab);
+                // Start HTTP /errors endpoint for integration tests
+                let errors_json = app.shared_errors_json.clone();
+                std::thread::Builder::new().name("test-http".into()).spawn(move || {
+                    if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:52580") {
+                        log!("Test HTTP server listening on http://127.0.0.1:52580/errors");
+                        for stream in listener.incoming().flatten() {
+                            let mut buf = [0u8; 1024];
+                            let _ = std::io::Read::read(&mut &stream, &mut buf);
+                            let json = errors_json.lock().map(|j| j.clone()).unwrap_or_else(|_| "[]".into());
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                                json.len(), json
+                            );
+                            let _ = std::io::Write::write_all(&mut &stream, resp.as_bytes());
+                        }
+                    }
+                }).ok();
+                Ok(Box::new(app))
             }
         }),
     )

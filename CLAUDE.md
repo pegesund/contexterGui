@@ -15,6 +15,7 @@ Trace the actual code path. Add targeted logging. Find the exact line.
 - Never stop to ask questions when the answer is obvious from context
 - Make tiny changes, verify each one before the next
 - When fixing test failures, test the specific failing case first, not the full suite
+- When many integration tests fail, don't run them all — fix and verify ONE at a time
 - When replacing code, DELETE the old path completely — no fallbacks, no duplicates
 - Never rewrite existing working code — search and reuse
 - Never rescan the whole document on every keystroke
