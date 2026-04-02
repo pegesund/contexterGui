@@ -13,10 +13,10 @@ ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
 tokenizers = "0.20"
 ndarray = "0.16"
 libloading = "0.8"
-nostos-cognio = { path = "../contexter-repo/nostos-cognio" }
+nostos-cognio = { path = "../../contexter-repo/nostos-cognio" }
 regex = "1"
 image = "0.25"
-mtag = { package = "mtag-rs", path = "../rustSpell/mtag-rs" }
+mtag = { package = "mtag-rs", path = "../../rustSpell/mtag-rs" }
 rustls = "0.23"
 rustls-pemfile = "2"
 native-tls = "0.2"

@@ -273,12 +273,15 @@ pub fn spawn_grammar_actor_with_loader(
                     let _ = std::fs::create_dir_all(&d);
                     d
                 });
-            let gmp_link = frameworks_dir.join("libgmp.10.dylib");
-            let gmp_source = std::path::Path::new("/Applications/SWI-Prolog.app/Contents/Frameworks/libgmp.10.dylib");
-            if !gmp_link.exists() && gmp_source.exists() {
-                let _ = std::fs::create_dir_all(&frameworks_dir);
-                let _ = std::os::unix::fs::symlink(gmp_source, &gmp_link);
-                eprintln!("Grammar actor: symlinked libgmp to {:?}", gmp_link);
+            #[cfg(unix)]
+            {
+                let gmp_link = frameworks_dir.join("libgmp.10.dylib");
+                let gmp_source = std::path::Path::new("/Applications/SWI-Prolog.app/Contents/Frameworks/libgmp.10.dylib");
+                if !gmp_link.exists() && gmp_source.exists() {
+                    let _ = std::fs::create_dir_all(&frameworks_dir);
+                    let _ = std::os::unix::fs::symlink(gmp_source, &gmp_link);
+                    eprintln!("Grammar actor: symlinked libgmp to {:?}", gmp_link);
+                }
             }
 
             // Load checker on THIS thread so SWI-Prolog stays on one thread
