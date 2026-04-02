@@ -14,6 +14,8 @@ tokenizers = "0.20"
 ndarray = "0.16"
 libloading = "0.8"
 nostos-cognio = { path = "../contexter-repo/nostos-cognio" }
+latext_no = { path = "../../python/math/latext_no" }
+image = "0.25"
 mtag = { package = "mtag-rs", path = "../rustSpell/mtag-rs" }
 rustls = "0.23"
 rustls-pemfile = "2"

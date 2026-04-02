@@ -4,6 +4,7 @@ pub mod logging;
 mod bert_worker;
 mod bridge;
 mod grammar_actor;
+mod math_ocr;
 mod ocr;
 mod platform;
 mod stt;
@@ -871,6 +872,8 @@ struct ContextApp {
     ocr_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     ocr_text: Option<String>,
     ocr_copy_mode: bool, // true = copy to clipboard, false = speak
+    // Math OCR (lazy-loaded)
+    math_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     // Microphone / Whisper
     whisper_engine: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,       // final model (medium-q5 or tiny)
     whisper_streaming: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,    // streaming model (base; None in tiny mode)
@@ -1368,6 +1371,7 @@ impl ContextApp {
             ocr_receiver: None,
             ocr_text: None,
             ocr_copy_mode: false,
+            math_receiver: None,
             whisper_engine: None,
             whisper_streaming: None,
             mic_handle: None,
@@ -4345,6 +4349,29 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // Math OCR: check if background recognition finished
+        if let Some(rx) = &self.math_receiver {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(text) => {
+                        log!("Math OCR: '{}'", &text);
+                        if !text.is_empty() {
+                            tts::speak_word(&text);
+                        }
+                        self.ocr_text = Some(text);
+                    }
+                    Err(e) => {
+                        log!("Math OCR error: {}", e);
+                    }
+                }
+                self.math_receiver = None;
+                // Dismiss the pending image
+                if let Some(ocr) = &mut self.ocr {
+                    ocr.dismiss();
+                }
+            }
+        }
+
         // Startup: poll background loading threads
         if let Some(rx) = &self.startup_rx {
             while let Ok(item) = rx.try_recv() {
@@ -6792,10 +6819,11 @@ impl eframe::App for ContextApp {
 
         // OCR: screenshot detected prompt (separate OS window)
         let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
-        let ocr_is_busy = self.ocr_receiver.is_some();
+        let ocr_is_busy = self.ocr_receiver.is_some() || self.math_receiver.is_some();
         if ocr_has_pending && !ocr_is_busy {
             let mut do_read = false;
             let mut do_copy = false;
+            let mut do_math = false;
             let mut do_dismiss = false;
 
             let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
@@ -6837,6 +6865,9 @@ impl eframe::App for ContextApp {
                                 if ui.button(egui::RichText::new("Kopier tekst").size(13.0)).clicked() {
                                     do_copy = true;
                                 }
+                                if ui.button(egui::RichText::new("Matte").size(13.0)).clicked() {
+                                    do_math = true;
+                                }
                                 if ui.button(egui::RichText::new("Avbryt").size(13.0)).clicked() {
                                     do_dismiss = true;
                                 }
@@ -6850,6 +6881,18 @@ impl eframe::App for ContextApp {
                 if let Some(ocr) = &mut self.ocr {
                     if let Some(rx) = ocr.start_ocr() {
                         self.ocr_receiver = Some(rx);
+                    }
+                }
+            }
+            if do_math {
+                // Save clipboard image to temp file, then start math OCR
+                if let Some(ocr) = &mut self.ocr {
+                    let tmp_path = std::env::temp_dir().join("math_ocr_input.png");
+                    if ocr.save_image_to(&tmp_path) {
+                        let rx = math_ocr::start_math_ocr(tmp_path.to_string_lossy().to_string());
+                        self.math_receiver = Some(rx);
+                    } else {
+                        log!("Math OCR: failed to save clipboard image");
                     }
                 }
             }

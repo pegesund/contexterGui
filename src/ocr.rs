@@ -47,6 +47,7 @@ mod windows_impl {
         }
         pub fn has_pending_image(&self) -> bool { self.pending_image }
         pub fn dismiss(&mut self) { self.pending_image = false; self.dismissed_seq = self.last_seq; }
+        pub fn save_image_to(&self, _path: &std::path::Path) -> bool { false } // TODO: Windows
         pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
             self.pending_image = false;
             let dib_data = read_clipboard_dib()?;
@@ -197,6 +198,24 @@ mod macos_impl {
         pub fn has_pending_image(&self) -> bool { self.pending_image }
         pub fn dismiss(&mut self) { self.pending_image = false; }
 
+        /// Save the clipboard image to a file. Returns true on success.
+        pub fn save_image_to(&self, path: &std::path::Path) -> bool {
+            let save_script = format!(
+                r#"set imgData to the clipboard as «class PNGf»
+set filePath to POSIX file "{}"
+set fileRef to open for access filePath with write permission
+set eof fileRef to 0
+write imgData to fileRef
+close access fileRef"#,
+                path.display()
+            );
+            Command::new("osascript")
+                .arg("-e")
+                .arg(&save_script)
+                .output()
+                .map_or(false, |o| o.status.success())
+        }
+
         pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
             self.pending_image = false;
 
@@ -302,5 +321,6 @@ impl OcrClipboard {
     pub fn poll(&mut self) {}
     pub fn has_pending_image(&self) -> bool { false }
     pub fn dismiss(&mut self) {}
+    pub fn save_image_to(&self, _path: &std::path::Path) -> bool { false }
     pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> { None }
 }
