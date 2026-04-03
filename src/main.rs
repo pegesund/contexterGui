@@ -581,6 +581,10 @@ impl BridgeManager {
         self.effective_bridge().and_then(|b| b.read_document_context())
     }
 
+    fn read_paragraph_at(&self, cursor_offset: usize) -> Option<(String, String, usize)> {
+        self.effective_bridge().and_then(|b| b.read_paragraph_at(cursor_offset))
+    }
+
     fn read_full_document(&self) -> Option<String> {
         // When last user app was a browser, ONLY read from Browser bridge
         if self.last_user_was_browser {
@@ -2831,6 +2835,93 @@ impl ContextApp {
         }
     }
 
+    /// Process a single paragraph read via COM — mirrors process_addin_changed_paragraphs for Mac.
+    /// Called on each keystroke with the paragraph at cursor. Only reprocesses if text changed.
+    fn process_com_changed_paragraph(&mut self, para_id: String, text: String, char_start: usize) {
+        // Clean control characters
+        let clean_text: String = text.chars()
+            .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
+            .collect();
+
+        // Skip if text identical to cached
+        if self.paragraph_texts.get(&para_id).map_or(false, |t| t == &clean_text) {
+            return;
+        }
+
+        log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
+        self.paragraph_texts.insert(para_id.clone(), clean_text.clone());
+
+        // Split into sentences
+        let sentences = split_sentences(&clean_text);
+        let new_hashes: Vec<u64> = sentences.iter()
+            .map(|s| hash_str(&format!("{}|{}", para_id, s))).collect();
+
+        // Remove old sentence hashes for this paragraph
+        if let Some(old_hashes) = self.paragraph_sentence_hashes.get(&para_id) {
+            for old_h in old_hashes {
+                if !new_hashes.contains(old_h) {
+                    self.processed_sentence_hashes.remove(old_h);
+                }
+            }
+        }
+
+        // Clear stale errors for this paragraph
+        let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
+        let para_text_lower = clean_text.to_lowercase();
+        self.writing_errors.retain(|e| {
+            if e.paragraph_id != para_id { return true; }
+            if new_sentence_set.contains(&e.sentence_context.to_lowercase()) { return true; }
+            if matches!(e.category, ErrorCategory::Spelling) {
+                if para_text_lower.contains(&e.word.to_lowercase()) { return true; }
+            }
+            false
+        });
+
+        // Send new/changed sentences to grammar actor
+        if let Some(actor) = &self.grammar_actor {
+            for sentence_text in &sentences {
+                let sent_h = hash_str(&format!("{}|{}", para_id, sentence_text));
+                let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
+                    || sentence_text.ends_with('?') || sentence_text.ends_with(':');
+
+                if self.processed_sentence_hashes.contains(&sent_h)
+                    || self.grammar_inflight.contains(&sent_h) {
+                    continue;
+                }
+
+                // Clear errors for this changed sentence
+                let sentence_lower = sentence_text.to_lowercase();
+                self.writing_errors.retain(|e| {
+                    !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
+                });
+
+                // Send on word boundary: user just typed a space (paragraph text ends with space/punct)
+                let para_ends_with_boundary = clean_text.ends_with(' ')
+                    || clean_text.ends_with('.') || clean_text.ends_with('!')
+                    || clean_text.ends_with('?') || clean_text.ends_with(':')
+                    || clean_text.ends_with('\t');
+                if is_complete || para_ends_with_boundary {
+                    let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                    actor.check_sentence_with_doc(sentence_text, char_start, &para_id, 0, &self.last_doc_text, &uw);
+                    self.grammar_inflight.insert(sent_h);
+                    log!("Grammar send (COM): '{}' (para={} start={})", trunc(sentence_text, 50), trunc(&para_id, 10), char_start);
+                }
+            }
+        }
+
+        // Store new sentence hashes
+        self.paragraph_sentence_hashes.insert(para_id.clone(), new_hashes);
+
+        // Rebuild last_doc_text from paragraph_texts (same as Mac line 3381)
+        if !self.paragraph_texts.is_empty() {
+            self.last_doc_text = self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ");
+        }
+
+        // Rebuild word counts + prune
+        self.rebuild_doc_word_counts();
+        self.prune_resolved_errors();
+    }
+
     /// Prepare grammar scan: read document, split sentences, compute offsets, fill queue.
     /// This is fast (no SWI/BERT calls) and runs every poll when document changes.
     /// The actual per-sentence grammar checking happens incrementally in process_grammar_queue().
@@ -3781,28 +3872,32 @@ impl ContextApp {
                 }
                 e.underlined = false;
             } else if !e.ignored && !e.underlined && !e.word.is_empty() {
+                let mut marked = false;
                 if !e.paragraph_id.is_empty() {
-                    // Mac Add-in path: underline using word + paragraph ID
+                    // Try Mac Add-in path first: underline using word + paragraph ID
                     let color = match e.category {
                         ErrorCategory::Spelling => "#FF0000",
                         ErrorCategory::Grammar => "#0000FF",
                         ErrorCategory::SentenceBoundary => "#0000FF",
                     };
-                    let marked = self.manager.underline_word(&e.word, &e.paragraph_id, color);
-                    log!("Underline: word='{}' para={} rule={} color={} ok={}",
-                        e.word, trunc(&e.paragraph_id, 10), e.rule_name, color, marked);
-                } else if e.word_doc_start < e.word_doc_end {
-                    // Windows COM path: underline using character range
+                    marked = self.manager.underline_word(&e.word, &e.paragraph_id, color);
+                    if marked {
+                        log!("Underline: word='{}' para={} rule={} color={} ok={}",
+                            e.word, trunc(&e.paragraph_id, 10), e.rule_name, color, marked);
+                    }
+                }
+                // Fallback: Windows COM path using character range
+                if !marked && e.word_doc_start < e.word_doc_end {
                     let ul_color = match e.category {
                         ErrorCategory::Spelling => bridge::ErrorUnderlineColor::Red,
                         _ => bridge::ErrorUnderlineColor::Blue,
                     };
-                    let marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end, ul_color);
+                    marked = self.manager.mark_error_underline(e.word_doc_start, e.word_doc_end, ul_color);
                     log!("Underline: range {}..{} for '{}' rule={} color={:?} ok={}",
                         e.word_doc_start, e.word_doc_end, trunc(&e.word, 30), e.rule_name,
                         match ul_color { bridge::ErrorUnderlineColor::Red => "red", _ => "blue" }, marked);
                 }
-                e.underlined = true;
+                e.underlined = marked;
             }
         }
     }
@@ -4723,8 +4818,19 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
-                if let Some(doc) = self.manager.read_full_document() {
-                    self.try_update_doc_text(doc);
+                // Incremental paragraph scan: read only the paragraph at cursor (not full doc)
+                let is_com_bridge = !self.manager.last_user_was_browser
+                    && !self.manager.bridges.iter().any(|b| b.name() == "Word Add-in");
+                if is_com_bridge {
+                    if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
+                        if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
+                            self.process_com_changed_paragraph(para_id, text, start);
+                        }
+                    }
+                } else if self.manager.last_user_was_browser {
+                    if let Some(doc) = self.manager.read_full_document() {
+                        self.try_update_doc_text(doc);
+                    }
                 }
                 let fg = self.platform.foreground_app();
                 // Only update context if we got something useful — don't overwrite
@@ -4769,8 +4875,8 @@ impl eframe::App for ContextApp {
                                 }
                             }
                         }
-                        if big_change {
-                            // Paste/cut/move detected — trigger grammar rescan
+                        if big_change && !is_com_bridge {
+                            // Paste/cut/move detected — trigger grammar rescan (non-COM only)
                             self.update_grammar_errors();
                             self.sync_error_underlines();
                         }
@@ -4830,9 +4936,14 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // Always try to scan for errors — doc hash check makes this cheap when unchanged
+            // Scan for errors — COM bridge uses incremental paragraph scan (above),
+            // other bridges use full doc scan
+            let is_com = !self.manager.last_user_was_browser
+                && !self.manager.bridges.iter().any(|b| b.name() == "Word Add-in");
             let errors_before = self.writing_errors.len();
-            self.update_grammar_errors();
+            if !is_com {
+                self.update_grammar_errors();
+            }
             self.prune_resolved_errors();
             // Upgrade spelling suggestions when BERT becomes available
             self.upgrade_spelling_suggestions();
@@ -4896,13 +5007,11 @@ impl eframe::App for ContextApp {
                 self.validate_consonant_checks();
                 // Sentence boundary: run grammar check
                 self.run_grammar_check();
-                // Trigger full doc scan to pick up new errors from typing
-                // Only when no grammar queue is already being processed
-                if self.grammar_queue.is_empty() {
+                // Non-COM bridges: trigger full doc scan
+                if !is_com && self.grammar_queue.is_empty() {
                     self.update_grammar_errors();
                 }
                 // Word boundary work: prune, upgrade, drain grammar queue
-                // Only process grammar queue when no background forward in flight (avoids model mutex contention)
                 self.prune_resolved_errors();
                 self.upgrade_spelling_suggestions();
                 if !self.spelling_queue.is_empty() {
@@ -4934,7 +5043,7 @@ impl eframe::App for ContextApp {
                 }
                 self.validate_consonant_checks();
                 self.run_grammar_check();
-                if self.grammar_queue.is_empty() {
+                if !is_com && self.grammar_queue.is_empty() {
                     self.update_grammar_errors();
                 }
                 // Word boundary work: prune, upgrade, drain grammar queue
