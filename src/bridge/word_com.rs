@@ -301,23 +301,28 @@ impl WordComBridge {
         let cursor_pos = unsafe { extract_i32(&sel_range.get("Start")?) }?;
 
         let doc = app.get_dispatch("ActiveDocument")?;
-        let content = doc.get_dispatch("Content")?;
-        let doc_end = unsafe { extract_i32(&content.get("End")?) }?;
 
-        // Read text before cursor (up to 2000 chars)
-        let before_start = (cursor_pos - 2000).max(0);
-        let before_v = doc.call("Range", &[make_i4(before_start), make_i4(cursor_pos)])?;
-        let before_range = unsafe { extract_dispatch(&before_v) }?;
-        let before = before_range.get_string("Text").unwrap_or_default()
-            .replace('\r', " ").replace('\n', " ");
+        // Expand to the current paragraph (wdParagraph = 4).
+        // This mirrors the Google Docs extension which sends only the active paragraph —
+        // the Rust engine only needs the paragraph the cursor is in, not the whole document.
+        let para_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(cursor_pos)])?;
+        let para_range = unsafe { extract_dispatch(&para_v) }?;
+        para_range.call("Expand", &[make_i4(4)])?; // wdParagraph = 4
 
-        // Read text after cursor (up to 2000 chars)
-        let after_end = (cursor_pos + 2000).min(doc_end);
-        let after_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(after_end)])?;
-        let after_range = unsafe { extract_dispatch(&after_v) }?;
-        let after = after_range.get_string("Text").unwrap_or_default()
-            .replace('\r', " ").replace('\n', " ");
+        let para_start = unsafe { extract_i32(&para_range.get("Start")?) }? as usize;
+        let para_text = para_range.get_string("Text")
+            .unwrap_or_default()
+            .trim_end_matches('\r')
+            .replace('\r', " ");
 
+        // Split paragraph at cursor — cursor_pos is a document-absolute char offset
+        let cursor_in_para = (cursor_pos as usize).saturating_sub(para_start);
+        let chars: Vec<char> = para_text.chars().collect();
+        let cursor_chars = cursor_in_para.min(chars.len());
+        let before: String = chars[..cursor_chars].iter().collect();
+        let after: String = chars[cursor_chars..].iter().collect();
+
+        // cursor_pos (absolute) is kept for find-and-replace offset resolution
         Ok((super::RawCursorText { before, after }, cursor_pos as usize))
     }
 

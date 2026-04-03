@@ -1,9 +1,9 @@
 {
   "name": "com.norsktale.bridge",
   "description": "NorskTale native messaging host for browser textarea monitoring",
-  "path": "C:\\Users\\pette\\dev\\contexter\\NorskTale\\acatts-rust\\target\\release\\native_bridge.exe",
+  "path": "D:\\Epresente\\ContexterGui\\contexterGui\\target\\debug\\native_bridge.exe",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://gddlhbndcponncbknnkilihbklbnfipj/"
+    "chrome-extension://ikdncjkonmegknmlpepafnmpncpfhiec/"
   ]
 }

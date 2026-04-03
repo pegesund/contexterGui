@@ -9,6 +9,7 @@
   let annotatedText = null;
   let lastEmittedText = "";
   let lastEmittedCursor = -1;
+  let lastParaStart = 0; // document offset where the last emitted paragraph begins
 
   // --- Annotate API initialization ---
   async function getAnnotatedText() {
@@ -26,6 +27,27 @@
 
   // Initialize the API as early as possible
   getAnnotatedText();
+
+  // --- Extract the paragraph containing the cursor ---
+  // Paragraphs in Google Docs are separated by \n.
+  // Returns { paraText, cursorInPara } so the Rust app only sees the active paragraph,
+  // mirroring the iOS approach of sending only the relevant text block.
+  function extractParagraphAtCursor(fullText, cursorIndex) {
+    // Clamp cursor to valid range
+    const cursor = Math.max(0, Math.min(cursorIndex, fullText.length));
+
+    // Find paragraph start: last \n before cursor
+    const paraStart = fullText.lastIndexOf("\n", cursor - 1) + 1;
+
+    // Find paragraph end: next \n after cursor (or end of text)
+    const nextNewline = fullText.indexOf("\n", cursor);
+    const paraEnd = nextNewline === -1 ? fullText.length : nextNewline;
+
+    const paraText = fullText.substring(paraStart, paraEnd);
+    const cursorInPara = cursor - paraStart;
+
+    return { paraText, cursorInPara, paraStart };
+  }
 
   // --- Text reading via annotate API ---
   async function emitText() {
@@ -50,7 +72,7 @@
 
     if (!fullText) return;
 
-    // Get cursor position — try annotate API first, fall back to DOM caret tracking
+    // Get cursor position in full document — try annotate API first, fall back to DOM
     let cursorIndex = fullText.length;
     try {
       const sel = at.getSelection();
@@ -68,10 +90,14 @@
       }
     }
 
-    // Skip if neither text nor cursor changed
-    if (fullText === lastEmittedText && cursorIndex === lastEmittedCursor) return;
-    lastEmittedText = fullText;
-    lastEmittedCursor = cursorIndex;
+    // Extract only the paragraph the cursor is in (iOS-style: send only the active block)
+    const { paraText, cursorInPara, paraStart } = extractParagraphAtCursor(fullText, cursorIndex);
+    lastParaStart = paraStart; // remember for doReplace offset conversion
+
+    // Skip if neither paragraph text nor cursor-within-paragraph changed
+    if (paraText === lastEmittedText && cursorInPara === lastEmittedCursor) return;
+    lastEmittedText = paraText;
+    lastEmittedCursor = cursorInPara;
 
     // Cross-world communication via DOM element
     let el = document.getElementById("norsktale-data");
@@ -84,19 +110,49 @@
     // Get caret screen position for window-follows-cursor
     let caretScreenX = 0, caretScreenY = 0;
     try {
+      const chromeHeight = window.outerHeight - window.innerHeight;
+      // Primary: kix-cursor-caret (the blinking I-beam)
       const caret = document.querySelector(".kix-cursor-caret");
       if (caret) {
         const r = caret.getBoundingClientRect();
         if (r.height > 0) {
-          const chromeHeight = window.outerHeight - window.innerHeight;
           caretScreenX = Math.round(window.screenX + r.left);
           caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
         }
       }
+      // Fallback 1: kix-cursor element (parent of kix-cursor-caret)
+      if (!caretScreenX && !caretScreenY) {
+        const cursor = document.querySelector(".kix-cursor");
+        if (cursor) {
+          const r = cursor.getBoundingClientRect();
+          if (r.height > 0) {
+            caretScreenX = Math.round(window.screenX + r.left);
+            caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
+          }
+        }
+      }
+      // Fallback 2: use the selection range from the iframe
+      if (!caretScreenX && !caretScreenY) {
+        const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
+        if (iframe) {
+          try {
+            const iDoc = iframe.contentDocument;
+            const iSel = iDoc && iDoc.getSelection && iDoc.getSelection();
+            if (iSel && iSel.rangeCount > 0) {
+              const r = iSel.getRangeAt(0).getBoundingClientRect();
+              if (r && r.height > 0) {
+                caretScreenX = Math.round(window.screenX + r.left);
+                caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
+              }
+            }
+          } catch(e2) {}
+        }
+      }
     } catch (e) {}
 
-    el.setAttribute("data-text", fullText);
-    el.setAttribute("data-cursor", String(cursorIndex));
+    // Send only the active paragraph + paragraph-relative cursor (iOS approach)
+    el.setAttribute("data-text", paraText);
+    el.setAttribute("data-cursor", String(cursorInPara));
     el.setAttribute("data-caret-x", String(caretScreenX));
     el.setAttribute("data-caret-y", String(caretScreenY));
     el.dispatchEvent(new Event("norsktale-update", { bubbles: false }));
@@ -205,7 +261,9 @@
   }, 100);
 
   async function doReplace(find, replace, charOffset, replEl) {
-    console.log("NorskTale gdocs-inject: replace '" + find + "' → '" + replace + "' at offset " + charOffset);
+    // charOffset is paragraph-relative — convert to document-absolute for the annotate API
+    const docAbsOffset = lastParaStart + charOffset;
+    console.log("NorskTale gdocs-inject: replace '" + find + "' → '" + replace + "' paraOffset=" + charOffset + " docOffset=" + docAbsOffset);
 
     const at = await getAnnotatedText();
     if (!at || typeof at.setSelection !== "function" || typeof at.getText !== "function") {
@@ -219,14 +277,14 @@
       const findLower = find.toLowerCase();
       const docLower = docText.toLowerCase();
 
-      // Find the occurrence closest to charOffset
+      // Find the occurrence closest to the document-absolute offset
       let bestPos = -1;
       let bestDist = Infinity;
       let searchFrom = 0;
       while (true) {
         const pos = docLower.indexOf(findLower, searchFrom);
         if (pos < 0) break;
-        const dist = Math.abs(pos - charOffset);
+        const dist = Math.abs(pos - docAbsOffset);
         if (dist < bestDist) {
           bestDist = dist;
           bestPos = pos;

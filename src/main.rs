@@ -4854,7 +4854,9 @@ impl eframe::App for ContextApp {
                         self.last_caret_pos = Some((x, y + 49));
                     } else if let Some(ref ctx) = ctx_result {
                         if let Some((x, y)) = ctx.caret_pos {
-                            self.last_caret_pos = Some((x, y));
+                            if x != 0 || y != 0 {
+                                self.last_caret_pos = Some((x, y));
+                            }
                         }
                     }
                 }
