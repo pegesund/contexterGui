@@ -2849,25 +2849,6 @@ impl ContextApp {
             .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
             .collect();
 
-        // Detect new/unknown paragraph — if we've never seen this para_id, it might be
-        // a document switch or major edit. Clear all state for unknown paragraphs.
-        if !self.paragraph_texts.contains_key(&para_id) && !self.paragraph_texts.is_empty() {
-            // Check if any of our cached paragraphs still exist by comparing text
-            // If none match, it's a document switch — clear everything
-            let cached_text: String = self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ");
-            if !cached_text.contains(&clean_text) && !clean_text.contains(&cached_text.chars().take(50).collect::<String>()) {
-                log!("New paragraph {} not in cache — clearing stale state", trunc(&para_id, 10));
-                self.manager.clear_all_error_underlines();
-                self.writing_errors.clear();
-                self.paragraph_texts.clear();
-                self.paragraph_sentence_hashes.clear();
-                self.processed_sentence_hashes.clear();
-                self.grammar_inflight.clear();
-                self.last_doc_text.clear();
-                self.last_doc_hash = 0;
-            }
-        }
-
         // Skip if text identical to cached
         if self.paragraph_texts.get(&para_id).map_or(false, |t| t == &clean_text) {
             return;

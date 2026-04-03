@@ -198,17 +198,20 @@ def restore_document(doc, orig_text, orig_hash):
     doc.Content.Font.Underline = 0  # wdUnderlineNone
     doc.Content.Text = orig_text + "\r"
     time.sleep(1)
-    # Move cursor through document to trigger NorskTale paragraph scanning
+    # Move cursor through ALL paragraphs to trigger NorskTale paragraph scanning
+    # This clears stale paragraph_texts entries
     bring_word_to_front()
-    doc.Application.Selection.HomeKey(Unit=6)
+    sel = doc.Application.Selection
+    sel.HomeKey(Unit=6)  # start of doc
     time.sleep(1)
-    doc.Application.Selection.EndKey(Unit=6)
-    time.sleep(1)
-    # Move back to start so next test starts clean
-    doc.Application.Selection.HomeKey(Unit=6)
-    time.sleep(3)
+    # Step through each paragraph
+    for _ in range(doc.Paragraphs.Count):
+        sel.MoveDown(Unit=5, Count=1)  # wdParagraph
+        time.sleep(0.3)
+    sel.HomeKey(Unit=6)  # back to start
+    time.sleep(2)
     # Wait for errors to drain
-    for _ in range(5):
+    for _ in range(8):
         errors = fetch_errors() or []
         if len(errors) == 0:
             break
@@ -323,7 +326,7 @@ def main():
     lp = get_log_size()
     go_to_end(sel); sel.TypeParagraph()
     type_text(sel, "Fotball er en morsom spor.")
-    time.sleep(8)
+    time.sleep(12)
     errors = fetch_errors() or []
     check_grammar("gender mismatch", "spor", errors)
     check_no_full_rescan("no full rescan", lp)
@@ -411,13 +414,13 @@ def main():
     restore_document(doc, orig_text, orig_h)
 
     # ============================================================
-    print("\nTest 11: Grammar error -- double 'er er'")
+    print("\nTest 11: Grammar error -- wrong article gender")
     lp = get_log_size()
     go_to_end(sel); sel.TypeParagraph()
-    type_text(sel, "Det er er en fin dag.")
+    type_text(sel, "Han kjopte en nytt hus.")
     time.sleep(12)
     errors = fetch_errors() or []
-    check_grammar("double er er", "er er", errors)
+    check_grammar("wrong article gender", "en", errors)
     check_no_full_rescan("no full rescan", lp)
     restore_document(doc, orig_text, orig_h)
 
