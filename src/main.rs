@@ -2707,7 +2707,13 @@ impl ContextApp {
                 }
             };
             if should_remove && e.underlined {
-                self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                // Try Mac add-in path first, then COM range fallback
+                if !e.paragraph_id.is_empty() {
+                    self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                }
+                if e.word_doc_start < e.word_doc_end {
+                    self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                }
                 e.underlined = false;
             }
         }
@@ -2851,6 +2857,16 @@ impl ContextApp {
         log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
         self.paragraph_texts.insert(para_id.clone(), clean_text.clone());
 
+        // Clear all underlines in this paragraph range — will be re-applied for remaining errors
+        let para_char_end = char_start + clean_text.chars().count();
+        self.manager.clear_error_underline(char_start, para_char_end);
+        // Mark all errors in this paragraph as not underlined so they get re-applied
+        for e in &mut self.writing_errors {
+            if e.paragraph_id == para_id && e.underlined {
+                e.underlined = false;
+            }
+        }
+
         // Split into sentences
         let sentences = split_sentences(&clean_text);
         let new_hashes: Vec<u64> = sentences.iter()
@@ -2881,8 +2897,9 @@ impl ContextApp {
             }
             false
         });
-        for (start, end) in to_clear {
-            self.manager.clear_error_underline(start, end);
+        for (start, end) in &to_clear {
+            log!("Clearing underline {}..{} (error removed from paragraph)", start, end);
+            self.manager.clear_error_underline(*start, *end);
         }
 
         // Send new/changed sentences to grammar actor
