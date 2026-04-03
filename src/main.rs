@@ -2865,21 +2865,44 @@ impl ContextApp {
             }
         }
 
-        // Clear stale errors for this paragraph
+        // Clear stale errors for this paragraph — also clear their underlines
         let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
         let para_text_lower = clean_text.to_lowercase();
+        let mut to_clear: Vec<(usize, usize)> = Vec::new();
         self.writing_errors.retain(|e| {
             if e.paragraph_id != para_id { return true; }
             if new_sentence_set.contains(&e.sentence_context.to_lowercase()) { return true; }
             if matches!(e.category, ErrorCategory::Spelling) {
                 if para_text_lower.contains(&e.word.to_lowercase()) { return true; }
             }
+            // Removing this error — clear its underline
+            if e.underlined && e.word_doc_start < e.word_doc_end {
+                to_clear.push((e.word_doc_start, e.word_doc_end));
+            }
             false
         });
+        for (start, end) in to_clear {
+            self.manager.clear_error_underline(start, end);
+        }
 
         // Send new/changed sentences to grammar actor
+        // Compute per-sentence offsets within the paragraph
+        let para_ends_with_boundary = clean_text.ends_with(' ')
+            || clean_text.ends_with('.') || clean_text.ends_with('!')
+            || clean_text.ends_with('?') || clean_text.ends_with(':')
+            || clean_text.ends_with('\t');
         if let Some(actor) = &self.grammar_actor {
+            let clean_lower = clean_text.to_lowercase();
+            let mut search_from = 0usize;
             for sentence_text in &sentences {
+                // Find sentence position within paragraph text
+                let sent_lower = sentence_text.to_lowercase();
+                let sent_offset = clean_lower[search_from..].find(&sent_lower)
+                    .map(|pos| search_from + pos)
+                    .unwrap_or(search_from);
+                let doc_offset = char_start + clean_text[..sent_offset.min(clean_text.len())].chars().count();
+                search_from = sent_offset + sent_lower.len();
+
                 let sent_h = hash_str(&format!("{}|{}", para_id, sentence_text));
                 let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                     || sentence_text.ends_with('?') || sentence_text.ends_with(':');
@@ -2895,16 +2918,11 @@ impl ContextApp {
                     !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
                 });
 
-                // Send on word boundary: user just typed a space (paragraph text ends with space/punct)
-                let para_ends_with_boundary = clean_text.ends_with(' ')
-                    || clean_text.ends_with('.') || clean_text.ends_with('!')
-                    || clean_text.ends_with('?') || clean_text.ends_with(':')
-                    || clean_text.ends_with('\t');
                 if is_complete || para_ends_with_boundary {
                     let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-                    actor.check_sentence_with_doc(sentence_text, char_start, &para_id, 0, &self.last_doc_text, &uw);
+                    actor.check_sentence_with_doc(sentence_text, doc_offset, &para_id, 0, &self.last_doc_text, &uw);
                     self.grammar_inflight.insert(sent_h);
-                    log!("Grammar send (COM): '{}' (para={} start={})", trunc(sentence_text, 50), trunc(&para_id, 10), char_start);
+                    log!("Grammar send (COM): '{}' (para={} doc_off={})", trunc(sentence_text, 50), trunc(&para_id, 10), doc_offset);
                 }
             }
         }
@@ -3621,7 +3639,7 @@ impl ContextApp {
                     doc_offset: 0,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: !c.paragraph_id.is_empty(), pinned: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                     paragraph_id: c.paragraph_id.clone(),
                     error_word: error_word.clone(),
                 });
@@ -3703,7 +3721,7 @@ impl ContextApp {
                             doc_offset: resp.doc_offset,
                             position: i,
                             ignored: false,
-                            word_doc_start: 0, word_doc_end: 0, underlined: !resp.paragraph_id.is_empty(), pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
+                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
                         });
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
@@ -3723,7 +3741,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: !resp.paragraph_id.is_empty(), pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
                     });
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
@@ -3775,7 +3793,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: unk.position,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: !resp.paragraph_id.is_empty(), pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
                     });
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
