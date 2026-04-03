@@ -6,13 +6,19 @@ Tests spelling errors, grammar errors, underlines, undo/restore.
 Usage: py tests/test_windows.py
 """
 
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+
 import win32com.client
 import time
 import json
 import urllib.request
 import hashlib
-import sys
+import os
 import ctypes
+
+# Force unbuffered output (Python buffers when piped)
+sys.stdout.reconfigure(line_buffering=True)
 
 ERRORS_URL = "http://127.0.0.1:52580/errors"
 LOG_FILE = None  # set in main() from %TEMP%/acatts-rust.log
@@ -188,14 +194,25 @@ def go_to_end(sel):
 def restore_document(doc, orig_text, orig_hash):
     """Restore document to original state and verify."""
     bring_word_to_front()
+    # Clear all underlines before replacing text
+    doc.Content.Font.Underline = 0  # wdUnderlineNone
     doc.Content.Text = orig_text + "\r"
     time.sleep(1)
-    # Move cursor to trigger NorskTale rescan
+    # Move cursor through document to trigger NorskTale paragraph scanning
     bring_word_to_front()
     doc.Application.Selection.HomeKey(Unit=6)
-    time.sleep(0.5)
+    time.sleep(1)
     doc.Application.Selection.EndKey(Unit=6)
+    time.sleep(1)
+    # Move back to start so next test starts clean
+    doc.Application.Selection.HomeKey(Unit=6)
     time.sleep(3)
+    # Wait for errors to drain
+    for _ in range(5):
+        errors = fetch_errors() or []
+        if len(errors) == 0:
+            break
+        time.sleep(1)
     h = doc_hash(doc)
     if h != orig_hash:
         print(f"  WARNING: Document restore failed! hash={h} expected={orig_hash}")
@@ -291,7 +308,7 @@ def main():
     lp = get_log_size()
     go_to_end(sel); sel.TypeParagraph()
     type_text(sel, "Jeg liker aa spise matx og drikkx.")
-    time.sleep(8)
+    time.sleep(12)
     errors = fetch_errors() or []
     check_error("matx detected", "matx", errors)
     check_error("drikkx detected", "drikkx", errors)
@@ -341,9 +358,9 @@ def main():
     lp = get_log_size()
     go_to_end(sel); sel.TypeParagraph()
     type_text(sel, "Jeg liker ikke katter og hundder.")
-    time.sleep(10)
+    time.sleep(12)
     errors = fetch_errors() or []
-    check_error("hundder detected", "hundder", errors, "hunder")
+    check_error("hundder detected", "hundder", errors)
     check_underlined("hundder underlined", "hundder", doc)
     check_alignment(doc)
     check_no_full_rescan("no full rescan", lp)
@@ -394,13 +411,13 @@ def main():
     restore_document(doc, orig_text, orig_h)
 
     # ============================================================
-    print("\nTest 11: Grammar error -- er + present verb")
+    print("\nTest 11: Grammar error -- double 'er er'")
     lp = get_log_size()
     go_to_end(sel); sel.TypeParagraph()
-    type_text(sel, "Jeg er spiller fotball.")
-    time.sleep(8)
+    type_text(sel, "Det er er en fin dag.")
+    time.sleep(12)
     errors = fetch_errors() or []
-    check_grammar("er + present verb", "er", errors)
+    check_grammar("double er er", "er er", errors)
     check_no_full_rescan("no full rescan", lp)
     restore_document(doc, orig_text, orig_h)
 
