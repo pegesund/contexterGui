@@ -45,6 +45,7 @@ impl AccessibilityBridge {
         }
     }
 
+
     /// Try to read text from a UIA element using TextPattern2, TextPattern v1, or ValuePattern.
     fn try_read_raw(element: &IUIAutomationElement) -> Option<(RawCursorText, String)> {
         unsafe {

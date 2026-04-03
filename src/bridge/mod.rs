@@ -88,6 +88,9 @@ pub trait TextBridge {
     /// Read the single paragraph at cursor position. Returns (para_id, text, char_start).
     fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> { None }
 
+    /// Read cached selected text (polled while external app had focus).
+    fn read_selected_text(&self) -> Option<String> { None }
+
     /// Mark a word with colored wavy underline by searching within a paragraph.
     fn underline_word(&self, _word: &str, _paragraph_id: &str, _color: &str) -> bool { false }
 

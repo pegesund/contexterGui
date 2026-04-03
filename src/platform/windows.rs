@@ -1,9 +1,83 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
+use std::sync::{Arc, Mutex};
 
-pub struct WindowsPlatform;
+pub struct WindowsPlatform {
+    /// Cached selected text — polled via UIA while external app has focus
+    cached_selected_text: Arc<Mutex<Option<String>>>,
+}
 
 impl WindowsPlatform {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        let cached_selected_text = Arc::new(Mutex::new(None));
+        let sel_clone = Arc::clone(&cached_selected_text);
+
+        // Background thread polls selected text via UIA every 200ms
+        // (same pattern as Mac's fg-poller)
+        std::thread::Builder::new()
+            .name("sel-poller".into())
+            .spawn(move || {
+                // Initialize COM on this thread
+                unsafe {
+                    use windows::Win32::System::Com::*;
+                    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
+                }
+                loop {
+                    // Only poll when an external app has focus (not our window)
+                    let sel = poll_uia_selected_text();
+                    if let Ok(mut lock) = sel_clone.lock() {
+                        if sel.is_some() {
+                            *lock = sel;
+                        }
+                        // Keep last known selection when our app gets focus
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            })
+            .expect("Failed to spawn selection poller");
+
+        Self { cached_selected_text }
+    }
+}
+
+/// Poll selected text from the focused UIA element using TextPattern.GetSelection.
+/// Works for Word, Notepad, Chrome, and any UIA-compliant app.
+/// Returns None if no text is selected or our app has focus.
+fn poll_uia_selected_text() -> Option<String> {
+    unsafe {
+        use windows::Win32::System::Com::*;
+        use windows::Win32::UI::Accessibility::*;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::Interface;
+
+        // Skip if our own window has focus
+        let fg = GetForegroundWindow();
+        let mut fg_pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        if fg_pid == std::process::id() {
+            return None;
+        }
+
+        let uia: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let focused = uia.GetFocusedElement().ok()?;
+
+        // Try TextPattern (works for most apps)
+        if let Ok(pattern) =
+            focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+        {
+            let selection = pattern.GetSelection().ok()?;
+            let count = selection.Length().ok()?;
+            if count > 0 {
+                let range: IUIAutomationTextRange = selection.GetElement(0).ok()?;
+                let text = range.GetText(-1).ok()?.to_string();
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -156,6 +230,14 @@ impl PlatformServices for WindowsPlatform {
 
     fn swipl_path(&self) -> &str {
         "C:/Program Files/swipl/bin/libswipl.dll"
+    }
+
+    fn read_selected_text(&self) -> Option<String> {
+        if let Ok(lock) = self.cached_selected_text.lock() {
+            lock.clone()
+        } else {
+            None
+        }
     }
 
     fn init_tts(&self) {

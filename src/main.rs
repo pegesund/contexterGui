@@ -581,6 +581,16 @@ impl BridgeManager {
         self.effective_bridge().and_then(|b| b.read_document_context())
     }
 
+    /// Read selected text from any available bridge.
+    fn read_selected_text(&self) -> Option<String> {
+        for b in &self.bridges {
+            if let Some(text) = b.read_selected_text() {
+                return Some(text);
+            }
+        }
+        None
+    }
+
     fn read_paragraph_at(&self, cursor_offset: usize) -> Option<(String, String, usize)> {
         self.effective_bridge().and_then(|b| b.read_paragraph_at(cursor_offset))
     }
@@ -5623,8 +5633,8 @@ impl eframe::App for ContextApp {
                                     if mode == 0 {
                                         let dll = dll_dir.clone();
                                         std::thread::spawn(move || {
-                                            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                                .join("../contexter-repo/training-data/ggml-nb-whisper-tiny.bin")
+                                            let model_path = data_dir()
+                                                .join("ggml-nb-whisper-tiny.bin")
                                                 .to_string_lossy().to_string();
                                             let _ = tx.send(WhisperLoadItem::Final(
                                                 stt::WhisperEngine::load(&dll, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
@@ -5634,16 +5644,16 @@ impl eframe::App for ContextApp {
                                         let tx2 = tx.clone();
                                         let dll2 = dll_dir.clone();
                                         std::thread::spawn(move || {
-                                            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                                .join("../contexter-repo/training-data/ggml-nb-whisper-base.bin")
+                                            let model_path = data_dir()
+                                                .join("ggml-nb-whisper-base.bin")
                                                 .to_string_lossy().to_string();
                                             let _ = tx2.send(WhisperLoadItem::Streaming(
                                                 stt::WhisperEngine::load(&dll2, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                                             ));
                                         });
                                         std::thread::spawn(move || {
-                                            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                                .join("../contexter-repo/training-data/ggml-nb-whisper-medium-q5.bin")
+                                            let model_path = data_dir()
+                                                .join("ggml-nb-whisper-medium-q5.bin")
                                                 .to_string_lossy().to_string();
                                             let _ = tx.send(WhisperLoadItem::Final(
                                                 stt::WhisperEngine::load(&dll_dir, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
@@ -5671,7 +5681,7 @@ impl eframe::App for ContextApp {
                         egui::RichText::new("▶").size(14.0).color(inactive)
                     ).sense(egui::Sense::click())).on_hover_text("Les opp markert tekst").clicked() {
                         log!("Speak button clicked!");
-                        match self.platform.read_selected_text() {
+                        match self.manager.read_selected_text().or_else(|| self.platform.read_selected_text()) {
                             Some(text) => {
                                 let trimmed = text.trim();
                                 log!("Selected text: '{}'", trimmed);
