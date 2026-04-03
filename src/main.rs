@@ -2991,10 +2991,11 @@ impl ContextApp {
         // Store new sentence hashes
         self.paragraph_sentence_hashes.insert(para_id.clone(), new_hashes);
 
-        // Rebuild last_doc_text from paragraph_texts (same as Mac line 3381)
-        if !self.paragraph_texts.is_empty() {
-            self.last_doc_text = self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ");
-        }
+        // COM mode: last_doc_text = current paragraph only.
+        // paragraph_texts accumulates all visited paragraphs for error tracking/pruning,
+        // but feeding them all into last_doc_text would cause update_grammar_errors()
+        // to rescan the entire document on every keystroke instead of just the active paragraph.
+        self.last_doc_text = clean_text.clone();
 
         // Rebuild word counts + prune
         self.rebuild_doc_word_counts();
@@ -3008,6 +3009,13 @@ impl ContextApp {
         // When Word Add-in is active, sentence detection and error management
         // is handled by the add-in (process_addin_changed_paragraphs).
         if self.manager.bridges.iter().any(|b| b.name() == "Word Add-in") {
+            return;
+        }
+
+        // Word COM mode: grammar checking is handled paragraph-by-paragraph in
+        // process_com_changed_paragraph. paragraph_texts is non-empty when COM is (or was)
+        // active — skip the full-doc scan so we never reprocess stale accumulated text.
+        if !self.paragraph_texts.is_empty() && !self.manager.last_user_was_browser {
             return;
         }
 
