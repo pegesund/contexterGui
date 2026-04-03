@@ -3,3 +3,4 @@
 debug_output.txt
 word-addin/cert.pem
 word-addin/key.pem
+word-addin/fullchain.pem
