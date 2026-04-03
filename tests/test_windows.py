@@ -198,20 +198,18 @@ def restore_document(doc, orig_text, orig_hash):
     doc.Content.Font.Underline = 0  # wdUnderlineNone
     doc.Content.Text = orig_text + "\r"
     time.sleep(1)
-    # Move cursor through ALL paragraphs to trigger NorskTale paragraph scanning
-    # This clears stale paragraph_texts entries
+    # Move cursor to trigger NorskTale paragraph scanning at start and end
+    # New paragraph IDs will cause prune_resolved_errors to drop stale errors
     bring_word_to_front()
     sel = doc.Application.Selection
     sel.HomeKey(Unit=6)  # start of doc
     time.sleep(1)
-    # Step through each paragraph
-    for _ in range(doc.Paragraphs.Count):
-        sel.MoveDown(Unit=5, Count=1)  # wdParagraph
-        time.sleep(0.3)
+    sel.EndKey(Unit=6)   # end of doc
+    time.sleep(1)
     sel.HomeKey(Unit=6)  # back to start
     time.sleep(2)
     # Wait for errors to drain
-    for _ in range(8):
+    for _ in range(10):
         errors = fetch_errors() or []
         if len(errors) == 0:
             break

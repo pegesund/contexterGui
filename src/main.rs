@@ -2680,34 +2680,42 @@ impl ContextApp {
 
     /// Remove errors whose word has been corrected in the document.
     fn prune_resolved_errors(&mut self) {
-        // Build doc text from paragraph_texts (always up-to-date) or fall back to cached
-        let doc_text = if !self.paragraph_texts.is_empty() {
-            self.paragraph_texts.values().cloned().collect::<Vec<_>>().join(" ").to_lowercase()
+        // Build per-paragraph text lookup
+        let para_texts_lower: std::collections::HashMap<&str, String> = self.paragraph_texts.iter()
+            .map(|(k, v)| (k.as_str(), v.to_lowercase()))
+            .collect();
+        // Build doc text only from known paragraphs
+        let doc_text = if !para_texts_lower.is_empty() {
+            para_texts_lower.values().cloned().collect::<Vec<_>>().join(" ")
         } else if !self.last_doc_text.is_empty() {
             self.last_doc_text.to_lowercase()
         } else {
             return;
         };
-        // Pre-build per-paragraph text lookup for precise spelling checks
-        let para_texts_lower: std::collections::HashMap<&str, String> = self.paragraph_texts.iter()
-            .map(|(k, v)| (k.as_str(), v.to_lowercase()))
-            .collect();
         // Clear underlines for errors that will be removed
         for e in &mut self.writing_errors {
             let should_remove = if e.ignored {
                 true
+            } else if !e.paragraph_id.is_empty() && !para_texts_lower.contains_key(e.paragraph_id.as_str()) {
+                // Error's paragraph no longer in cache — paragraph was deleted or document changed
+                true
             } else {
+                // Check within the error's own paragraph text (not full doc)
+                let check_text = if !e.paragraph_id.is_empty() {
+                    para_texts_lower.get(e.paragraph_id.as_str()).map(|s| s.as_str()).unwrap_or("")
+                } else {
+                    doc_text.as_str()
+                };
                 match e.category {
-                    ErrorCategory::Grammar => !doc_text.contains(&e.sentence_context.to_lowercase()),
+                    ErrorCategory::Grammar => !check_text.contains(&e.sentence_context.to_lowercase()),
                     ErrorCategory::Spelling => {
                         let word_lower = e.word.to_lowercase();
-                        !doc_text.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower)
+                        !check_text.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower)
                     }
-                    ErrorCategory::SentenceBoundary => !doc_text.contains(&e.word.to_lowercase()),
+                    ErrorCategory::SentenceBoundary => !check_text.contains(&e.word.to_lowercase()),
                 }
             };
             if should_remove && e.underlined {
-                // Try Mac add-in path first, then COM range fallback
                 if !e.paragraph_id.is_empty() {
                     self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                 }
@@ -2722,21 +2730,25 @@ impl ContextApp {
                 log!("Pruning ignored: {:?} '{}'", e.category, trunc(&e.word, 40));
                 return false;
             }
+            if !e.paragraph_id.is_empty() && !para_texts_lower.contains_key(e.paragraph_id.as_str()) {
+                log!("Error resolved: {:?} '{}' paragraph gone", e.category, trunc(&e.word, 40));
+                return false;
+            }
+            let check_text = if !e.paragraph_id.is_empty() {
+                para_texts_lower.get(e.paragraph_id.as_str()).map(|s| s.as_str()).unwrap_or("")
+            } else {
+                doc_text.as_str()
+            };
             let still_present = match e.category {
-                ErrorCategory::Grammar => {
-                    doc_text.contains(&e.sentence_context.to_lowercase())
-                }
+                ErrorCategory::Grammar => check_text.contains(&e.sentence_context.to_lowercase()),
                 ErrorCategory::Spelling => {
                     let word_lower = e.word.to_lowercase();
-                    doc_text.split(|c: char| !c.is_alphanumeric())
-                        .any(|w| w == word_lower)
+                    check_text.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower)
                 }
-                ErrorCategory::SentenceBoundary => {
-                    doc_text.contains(&e.word.to_lowercase())
-                }
+                ErrorCategory::SentenceBoundary => check_text.contains(&e.word.to_lowercase()),
             };
             if !still_present {
-                log!("Error resolved: {:?} '{}' no longer in document", e.category, trunc(&e.word, 40));
+                log!("Error resolved: {:?} '{}' no longer in paragraph", e.category, trunc(&e.word, 40));
             }
             still_present
         });
@@ -2848,6 +2860,28 @@ impl ContextApp {
         let clean_text: String = text.chars()
             .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
             .collect();
+
+        // Evict stale paragraph entries: if a NEW para_id appears at a position where
+        // we had a DIFFERENT para_id cached, the old one is from a previous document state.
+        // This handles document restore/reload where all paragraph IDs change.
+        if !self.paragraph_texts.contains_key(&para_id) {
+            // Check if any existing entry overlaps this char_start position
+            // (paragraph at same position but different ID = document reloaded)
+            let para_char_end = char_start + clean_text.chars().count();
+            let stale: Vec<String> = self.writing_errors.iter()
+                .filter(|e| e.paragraph_id != para_id && e.doc_offset >= char_start && e.doc_offset < para_char_end)
+                .map(|e| e.paragraph_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter().collect();
+            for id in &stale {
+                log!("Evicting stale paragraph {} (replaced by {} at offset {})", trunc(id, 10), trunc(&para_id, 10), char_start);
+                self.paragraph_texts.remove(id);
+                if let Some(hashes) = self.paragraph_sentence_hashes.remove(id) {
+                    for h in hashes { self.processed_sentence_hashes.remove(&h); }
+                }
+                self.writing_errors.retain(|e| e.paragraph_id != *id);
+            }
+        }
 
         // Skip if text identical to cached
         if self.paragraph_texts.get(&para_id).map_or(false, |t| t == &clean_text) {
