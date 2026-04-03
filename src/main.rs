@@ -2151,7 +2151,6 @@ impl ContextApp {
         let mut seen = std::collections::HashSet::new();
         let mut edit_distances: HashMap<String, u32> = HashMap::new();
 
-        let _t_total = Instant::now();
         {
             let analyzer = match &self.analyzer {
                 Some(a) => a,
@@ -3718,9 +3717,7 @@ impl ContextApp {
                         continue;
                     }
                 }
-                let _t_spell = Instant::now();
                 let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
-                log!("find_spelling_suggestions('{}') took {}ms", word, _t_spell.elapsed().as_millis());
                 // Pick best ortho+dict candidate (grammar filtering happens async in BERT worker)
                 if let Some((best, score)) = suggestions.first().cloned() {
                     if !best.is_empty() {
