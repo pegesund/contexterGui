@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 static MIC_RECORDING: AtomicBool = AtomicBool::new(false);
+/// Saved audio from last recording — for re-transcription with final model
+static SAVED_AUDIO: Mutex<Option<Vec<f32>>> = Mutex::new(None);
 
 /// Trait for speech-to-text engines.
 /// Implementations must be safe to call from a background thread.
@@ -62,11 +64,13 @@ pub use macos_impl::MacSttEngine;
 pub use macos_impl::start_recording_live;
 
 /// Start recording from default microphone.
-/// Uses `streaming_engine` for fast partial transcription during recording,
-/// and `final_engine` for high-quality final transcription after stop.
+/// Uses `streaming_engine` for fast partial transcription during recording.
+/// If `auto_final` is true, re-transcribes with `final_engine` after stop (Mac default).
+/// If `auto_final` is false, uses streaming engine for final result (Windows: user clicks "Forbedre").
 pub fn start_recording(
     final_engine: Arc<Mutex<Box<dyn SttEngine>>>,
     streaming_engine: Arc<Mutex<Box<dyn SttEngine>>>,
+    auto_final: bool,
 ) -> Result<MicHandle, String> {
     if MIC_RECORDING.load(Ordering::Relaxed) {
         return Err("Already recording".into());
@@ -242,18 +246,52 @@ pub fn start_recording(
             raw_audio
         };
 
-        mic_log(&format!("Microphone: final transcribe {:.1}s...",
-            audio_16k.len() as f64 / 16000.0));
+        mic_log(&format!("Microphone: final transcribe {:.1}s (auto_final={})...",
+            audio_16k.len() as f64 / 16000.0, auto_final));
         let final_start = std::time::Instant::now();
-        let text = {
+        let text = if auto_final {
             let eng = final_engine.lock().unwrap();
+            eng.transcribe(&audio_16k)
+        } else {
+            // Use streaming engine for quick result — user can click "Forbedre" later
+            let eng = streaming_engine.lock().unwrap();
             eng.transcribe(&audio_16k)
         };
         mic_log(&format!("STT final result in {:.1}s: '{}'", final_start.elapsed().as_secs_f64(), text));
+        // Save audio for later re-transcription with final model
+        if !auto_final {
+            if let Ok(mut buf) = SAVED_AUDIO.lock() {
+                *buf = Some(audio_16k);
+            }
+        }
         let _ = result_tx.send(TranscribeResult { text, partial: false });
     });
 
     Ok(MicHandle { stop_flag, result_rx })
+}
+
+/// Re-transcribe saved audio with the final (large) model.
+/// Returns a channel that will receive the improved text.
+pub fn improve_with_final_model(
+    final_engine: Arc<Mutex<Box<dyn SttEngine>>>,
+) -> Option<mpsc::Receiver<String>> {
+    let audio = {
+        let buf = SAVED_AUDIO.lock().ok()?;
+        buf.clone()?
+    };
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        mic_log(&format!("Improve: re-transcribing {:.1}s with final model...",
+            audio.len() as f64 / 16000.0));
+        let start = std::time::Instant::now();
+        let text = {
+            let eng = final_engine.lock().unwrap();
+            eng.transcribe(&audio)
+        };
+        mic_log(&format!("Improve: done in {:.1}s: '{}'", start.elapsed().as_secs_f64(), text));
+        let _ = tx.send(text);
+    });
+    Some(rx)
 }
 
 /// Log to the shared log file

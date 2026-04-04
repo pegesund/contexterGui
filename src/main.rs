@@ -910,6 +910,9 @@ struct ContextApp {
     mic_handle: Option<stt::MicHandle>,
     mic_transcribing: bool,
     mic_result_text: Option<String>,
+    /// Receiver for "Forbedre" re-transcription result (Windows only)
+    improve_rx: Option<std::sync::mpsc::Receiver<String>>,
+    improve_running: bool,
     /// 0 = Rask (tiny only, ~75MB), 1 = Beste (base streaming + medium-q5 final, ~690MB)
     whisper_mode: u8,
     /// Receiver for lazy-loaded whisper engines
@@ -1410,6 +1413,8 @@ impl ContextApp {
             mic_handle: None,
             mic_transcribing: false,
             mic_result_text: None,
+            improve_rx: None,
+            improve_running: false,
             whisper_mode: 1, // default: Beste (base+medium-q5)
             whisper_load_rx: None,
             whisper_loading: false,
@@ -4800,7 +4805,8 @@ impl eframe::App for ContextApp {
                     if self.whisper_engine.is_some() {
                         let final_eng = self.whisper_engine.as_ref().unwrap().clone();
                         let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-                        match stt::start_recording(final_eng, stream_eng) {
+                        let auto_final = cfg!(target_os = "macos");
+                        match stt::start_recording(final_eng, stream_eng, auto_final) {
                             Ok(handle) => {
                                 log!("Microphone recording auto-started after load");
                                 self.mic_handle = Some(handle);
@@ -4830,8 +4836,18 @@ impl eframe::App for ContextApp {
                 }
             }
         }
+        // Poll for "Forbedre" result
+        if let Some(ref rx) = self.improve_rx {
+            if let Ok(text) = rx.try_recv() {
+                log!("Improve result: '{}'", trunc(&text, 60));
+                self.mic_result_text = Some(text);
+                self.improve_rx = None;
+                self.improve_running = false;
+                ctx.request_repaint();
+            }
+        }
         // Keep repainting while waiting for whisper results
-        if self.mic_handle.is_some() || self.mic_transcribing {
+        if self.mic_handle.is_some() || self.mic_transcribing || self.improve_running {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
@@ -5603,7 +5619,8 @@ impl eframe::App for ContextApp {
                                 // Models already loaded — start recording immediately
                                 let final_eng = self.whisper_engine.as_ref().unwrap().clone();
                                 let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-                                match stt::start_recording(final_eng, stream_eng) {
+                                let auto_final = cfg!(target_os = "macos");
+                                match stt::start_recording(final_eng, stream_eng, auto_final) {
                                     Ok(handle) => {
                                         log!("Microphone recording started");
                                         self.mic_handle = Some(handle);
@@ -6754,6 +6771,7 @@ impl eframe::App for ContextApp {
                 let mut do_close = false;
                 let mut do_copy = false;
                 let mut do_stop = false;
+                let mut do_improve = false;
                 let text_clone = self.mic_result_text.clone().unwrap_or_default();
 
                 let win_w = 600.0_f32;
@@ -6811,7 +6829,11 @@ impl eframe::App for ContextApp {
                                 } else if is_correcting {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        let msg = if self.whisper_mode == 1 { "Forbedrer med stor modell..." } else { "Transkriberer..." };
+                                        let msg = if self.whisper_mode == 1 && cfg!(target_os = "macos") {
+                                            "Forbedrer med stor modell..."
+                                        } else {
+                                            "Transkriberer..."
+                                        };
                                         ui.label(egui::RichText::new(msg).size(14.0)
                                             .color(egui::Color32::from_rgb(100, 80, 140)));
                                     });
@@ -6832,6 +6854,16 @@ impl eframe::App for ContextApp {
                                     });
                                 });
 
+                                // Show spinner when improving
+                                if self.improve_running {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(egui::RichText::new("Forbedrer med stor modell...").size(14.0)
+                                            .color(egui::Color32::from_rgb(100, 80, 140)));
+                                    });
+                                    ui.add_space(4.0);
+                                }
+
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     if !is_streaming {
@@ -6843,6 +6875,17 @@ impl eframe::App for ContextApp {
                                             tts::speak_word(&text_clone);
                                         }
                                         ui.add_space(8.0);
+                                        // "Forbedre" button — only on Windows, when final model available, not already improving
+                                        if cfg!(target_os = "windows")
+                                            && self.whisper_mode == 1
+                                            && self.whisper_engine.is_some()
+                                            && !self.improve_running
+                                        {
+                                            if ui.button(egui::RichText::new("Forbedre resultat").size(14.0)).clicked() {
+                                                do_improve = true;
+                                            }
+                                            ui.add_space(8.0);
+                                        }
                                     }
                                     if ui.button(egui::RichText::new("Lukk").size(14.0)).clicked() {
                                         do_close = true;
@@ -6867,6 +6910,15 @@ impl eframe::App for ContextApp {
                 }
                 if do_copy {
                     self.platform.copy_to_clipboard(&text_clone);
+                }
+                if do_improve {
+                    if let Some(final_eng) = &self.whisper_engine {
+                        if let Some(rx) = stt::improve_with_final_model(final_eng.clone()) {
+                            self.improve_rx = Some(rx);
+                            self.improve_running = true;
+                            log!("Improve: started re-transcription with final model");
+                        }
+                    }
                 }
                 if do_close {
                     // Stop recording if active
