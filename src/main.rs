@@ -5549,10 +5549,10 @@ impl eframe::App for ContextApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
-        egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            // Tab bar with painted dot indicators
-            let tts_speaking = tts::is_speaking();
-            let ocr_is_busy = self.ocr_receiver.is_some();
+        // Toolbar at bottom
+        let tts_speaking = tts::is_speaking();
+        let ocr_is_busy = self.ocr_receiver.is_some();
+        egui::TopBottomPanel::bottom("toolbar").frame(panel_frame).show(ctx, |ui| {
             let header_resp = ui.horizontal(|ui| {
                 let sep = egui::Color32::from_rgb(180, 170, 140);
                 let active = egui::Color32::from_rgb(0, 70, 160);
@@ -5793,16 +5793,16 @@ impl eframe::App for ContextApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }).response;
-            // Drag the window by dragging anywhere on the header bar (when unpinned)
+            // Drag the window by dragging anywhere on the toolbar (when unpinned)
             if !self.follow_cursor {
                 let header_drag = header_resp.interact(egui::Sense::drag());
                 if header_drag.drag_started() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             }
+        });
 
-            ui.separator();
-
+        egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // === Whisper transcription result — shown in separate centered window ===
             // (rendering happens below via show_viewport_immediate)
 

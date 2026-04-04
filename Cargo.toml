@@ -57,7 +57,7 @@ features = [
 
 # Override neorusticus SSH git dependency with local copy
 [patch."ssh://git@github.com/pegesund/neorusticus.git"]
-neorusticus = { path = "../../neorusticus/neorusticus" }
+neorusticus = { path = "../../neorusticus" }
 
 [[bin]]
 name = "native_bridge"
