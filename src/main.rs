@@ -3827,7 +3827,11 @@ impl ContextApp {
             // Handle unknown words (spelling errors) — from check_sentence_full
             for unk in resp.unknown_words.iter()
                 .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
-                .filter(|u| !self.wordfreq.as_ref().map_or(false, |wf| wf.contains_key(&u.word.to_lowercase())))
+                .filter(|u| !self.analyzer.as_ref().map_or(false, |a| a.has_word(&u.word)))
+                .filter(|u| !self.wordfreq.as_ref().map_or(false, |wf| {
+                    let freq = wf.get(&u.word.to_lowercase()).copied().unwrap_or(0);
+                    freq >= 1000 // Only skip high-frequency words — low-freq entries may be junk
+                }))
             {
                 let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default()
                     .trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();

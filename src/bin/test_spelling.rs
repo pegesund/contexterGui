@@ -11,7 +11,11 @@ use acatts_rust::spelling_scorer::{generate_spelling_candidates, score_and_reran
 
 fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let training = base.join("../contexter-repo/training-data");
+    // Try both Mac layout (../contexter-repo) and Windows layout (../../contexter-repo)
+    let training = {
+        let mac = base.join("../contexter-repo/training-data");
+        if mac.exists() { mac } else { base.join("../../contexter-repo/training-data") }
+    };
 
     let onnx_path = training.join("onnx/norbert4_base_int8.onnx");
     let tok_path = training.join("onnx/tokenizer.json");
@@ -20,9 +24,18 @@ fn main() {
         .expect("Failed to load model");
     println!("Loaded. Vocab: {}", model.vocab_size());
 
-    let dict_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
-    let grammar_rules_path = base.join("../syntaxer/grammar_rules.pl");
-    let syntaxer_dir = base.join("../syntaxer");
+    let dict_path = {
+        let mac = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+        if mac.exists() { mac } else { base.join("../../rustSpell/mtag-rs/data/fullform_bm.mfst") }
+    };
+    let grammar_rules_path = {
+        let mac = base.join("../syntaxer/grammar_rules.pl");
+        if mac.exists() { mac } else { base.join("../../syntaxer/grammar_rules.pl") }
+    };
+    let syntaxer_dir = {
+        let mac = base.join("../syntaxer");
+        if mac.exists() { mac } else { base.join("../../syntaxer") }
+    };
     let swipl_dll = if cfg!(target_os = "macos") {
         "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib"
     } else {
