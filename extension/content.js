@@ -22,8 +22,21 @@
   let lastTextElement = null;
   let lastGDocsText = null;
   let port = null;
-  let replaceInProgress = false; // true while GDocs replace is pending
+  let replaceInProgress = false;
   let replaceStartTime = 0;
+  let lastParaStart = 0;
+
+  function extractParagraphAtCursor(text, cursorPos) {
+    const cursor = Math.max(0, Math.min(cursorPos, text.length));
+    const paraStart = text.lastIndexOf("\n", cursor - 1) + 1;
+    const nextNewline = text.indexOf("\n", cursor);
+    const paraEnd = nextNewline === -1 ? text.length : nextNewline;
+    return {
+      paraText: text.substring(paraStart, paraEnd),
+      cursorInPara: cursor - paraStart,
+      paraStart
+    };
+  }
 
   function connectPort() {
     try {
@@ -37,45 +50,56 @@
     return location.hostname === "docs.google.com" && location.pathname.startsWith("/document/");
   }
 
-  // ========================================================================
-  // ACTIVE CURSOR CHECK — the ONE gate for ALL text sending.
-  // Returns the editable element with cursor, or null if no active cursor.
-  // "Active cursor" means: user has clicked into an editable element and
-  // there is a blinking caret / text selection inside it.
-  // ========================================================================
+  function isGmail() {
+    return location.hostname === "mail.google.com";
+  }
+
+  // Walk up the DOM to find the nearest contenteditable ancestor.
+  // Needed for Gmail compose where document.activeElement is a wrapper div,
+  // not the actual textbox the cursor is in.
+  function findContentEditableAncestor(node) {
+    while (node && node !== document.body) {
+      if (node.nodeType === 1 && node.isContentEditable) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
   function getElementWithActiveCursor() {
     if (!document.hasFocus()) return null;
 
     const el = document.activeElement;
-    if (!el) return null;
 
-    // Textarea or text input: cursor exists if selectionStart is a number
-    if (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text")) {
+    if (el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text"))) {
       if (typeof el.selectionStart === "number") return el;
-      return null;
     }
 
-    // ContentEditable: cursor exists if window.getSelection() has a range
-    // AND that range is inside the editable element
-    if (el.isContentEditable) {
+    if (el && el.isContentEditable) {
       const sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0) return null;
-      const range = sel.getRangeAt(0);
-      if (el.contains(range.startContainer)) return el;
-      return null;
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        if (el.contains(range.startContainer)) return el;
+      }
     }
 
-    // Not an editable element — no cursor
+    // Fallback for Gmail and rich editors where activeElement ≠ the textbox
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const anchor = sel.getRangeAt(0).startContainer;
+      const editable = findContentEditableAncestor(
+        anchor.nodeType === 3 ? anchor.parentNode : anchor
+      );
+      if (editable) return editable;
+    }
+
     return null;
   }
 
-  // --- Google Docs: read text from DOM element written by gdocs-inject.js ---
   // gdocs-inject.js (MAIN world) writes to #norsktale-data.
   // Content.js (ISOLATED world) polls it. DOM is shared between worlds.
   let lastDataVersion = "";
   function pollGDocsData() {
     if (!isGoogleDocs()) return;
-    // During replace: block until gdocs-inject confirms replacement (or timeout)
     if (replaceInProgress) {
       const el = document.getElementById("norsktale-data");
       const done = el && el.getAttribute("data-replace-done") === "true";
@@ -85,7 +109,7 @@
         replaceInProgress = false;
         if (el) el.removeAttribute("data-replace-done");
       } else {
-        return; // don't send stale text while replace is pending
+        return;
       }
     }
     const el = document.getElementById("norsktale-data");
@@ -115,23 +139,19 @@
       } catch (e) { port = null; }
     }
   }
-  // Poll every 500ms for GDocs data
   setInterval(pollGDocsData, 500);
 
-  // --- Replace handler ---
   function handleResponse(msg) {
     if (msg.action !== "replace") return;
     norsktaleLog("REPLACE: find='" + (msg.expected||"") + "' text='" + (msg.text||"") + "'");
 
     if (isGoogleDocs()) {
-      // Send replace request to gdocs-inject.js (MAIN world) via postMessage
       const findText = msg.expected || "";
       const replaceText = msg.text || "";
       if (!findText) {
         norsktaleLog("REPLACE FAILED: no expected text");
         return;
       }
-      // Send replace request via DOM element (shared between worlds)
       let replEl = document.getElementById("norsktale-replace");
       if (!replEl) {
         replEl = document.createElement("div");
@@ -143,26 +163,27 @@
       replEl.setAttribute("data-replace", replaceText);
       replEl.setAttribute("data-offset", String(msg.start || 0));
       replEl.setAttribute("data-pending", "true");
-      replaceInProgress = true; // block text updates until replace confirmed
+      replaceInProgress = true;
       replaceStartTime = Date.now();
-      lastSent = ""; // force re-read after replace
-      lastDataVersion = ""; // force re-read when fresh data arrives
+      lastSent = "";
+      lastDataVersion = "";
       return;
     }
 
-    // Non-GDocs: textarea or contenteditable
     const el = activeElement || lastTextElement;
     if (!el) return;
-    let start = msg.start;
-    let end = msg.end;
     const replacement = msg.text;
     const expected = msg.expected || "";
+
+    // msg.start / msg.end are paragraph-relative; convert to document-absolute
+    let start = lastParaStart + (msg.start || 0);
+    let end   = lastParaStart + (msg.end   || 0);
 
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
       const val = el.value;
       if (expected && val.substring(start, end).toLowerCase() !== expected.toLowerCase()) {
         const idx = val.toLowerCase().indexOf(expected.toLowerCase(), Math.max(0, start - 5));
-        if (idx >= 0 && idx <= start + 5) { start = idx; end = idx + expected.length; }
+        if (idx >= 0 && idx <= start + 10) { start = idx; end = idx + expected.length; }
       }
       const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
         || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
@@ -174,6 +195,7 @@
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
       lastSent = "";
+      lastParaStart = 0;
     } else if (el.isContentEditable) {
       el.focus();
       const sel = window.getSelection();
@@ -216,9 +238,8 @@
     }
   }
 
-  // --- Mirror div technique to get textarea cursor pixel position ---
-  // Convert viewport-relative coordinates to physical screen pixels.
-  // Word COM uses ClientToScreen (physical pixels), so browser must match.
+  // Converts viewport-relative coordinates to physical screen pixels.
+  // Must match the physical pixel coordinates the native app uses (ClientToScreen on Windows).
   function viewportToScreen(vpX, vpY) {
     const dpr = window.devicePixelRatio || 1;
     const chromeHeight = window.outerHeight - window.innerHeight;
@@ -255,34 +276,36 @@
     const rect = el.getBoundingClientRect();
     const markerRect = marker.getBoundingClientRect();
     const mirrorRect = mirror.getBoundingClientRect();
-    // Viewport-relative cursor position within textarea
     const vpX = rect.left + (markerRect.left - mirrorRect.left) - el.scrollLeft;
     const vpY = rect.top + (markerRect.top - mirrorRect.top) - el.scrollTop;
     document.body.removeChild(mirror);
     return viewportToScreen(vpX, vpY);
   }
 
-  // --- Non-GDocs: textarea/contenteditable monitoring ---
   function getTextAndCursor(el) {
     if (isGoogleDocs()) return null;
     if (!el) return null;
+
     if (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text")) {
       const pos = getTextareaCursorXY(el);
-      return { text: el.value, cursorStart: el.selectionStart, cursorEnd: el.selectionEnd, caretX: pos.x, caretY: pos.y };
+      const { paraText, cursorInPara, paraStart } =
+        extractParagraphAtCursor(el.value, el.selectionStart);
+      lastParaStart = paraStart;
+      return { text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara, caretX: pos.x, caretY: pos.y };
     }
+
     if (el.isContentEditable) {
       const sel = window.getSelection();
-      const text = el.innerText;
-      let cursorStart = 0, cursorEnd = 0;
+      // innerText normalises Gmail's per-div line breaks to \n
+      const fullText = el.innerText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      let docCursor = 0;
       let caretX = 0, caretY = 0;
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0);
         const preRange = document.createRange();
         preRange.selectNodeContents(el);
         preRange.setEnd(range.startContainer, range.startOffset);
-        cursorStart = preRange.toString().length;
-        preRange.setEnd(range.endContainer, range.endOffset);
-        cursorEnd = preRange.toString().length;
+        docCursor = preRange.toString().length;
         const caretRect = range.getBoundingClientRect();
         if (caretRect && caretRect.height > 0) {
           const screenPos = viewportToScreen(caretRect.left, caretRect.bottom);
@@ -290,14 +313,18 @@
           caretY = screenPos.y;
         }
       }
-      return { text, cursorStart, cursorEnd, caretX, caretY };
+      const { paraText, cursorInPara, paraStart } =
+        extractParagraphAtCursor(fullText, docCursor);
+      lastParaStart = paraStart;
+      if (!paraText.trim()) return null;
+      return { text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara, caretX, caretY };
     }
+
     return null;
   }
 
-  // --- sendUpdate: ONLY sends if active cursor exists ---
   function sendUpdate() {
-    if (isGoogleDocs()) return; // GDocs handled via postMessage from gdocs-inject.js
+    if (isGoogleDocs()) return;
     const el = getElementWithActiveCursor();
     if (!el) return;
     const data = getTextAndCursor(el);
@@ -326,17 +353,13 @@
   document.addEventListener("click", () => setTimeout(sendUpdate, 50), true);
   document.addEventListener("keyup", sendUpdate, true);
 
-  // Clear stale text when page loses focus
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) lastGDocsText = null;
   }, true);
 
-  // Heartbeat — keeps native bridge alive, only sends text with active cursor
   setInterval(() => {
     if (!port) connectPort();
     if (isGoogleDocs()) {
-      // GDocs: only resend if page has focus AND we have text from canvas hook
-      // Don't resend stale text during replace
       if (replaceInProgress) {
         if (port) { try { port.postMessage({ type: "keepalive" }); } catch(e) { port = null; } }
         return;
@@ -354,7 +377,6 @@
       }
       return;
     }
-    // Non-GDocs: ONLY send if active cursor exists
     const el = getElementWithActiveCursor();
     if (!el) return;
     const data = getTextAndCursor(el);
