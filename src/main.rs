@@ -5749,7 +5749,16 @@ impl eframe::App for ContextApp {
                 } else {
                     egui::Color32::from_rgb(160, 160, 160)
                 };
-                let pin_tooltip = if self.follow_cursor { "Følg markør (på)" } else { "Følg markør (av)" };
+                // Phase 11a: UI strings come from the Language trait. Bokmål
+                // is hard-coded here for now; later phases pipe a runtime
+                // language through ContextApp.
+                use language::LanguageUi as _;
+                let bokmal = language::BokmalLanguage;
+                let pin_tooltip = if self.follow_cursor {
+                    bokmal.ui_pin_cursor_on()
+                } else {
+                    bokmal.ui_pin_cursor_off()
+                };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
                 ).sense(egui::Sense::click())).on_hover_text(pin_tooltip).clicked() {
@@ -5760,14 +5769,14 @@ impl eframe::App for ContextApp {
                 let settings_color = if self.selected_tab == 2 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
-                ).sense(egui::Sense::click())).on_hover_text("Innstillinger").clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(bokmal.ui_settings()).clicked() {
                     self.selected_tab = 2;
                 }
 
                 // ▁ Minimize
                 if ui.add(egui::Label::new(
                     egui::RichText::new("–").size(14.0).color(inactive)
-                ).sense(egui::Sense::click())).on_hover_text("Minimer").clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(bokmal.ui_minimize()).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
@@ -5983,8 +5992,10 @@ impl eframe::App for ContextApp {
                 });
 
                 if active_errors.is_empty() {
+                    use language::LanguageUi as _;
+                    let bokmal = language::BokmalLanguage;
                     ui.label(
-                        egui::RichText::new("Ingen feil funnet.")
+                        egui::RichText::new(bokmal.ui_no_errors())
                             .size(12.0)
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
@@ -6010,8 +6021,10 @@ impl eframe::App for ContextApp {
                                 .filter(|e| !e.ignored && e.rule_name != "llm_correction")
                                 .count();
                             if err_count > 0 {
+                                use language::LanguageUi as _;
+                                let bokmal = language::BokmalLanguage;
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new("✨ AI-korriger alle").size(11.0)
+                                    egui::RichText::new(bokmal.ui_ai_fix_all()).size(11.0)
                                 ).min_size(egui::vec2(0.0, 18.0))).clicked() {
                                     self.dispatch_llm_fix_all();
                                 }
@@ -7108,8 +7121,10 @@ impl eframe::App for ContextApp {
                 .show(ctx, |ui| {
                     let current = tts::current_voice();
                     if self.voice_list.is_empty() {
+                        use language::LanguageUi as _;
+                        let bokmal = language::BokmalLanguage;
                         ui.label(egui::RichText::new("Ingen norske stemmer funnet.").size(12.0));
-                        ui.label(egui::RichText::new("Last ned stemmer i Systeminnstillinger > Tilgjengelighet > Opplest innhold > Systemstemme").size(11.0)
+                        ui.label(egui::RichText::new(bokmal.ui_voice_download_help()).size(11.0)
                             .color(egui::Color32::from_rgb(100, 100, 100)));
                     }
                     for voice in &self.voice_list {
