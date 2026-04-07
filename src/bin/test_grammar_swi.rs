@@ -19,7 +19,7 @@ struct TestCase {
 
 fn main() {
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dict_path = base.join("../c/mtag-rs/data/fullform_bm.mfst");
+    let dict_path = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
     let grammar_path = base.join("../syntaxer/grammar_rules.pl");
     let syntaxer_dir = base.join("../syntaxer");
 
