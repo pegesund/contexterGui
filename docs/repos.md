@@ -31,19 +31,117 @@ NorskTale is a Norwegian spelling and grammar checker for dyslexia users, built 
 - **Purpose**: Morphological analyzer — FST-based dictionary with 633K Norwegian word forms
 - **Key files**: `data/fullform_bm.mfst` (dictionary), `src/lib.rs` (analyze, prefix_lookup, has_word, fuzzy_lookup)
 
-### neorusticus
-- **GitHub**: pegesund/neorusticus
-- **Path**: `neorusticus`
-- **Purpose**: Pure Rust Prolog engine — zero dependencies, fallback when SWI-Prolog is not available
-- **Note**: Grammar rules are embedded via `include_str!` (synced from syntaxer via `sync_grammar_rules.py`)
+### language-rs
+- **GitHub**: pegesund/rustSpell (subdir `language-rs/`)
+- **Path**: `rustSpell/language-rs`
+- **Purpose**: Language abstraction trait stack — every Bokmål-specific constant (paths, modal pairs, function words, voice/STT/OCR codes, UI strings) lives behind a trait so adding Nynorsk/English/etc. is a single new file
+- **Key files**: `src/lib.rs` (LanguageProfile + 6 sub-traits + LanguageBundle supertrait + BokmalLanguage impl + resolve_language registry)
+- **See**: [`adding-a-language.md`](adding-a-language.md) for the per-language walkthrough
 
 ## External Dependencies
 
-| Dependency | Version | Path | Purpose |
-|-----------|---------|------|---------|
-| SWI-Prolog | 9.2.9 | `C:\Program Files\swipl\bin\libswipl.dll` | Grammar checking (loaded dynamically) |
-| ONNX Runtime | 1.23.0 | `onnxruntime/` | BERT model inference (CPU) |
-| OpenVINO | 2025.4.0 | `openvino/` | BERT inference (2x faster on Intel CPUs) |
+| Dependency | Path (macOS) | Path (Windows) | Purpose |
+|-----------|--------------|----------------|---------|
+| SWI-Prolog | `/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib` | `C:\Program Files\swipl\bin\libswipl.dll` | Grammar checking (loaded dynamically at runtime) |
+| ONNX Runtime | `/opt/homebrew/lib/libonnxruntime.dylib` | `onnxruntime/` (vendored) | BERT model inference (CPU) |
+| OpenVINO | (not used on macOS) | `openvino/` (vendored) | BERT inference (2x faster on Intel CPUs) |
+
+The runtime loads each library dynamically. SWI-Prolog and ONNX Runtime
+must be installed before the app starts; OpenVINO is auto-detected
+(falls back to ORT if not present).
+
+## Building and running (macOS)
+
+### One-time setup
+
+```bash
+# 1. Install runtime dependencies
+brew install onnxruntime
+brew install --cask swi-prolog
+# (rustup must already be installed)
+
+# 2. Clone the four repos as siblings under dev/dyslex/
+mkdir -p ~/dev/dyslex && cd ~/dev/dyslex
+git clone git@github.com:pegesund/contexterGui.git
+git clone git@github.com:pegesund/contexter.git contexter-repo
+git clone git@github.com:pegesund/rustSpell.git
+git clone git@github.com:pegesund/syntaxer.git
+
+# 3. Symlink the path-dep targets so the Cargo.toml ../../ paths resolve.
+#    (contexterGui/Cargo.toml uses ../../rustSpell etc. which is the
+#    Windows layout — these symlinks make Mac match.)
+ln -s ~/dev/dyslex/rustSpell      ~/dev/rustSpell
+ln -s ~/dev/dyslex/contexter-repo ~/dev/contexter-repo
+```
+
+### Build
+
+From `contexterGui/`:
+
+```bash
+cargo build --bin acatts-rust            # debug
+cargo build --release --bin acatts-rust  # release
+```
+
+The first build takes 5–10 min (large dependency tree: eframe, ort,
+tokenizers, ndarray, rustls, cpal, …). Subsequent builds are
+incremental and finish in seconds.
+
+### Run
+
+```bash
+# default: Bokmål
+./target/debug/acatts-rust &
+
+# pick a language explicitly (only nb / no are registered today)
+./target/debug/acatts-rust --language nb &
+
+# disable grammar checking
+./target/debug/acatts-rust --no-grammar &
+
+# faster (lower-quality) BERT inference
+./target/debug/acatts-rust --quality 0 &
+
+# show the debug tab in the UI
+./target/debug/acatts-rust --debug &
+
+# headless spelling test mode (no GUI, runs the same pipeline)
+./target/debug/acatts-rust --test-spelling
+```
+
+The app opens a small always-on-top window that follows the cursor in
+Word / Google Docs / accessibility-enabled apps. It listens on
+`https://127.0.0.1:3000` for the Word add-in to connect.
+
+### Verifying the build
+
+Banner on startup should print:
+
+```
+Grammar completion: ON
+SWI-Prolog engine: ON
+Language: Bokmål (nb)
+Quality: 1 (Normal)
+Loaded dictionary with 633618 entries in ~100ms
+Loading NorBERT4 from .../norbert4_base_int8.onnx
+Word Add-in HTTPS bridge (native-tls) listening on port 3000
+Sentence splitter loaded from .../syntaxer/sentence_split.pl
+Grammar actor: SWI-Prolog loaded on actor thread
+```
+
+If a path fails to resolve (typically the FST, ONNX model, or Prolog
+rules) the app crashes early with the path in the error message.
+
+### Reloading the Word add-in
+
+Two scripts in `contexterGui/`:
+
+```bash
+./reconnect_addin.sh   # add-in dropped its connection (shows "Prøv på nytt")
+./reload_addin.sh      # add-in is loaded but needs a refresh
+```
+
+Always try `reconnect_addin.sh` first.
 
 ## Architecture
 
@@ -56,16 +154,19 @@ Chrome Extension (Google Docs)
 │  ├── Word COM bridge (Microsoft Word)   │
 │  ├── Browser bridge (Google Docs)       │
 │  ├── Accessibility bridge (other apps)  │
-│  └── BERT worker thread                 │
+│  ├── BERT worker thread                 │
+│  └── language: Arc<dyn LanguageBundle>  │ ← language-rs
 │       │                                 │
 │       v                                 │
 │  nostos-cognio (NLP engine)             │
-│  ├── NorBERT4 (ORT/OpenVINO)           │
+│  ├── NorBERT4 (ORT / OpenVINO)          │
 │  ├── SWI-Prolog grammar checker ──────────── syntaxer (grammar_rules.pl)
-│  ├── mtag-rs (dictionary) ────────────────── rustSpell (fullform_bm.mfst)
-│  └── neorusticus (Prolog fallback)      │
+│  └── mtag-rs (dictionary) ────────────────── rustSpell (fullform_bm.mfst)
 └─────────────────────────────────────────┘
 ```
+
+SWI-Prolog is the only grammar engine. The Neo path (and the
+neorusticus dependency) was removed in the multiLanguage refactor.
 
 ## Chromebook / Android Path
 
@@ -73,5 +174,5 @@ For running on Chromebooks as an Android app:
 - Same Rust codebase (nostos-cognio + egui)
 - Chrome extension communicates via localhost HTTP (replacing file bridge)
 - ONNX Runtime has Android ARM support
-- SWI-Prolog: minimal C build for ARM, or fallback to neorusticus
+- SWI-Prolog: minimal C build for ARM
 - See `docs/gpu.md` in nostos-cognio for inference backend benchmarks
