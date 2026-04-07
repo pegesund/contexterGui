@@ -5502,10 +5502,14 @@ impl eframe::App for ContextApp {
                 let dpi_scale = ctx.pixels_per_point();
                 let lx = x as f32 / dpi_scale;
                 let ly = y as f32 / dpi_scale;
-                let pos_y = if (ly + win_h) > screen_h {
+                // Push the window 5 cm below the caret so it doesn't cover the line
+                // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
+                const CARET_OFFSET_BELOW_PX: f32 = 189.0;
+                let pos_y = if (ly + CARET_OFFSET_BELOW_PX + win_h) > screen_h {
+                    // Not enough room below — flip above the caret with a 30 px gap.
                     ly - win_h - 30.0
                 } else {
-                    ly
+                    ly + CARET_OFFSET_BELOW_PX
                 };
                 let pos_y = pos_y.max(0.0).min(screen_h - win_h);
                 let pos_x = lx.min(screen_w - win_w).max(0.0);
