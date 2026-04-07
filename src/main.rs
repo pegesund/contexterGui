@@ -7511,10 +7511,37 @@ fn main() -> eframe::Result {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1) // default: Normal (1)
     };
+
+    // Phase 13: parse --language flag (default "nb"). Resolve through the
+    // language-rs registry; unsupported codes fail loudly with a useful
+    // message instead of silently falling back to Bokmål.
+    let lang_code: String = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .position(|a| a == "--language")
+            .and_then(|i| args.get(i + 1).cloned())
+            .unwrap_or_else(|| "nb".to_string())
+    };
+    let _selected_language = match language::resolve_language(&lang_code) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Language: {}", e);
+            std::process::exit(2);
+        }
+    };
+
     if grammar_completion {
         eprintln!("Grammar completion: ON");
     }
     eprintln!("SWI-Prolog engine: ON");
+    {
+        use language::LanguageProfile as _;
+        eprintln!(
+            "Language: {} ({})",
+            _selected_language.display_name(),
+            _selected_language.code()
+        );
+    }
     let quality_name = match quality { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" };
     eprintln!("Quality: {} ({})", quality, quality_name);
 
