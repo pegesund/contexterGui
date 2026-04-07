@@ -1741,7 +1741,7 @@ impl ContextApp {
             category: ErrorCategory::Spelling,
             word: clean.clone(),
             suggestion: shown_suggestion,
-            explanation: format!("«{}» finnes ikke i ordboken.", clean),
+            explanation: { use language::LanguageUi as _; language::BokmalLanguage.ui_word_not_in_dict(&clean) },
             rule_name: rule.to_string(),
             sentence_context: sentence_ctx.to_string(),
             doc_offset,
@@ -2533,7 +2533,7 @@ impl ContextApp {
                         // Try just removing å
                         let removed_aa = remove_word_from_sentence(sentence, "å");
                         if removed_aa != sentence {
-                            candidates.push((removed_aa.clone(), format!("Fjernet «å» foran «{}».", e.word), e.rule_name.clone()));
+                            candidates.push((removed_aa.clone(), { use language::LanguageUi as _; language::BokmalLanguage.ui_removed_aa_before(&e.word) }, e.rule_name.clone()));
                         }
                         // Try removing å AND applying the substitution
                         // e.g. "har å gikk" → "har gått" (remove å, replace gikk with suggestion)
@@ -2555,7 +2555,7 @@ impl ContextApp {
             for e in errors {
                 let removed = remove_word_from_sentence(sentence, &e.word);
                 if removed != sentence {
-                    candidates.push((removed, format!("Fjernet «{}».", e.word), e.rule_name.clone()));
+                    candidates.push((removed, { use language::LanguageUi as _; language::BokmalLanguage.ui_removed_word(&e.word) }, e.rule_name.clone()));
                 }
             }
         }
@@ -3858,7 +3858,7 @@ impl ContextApp {
                         category: ErrorCategory::Spelling,
                         word: unk.word.clone(),
                         suggestion: best,
-                        explanation: format!("«{}» finnes ikke i ordboken.", unk.word),
+                        explanation: { use language::LanguageUi as _; language::BokmalLanguage.ui_word_not_in_dict(&unk.word) },
                         rule_name: "stavefeil".to_string(),
                         sentence_context: resp.sentence.to_string(),
                         doc_offset: resp.doc_offset,
@@ -6013,7 +6013,7 @@ impl eframe::App for ContextApp {
                                 egui::Color32::from_rgb(60, 160, 240)
                             };
                             ui.label(egui::RichText::new(phase).size(16.0));
-                            ui.label(egui::RichText::new(format!("AI korrigerer... ({}s)", elapsed))
+                            ui.label(egui::RichText::new({ use language::LanguageUi as _; language::BokmalLanguage.ui_ai_correcting_seconds(elapsed) })
                                 .size(12.0).strong().color(pulse));
                             ctx.request_repaint_after(Duration::from_millis(500));
                         } else {
