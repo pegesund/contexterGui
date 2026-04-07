@@ -33,9 +33,12 @@ pub fn compute_boost(
     wordfreq: Option<&HashMap<String, u64>>,
 ) -> f32 {
     let lower = word.to_lowercase();
+    // Phase 12: common-word threshold comes from the Language trait. Bokmål
+    // is hard-coded here for now; later phases pipe a runtime language through.
+    use language::LanguageLexicon as _;
+    let common_threshold = language::BokmalLanguage.wordfreq_common_threshold();
     // Never boost common function words (top ~31 in Norwegian: og, er, for, til, av, det, ...)
-    const COMMON_THRESHOLD: u64 = 40_000;
-    if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= COMMON_THRESHOLD) {
+    if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= common_threshold) {
         return 1.0;
     }
     let in_doc = doc_word_counts.get(&lower).copied().unwrap_or(0) >= 2;
@@ -1264,7 +1267,7 @@ impl ContextApp {
             let data = data_dir();
             let onnx_path = language::LanguageMlm::onnx_path(&bokmal);
             let tokenizer_path = language::LanguageMlm::tokenizer_path(&bokmal);
-            let wordfreq_path = data.join("wordfreq.tsv");
+            let wordfreq_path = language::LanguageLexicon::wordfreq_path(&bokmal);
             let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
             let minilm_tok = data.join("minilm-onnx/tokenizer.json");
             let embed_cache = data.join("word_embeddings.bin");
