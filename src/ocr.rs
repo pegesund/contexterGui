@@ -7,12 +7,17 @@ use std::sync::mpsc;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
+    use language::LanguageVoice as _;
     use windows::core::HSTRING;
     use windows::Globalization::Language;
     use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap, BitmapPixelFormat};
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::{InMemoryRandomAccessStream, DataWriter};
     use windows::Win32::Foundation::HGLOBAL;
+
+    // Phase 10: OCR language code comes from the Language trait. Bokmål is
+    // hard-coded here for now; later phases pipe a runtime language through.
+    const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::CF_DIB;
@@ -26,8 +31,9 @@ mod windows_impl {
 
     impl OcrClipboard {
         pub fn new() -> Result<Self, String> {
-            let lang = Language::CreateLanguage(&HSTRING::from("nb"))
-                .map_err(|e| format!("Failed to create Language('nb'): {}", e))?;
+            let lang_code = BOKMAL.ocr_language_code();
+            let lang = Language::CreateLanguage(&HSTRING::from(lang_code))
+                .map_err(|e| format!("Failed to create Language('{}'): {}", lang_code, e))?;
             if !OcrEngine::IsLanguageSupported(&lang)
                 .map_err(|e| format!("IsLanguageSupported: {}", e))? {
                 return Err("Norwegian OCR language pack not installed.".into());

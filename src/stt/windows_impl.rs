@@ -1,7 +1,12 @@
 use super::{SttEngine, mic_log};
+use language::LanguageVoice as _;
 use libloading::Library;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_float, c_void};
+
+// Phase 9: STT language code comes from the Language trait. Bokmål is
+// hard-coded here for now; later phases pipe a runtime language through.
+const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
 type WhisperContext = c_void;
 
@@ -105,7 +110,7 @@ impl SttEngine for WhisperEngine {
             params[OFF_PRINT_REALTIME] = 0;
             params[OFF_PRINT_TIMESTAMPS] = 0;
 
-            let lang_c = CString::new("no").unwrap();
+            let lang_c = CString::new(BOKMAL.stt_language_code()).unwrap();
             let lang_ptr_bytes = (lang_c.as_ptr() as usize).to_ne_bytes();
             params[OFF_LANGUAGE..OFF_LANGUAGE+8].copy_from_slice(&lang_ptr_bytes);
 
