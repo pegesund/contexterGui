@@ -2825,10 +2825,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "neorusticus"
-version = "0.1.3"
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2874,7 +2870,6 @@ dependencies = [
  "libloading 0.8.9",
  "mtag-rs",
  "ndarray 0.16.1",
- "neorusticus",
  "openvino",
  "openvino-sys",
  "ort",

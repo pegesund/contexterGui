@@ -55,10 +55,6 @@ features = [
     "Storage_Streams",
 ]
 
-# Override neorusticus SSH git dependency with local copy
-[patch."ssh://git@github.com/pegesund/neorusticus.git"]
-neorusticus = { path = "../../neorusticus" }
-
 [[bin]]
 name = "native_bridge"
 path = "src/bin/native_bridge.rs"

@@ -118,7 +118,6 @@ fn trunc(s: &str, max: usize) -> &str {
 use nostos_cognio::baseline::{compute_baseline, Baselines};
 use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
 use nostos_cognio::embeddings::EmbeddingStore;
-use nostos_cognio::grammar::GrammarChecker;
 use nostos_cognio::grammar::swipl_checker::SwiGrammarChecker;
 use nostos_cognio::grammar::types::GrammarError;
 use nostos_cognio::model::Model;
@@ -128,7 +127,6 @@ use nostos_cognio::wordfreq;
 // --- Grammar checker abstraction ---
 
 pub(crate) enum AnyChecker {
-    Neo(GrammarChecker),
     Swi(SwiGrammarChecker),
 }
 
@@ -140,49 +138,42 @@ unsafe impl Send for AnyChecker {}
 impl AnyChecker {
     fn has_word(&self, word: &str) -> bool {
         match self {
-            AnyChecker::Neo(c) => c.has_word(word),
             AnyChecker::Swi(c) => c.has_word(word),
         }
     }
 
     fn prefix_lookup(&self, prefix: &str, limit: usize) -> Vec<String> {
         match self {
-            AnyChecker::Neo(c) => c.prefix_lookup(prefix, limit),
             AnyChecker::Swi(c) => c.prefix_lookup(prefix, limit),
         }
     }
 
     fn check_sentence(&mut self, text: &str) -> Vec<GrammarError> {
         match self {
-            AnyChecker::Neo(c) => c.check_sentence(text),
             AnyChecker::Swi(c) => c.check_sentence(text),
         }
     }
 
     fn has_error(&mut self, text: &str) -> bool {
         match self {
-            AnyChecker::Neo(c) => !c.check_sentence(text).is_empty(),
             AnyChecker::Swi(c) => c.has_error(text),
         }
     }
 
     fn check_sentence_full(&mut self, text: &str) -> nostos_cognio::grammar::types::CheckResult {
         match self {
-            AnyChecker::Neo(c) => c.check_sentence_full(text),
             AnyChecker::Swi(c) => c.check_sentence_full(text),
         }
     }
 
     fn check_sentence_full_with_doc(&mut self, text: &str, doc_text: &str) -> nostos_cognio::grammar::types::CheckResult {
         match self {
-            AnyChecker::Neo(c) => c.check_sentence_full(text), // Neo doesn't have doc variant
             AnyChecker::Swi(c) => c.check_sentence_full_with_doc(text, doc_text),
         }
     }
 
     fn fuzzy_lookup(&self, word: &str, max_distance: u32) -> Vec<(String, u32)> {
         match self {
-            AnyChecker::Neo(c) => c.fuzzy_lookup(word, max_distance),
             AnyChecker::Swi(c) => c.fuzzy_lookup(word, max_distance),
         }
     }
@@ -190,14 +181,12 @@ impl AnyChecker {
     fn suggest_compound(&self, word: &str) -> Option<String> {
         match self {
             AnyChecker::Swi(c) => c.suggest_compound(word),
-            AnyChecker::Neo(_) => None,
         }
     }
 
     /// Get the set of POS tags for a word from the dictionary
     fn pos_set(&self, word: &str) -> std::collections::HashSet<String> {
         let analyzer = match self {
-            AnyChecker::Neo(c) => c.analyzer().clone(),
             AnyChecker::Swi(c) => c.analyzer().clone(),
         };
         let mut pos = std::collections::HashSet::new();
@@ -1233,7 +1222,7 @@ fn build_right_completions(
 }
 
 impl ContextApp {
-    fn new(grammar_completion: bool, use_swipl: bool, quality: u8, show_debug_tab: bool) -> Self {
+    fn new(grammar_completion: bool, quality: u8, show_debug_tab: bool) -> Self {
         let platform = platform::create_platform();
         platform.init_runtime();
 
@@ -1427,15 +1416,6 @@ impl ContextApp {
             startup_done: Vec::new(),
             startup_total: 1, // completer only
         }
-    }
-
-    fn load_checker() -> Result<GrammarChecker, Box<dyn std::error::Error>> {
-        let compound_data = std::fs::read_to_string(compound_data_path())
-            .unwrap_or_else(|_| {
-                eprintln!("compound_data.pl not found, using empty");
-                String::new()
-            });
-        GrammarChecker::new(dict_path().to_str().unwrap(), &compound_data)
     }
 
     fn load_swipl_checker(swipl_path: &str) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
@@ -7397,7 +7377,7 @@ fn main() -> eframe::Result {
     // Console spelling test mode — exercises exact same code as GUI
     if std::env::args().any(|a| a == "--test-spelling") {
         eprintln!("=== Spelling test mode ===");
-        let mut app = ContextApp::new(true, true, 2, false);
+        let mut app = ContextApp::new(true, 2, false);
         // Wait for startup (BERT model loading) to complete
         if let Some(rx) = app.startup_rx.take() {
             eprintln!("Waiting for BERT model to load...");
@@ -7491,7 +7471,6 @@ fn main() -> eframe::Result {
     }
 
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
-    let use_swipl = !std::env::args().any(|a| a == "--no-swipl");
     let show_debug_tab = std::env::args().any(|a| a == "--debug");
     let quality: u8 = {
         let args: Vec<String> = std::env::args().collect();
@@ -7504,9 +7483,7 @@ fn main() -> eframe::Result {
     if grammar_completion {
         eprintln!("Grammar completion: ON");
     }
-    if use_swipl {
-        eprintln!("SWI-Prolog engine: ON");
-    }
+    eprintln!("SWI-Prolog engine: ON");
     let quality_name = match quality { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" };
     eprintln!("Quality: {} ({})", quality, quality_name);
 
@@ -7609,7 +7586,7 @@ fn main() -> eframe::Result {
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                let app = ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab);
+                let app = ContextApp::new(grammar_completion, quality, show_debug_tab);
                 // Start HTTP /errors endpoint for integration tests
                 let errors_json = app.shared_errors_json.clone();
                 std::thread::Builder::new().name("test-http".into()).spawn(move || {
