@@ -740,6 +740,11 @@ enum WhisperLoadItem {
 }
 
 struct ContextApp {
+    /// Phase 14: runtime-selected language. Resolved once at startup from
+    /// the --language CLI flag and shared by every part of the app that
+    /// needs language-specific data (FST path, Prolog rules, BERT model,
+    /// UI strings, voice/STT/OCR codes, …).
+    language: std::sync::Arc<dyn language::LanguageBundle>,
     manager: BridgeManager,
     context: CursorContext,
     last_poll: Instant,
@@ -1225,7 +1230,12 @@ fn build_right_completions(
 }
 
 impl ContextApp {
-    fn new(grammar_completion: bool, quality: u8, show_debug_tab: bool) -> Self {
+    fn new(
+        language: std::sync::Arc<dyn language::LanguageBundle>,
+        grammar_completion: bool,
+        quality: u8,
+        show_debug_tab: bool,
+    ) -> Self {
         let platform = platform::create_platform();
         platform.init_runtime();
 
@@ -1233,11 +1243,10 @@ impl ContextApp {
 
         // Load dictionary (analyzer) on main thread for fast lookups.
         // SWI-Prolog grammar checker loads on the grammar actor thread (later).
-        // Phase 2: dictionary path comes from the Language trait. Bokmål is
-        // hard-coded here for now; later phases pipe a runtime-selected
-        // language through ContextApp.
-        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
-        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&language::LanguageLexicon::mtag_fst_path(&bokmal)) {
+        // Phase 14: dictionary path comes from the runtime-selected language
+        // stored on ContextApp. The Phase 2 hard-coded BokmalLanguage local
+        // is gone — we read directly from `language.mtag_fst_path()`.
+        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&language.mtag_fst_path()) {
             Ok(a) => {
                 eprintln!("Loaded dictionary with {} entries", a.dict_size());
                 Some(std::sync::Arc::new(a))
@@ -1259,15 +1268,14 @@ impl ContextApp {
 
         // Thread 1: NorBERT4 + completer
         let tx2 = startup_tx.clone();
+        let language_for_bert = std::sync::Arc::clone(&language);
         std::thread::spawn(move || {
-            // Phase 4: BERT model + tokenizer paths come from the Language
-            // trait. Bokmål is hard-coded here for now; later phases will
-            // pipe a runtime-selected language through ContextApp.
-            let bokmal: language::BokmalLanguage = language::BokmalLanguage;
+            // Phase 14: BERT model + tokenizer + wordfreq paths come from
+            // the runtime-selected language passed in via Arc clone.
             let data = data_dir();
-            let onnx_path = language::LanguageMlm::onnx_path(&bokmal);
-            let tokenizer_path = language::LanguageMlm::tokenizer_path(&bokmal);
-            let wordfreq_path = language::LanguageLexicon::wordfreq_path(&bokmal);
+            let onnx_path = language_for_bert.onnx_path();
+            let tokenizer_path = language_for_bert.tokenizer_path();
+            let wordfreq_path = language_for_bert.wordfreq_path();
             let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
             let minilm_tok = data.join("minilm-onnx/tokenizer.json");
             let embed_cache = data.join("word_embeddings.bin");
@@ -1299,6 +1307,7 @@ impl ContextApp {
         drop(startup_tx);
 
         ContextApp {
+            language,
             manager: BridgeManager::new(platform::create_platform()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
@@ -1562,12 +1571,10 @@ impl ContextApp {
             }
         }
 
-        // Phase 5: modal verb misspellings come from the Language trait —
-        // BERT can't distinguish forms like "vil" vs "ville" in context.
-        // Bokmål is hard-coded here for now; later phases pipe a runtime
-        // language through ContextApp.
-        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
-        let modal_fixes = language::LanguageSpelling::modal_confusion_pairs(&bokmal);
+        // Phase 14: modal verb misspellings come from the runtime-selected
+        // language. BERT can't distinguish forms like "vil" vs "ville"
+        // in context, so each language carries its own pair list.
+        let modal_fixes = self.language.modal_confusion_pairs();
         if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean) {
             if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
                 log!("modal fix: '{}' → '{}'", clean, correct);
@@ -1744,7 +1751,7 @@ impl ContextApp {
             category: ErrorCategory::Spelling,
             word: clean.clone(),
             suggestion: shown_suggestion,
-            explanation: { use language::LanguageUi as _; language::BokmalLanguage.ui_word_not_in_dict(&clean) },
+            explanation: self.language.ui_word_not_in_dict(&clean),
             rule_name: rule.to_string(),
             sentence_context: sentence_ctx.to_string(),
             doc_offset,
@@ -2536,7 +2543,7 @@ impl ContextApp {
                         // Try just removing å
                         let removed_aa = remove_word_from_sentence(sentence, "å");
                         if removed_aa != sentence {
-                            candidates.push((removed_aa.clone(), { use language::LanguageUi as _; language::BokmalLanguage.ui_removed_aa_before(&e.word) }, e.rule_name.clone()));
+                            candidates.push((removed_aa.clone(), self.language.ui_removed_aa_before(&e.word), e.rule_name.clone()));
                         }
                         // Try removing å AND applying the substitution
                         // e.g. "har å gikk" → "har gått" (remove å, replace gikk with suggestion)
@@ -2558,7 +2565,7 @@ impl ContextApp {
             for e in errors {
                 let removed = remove_word_from_sentence(sentence, &e.word);
                 if removed != sentence {
-                    candidates.push((removed, { use language::LanguageUi as _; language::BokmalLanguage.ui_removed_word(&e.word) }, e.rule_name.clone()));
+                    candidates.push((removed, self.language.ui_removed_word(&e.word), e.rule_name.clone()));
                 }
             }
         }
@@ -3861,7 +3868,7 @@ impl ContextApp {
                         category: ErrorCategory::Spelling,
                         word: unk.word.clone(),
                         suggestion: best,
-                        explanation: { use language::LanguageUi as _; language::BokmalLanguage.ui_word_not_in_dict(&unk.word) },
+                        explanation: self.language.ui_word_not_in_dict(&unk.word),
                         rule_name: "stavefeil".to_string(),
                         sentence_context: resp.sentence.to_string(),
                         doc_offset: resp.doc_offset,
@@ -5752,15 +5759,12 @@ impl eframe::App for ContextApp {
                 } else {
                     egui::Color32::from_rgb(160, 160, 160)
                 };
-                // Phase 11a: UI strings come from the Language trait. Bokmål
-                // is hard-coded here for now; later phases pipe a runtime
-                // language through ContextApp.
-                use language::LanguageUi as _;
-                let bokmal = language::BokmalLanguage;
+                // Phase 14: UI strings come from the runtime-selected
+                // language stored on ContextApp.
                 let pin_tooltip = if self.follow_cursor {
-                    bokmal.ui_pin_cursor_on()
+                    self.language.ui_pin_cursor_on()
                 } else {
-                    bokmal.ui_pin_cursor_off()
+                    self.language.ui_pin_cursor_off()
                 };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
@@ -5772,14 +5776,14 @@ impl eframe::App for ContextApp {
                 let settings_color = if self.selected_tab == 2 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
-                ).sense(egui::Sense::click())).on_hover_text(bokmal.ui_settings()).clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_settings()).clicked() {
                     self.selected_tab = 2;
                 }
 
                 // ▁ Minimize
                 if ui.add(egui::Label::new(
                     egui::RichText::new("–").size(14.0).color(inactive)
-                ).sense(egui::Sense::click())).on_hover_text(bokmal.ui_minimize()).clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_minimize()).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
@@ -5995,10 +5999,8 @@ impl eframe::App for ContextApp {
                 });
 
                 if active_errors.is_empty() {
-                    use language::LanguageUi as _;
-                    let bokmal = language::BokmalLanguage;
                     ui.label(
-                        egui::RichText::new(bokmal.ui_no_errors())
+                        egui::RichText::new(self.language.ui_no_errors())
                             .size(12.0)
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
@@ -6016,7 +6018,7 @@ impl eframe::App for ContextApp {
                                 egui::Color32::from_rgb(60, 160, 240)
                             };
                             ui.label(egui::RichText::new(phase).size(16.0));
-                            ui.label(egui::RichText::new({ use language::LanguageUi as _; language::BokmalLanguage.ui_ai_correcting_seconds(elapsed) })
+                            ui.label(egui::RichText::new(self.language.ui_ai_correcting_seconds(elapsed))
                                 .size(12.0).strong().color(pulse));
                             ctx.request_repaint_after(Duration::from_millis(500));
                         } else {
@@ -6024,10 +6026,8 @@ impl eframe::App for ContextApp {
                                 .filter(|e| !e.ignored && e.rule_name != "llm_correction")
                                 .count();
                             if err_count > 0 {
-                                use language::LanguageUi as _;
-                                let bokmal = language::BokmalLanguage;
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new(bokmal.ui_ai_fix_all()).size(11.0)
+                                    egui::RichText::new(self.language.ui_ai_fix_all()).size(11.0)
                                 ).min_size(egui::vec2(0.0, 18.0))).clicked() {
                                     self.dispatch_llm_fix_all();
                                 }
@@ -7124,10 +7124,8 @@ impl eframe::App for ContextApp {
                 .show(ctx, |ui| {
                     let current = tts::current_voice();
                     if self.voice_list.is_empty() {
-                        use language::LanguageUi as _;
-                        let bokmal = language::BokmalLanguage;
                         ui.label(egui::RichText::new("Ingen norske stemmer funnet.").size(12.0));
-                        ui.label(egui::RichText::new(bokmal.ui_voice_download_help()).size(11.0)
+                        ui.label(egui::RichText::new(self.language.ui_voice_download_help()).size(11.0)
                             .color(egui::Color32::from_rgb(100, 100, 100)));
                     }
                     for voice in &self.voice_list {
@@ -7408,7 +7406,9 @@ fn main() -> eframe::Result {
     // Console spelling test mode — exercises exact same code as GUI
     if std::env::args().any(|a| a == "--test-spelling") {
         eprintln!("=== Spelling test mode ===");
-        let mut app = ContextApp::new(true, 2, false);
+        let test_language: std::sync::Arc<dyn language::LanguageBundle> =
+            std::sync::Arc::new(language::BokmalLanguage);
+        let mut app = ContextApp::new(test_language, true, 2, false);
         // Wait for startup (BERT model loading) to complete
         if let Some(rx) = app.startup_rx.take() {
             eprintln!("Waiting for BERT model to load...");
@@ -7522,26 +7522,24 @@ fn main() -> eframe::Result {
             .and_then(|i| args.get(i + 1).cloned())
             .unwrap_or_else(|| "nb".to_string())
     };
-    let _selected_language = match language::resolve_language(&lang_code) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Language: {}", e);
-            std::process::exit(2);
-        }
-    };
+    let selected_language: std::sync::Arc<dyn language::LanguageBundle> =
+        match language::resolve_language(&lang_code) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Language: {}", e);
+                std::process::exit(2);
+            }
+        };
 
     if grammar_completion {
         eprintln!("Grammar completion: ON");
     }
     eprintln!("SWI-Prolog engine: ON");
-    {
-        use language::LanguageProfile as _;
-        eprintln!(
-            "Language: {} ({})",
-            _selected_language.display_name(),
-            _selected_language.code()
-        );
-    }
+    eprintln!(
+        "Language: {} ({})",
+        selected_language.display_name(),
+        selected_language.code()
+    );
     let quality_name = match quality { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" };
     eprintln!("Quality: {} ({})", quality, quality_name);
 
@@ -7612,6 +7610,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    let language_for_app = std::sync::Arc::clone(&selected_language);
     eframe::run_native(
         "NorskTale",
         options,
@@ -7644,7 +7643,7 @@ fn main() -> eframe::Result {
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                let app = ContextApp::new(grammar_completion, quality, show_debug_tab);
+                let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab);
                 // Start HTTP /errors endpoint for integration tests
                 let errors_json = app.shared_errors_json.clone();
                 std::thread::Builder::new().name("test-http".into()).spawn(move || {
