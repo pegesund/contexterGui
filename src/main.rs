@@ -1257,9 +1257,13 @@ impl ContextApp {
         // Thread 1: NorBERT4 + completer
         let tx2 = startup_tx.clone();
         std::thread::spawn(move || {
+            // Phase 4: BERT model + tokenizer paths come from the Language
+            // trait. Bokmål is hard-coded here for now; later phases will
+            // pipe a runtime-selected language through ContextApp.
+            let bokmal: language::BokmalLanguage = language::BokmalLanguage;
             let data = data_dir();
-            let onnx_path = data.join("onnx/norbert4_base_int8.onnx");
-            let tokenizer_path = data.join("onnx/tokenizer.json");
+            let onnx_path = language::LanguageMlm::onnx_path(&bokmal);
+            let tokenizer_path = language::LanguageMlm::tokenizer_path(&bokmal);
             let wordfreq_path = data.join("wordfreq.tsv");
             let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
             let minilm_tok = data.join("minilm-onnx/tokenizer.json");
