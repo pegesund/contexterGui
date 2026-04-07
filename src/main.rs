@@ -1258,9 +1258,10 @@ impl ContextApp {
                 None
             }
         };
-        // Load raw FST for compound word walker (Source 13)
+        // Load raw FST for compound word walker (Source 13).
+        // Phase 16: same path as the analyzer above, sourced from the Language trait.
         let compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>> =
-            compound_walker::load_fst_from_mfst(dict_path().to_str().unwrap())
+            compound_walker::load_fst_from_mfst(language.mtag_fst_path().to_str().unwrap())
                 .ok().map(|f| Arc::new(f));
 
         // Spawn heavy model loading on background threads
@@ -4492,12 +4493,16 @@ impl eframe::App for ContextApp {
         ctx.style_mut(|s| s.interaction.selectable_labels = true);
 
       if !skip_processing {
-        // Spawn grammar actor on first update — loads SWI-Prolog on its own thread
+        // Spawn grammar actor on first update — loads SWI-Prolog on its own thread.
+        // Phase 16: dict and Prolog rules paths come from the Language trait.
+        // syntaxer_dir() and compound_data_path() are still legacy free functions
+        // (the syntaxer dir layout is shared across all languages today; per-
+        // language compound data hasn't been split out yet).
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
             self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(
                 self.platform.swipl_path().to_string(),
-                dict_path().to_str().unwrap().to_string(),
-                grammar_rules_path().to_str().unwrap().to_string(),
+                self.language.mtag_fst_path().to_str().unwrap().to_string(),
+                self.language.prolog_rules_path().to_str().unwrap().to_string(),
                 syntaxer_dir().to_str().unwrap().to_string(),
                 std::fs::read_to_string(compound_data_path()).unwrap_or_default(),
                 ctx.clone(),
