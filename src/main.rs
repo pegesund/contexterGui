@@ -1423,10 +1423,14 @@ impl ContextApp {
     }
 
     fn load_swipl_checker(swipl_path: &str) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
+        // Phase 3: grammar rules path comes from the Language trait. Bokmål
+        // is hard-coded here for now; later phases pipe a runtime-selected
+        // language through ContextApp.
+        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
         SwiGrammarChecker::new(
             swipl_path,
             dict_path().to_str().unwrap(),
-            grammar_rules_path().to_str().unwrap(),
+            language::LanguageGrammar::prolog_rules_path(&bokmal).to_str().unwrap(),
             syntaxer_dir().to_str().unwrap(),
         )
     }
