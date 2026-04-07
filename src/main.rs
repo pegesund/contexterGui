@@ -1230,7 +1230,11 @@ impl ContextApp {
 
         // Load dictionary (analyzer) on main thread for fast lookups.
         // SWI-Prolog grammar checker loads on the grammar actor thread (later).
-        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&dict_path()) {
+        // Phase 2: dictionary path comes from the Language trait. Bokmål is
+        // hard-coded here for now; later phases pipe a runtime-selected
+        // language through ContextApp.
+        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
+        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&language::LanguageLexicon::mtag_fst_path(&bokmal)) {
             Ok(a) => {
                 eprintln!("Loaded dictionary with {} entries", a.dict_size());
                 Some(std::sync::Arc::new(a))
