@@ -7,12 +7,18 @@ use std::sync::mpsc;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
+    use language::{LanguageUi as _, LanguageVoice as _};
     use windows::core::HSTRING;
     use windows::Globalization::Language;
     use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap, BitmapPixelFormat};
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::{InMemoryRandomAccessStream, DataWriter};
     use windows::Win32::Foundation::HGLOBAL;
+
+    // Phase 10/11c: OCR language code and error messages come from the
+    // Language trait. Bokmål is hard-coded here for now; later phases pipe
+    // a runtime language through.
+    const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::CF_DIB;
@@ -26,11 +32,12 @@ mod windows_impl {
 
     impl OcrClipboard {
         pub fn new() -> Result<Self, String> {
-            let lang = Language::CreateLanguage(&HSTRING::from("nb"))
-                .map_err(|e| format!("Failed to create Language('nb'): {}", e))?;
+            let lang_code = BOKMAL.ocr_language_code();
+            let lang = Language::CreateLanguage(&HSTRING::from(lang_code))
+                .map_err(|e| format!("Failed to create Language('{}'): {}", lang_code, e))?;
             if !OcrEngine::IsLanguageSupported(&lang)
                 .map_err(|e| format!("IsLanguageSupported: {}", e))? {
-                return Err("Norwegian OCR language pack not installed.".into());
+                return Err(BOKMAL.ui_ocr_lang_pack_missing().into());
             }
             let _engine = OcrEngine::TryCreateFromLanguage(&lang)
                 .map_err(|e| format!("TryCreateFromLanguage: {}", e))?;
@@ -146,10 +153,15 @@ pub use windows_impl::OcrClipboard;
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
+    use language::LanguageUi as _;
     use std::sync::mpsc;
     use std::process::Command;
     use libloading::{Library, Symbol};
     use std::ffi::{CStr, CString};
+
+    // Phase 11c: OCR error messages come from the Language trait. Bokmål is
+    // hard-coded here for now; later phases pipe a runtime language through.
+    const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
     type OcrRecognizeFn = unsafe extern "C" fn(*const i8) -> *mut i8;
     type OcrFreeFn = unsafe extern "C" fn(*mut i8);
@@ -264,12 +276,12 @@ close access fileRef"#,
                 let result_ptr = unsafe { recognize(c_path.as_ptr()) };
 
                 let text = if result_ptr.is_null() {
-                    Err("Ingen tekst funnet i bildet".into())
+                    Err(BOKMAL.ui_ocr_no_text().into())
                 } else {
                     let s = unsafe { CStr::from_ptr(result_ptr).to_string_lossy().to_string() };
                     unsafe { free_fn(result_ptr); }
                     if s.is_empty() {
-                        Err("Ingen tekst funnet i bildet".into())
+                        Err(BOKMAL.ui_ocr_no_text().into())
                     } else {
                         Ok(s)
                     }

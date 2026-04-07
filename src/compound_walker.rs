@@ -62,29 +62,40 @@ const MAX_TOTAL_EDITS: u32 = 4;
 const MAX_PARTS: usize = 3;
 const MIN_PART_BYTES: usize = 3;
 const BEAM_WIDTH: usize = 5000;
-const BINDING_LETTERS: &[u8] = b"se";
+
+// Phase 7: compound walker constants come from the Language trait. Bokmål is
+// hard-coded here for now; later phases pipe a runtime language through.
+// We snapshot the &'static slices once into module-level statics so the hot
+// loops below can read them with the same cost as the previous consts.
+use language::LanguageSpelling as _;
+const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
+
+/// ASCII bytes that may appear as a binding letter between compound parts.
+/// Sourced from `language::BokmalLanguage::binding_letters()`.
+fn binding_letters() -> &'static [u8] {
+    BOKMAL.binding_letters()
+}
 
 /// Norwegian phonetic vowel pairs common in dyslexic writing.
 /// These substitutions cost 0 edits since they're near-equivalences.
-/// ascii_byte ↔ UTF-8 continuation byte (after 0xC3 prefix)
+/// ascii_byte ↔ UTF-8 continuation byte (after 0xC3 prefix). Pairs come from
+/// `language::BokmalLanguage::free_vowel_swaps()`.
 #[inline]
 fn is_free_vowel_swap(ascii: u8, utf8_cont: u8) -> bool {
-    matches!((ascii, utf8_cont),
-        (b'e', 0xB8) |  // e ↔ ø
-        (b'o', 0xA5) |  // o ↔ å
-        (b'a', 0xA6)    // a ↔ æ
-    )
+    BOKMAL
+        .free_vowel_swaps()
+        .iter()
+        .any(|&(a, c)| a == ascii && c == utf8_cont)
 }
 
 /// Check if a word's suffix triggers binding -s- in Norwegian compounds.
-/// Based on morphological rules: -ing, -ning, -het, -skap, -sjon, -tet,
-/// -dom, -else, -sel, -nad, -itet, -leik always take -s-.
+/// Suffix list comes from `language::BokmalLanguage::binding_s_suffixes()`.
 #[inline]
 fn needs_binding_s(word: &[u8]) -> bool {
-    word.ends_with(b"ing") || word.ends_with(b"het") || word.ends_with(b"skap") ||
-    word.ends_with(b"sjon") || word.ends_with(b"tet") || word.ends_with(b"dom") ||
-    word.ends_with(b"else") || word.ends_with(b"sel") || word.ends_with(b"nad") ||
-    word.ends_with(b"leik")
+    BOKMAL
+        .binding_s_suffixes()
+        .iter()
+        .any(|suffix| word.ends_with(*suffix))
 }
 
 /// Quick exact-match walk from root for the remaining input bytes.
@@ -299,7 +310,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     // Binding 'e': only after consonants (laks→lakse OK, innsjø→innsjøe NOT OK)
                     // Binding 's': always allowed (handled by morphological rules too)
                     if state.input_pos < input_bytes.len()
-                        && BINDING_LETTERS.contains(&input_bytes[state.input_pos])
+                        && binding_letters().contains(&input_bytes[state.input_pos])
                     {
                         let bl = input_bytes[state.input_pos];
                         let last_byte = state.word_bytes.last().copied().unwrap_or(0);

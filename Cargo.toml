@@ -17,6 +17,7 @@ nostos-cognio = { path = "../../contexter-repo/nostos-cognio" }
 regex = "1"
 image = "0.25"
 mtag = { package = "mtag-rs", path = "../../rustSpell/mtag-rs" }
+language = { package = "language-rs", path = "../../rustSpell/language-rs" }
 rustls = "0.23"
 rustls-pemfile = "2"
 native-tls = "0.2"
@@ -54,10 +55,6 @@ features = [
     "Globalization",
     "Storage_Streams",
 ]
-
-# Override neorusticus SSH git dependency with local copy
-[patch."ssh://git@github.com/pegesund/neorusticus.git"]
-neorusticus = { path = "../../neorusticus" }
 
 [[bin]]
 name = "native_bridge"

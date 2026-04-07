@@ -43,22 +43,12 @@ pub fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer) -> Option<
     if analyzer.has_word(&word.to_lowercase()) {
         return None;
     }
-    const FUNCTION_WORDS: &[&str] = &[
-        "gjennom", "mellom", "under", "etter", "langs", "rundt",
-        "foran", "bortover", "innover", "utover",
-        "forbi", "siden", "etter", "blant",
-        "over", "inne", "borte",
-        "uten", "utenfor", "innenfor",
-        "med", "mot", "ved", "hos", "fra",
-        "for", "som", "men",
-        "til", "per", "via",
-        "på", "av", "om",
-        "en", "et", "ei",
-        "og", "at",
-        "i",
-    ];
+    // Phase 6: function words come from the Language trait. Bokmål is hard-
+    // coded here for now; later phases pipe a runtime language through.
+    let bokmal = language::BokmalLanguage;
+    let function_words = language::LanguageSpelling::function_words(&bokmal);
     let lower = word.to_lowercase();
-    for prefix in FUNCTION_WORDS {
+    for prefix in function_words {
         if lower.len() <= prefix.len() + 1 { continue; }
         if !lower.starts_with(prefix) { continue; }
         let remainder = &lower[prefix.len()..];

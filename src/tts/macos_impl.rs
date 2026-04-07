@@ -1,7 +1,12 @@
 use super::{TtsEngine, VoiceInfo};
+use language::LanguageVoice as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{OnceLock, RwLock};
+
+// Phase 8: TTS voice constants come from the Language trait. Bokmål is
+// hard-coded here for now; later phases pipe a runtime language through.
+const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
 static TTS_SENDER: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 static TTS_AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -13,7 +18,7 @@ pub struct MacTtsEngine;
 
 impl MacTtsEngine {
     pub fn new() -> Self {
-        CURRENT_VOICE.get_or_init(|| RwLock::new("Nora".to_string()));
+        CURRENT_VOICE.get_or_init(|| RwLock::new(BOKMAL.tts_default_voice().to_string()));
 
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
@@ -22,7 +27,7 @@ impl MacTtsEngine {
                 TTS_SPEAKING.store(true, Ordering::Relaxed);
                 let voice = CURRENT_VOICE.get()
                     .map(|v| v.read().unwrap().clone())
-                    .unwrap_or_else(|| "Nora".to_string());
+                    .unwrap_or_else(|| BOKMAL.tts_default_voice().to_string());
                 let child = std::process::Command::new("say")
                     .arg("-v").arg(&voice)
                     .arg(&word)
@@ -64,9 +69,11 @@ impl MacTtsEngine {
         };
 
         let mut voices = Vec::new();
+        let voice_filters = BOKMAL.tts_voice_filters();
         for line in output.lines() {
-            // Only Norwegian voices (nb_NO, nn_NO, no_NO)
-            if !line.contains("nb_NO") && !line.contains("nn_NO") && !line.contains("no_NO") {
+            // Filter set comes from the Language trait (Bokmål returns
+            // ["nb_NO", "nn_NO", "no_NO"] so both Bokmål and Nynorsk show up)
+            if !voice_filters.iter().any(|f| line.contains(f)) {
                 continue;
             }
             // Format: "Name    lang    # Sample text"
@@ -110,7 +117,7 @@ impl TtsEngine for MacTtsEngine {
     fn current_voice(&self) -> String {
         CURRENT_VOICE.get()
             .map(|v| v.read().unwrap().clone())
-            .unwrap_or_else(|| "Nora".to_string())
+            .unwrap_or_else(|| BOKMAL.tts_default_voice().to_string())
     }
 
     fn set_voice(&self, name: &str) {

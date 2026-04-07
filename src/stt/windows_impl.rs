@@ -1,7 +1,12 @@
 use super::{SttEngine, mic_log};
+use language::{LanguageUi as _, LanguageVoice as _};
 use libloading::Library;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_float, c_void};
+
+// Phase 9: STT language code comes from the Language trait. Bokmål is
+// hard-coded here for now; later phases pipe a runtime language through.
+const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
 type WhisperContext = c_void;
 
@@ -59,7 +64,7 @@ impl WhisperEngine {
 
         let dll_path = format!("{}\\whisper.dll", dll_dir);
         let lib = unsafe { Library::new(&dll_path) }
-            .map_err(|e| format!("kunne ikke laste whisper.dll: {}", e))?;
+            .map_err(|e| BOKMAL.ui_whisper_dll_load_failed(&e.to_string()))?;
 
         unsafe {
             let fn_init: FnInit = *lib.get::<FnInit>(b"whisper_init_from_file")
@@ -77,7 +82,7 @@ impl WhisperEngine {
             let start = std::time::Instant::now();
             let ctx = fn_init(model_c.as_ptr());
             if ctx.is_null() {
-                return Err("kunne ikke laste Whisper-modell".into());
+                return Err(BOKMAL.ui_whisper_model_load_failed().into());
             }
             mic_log(&format!("Whisper: model loaded in {:.1}s", start.elapsed().as_secs_f64()));
 
@@ -105,7 +110,7 @@ impl SttEngine for WhisperEngine {
             params[OFF_PRINT_REALTIME] = 0;
             params[OFF_PRINT_TIMESTAMPS] = 0;
 
-            let lang_c = CString::new("no").unwrap();
+            let lang_c = CString::new(BOKMAL.stt_language_code()).unwrap();
             let lang_ptr_bytes = (lang_c.as_ptr() as usize).to_ne_bytes();
             params[OFF_LANGUAGE..OFF_LANGUAGE+8].copy_from_slice(&lang_ptr_bytes);
 
@@ -137,7 +142,7 @@ impl SttEngine for WhisperEngine {
             drop(lang_c);
 
             if result.is_empty() {
-                "(ingen tale gjenkjent)".into()
+                BOKMAL.ui_no_speech_recognized().into()
             } else {
                 result
             }

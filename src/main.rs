@@ -33,9 +33,12 @@ pub fn compute_boost(
     wordfreq: Option<&HashMap<String, u64>>,
 ) -> f32 {
     let lower = word.to_lowercase();
+    // Phase 12: common-word threshold comes from the Language trait. Bokmål
+    // is hard-coded here for now; later phases pipe a runtime language through.
+    use language::LanguageLexicon as _;
+    let common_threshold = language::BokmalLanguage.wordfreq_common_threshold();
     // Never boost common function words (top ~31 in Norwegian: og, er, for, til, av, det, ...)
-    const COMMON_THRESHOLD: u64 = 40_000;
-    if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= COMMON_THRESHOLD) {
+    if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= common_threshold) {
         return 1.0;
     }
     let in_doc = doc_word_counts.get(&lower).copied().unwrap_or(0) >= 2;
@@ -118,7 +121,6 @@ fn trunc(s: &str, max: usize) -> &str {
 use nostos_cognio::baseline::{compute_baseline, Baselines};
 use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
 use nostos_cognio::embeddings::EmbeddingStore;
-use nostos_cognio::grammar::GrammarChecker;
 use nostos_cognio::grammar::swipl_checker::SwiGrammarChecker;
 use nostos_cognio::grammar::types::GrammarError;
 use nostos_cognio::model::Model;
@@ -128,7 +130,6 @@ use nostos_cognio::wordfreq;
 // --- Grammar checker abstraction ---
 
 pub(crate) enum AnyChecker {
-    Neo(GrammarChecker),
     Swi(SwiGrammarChecker),
 }
 
@@ -140,49 +141,42 @@ unsafe impl Send for AnyChecker {}
 impl AnyChecker {
     fn has_word(&self, word: &str) -> bool {
         match self {
-            AnyChecker::Neo(c) => c.has_word(word),
             AnyChecker::Swi(c) => c.has_word(word),
         }
     }
 
     fn prefix_lookup(&self, prefix: &str, limit: usize) -> Vec<String> {
         match self {
-            AnyChecker::Neo(c) => c.prefix_lookup(prefix, limit),
             AnyChecker::Swi(c) => c.prefix_lookup(prefix, limit),
         }
     }
 
     fn check_sentence(&mut self, text: &str) -> Vec<GrammarError> {
         match self {
-            AnyChecker::Neo(c) => c.check_sentence(text),
             AnyChecker::Swi(c) => c.check_sentence(text),
         }
     }
 
     fn has_error(&mut self, text: &str) -> bool {
         match self {
-            AnyChecker::Neo(c) => !c.check_sentence(text).is_empty(),
             AnyChecker::Swi(c) => c.has_error(text),
         }
     }
 
     fn check_sentence_full(&mut self, text: &str) -> nostos_cognio::grammar::types::CheckResult {
         match self {
-            AnyChecker::Neo(c) => c.check_sentence_full(text),
             AnyChecker::Swi(c) => c.check_sentence_full(text),
         }
     }
 
     fn check_sentence_full_with_doc(&mut self, text: &str, doc_text: &str) -> nostos_cognio::grammar::types::CheckResult {
         match self {
-            AnyChecker::Neo(c) => c.check_sentence_full(text), // Neo doesn't have doc variant
             AnyChecker::Swi(c) => c.check_sentence_full_with_doc(text, doc_text),
         }
     }
 
     fn fuzzy_lookup(&self, word: &str, max_distance: u32) -> Vec<(String, u32)> {
         match self {
-            AnyChecker::Neo(c) => c.fuzzy_lookup(word, max_distance),
             AnyChecker::Swi(c) => c.fuzzy_lookup(word, max_distance),
         }
     }
@@ -190,14 +184,12 @@ impl AnyChecker {
     fn suggest_compound(&self, word: &str) -> Option<String> {
         match self {
             AnyChecker::Swi(c) => c.suggest_compound(word),
-            AnyChecker::Neo(_) => None,
         }
     }
 
     /// Get the set of POS tags for a word from the dictionary
     fn pos_set(&self, word: &str) -> std::collections::HashSet<String> {
         let analyzer = match self {
-            AnyChecker::Neo(c) => c.analyzer().clone(),
             AnyChecker::Swi(c) => c.analyzer().clone(),
         };
         let mut pos = std::collections::HashSet::new();
@@ -748,6 +740,11 @@ enum WhisperLoadItem {
 }
 
 struct ContextApp {
+    /// Phase 14: runtime-selected language. Resolved once at startup from
+    /// the --language CLI flag and shared by every part of the app that
+    /// needs language-specific data (FST path, Prolog rules, BERT model,
+    /// UI strings, voice/STT/OCR codes, …).
+    language: std::sync::Arc<dyn language::LanguageBundle>,
     manager: BridgeManager,
     context: CursorContext,
     last_poll: Instant,
@@ -1233,7 +1230,12 @@ fn build_right_completions(
 }
 
 impl ContextApp {
-    fn new(grammar_completion: bool, use_swipl: bool, quality: u8, show_debug_tab: bool) -> Self {
+    fn new(
+        language: std::sync::Arc<dyn language::LanguageBundle>,
+        grammar_completion: bool,
+        quality: u8,
+        show_debug_tab: bool,
+    ) -> Self {
         let platform = platform::create_platform();
         platform.init_runtime();
 
@@ -1241,7 +1243,10 @@ impl ContextApp {
 
         // Load dictionary (analyzer) on main thread for fast lookups.
         // SWI-Prolog grammar checker loads on the grammar actor thread (later).
-        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&dict_path()) {
+        // Phase 14: dictionary path comes from the runtime-selected language
+        // stored on ContextApp. The Phase 2 hard-coded BokmalLanguage local
+        // is gone — we read directly from `language.mtag_fst_path()`.
+        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&language.mtag_fst_path()) {
             Ok(a) => {
                 eprintln!("Loaded dictionary with {} entries", a.dict_size());
                 Some(std::sync::Arc::new(a))
@@ -1253,9 +1258,10 @@ impl ContextApp {
                 None
             }
         };
-        // Load raw FST for compound word walker (Source 13)
+        // Load raw FST for compound word walker (Source 13).
+        // Phase 16: same path as the analyzer above, sourced from the Language trait.
         let compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>> =
-            compound_walker::load_fst_from_mfst(dict_path().to_str().unwrap())
+            compound_walker::load_fst_from_mfst(language.mtag_fst_path().to_str().unwrap())
                 .ok().map(|f| Arc::new(f));
 
         // Spawn heavy model loading on background threads
@@ -1263,11 +1269,14 @@ impl ContextApp {
 
         // Thread 1: NorBERT4 + completer
         let tx2 = startup_tx.clone();
+        let language_for_bert = std::sync::Arc::clone(&language);
         std::thread::spawn(move || {
+            // Phase 14: BERT model + tokenizer + wordfreq paths come from
+            // the runtime-selected language passed in via Arc clone.
             let data = data_dir();
-            let onnx_path = data.join("onnx/norbert4_base_int8.onnx");
-            let tokenizer_path = data.join("onnx/tokenizer.json");
-            let wordfreq_path = data.join("wordfreq.tsv");
+            let onnx_path = language_for_bert.onnx_path();
+            let tokenizer_path = language_for_bert.tokenizer_path();
+            let wordfreq_path = language_for_bert.wordfreq_path();
             let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
             let minilm_tok = data.join("minilm-onnx/tokenizer.json");
             let embed_cache = data.join("word_embeddings.bin");
@@ -1299,6 +1308,7 @@ impl ContextApp {
         drop(startup_tx);
 
         ContextApp {
+            language,
             manager: BridgeManager::new(platform::create_platform()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
@@ -1429,20 +1439,15 @@ impl ContextApp {
         }
     }
 
-    fn load_checker() -> Result<GrammarChecker, Box<dyn std::error::Error>> {
-        let compound_data = std::fs::read_to_string(compound_data_path())
-            .unwrap_or_else(|_| {
-                eprintln!("compound_data.pl not found, using empty");
-                String::new()
-            });
-        GrammarChecker::new(dict_path().to_str().unwrap(), &compound_data)
-    }
-
     fn load_swipl_checker(swipl_path: &str) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
+        // Phase 3: grammar rules path comes from the Language trait. Bokmål
+        // is hard-coded here for now; later phases pipe a runtime-selected
+        // language through ContextApp.
+        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
         SwiGrammarChecker::new(
             swipl_path,
             dict_path().to_str().unwrap(),
-            grammar_rules_path().to_str().unwrap(),
+            language::LanguageGrammar::prolog_rules_path(&bokmal).to_str().unwrap(),
             syntaxer_dir().to_str().unwrap(),
         )
     }
@@ -1567,11 +1572,10 @@ impl ContextApp {
             }
         }
 
-        // Common modal verb misspellings — BERT can't distinguish "vil" vs "ville" in context
-        let modal_fixes: &[(&str, &str)] = &[
-            ("vile", "ville"), ("skule", "skulle"), ("kune", "kunne"), ("måte", "måtte"),
-            ("bure", "burde"), ("tore", "torde"), ("gide", "gidde"),
-        ];
+        // Phase 14: modal verb misspellings come from the runtime-selected
+        // language. BERT can't distinguish forms like "vil" vs "ville"
+        // in context, so each language carries its own pair list.
+        let modal_fixes = self.language.modal_confusion_pairs();
         if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean) {
             if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
                 log!("modal fix: '{}' → '{}'", clean, correct);
@@ -1748,7 +1752,7 @@ impl ContextApp {
             category: ErrorCategory::Spelling,
             word: clean.clone(),
             suggestion: shown_suggestion,
-            explanation: format!("«{}» finnes ikke i ordboken.", clean),
+            explanation: self.language.ui_word_not_in_dict(&clean),
             rule_name: rule.to_string(),
             sentence_context: sentence_ctx.to_string(),
             doc_offset,
@@ -2540,7 +2544,7 @@ impl ContextApp {
                         // Try just removing å
                         let removed_aa = remove_word_from_sentence(sentence, "å");
                         if removed_aa != sentence {
-                            candidates.push((removed_aa.clone(), format!("Fjernet «å» foran «{}».", e.word), e.rule_name.clone()));
+                            candidates.push((removed_aa.clone(), self.language.ui_removed_aa_before(&e.word), e.rule_name.clone()));
                         }
                         // Try removing å AND applying the substitution
                         // e.g. "har å gikk" → "har gått" (remove å, replace gikk with suggestion)
@@ -2562,7 +2566,7 @@ impl ContextApp {
             for e in errors {
                 let removed = remove_word_from_sentence(sentence, &e.word);
                 if removed != sentence {
-                    candidates.push((removed, format!("Fjernet «{}».", e.word), e.rule_name.clone()));
+                    candidates.push((removed, self.language.ui_removed_word(&e.word), e.rule_name.clone()));
                 }
             }
         }
@@ -3865,7 +3869,7 @@ impl ContextApp {
                         category: ErrorCategory::Spelling,
                         word: unk.word.clone(),
                         suggestion: best,
-                        explanation: format!("«{}» finnes ikke i ordboken.", unk.word),
+                        explanation: self.language.ui_word_not_in_dict(&unk.word),
                         rule_name: "stavefeil".to_string(),
                         sentence_context: resp.sentence.to_string(),
                         doc_offset: resp.doc_offset,
@@ -4489,12 +4493,16 @@ impl eframe::App for ContextApp {
         ctx.style_mut(|s| s.interaction.selectable_labels = true);
 
       if !skip_processing {
-        // Spawn grammar actor on first update — loads SWI-Prolog on its own thread
+        // Spawn grammar actor on first update — loads SWI-Prolog on its own thread.
+        // Phase 16: dict and Prolog rules paths come from the Language trait.
+        // syntaxer_dir() and compound_data_path() are still legacy free functions
+        // (the syntaxer dir layout is shared across all languages today; per-
+        // language compound data hasn't been split out yet).
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
             self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(
                 self.platform.swipl_path().to_string(),
-                dict_path().to_str().unwrap().to_string(),
-                grammar_rules_path().to_str().unwrap().to_string(),
+                self.language.mtag_fst_path().to_str().unwrap().to_string(),
+                self.language.prolog_rules_path().to_str().unwrap().to_string(),
                 syntaxer_dir().to_str().unwrap().to_string(),
                 std::fs::read_to_string(compound_data_path()).unwrap_or_default(),
                 ctx.clone(),
@@ -5494,10 +5502,14 @@ impl eframe::App for ContextApp {
                 let dpi_scale = ctx.pixels_per_point();
                 let lx = x as f32 / dpi_scale;
                 let ly = y as f32 / dpi_scale;
-                let pos_y = if (ly + win_h) > screen_h {
+                // Push the window 5 cm below the caret so it doesn't cover the line
+                // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
+                const CARET_OFFSET_BELOW_PX: f32 = 189.0;
+                let pos_y = if (ly + CARET_OFFSET_BELOW_PX + win_h) > screen_h {
+                    // Not enough room below — flip above the caret with a 30 px gap.
                     ly - win_h - 30.0
                 } else {
-                    ly
+                    ly + CARET_OFFSET_BELOW_PX
                 };
                 let pos_y = pos_y.max(0.0).min(screen_h - win_h);
                 let pos_x = lx.min(screen_w - win_w).max(0.0);
@@ -5756,7 +5768,13 @@ impl eframe::App for ContextApp {
                 } else {
                     egui::Color32::from_rgb(160, 160, 160)
                 };
-                let pin_tooltip = if self.follow_cursor { "Følg markør (på)" } else { "Følg markør (av)" };
+                // Phase 14: UI strings come from the runtime-selected
+                // language stored on ContextApp.
+                let pin_tooltip = if self.follow_cursor {
+                    self.language.ui_pin_cursor_on()
+                } else {
+                    self.language.ui_pin_cursor_off()
+                };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
                 ).sense(egui::Sense::click())).on_hover_text(pin_tooltip).clicked() {
@@ -5767,14 +5785,14 @@ impl eframe::App for ContextApp {
                 let settings_color = if self.selected_tab == 2 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
-                ).sense(egui::Sense::click())).on_hover_text("Innstillinger").clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_settings()).clicked() {
                     self.selected_tab = 2;
                 }
 
                 // ▁ Minimize
                 if ui.add(egui::Label::new(
                     egui::RichText::new("–").size(14.0).color(inactive)
-                ).sense(egui::Sense::click())).on_hover_text("Minimer").clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_minimize()).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
@@ -5991,7 +6009,7 @@ impl eframe::App for ContextApp {
 
                 if active_errors.is_empty() {
                     ui.label(
-                        egui::RichText::new("Ingen feil funnet.")
+                        egui::RichText::new(self.language.ui_no_errors())
                             .size(12.0)
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
@@ -6009,7 +6027,7 @@ impl eframe::App for ContextApp {
                                 egui::Color32::from_rgb(60, 160, 240)
                             };
                             ui.label(egui::RichText::new(phase).size(16.0));
-                            ui.label(egui::RichText::new(format!("AI korrigerer... ({}s)", elapsed))
+                            ui.label(egui::RichText::new(self.language.ui_ai_correcting_seconds(elapsed))
                                 .size(12.0).strong().color(pulse));
                             ctx.request_repaint_after(Duration::from_millis(500));
                         } else {
@@ -6018,7 +6036,7 @@ impl eframe::App for ContextApp {
                                 .count();
                             if err_count > 0 {
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new("✨ AI-korriger alle").size(11.0)
+                                    egui::RichText::new(self.language.ui_ai_fix_all()).size(11.0)
                                 ).min_size(egui::vec2(0.0, 18.0))).clicked() {
                                     self.dispatch_llm_fix_all();
                                 }
@@ -7116,7 +7134,7 @@ impl eframe::App for ContextApp {
                     let current = tts::current_voice();
                     if self.voice_list.is_empty() {
                         ui.label(egui::RichText::new("Ingen norske stemmer funnet.").size(12.0));
-                        ui.label(egui::RichText::new("Last ned stemmer i Systeminnstillinger > Tilgjengelighet > Opplest innhold > Systemstemme").size(11.0)
+                        ui.label(egui::RichText::new(self.language.ui_voice_download_help()).size(11.0)
                             .color(egui::Color32::from_rgb(100, 100, 100)));
                     }
                     for voice in &self.voice_list {
@@ -7397,7 +7415,9 @@ fn main() -> eframe::Result {
     // Console spelling test mode — exercises exact same code as GUI
     if std::env::args().any(|a| a == "--test-spelling") {
         eprintln!("=== Spelling test mode ===");
-        let mut app = ContextApp::new(true, true, 2, false);
+        let test_language: std::sync::Arc<dyn language::LanguageBundle> =
+            std::sync::Arc::new(language::BokmalLanguage);
+        let mut app = ContextApp::new(test_language, true, 2, false);
         // Wait for startup (BERT model loading) to complete
         if let Some(rx) = app.startup_rx.take() {
             eprintln!("Waiting for BERT model to load...");
@@ -7491,7 +7511,6 @@ fn main() -> eframe::Result {
     }
 
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
-    let use_swipl = !std::env::args().any(|a| a == "--no-swipl");
     let show_debug_tab = std::env::args().any(|a| a == "--debug");
     let quality: u8 = {
         let args: Vec<String> = std::env::args().collect();
@@ -7501,12 +7520,35 @@ fn main() -> eframe::Result {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1) // default: Normal (1)
     };
+
+    // Phase 13: parse --language flag (default "nb"). Resolve through the
+    // language-rs registry; unsupported codes fail loudly with a useful
+    // message instead of silently falling back to Bokmål.
+    let lang_code: String = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .position(|a| a == "--language")
+            .and_then(|i| args.get(i + 1).cloned())
+            .unwrap_or_else(|| "nb".to_string())
+    };
+    let selected_language: std::sync::Arc<dyn language::LanguageBundle> =
+        match language::resolve_language(&lang_code) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Language: {}", e);
+                std::process::exit(2);
+            }
+        };
+
     if grammar_completion {
         eprintln!("Grammar completion: ON");
     }
-    if use_swipl {
-        eprintln!("SWI-Prolog engine: ON");
-    }
+    eprintln!("SWI-Prolog engine: ON");
+    eprintln!(
+        "Language: {} ({})",
+        selected_language.display_name(),
+        selected_language.code()
+    );
     let quality_name = match quality { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" };
     eprintln!("Quality: {} ({})", quality, quality_name);
 
@@ -7577,6 +7619,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    let language_for_app = std::sync::Arc::clone(&selected_language);
     eframe::run_native(
         "NorskTale",
         options,
@@ -7609,7 +7652,7 @@ fn main() -> eframe::Result {
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                let app = ContextApp::new(grammar_completion, use_swipl, quality, show_debug_tab);
+                let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab);
                 // Start HTTP /errors endpoint for integration tests
                 let errors_json = app.shared_errors_json.clone();
                 std::thread::Builder::new().name("test-http".into()).spawn(move || {
