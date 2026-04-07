@@ -1559,11 +1559,12 @@ impl ContextApp {
             }
         }
 
-        // Common modal verb misspellings — BERT can't distinguish "vil" vs "ville" in context
-        let modal_fixes: &[(&str, &str)] = &[
-            ("vile", "ville"), ("skule", "skulle"), ("kune", "kunne"), ("måte", "måtte"),
-            ("bure", "burde"), ("tore", "torde"), ("gide", "gidde"),
-        ];
+        // Phase 5: modal verb misspellings come from the Language trait —
+        // BERT can't distinguish forms like "vil" vs "ville" in context.
+        // Bokmål is hard-coded here for now; later phases pipe a runtime
+        // language through ContextApp.
+        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
+        let modal_fixes = language::LanguageSpelling::modal_confusion_pairs(&bokmal);
         if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean) {
             if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
                 log!("modal fix: '{}' → '{}'", clean, correct);
