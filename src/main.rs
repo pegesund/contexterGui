@@ -3759,6 +3759,13 @@ impl ContextApp {
                     log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
                 }
 
+                // Sentinel that grammar rules can use as their suggestion to mean
+                // "delete this word entirely" — handled below by routing through
+                // remove_word_from_sentence instead of replace_word_at_position.
+                // Used by Prolog rules like infinitivsmerke_presens where the
+                // correction is to remove a stray «å», not to replace a word.
+                const DELETE_SENTINEL: &str = "<DELETE>";
+
                 let errors_with_suggestions: Vec<_> = resp.errors.iter()
                     .filter(|e| !e.suggestion.is_empty())
                     .collect();
@@ -3766,7 +3773,11 @@ impl ContextApp {
                 if !errors_with_suggestions.is_empty() {
                     for (i, ge) in errors_with_suggestions.iter().enumerate() {
                         let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
-                        let mut corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
+                        let mut corrected = if first_alt == DELETE_SENTINEL {
+                            remove_word_from_sentence(&resp.sentence, &ge.word)
+                        } else {
+                            replace_word_at_position(&resp.sentence, &ge.word, first_alt)
+                        };
                         // When article gender changes (en↔et), also fix adjective agreement.
                         // Dispatched through the language trait so the actual articles
                         // and rules come from the active LanguageBundle (Bokmål here;
@@ -3777,12 +3788,15 @@ impl ContextApp {
                         if corrected.trim() == resp.sentence.trim() {
                             continue;
                         }
-                        log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, first_alt, ge.rule_name);
+                        // For user-facing text, render <DELETE> as the empty string
+                        // (or "" with quotes) so the explanation reads cleanly.
+                        let display_alt = if first_alt == DELETE_SENTINEL { "" } else { first_alt };
+                        log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, display_alt, ge.rule_name);
                         self.writing_errors.push(WritingError {
                             category: ErrorCategory::Grammar,
                             word: resp.sentence.to_string(),
                             suggestion: corrected,
-                            explanation: format!("«{}» → «{}»: {}", ge.word, first_alt, ge.explanation),
+                            explanation: format!("«{}» → «{}»: {}", ge.word, display_alt, ge.explanation),
                             rule_name: ge.rule_name.clone(),
                             sentence_context: resp.sentence.to_string(),
                             doc_offset: resp.doc_offset,

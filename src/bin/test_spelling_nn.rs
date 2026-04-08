@@ -225,12 +225,15 @@ fn main() {
     // `fra` and suggest `frå`.
     // -----------------------------------------------------------------------
     println!("\n{}", "=".repeat(70));
-    println!("Grammar check probe: does NN grammar flag 'fra'?");
+    println!("Grammar check probe: does NN grammar flag known errors?");
     for sentence in &[
         "Eg er ikkje fra Bergen.",
         "Eg er ikkje frå Bergen.",
         "Eg kjem fra Oslo.",
         "Eg kjem frå Oslo.",
+        // å + present tense verb is wrong (å only precedes infinitive)
+        "Eg å spelar fotball kvar dag.",
+        "Eg spelar fotball kvar dag.",
     ] {
         let errors = checker.check_sentence(sentence);
         println!("\n  Sentence: '{}'", sentence);
