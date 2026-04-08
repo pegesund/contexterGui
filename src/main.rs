@@ -66,51 +66,6 @@ fn levenshtein_distance(a: &str, b: &str) -> u32 {
     dp[m][n]
 }
 
-/// Fix adjective agreement after article gender change.
-/// Norwegian: "en morsom" (masc) ↔ "et morsomt" (neuter)
-/// When "et" precedes an adjective without -t suffix, add -t.
-/// When "en/ei" precedes an adjective with -t suffix, remove -t.
-fn fix_adjective_agreement(sentence: &str) -> String {
-    let words: Vec<&str> = sentence.split_whitespace().collect();
-    let mut result: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        if i + 1 < words.len() {
-            let article = words[i].to_lowercase();
-            let next = words[i + 1];
-            let next_lower = next.to_lowercase();
-            let next_clean = next_lower.trim_matches(|c: char| c.is_ascii_punctuation());
-            if article == "et" && !next_clean.ends_with('t') && next_clean.len() >= 3 {
-                // Neuter article but adjective missing -t: add -t
-                // Check it's likely an adjective (not a noun)
-                // Simple heuristic: if the word after this one exists, treat current as adjective
-                if i + 2 < words.len() {
-                    let fixed = format!("{}t", next_clean);
-                    // Preserve trailing punctuation
-                    let trailing: String = next.chars().rev().take_while(|c| c.is_ascii_punctuation()).collect::<String>().chars().rev().collect();
-                    result.push(words[i].to_string());
-                    result.push(format!("{}{}", fixed, trailing));
-                    i += 2;
-                    continue;
-                }
-            } else if (article == "en" || article == "ei") && next_clean.ends_with('t') && next_clean.len() >= 4 {
-                // Masculine/feminine article but adjective has neuter -t: remove -t
-                if i + 2 < words.len() {
-                    let fixed = &next_clean[..next_clean.len() - 1];
-                    let trailing: String = next.chars().rev().take_while(|c| c.is_ascii_punctuation()).collect::<String>().chars().rev().collect();
-                    result.push(words[i].to_string());
-                    result.push(format!("{}{}", fixed, trailing));
-                    i += 2;
-                    continue;
-                }
-            }
-        }
-        result.push(words[i].to_string());
-        i += 1;
-    }
-    result.join(" ")
-}
-
 fn trunc(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }
     let mut end = max;
@@ -2233,7 +2188,11 @@ impl ContextApp {
             // Source 5: Compound suggestion (skipped — only available on SWI checker, not on Analyzer)
 
             // Source 6: Split function word ("tilbutikken" → "til butikken")
-            if let Some(split) = try_split_function_word(&word_lower, analyzer) {
+            if let Some(split) = try_split_function_word(
+                &word_lower,
+                analyzer,
+                self.language.function_words(),
+            ) {
                 let sl = split.to_lowercase();
                 if seen.insert(sl.clone()) { candidates.push(sl); }
             }
@@ -3781,9 +3740,12 @@ impl ContextApp {
                     for (i, ge) in errors_with_suggestions.iter().enumerate() {
                         let first_alt = ge.suggestion.split('|').next().unwrap_or(&ge.suggestion);
                         let mut corrected = replace_word_at_position(&resp.sentence, &ge.word, first_alt);
-                        // When article gender changes (en↔et), also fix adjective agreement
+                        // When article gender changes (en↔et), also fix adjective agreement.
+                        // Dispatched through the language trait so the actual articles
+                        // and rules come from the active LanguageBundle (Bokmål here;
+                        // Nynorsk and other languages override the trait method).
                         if ge.rule_name.contains("kjoenn") || ge.rule_name.contains("kjønn") {
-                            corrected = fix_adjective_agreement(&corrected);
+                            corrected = self.language.fix_adjective_agreement(&corrected);
                         }
                         if corrected.trim() == resp.sentence.trim() {
                             continue;
@@ -4181,28 +4143,20 @@ fn find_diff_word(original: &str, corrected: &str) -> String {
     original.split_whitespace().next().unwrap_or(original).to_string()
 }
 
-fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer) -> Option<String> {
-    // Norwegian function words that are commonly glued to the next word.
-    // Sorted longest-first so "etter" matches before "et".
-    const FUNCTION_WORDS: &[&str] = &[
-        "gjennom", "mellom", "under", "etter", "langs", "rundt",
-        "foran", "bortover", "innover", "utover",
-        "forbi", "siden", "etter", "blant",
-        "over", "inne", "borte",
-        "uten", "utenfor", "innenfor",
-        "med", "mot", "ved", "hos", "fra",
-        "for", "som", "men",
-        "til", "per", "via",
-        "på", "av", "om",
-        "en", "et", "ei",
-        "og", "at",
-        "i",
-    ];
+fn try_split_function_word(
+    word: &str,
+    analyzer: &mtag::Analyzer,
+    function_words: &[&str],
+) -> Option<String> {
+    // Function words come from the active language's `LanguageSpelling`
+    // trait — see `BokmalLanguage::function_words` (and future
+    // `NynorskLanguage`/`EnglishLanguage` impls). The caller passes
+    // `self.language.function_words()`.
 
     let lower = word.to_lowercase();
 
     // Phase 1: Try known function word prefixes (high confidence)
-    for prefix in FUNCTION_WORDS {
+    for prefix in function_words {
         if lower.len() <= prefix.len() + 1 { continue; } // remainder must be ≥2 chars
         if !lower.starts_with(prefix) { continue; }
         let remainder = &lower[prefix.len()..];
