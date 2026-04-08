@@ -38,11 +38,22 @@ pub enum BertRequest {
 
     /// Score spelling candidates using score_spelling() (batched_forward).
     /// Replaces the old SentenceScoreBatch which used a slow single_forward loop.
+    ///
+    /// `sentence` must be the FULL original sentence with the misspelled
+    /// word still in it. The worker used to reconstruct it as
+    /// `format!("{}{}", context_before, context_after)`, but that dropped
+    /// the misspelled word when both context slices were trimmed and
+    /// context_after ended up empty — the hybrid reranker in
+    /// `score_and_rerank` then failed to locate the word position and
+    /// returned `NEG_INFINITY` for every candidate (word-boundary spell
+    /// check is exactly this state: context_after is "" right after the
+    /// user presses space). Pass the real sentence through.
     SpellingScore {
         id: RequestId,
         context_before: String,
         context_after: String,
         candidates: Vec<String>,
+        sentence: String,
     },
 
     /// MLM forward pass: get top token predictions at <mask> position.
@@ -225,12 +236,15 @@ fn worker_loop(
                 repaint_ctx.request_repaint();
             }
 
-            BertRequest::SpellingScore { id, context_before, context_after, candidates } => {
+            BertRequest::SpellingScore { id, context_before, context_after, candidates, sentence } => {
                 // Build ortho-scored candidates for the shared scorer
                 let ortho_candidates: Vec<(String, f32)> = candidates.iter()
                     .map(|c| (c.clone(), 0.5)) // default ortho — real scores come from main thread
                     .collect();
-                let sentence = format!("{}{}", context_before, context_after);
+                // sentence is passed directly from the caller — must be the
+                // full original sentence with the misspelled word still in
+                // it, NOT a concatenation of context_before + context_after.
+                // See the doc-comment on BertRequest::SpellingScore for why.
                 let mut grammar_check = |sentences: &[String]| -> Vec<Vec<nostos_cognio::grammar::types::GrammarError>> {
                     if let Some(ref gs) = grammar_sender {
                         crate::grammar_actor::grammar_batch_via_sender(gs, sentences)

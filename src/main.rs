@@ -1794,7 +1794,18 @@ impl ContextApp {
         let mut candidates = vec![word.to_string()];
         candidates.extend(variants.iter().cloned());
         log!("consonant BERT send: '{}' variants={:?}", word, variants);
-        let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates });
+        // If the user is at a word boundary (pressed space or end-of-sentence),
+        // context_after is empty/whitespace — which breaks score_and_rerank's
+        // word-position extraction (find("") returns Some(0) → word_lower = "").
+        // Append a sentinel "." to BOTH context_after AND sentence so the word
+        // extraction inside the scorer hits the else branch and correctly strips
+        // the trailing punctuation to recover the misspelled word.
+        let (context_after, sentence) = if context_after.trim().is_empty() {
+            (".".to_string(), format!("{}.", sentence_ctx))
+        } else {
+            (context_after, sentence_ctx.to_string())
+        };
+        let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates, sentence });
         self.pending_consonant_bert.push(PendingConsonantBert {
             request_id,
             word: word.to_string(),
@@ -2446,7 +2457,18 @@ impl ContextApp {
                     (sentence_lower.clone(), String::new())
                 };
                 let candidates: Vec<String> = passing.iter().take(30).map(|(c, _)| c.clone()).collect();
-                let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates });
+                // If the user is at a word boundary (pressed space or end-of-
+                // sentence), context_after is empty/whitespace — which breaks
+                // score_and_rerank's word-position extraction. Append sentinel
+                // "." to BOTH context_after and sentence so the word extraction
+                // inside the scorer hits the else branch and correctly strips
+                // the trailing punctuation to recover the misspelled word.
+                let (context_after, sentence) = if context_after.trim().is_empty() {
+                    (".".to_string(), format!("{}.", sentence_ctx))
+                } else {
+                    (context_after, sentence_ctx.to_string())
+                };
+                let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates, sentence });
                 self.pending_spelling_bert.push(PendingSpellingBert {
                     request_id,
                     error_idx_word: word_lower.clone(),
@@ -2587,11 +2609,16 @@ impl ContextApp {
         if valid_candidates.len() > 1 {
             if let Some(worker) = &mut self.bert_worker {
                 let candidates: Vec<String> = valid_candidates.iter().map(|(c, _, _)| c.clone()).collect();
+                // Grammar rerank path: we don't have per-word context_before/after
+                // (the grammar check operates on the whole sentence), so pass
+                // the full sentence as-is and let the scorer work with it.
+                let sentence_full = sentence.to_string();
                 let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore {
                     id,
                     context_before: String::new(),
                     context_after: String::new(),
                     candidates,
+                    sentence: sentence_full,
                 });
                 self.pending_grammar_bert.push(PendingGrammarBert {
                     request_id,
