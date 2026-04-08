@@ -1,11 +1,28 @@
 //! Small console tool to test UIA text reading from Edge textarea.
 //! Usage: leave cursor in the textarea, then run this.
+//!
+//! Windows-only: uses the `windows` crate's UIA bindings directly. On
+//! non-Windows platforms the bin compiles to a no-op main that exits
+//! with an error message, so the workspace still builds on Mac. All
+//! module-level items (use statements, main, helper functions) are
+//! gated with `#[cfg(windows)]` so they vanish on non-Windows.
 
+#[cfg(windows)]
 use windows::Win32::Foundation::*;
+#[cfg(windows)]
 use windows::Win32::System::Com::*;
+#[cfg(windows)]
 use windows::Win32::UI::Accessibility::*;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("test_uia is a Windows-only UIA reader; not compiled for this platform.");
+    std::process::exit(1);
+}
+
+#[cfg(windows)]
 fn main() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -76,6 +93,7 @@ fn main() {
     }
 }
 
+#[cfg(windows)]
 unsafe fn dump_element(el: &IUIAutomationElement, label: &str) {
     let name = el.CurrentName().unwrap_or_default().to_string();
     let cls = el.CurrentClassName().unwrap_or_default().to_string();
@@ -86,6 +104,7 @@ unsafe fn dump_element(el: &IUIAutomationElement, label: &str) {
         label, &name[..name.len().min(60)], &cls[..cls.len().min(30)], ct.0, pid, hwnd);
 }
 
+#[cfg(windows)]
 unsafe fn try_all_patterns(el: &IUIAutomationElement) {
     // ValuePattern
     if let Ok(vp) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {

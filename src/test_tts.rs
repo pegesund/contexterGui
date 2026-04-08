@@ -1,5 +1,12 @@
 mod tts;
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("test_tts is a Windows-only audio test; not compiled for this platform.");
+    std::process::exit(1);
+}
+
+#[cfg(windows)]
 fn main() {
     // Test: play the same WAV file 5 times using PlaySoundW
     // If this sounds random, it's a Windows audio issue
