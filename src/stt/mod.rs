@@ -1,14 +1,10 @@
 // STT module — trait-based platform dispatch.
 // Windows: Whisper (C API via DLL). macOS: Apple SFSpeechRecognizer (future).
 
-use language::LanguageUi as _;
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-// Phase 11c: STT status messages come from the Language trait. Bokmål is
-// hard-coded here for now; later phases pipe a runtime language through.
-const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
 static MIC_RECORDING: AtomicBool = AtomicBool::new(false);
 /// Saved audio from last recording — for re-transcription with final model
@@ -76,6 +72,7 @@ pub fn start_recording(
     final_engine: Arc<Mutex<Box<dyn SttEngine>>>,
     streaming_engine: Arc<Mutex<Box<dyn SttEngine>>>,
     auto_final: bool,
+    no_audio_msg: String,
 ) -> Result<MicHandle, String> {
     if MIC_RECORDING.load(Ordering::Relaxed) {
         return Err("Already recording".into());
@@ -238,7 +235,7 @@ pub fn start_recording(
         };
 
         if raw_audio.is_empty() {
-            let _ = result_tx.send(TranscribeResult { text: BOKMAL.ui_no_audio_captured().into(), partial: false });
+            let _ = result_tx.send(TranscribeResult { text: no_audio_msg, partial: false });
             return;
         }
 

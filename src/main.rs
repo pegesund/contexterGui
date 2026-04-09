@@ -31,12 +31,10 @@ pub fn compute_boost(
     doc_word_counts: &HashMap<String, u16>,
     user_dict: Option<&user_dict::UserDict>,
     wordfreq: Option<&HashMap<String, u64>>,
+    lang: &dyn language::LanguageBundle,
 ) -> f32 {
     let lower = word.to_lowercase();
-    // Phase 12: common-word threshold comes from the Language trait. Bokmål
-    // is hard-coded here for now; later phases pipe a runtime language through.
-    use language::LanguageLexicon as _;
-    let common_threshold = language::BokmalLanguage.wordfreq_common_threshold();
+    let common_threshold = lang.wordfreq_common_threshold();
     // Never boost common function words (top ~31 in Norwegian: og, er, for, til, av, det, ...)
     if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= common_threshold) {
         return 1.0;
@@ -267,30 +265,6 @@ fn data_dir() -> PathBuf {
     let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contexter-repo/training-data");
     if mac.exists() { return mac; }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contexter-repo/training-data")
-}
-
-fn dict_path() -> PathBuf {
-    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
-    if mac.exists() { return mac; }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rustSpell/mtag-rs/data/fullform_bm.mfst")
-}
-
-fn compound_data_path() -> PathBuf {
-    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/compound_data.pl");
-    if mac.exists() { return mac; }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/compound_data.pl")
-}
-
-fn grammar_rules_path() -> PathBuf {
-    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer/grammar_rules.pl");
-    if mac.exists() { return mac; }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer/grammar_rules.pl")
-}
-
-fn syntaxer_dir() -> PathBuf {
-    let mac = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntaxer");
-    if mac.exists() { return mac; }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../syntaxer")
 }
 
 // --- Bridge manager: picks the best available bridge ---
@@ -1263,7 +1237,7 @@ impl ContextApp {
         drop(startup_tx);
 
         ContextApp {
-            language,
+            language: language.clone(),
             manager: BridgeManager::new(platform::create_platform()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
@@ -1365,7 +1339,7 @@ impl ContextApp {
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
             rule_info_llm_changes: Vec::new(),
-            ocr: match ocr::OcrClipboard::new() {
+            ocr: match ocr::OcrClipboard::new(&*language) {
                 Ok(o) => { eprintln!("OCR clipboard monitor ready"); Some(o) }
                 Err(e) => { eprintln!("OCR not available: {}", e); None }
             },
@@ -1394,16 +1368,14 @@ impl ContextApp {
         }
     }
 
-    fn load_swipl_checker(swipl_path: &str) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
-        // Phase 3: grammar rules path comes from the Language trait. Bokmål
-        // is hard-coded here for now; later phases pipe a runtime-selected
-        // language through ContextApp.
-        let bokmal: language::BokmalLanguage = language::BokmalLanguage;
+    fn load_swipl_checker(swipl_path: &str, language: &dyn language::LanguageBundle) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
+        let prolog_rules = language.prolog_rules_path();
+        let syntaxer = prolog_rules.parent().unwrap_or_else(|| std::path::Path::new("."));
         SwiGrammarChecker::new(
             swipl_path,
-            dict_path().to_str().unwrap(),
-            language::LanguageGrammar::prolog_rules_path(&bokmal).to_str().unwrap(),
-            syntaxer_dir().to_str().unwrap(),
+            language.mtag_fst_path().to_str().unwrap(),
+            prolog_rules.to_str().unwrap(),
+            syntaxer.to_str().unwrap(),
         )
     }
 
@@ -1853,7 +1825,7 @@ impl ContextApp {
                         let mut left_boosted: Vec<_> = left;
                         for c in &mut left_boosted {
                             c.score *= compute_boost(&c.word, &self.doc_word_counts,
-                                self.user_dict.as_ref(), self.wordfreq.as_deref());
+                                self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
                             if capitalize && c.word.chars().next().map_or(false, |ch| ch.is_lowercase()) {
                                 let mut chars = c.word.chars();
                                 c.word = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
@@ -1865,7 +1837,7 @@ impl ContextApp {
                         let mut right_boosted: Vec<_> = right;
                         for c in &mut right_boosted {
                             c.score *= compute_boost(&c.word, &self.doc_word_counts,
-                                self.user_dict.as_ref(), self.wordfreq.as_deref());
+                                self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
                         }
                         right_boosted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
                         self.open_completions = right_boosted.into_iter().take(5).collect();
@@ -1971,7 +1943,7 @@ impl ContextApp {
             .map(|(candidate, bert_score)| {
                 let ortho_sim = ortho_map.get(candidate).copied().unwrap_or(0.5);
                 let boost = compute_boost(candidate, &self.doc_word_counts,
-                    self.user_dict.as_ref(), self.wordfreq.as_deref());
+                    self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
                 let final_score = bert_score * ortho_sim.sqrt() * boost;
                 log!("  spelling BERT: '{}' bert={:.3} × sqrt(ortho {:.2}) × boost {:.2} = {:.3}", candidate, bert_score, ortho_sim, boost, final_score);
                 (candidate.clone(), final_score)
@@ -2337,6 +2309,7 @@ impl ContextApp {
                 };
                 let results = compound_walker::compound_fuzzy_walk(
                     fst, &word_lower,
+                    &*self.language,
                     self.wordfreq.as_deref(),
                     Some(&word_check), Some(&noun_check),
                 );
@@ -2379,7 +2352,7 @@ impl ContextApp {
             }
             // Boost words found in document or user dictionary (TF-IDF style)
             ortho_sim *= compute_boost(w, &self.doc_word_counts,
-                self.user_dict.as_ref(), self.wordfreq.as_deref());
+                self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
             ortho_scored.push((w.clone(), ortho_sim));
         }
         ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -4489,17 +4462,18 @@ impl eframe::App for ContextApp {
 
       if !skip_processing {
         // Spawn grammar actor on first update — loads SWI-Prolog on its own thread.
-        // Phase 16: dict and Prolog rules paths come from the Language trait.
-        // syntaxer_dir() and compound_data_path() are still legacy free functions
-        // (the syntaxer dir layout is shared across all languages today; per-
-        // language compound data hasn't been split out yet).
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
+            let prolog_rules = self.language.prolog_rules_path();
+            let syntaxer_dir = prolog_rules.parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf();
+            let compound_data_path = syntaxer_dir.join("compound_data.pl");
             self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(
                 self.platform.swipl_path().to_string(),
                 self.language.mtag_fst_path().to_str().unwrap().to_string(),
-                self.language.prolog_rules_path().to_str().unwrap().to_string(),
-                syntaxer_dir().to_str().unwrap().to_string(),
-                std::fs::read_to_string(compound_data_path()).unwrap_or_default(),
+                prolog_rules.to_str().unwrap().to_string(),
+                syntaxer_dir.to_str().unwrap().to_string(),
+                std::fs::read_to_string(&compound_data_path).unwrap_or_default(),
                 ctx.clone(),
             ));
             log!("Grammar actor spawning (SWI-Prolog loads on actor thread)");
@@ -4813,7 +4787,7 @@ impl eframe::App for ContextApp {
                         let final_eng = self.whisper_engine.as_ref().unwrap().clone();
                         let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
                         let auto_final = cfg!(target_os = "macos");
-                        match stt::start_recording(final_eng, stream_eng, auto_final) {
+                        match stt::start_recording(final_eng, stream_eng, auto_final, self.language.ui_no_audio_captured().to_string()) {
                             Ok(handle) => {
                                 log!("Microphone recording auto-started after load");
                                 self.mic_handle = Some(handle);
@@ -5631,7 +5605,7 @@ impl eframe::App for ContextApp {
                                 let final_eng = self.whisper_engine.as_ref().unwrap().clone();
                                 let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
                                 let auto_final = cfg!(target_os = "macos");
-                                match stt::start_recording(final_eng, stream_eng, auto_final) {
+                                match stt::start_recording(final_eng, stream_eng, auto_final, self.language.ui_no_audio_captured().to_string()) {
                                     Ok(handle) => {
                                         log!("Microphone recording started");
                                         self.mic_handle = Some(handle);
@@ -5670,23 +5644,26 @@ impl eframe::App for ContextApp {
                                         .to_string_lossy().to_string();
                                     if mode == 0 {
                                         let dll = dll_dir.clone();
+                                        let lang0 = self.language.clone();
                                         std::thread::spawn(move || {
                                             let model_path = data_dir()
                                                 .join("ggml-nb-whisper-tiny.bin")
                                                 .to_string_lossy().to_string();
                                             let _ = tx.send(WhisperLoadItem::Final(
-                                                stt::WhisperEngine::load(&dll, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                                                stt::WhisperEngine::load(&dll, &model_path, &*lang0).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                                             ));
                                         });
                                     } else {
                                         let tx2 = tx.clone();
                                         let dll2 = dll_dir.clone();
+                                        let lang1 = self.language.clone();
+                                        let lang2 = self.language.clone();
                                         std::thread::spawn(move || {
                                             let model_path = data_dir()
                                                 .join("ggml-nb-whisper-base.bin")
                                                 .to_string_lossy().to_string();
                                             let _ = tx2.send(WhisperLoadItem::Streaming(
-                                                stt::WhisperEngine::load(&dll2, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                                                stt::WhisperEngine::load(&dll2, &model_path, &*lang1).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                                             ));
                                         });
                                         std::thread::spawn(move || {
@@ -5694,7 +5671,7 @@ impl eframe::App for ContextApp {
                                                 .join("ggml-nb-whisper-medium-q5.bin")
                                                 .to_string_lossy().to_string();
                                             let _ = tx.send(WhisperLoadItem::Final(
-                                                stt::WhisperEngine::load(&dll_dir, &model_path).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                                                stt::WhisperEngine::load(&dll_dir, &model_path, &*lang2).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                                             ));
                                         });
                                     }
@@ -7548,7 +7525,7 @@ fn main() -> eframe::Result {
     eprintln!("Quality: {} ({})", quality, quality_name);
 
     // Initialize TTS engine (platform-specific)
-    setup_platform.init_tts();
+    setup_platform.init_tts(&*selected_language);
 
     fn make_pen_icon(size: u32) -> egui::IconData {
         let mut rgba = vec![0u8; (size * size * 4) as usize];

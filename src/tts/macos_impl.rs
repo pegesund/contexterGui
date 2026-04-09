@@ -4,21 +4,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{OnceLock, RwLock};
 
-// Phase 8: TTS voice constants come from the Language trait. Bokmål is
-// hard-coded here for now; later phases pipe a runtime language through.
-const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
-
 static TTS_SENDER: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 static TTS_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static TTS_SPEAKING: AtomicBool = AtomicBool::new(false);
 static TTS_STOP: AtomicBool = AtomicBool::new(false);
 static CURRENT_VOICE: OnceLock<RwLock<String>> = OnceLock::new();
+/// Fallback voice name used when CURRENT_VOICE is uninitialised (should not happen).
+static FALLBACK_VOICE: OnceLock<String> = OnceLock::new();
 
-pub struct MacTtsEngine;
+pub struct MacTtsEngine {
+    voice_filters: &'static [&'static str],
+}
 
 impl MacTtsEngine {
-    pub fn new() -> Self {
-        CURRENT_VOICE.get_or_init(|| RwLock::new(BOKMAL.tts_default_voice().to_string()));
+    pub fn new(lang: &dyn language::LanguageVoice) -> Self {
+        let default_voice = lang.tts_default_voice();
+        CURRENT_VOICE.get_or_init(|| RwLock::new(default_voice.to_string()));
+        FALLBACK_VOICE.get_or_init(|| default_voice.to_string());
 
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
@@ -27,7 +29,7 @@ impl MacTtsEngine {
                 TTS_SPEAKING.store(true, Ordering::Relaxed);
                 let voice = CURRENT_VOICE.get()
                     .map(|v| v.read().unwrap().clone())
-                    .unwrap_or_else(|| BOKMAL.tts_default_voice().to_string());
+                    .unwrap_or_else(|| FALLBACK_VOICE.get().cloned().unwrap_or_default());
                 let child = std::process::Command::new("say")
                     .arg("-v").arg(&voice)
                     .arg(&word)
@@ -53,11 +55,11 @@ impl MacTtsEngine {
         });
         TTS_SENDER.get_or_init(|| tx);
         TTS_AVAILABLE.store(true, Ordering::Relaxed);
-        MacTtsEngine
+        MacTtsEngine { voice_filters: lang.tts_voice_filters() }
     }
 
-    /// Query macOS for Norwegian voices by running `say -v '?'`
-    fn query_voices() -> Vec<VoiceInfo> {
+    /// Query macOS for voices matching the language's filter set by running `say -v '?'`
+    fn query_voices(voice_filters: &'static [&'static str]) -> Vec<VoiceInfo> {
         let output = std::process::Command::new("say")
             .arg("-v").arg("?")
             .output()
@@ -69,7 +71,6 @@ impl MacTtsEngine {
         };
 
         let mut voices = Vec::new();
-        let voice_filters = BOKMAL.tts_voice_filters();
         for line in output.lines() {
             // Filter set comes from the Language trait (Bokmål returns
             // ["nb_NO", "nn_NO", "no_NO"] so both Bokmål and Nynorsk show up)
@@ -111,13 +112,13 @@ impl TtsEngine for MacTtsEngine {
     }
 
     fn available_voices(&self) -> Vec<VoiceInfo> {
-        Self::query_voices()
+        Self::query_voices(self.voice_filters)
     }
 
     fn current_voice(&self) -> String {
         CURRENT_VOICE.get()
             .map(|v| v.read().unwrap().clone())
-            .unwrap_or_else(|| BOKMAL.tts_default_voice().to_string())
+            .unwrap_or_else(|| FALLBACK_VOICE.get().cloned().unwrap_or_default())
     }
 
     fn set_voice(&self, name: &str) {

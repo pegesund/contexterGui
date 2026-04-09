@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use acatts_rust::spelling_scorer::{generate_spelling_candidates, score_and_rerank};
+use language::LanguageSpelling as _;
 
 fn main() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -96,6 +97,7 @@ fn main() {
             &empty_doc,
             misspelled,
             sentence,
+            &language::BokmalLanguage,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

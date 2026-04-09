@@ -7,18 +7,12 @@ use std::sync::mpsc;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use language::{LanguageUi as _, LanguageVoice as _};
     use windows::core::HSTRING;
     use windows::Globalization::Language;
     use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap, BitmapPixelFormat};
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::{InMemoryRandomAccessStream, DataWriter};
     use windows::Win32::Foundation::HGLOBAL;
-
-    // Phase 10/11c: OCR language code and error messages come from the
-    // Language trait. Bokmål is hard-coded here for now; later phases pipe
-    // a runtime language through.
-    const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::CF_DIB;
@@ -28,21 +22,23 @@ mod windows_impl {
         last_seq: u32,
         pending_image: bool,
         dismissed_seq: u32,
+        /// BCP-47 language code passed to Windows OCR engine (e.g. "nb", "en")
+        ocr_lang_code: String,
     }
 
     impl OcrClipboard {
-        pub fn new() -> Result<Self, String> {
-            let lang_code = BOKMAL.ocr_language_code();
-            let lang = Language::CreateLanguage(&HSTRING::from(lang_code))
+        pub fn new(lang: &dyn language::LanguageBundle) -> Result<Self, String> {
+            let lang_code = lang.ocr_language_code();
+            let win_lang = Language::CreateLanguage(&HSTRING::from(lang_code))
                 .map_err(|e| format!("Failed to create Language('{}'): {}", lang_code, e))?;
-            if !OcrEngine::IsLanguageSupported(&lang)
+            if !OcrEngine::IsLanguageSupported(&win_lang)
                 .map_err(|e| format!("IsLanguageSupported: {}", e))? {
-                return Err(BOKMAL.ui_ocr_lang_pack_missing().into());
+                return Err(lang.ui_ocr_lang_pack_missing().into());
             }
-            let _engine = OcrEngine::TryCreateFromLanguage(&lang)
+            let _engine = OcrEngine::TryCreateFromLanguage(&win_lang)
                 .map_err(|e| format!("TryCreateFromLanguage: {}", e))?;
             let seq = unsafe { GetClipboardSequenceNumber() };
-            Ok(Self { last_seq: seq, pending_image: false, dismissed_seq: 0 })
+            Ok(Self { last_seq: seq, pending_image: false, dismissed_seq: 0, ocr_lang_code: lang_code.to_string() })
         }
         pub fn poll(&mut self) {
             let seq = unsafe { GetClipboardSequenceNumber() };
@@ -58,13 +54,14 @@ mod windows_impl {
         pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
             self.pending_image = false;
             let dib_data = read_clipboard_dib()?;
+            let lang_code = self.ocr_lang_code.clone();
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 unsafe {
                     let _ = windows::Win32::System::Com::CoInitializeEx(
                         None, windows::Win32::System::Com::COINIT_MULTITHREADED);
                 }
-                let _ = tx.send(run_ocr_on_dib(&dib_data));
+                let _ = tx.send(run_ocr_on_dib(&dib_data, &lang_code));
             });
             Some(rx)
         }
@@ -97,7 +94,7 @@ mod windows_impl {
         }
     }
 
-    fn run_ocr_on_dib(dib_data: &[u8]) -> Result<String, String> {
+    fn run_ocr_on_dib(dib_data: &[u8], lang_code: &str) -> Result<String, String> {
         let file_header_size: u32 = 14;
         let file_size = file_header_size + dib_data.len() as u32;
         let header_size = u32::from_le_bytes([dib_data[0], dib_data[1], dib_data[2], dib_data[3]]);
@@ -131,7 +128,7 @@ mod windows_impl {
             SoftwareBitmap::Convert(&bitmap, BitmapPixelFormat::Bgra8).map_err(|e| format!("{}", e))?
         } else { bitmap };
 
-        let lang = Language::CreateLanguage(&HSTRING::from("nb")).map_err(|e| format!("{}", e))?;
+        let lang = Language::CreateLanguage(&HSTRING::from(lang_code)).map_err(|e| format!("{}", e))?;
         let engine = OcrEngine::TryCreateFromLanguage(&lang).map_err(|e| format!("{}", e))?;
         let result = engine.RecognizeAsync(&ocr_bitmap).map_err(|e| format!("{}", e))?
             .get().map_err(|e| format!("{}", e))?;
@@ -159,9 +156,7 @@ mod macos_impl {
     use libloading::{Library, Symbol};
     use std::ffi::{CStr, CString};
 
-    // Phase 11c: OCR error messages come from the Language trait. Bokmål is
-    // hard-coded here for now; later phases pipe a runtime language through.
-    const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
+    use language::LanguageUi as _;
 
     type OcrRecognizeFn = unsafe extern "C" fn(*const i8) -> *mut i8;
     type OcrFreeFn = unsafe extern "C" fn(*mut i8);
@@ -170,10 +165,12 @@ mod macos_impl {
         pending_image: bool,
         last_change_count: isize,
         lib: Library,
+        /// UI string returned when OCR finds no text
+        no_text_msg: String,
     }
 
     impl OcrClipboard {
-        pub fn new() -> Result<Self, String> {
+        pub fn new(lang: &dyn language::LanguageBundle) -> Result<Self, String> {
             // Find libocr_helper.dylib
             let exe_dir = std::env::current_exe()
                 .ok()
@@ -193,7 +190,7 @@ mod macos_impl {
                 .map_err(|e| format!("Failed to load libocr_helper.dylib: {}", e))?;
 
             let count = pasteboard_change_count();
-            Ok(Self { pending_image: false, last_change_count: count, lib })
+            Ok(Self { pending_image: false, last_change_count: count, lib, no_text_msg: lang.ui_ocr_no_text().to_string() })
         }
 
         pub fn poll(&mut self) {
@@ -271,17 +268,18 @@ close access fileRef"#,
             let img_path = tmp_path.to_string_lossy().to_string();
             let (tx, rx) = mpsc::channel();
 
+            let no_text = self.no_text_msg.clone();
             std::thread::spawn(move || {
                 let c_path = CString::new(img_path.as_str()).unwrap();
                 let result_ptr = unsafe { recognize(c_path.as_ptr()) };
 
                 let text = if result_ptr.is_null() {
-                    Err(BOKMAL.ui_ocr_no_text().into())
+                    Err(no_text.clone())
                 } else {
                     let s = unsafe { CStr::from_ptr(result_ptr).to_string_lossy().to_string() };
                     unsafe { free_fn(result_ptr); }
                     if s.is_empty() {
-                        Err(BOKMAL.ui_ocr_no_text().into())
+                        Err(no_text)
                     } else {
                         Ok(s)
                     }

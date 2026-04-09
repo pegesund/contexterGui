@@ -4,6 +4,7 @@
 /// The only `#[cfg]` lives in `create_platform()` — all other code
 /// uses the trait, so adding a new platform is just another `impl`.
 
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -87,7 +88,7 @@ pub trait PlatformServices: Send + Sync {
     fn take_tab_press(&self) -> bool { false }
 
     /// Initialize TTS engine (platform-specific).
-    fn init_tts(&self);
+    fn init_tts(&self, lang: &dyn language::LanguageVoice);
 
     /// Read the currently selected text in the frontmost application.
     /// Returns None if no text is selected or if accessibility access is denied.
@@ -122,5 +123,5 @@ impl PlatformServices for StubPlatform {
     fn emoji_font_path(&self) -> Option<&str> { None }
     fn ort_dylib_candidates(&self) -> Vec<String> { vec![] }
     fn swipl_path(&self) -> &str { "libswipl.so" }
-    fn init_tts(&self) {}
+    fn init_tts(&self, _lang: &dyn language::LanguageVoice) {}
 }

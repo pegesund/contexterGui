@@ -38,23 +38,23 @@ static ENGINE: OnceLock<Box<dyn TtsEngine>> = OnceLock::new();
 
 /// Initialize the platform TTS engine.
 /// Called once at startup. After this, use speak_word/tts_available/etc.
-pub fn init_tts(sdk_dir: &str, voice_name: &str) {
-    let engine: Box<dyn TtsEngine> = create_engine(sdk_dir, voice_name);
+pub fn init_tts(sdk_dir: &str, voice_name: &str, lang: &dyn language::LanguageVoice) {
+    let engine: Box<dyn TtsEngine> = create_engine(sdk_dir, voice_name, lang);
     let _ = ENGINE.set(engine);
 }
 
 #[cfg(target_os = "macos")]
-fn create_engine(_sdk_dir: &str, _voice_name: &str) -> Box<dyn TtsEngine> {
-    Box::new(macos_impl::MacTtsEngine::new())
+fn create_engine(_sdk_dir: &str, _voice_name: &str, lang: &dyn language::LanguageVoice) -> Box<dyn TtsEngine> {
+    Box::new(macos_impl::MacTtsEngine::new(lang))
 }
 
 #[cfg(target_os = "windows")]
-fn create_engine(sdk_dir: &str, voice_name: &str) -> Box<dyn TtsEngine> {
+fn create_engine(sdk_dir: &str, voice_name: &str, _lang: &dyn language::LanguageVoice) -> Box<dyn TtsEngine> {
     Box::new(windows_impl::WindowsTtsEngine::new(sdk_dir, voice_name))
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn create_engine(_sdk_dir: &str, _voice_name: &str) -> Box<dyn TtsEngine> {
+fn create_engine(_sdk_dir: &str, _voice_name: &str, _lang: &dyn language::LanguageVoice) -> Box<dyn TtsEngine> {
     Box::new(StubTtsEngine)
 }
 

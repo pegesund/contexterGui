@@ -1,12 +1,7 @@
 use super::{SttEngine, mic_log};
-use language::{LanguageUi as _, LanguageVoice as _};
 use libloading::Library;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_float, c_void};
-
-// Phase 9: STT language code comes from the Language trait. Bokmål is
-// hard-coded here for now; later phases pipe a runtime language through.
-const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
 type WhisperContext = c_void;
 
@@ -37,6 +32,10 @@ pub struct WhisperEngine {
     fn_full: FnFull,
     fn_n_segments: FnSegments,
     fn_segment_text: FnSegmentText,
+    /// BCP-47 language code for Whisper transcription (e.g. "nb", "en")
+    stt_lang_code: CString,
+    /// UI string returned when transcription produces no output
+    no_speech_msg: String,
 }
 
 unsafe impl Send for WhisperEngine {}
@@ -53,7 +52,7 @@ impl Drop for WhisperEngine {
 
 impl WhisperEngine {
     /// Load whisper.dll and the GGML model. Call once at startup.
-    pub fn load(dll_dir: &str, model_path: &str) -> Result<Self, String> {
+    pub fn load(dll_dir: &str, model_path: &str, lang: &dyn language::LanguageBundle) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
         unsafe {
             use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
@@ -64,7 +63,7 @@ impl WhisperEngine {
 
         let dll_path = format!("{}\\whisper.dll", dll_dir);
         let lib = unsafe { Library::new(&dll_path) }
-            .map_err(|e| BOKMAL.ui_whisper_dll_load_failed(&e.to_string()))?;
+            .map_err(|e| lang.ui_whisper_dll_load_failed(&e.to_string()))?;
 
         unsafe {
             let fn_init: FnInit = *lib.get::<FnInit>(b"whisper_init_from_file")
@@ -82,7 +81,7 @@ impl WhisperEngine {
             let start = std::time::Instant::now();
             let ctx = fn_init(model_c.as_ptr());
             if ctx.is_null() {
-                return Err(BOKMAL.ui_whisper_model_load_failed().into());
+                return Err(lang.ui_whisper_model_load_failed().into());
             }
             mic_log(&format!("Whisper: model loaded in {:.1}s", start.elapsed().as_secs_f64()));
 
@@ -94,6 +93,8 @@ impl WhisperEngine {
                 fn_full,
                 fn_n_segments,
                 fn_segment_text,
+                stt_lang_code: CString::new(lang.stt_language_code()).unwrap_or_default(),
+                no_speech_msg: lang.ui_no_speech_recognized().to_string(),
             })
         }
     }
@@ -110,8 +111,7 @@ impl SttEngine for WhisperEngine {
             params[OFF_PRINT_REALTIME] = 0;
             params[OFF_PRINT_TIMESTAMPS] = 0;
 
-            let lang_c = CString::new(BOKMAL.stt_language_code()).unwrap();
-            let lang_ptr_bytes = (lang_c.as_ptr() as usize).to_ne_bytes();
+            let lang_ptr_bytes = (self.stt_lang_code.as_ptr() as usize).to_ne_bytes();
             params[OFF_LANGUAGE..OFF_LANGUAGE+8].copy_from_slice(&lang_ptr_bytes);
 
             mic_log(&format!("Whisper: transcribing {} samples ({:.1}s)...", audio.len(), audio.len() as f64 / 16000.0));
@@ -139,10 +139,8 @@ impl SttEngine for WhisperEngine {
                 }
             }
 
-            drop(lang_c);
-
             if result.is_empty() {
-                BOKMAL.ui_no_speech_recognized().into()
+                self.no_speech_msg.clone()
             } else {
                 result
             }

@@ -63,37 +63,25 @@ const MAX_PARTS: usize = 3;
 const MIN_PART_BYTES: usize = 3;
 const BEAM_WIDTH: usize = 5000;
 
-// Phase 7: compound walker constants come from the Language trait. Bokmål is
-// hard-coded here for now; later phases pipe a runtime language through.
-// We snapshot the &'static slices once into module-level statics so the hot
-// loops below can read them with the same cost as the previous consts.
-use language::LanguageSpelling as _;
-const BOKMAL: language::BokmalLanguage = language::BokmalLanguage;
 
 /// ASCII bytes that may appear as a binding letter between compound parts.
-/// Sourced from `language::BokmalLanguage::binding_letters()`.
-fn binding_letters() -> &'static [u8] {
-    BOKMAL.binding_letters()
+fn binding_letters(lang: &dyn language::LanguageSpelling) -> &'static [u8] {
+    lang.binding_letters()
 }
 
-/// Norwegian phonetic vowel pairs common in dyslexic writing.
-/// These substitutions cost 0 edits since they're near-equivalences.
-/// ascii_byte ↔ UTF-8 continuation byte (after 0xC3 prefix). Pairs come from
-/// `language::BokmalLanguage::free_vowel_swaps()`.
+/// Phonetic vowel pairs for the given language: ascii_byte ↔ UTF-8 continuation byte.
+/// These substitutions cost 0 edits (near-equivalences in dyslexic writing).
 #[inline]
-fn is_free_vowel_swap(ascii: u8, utf8_cont: u8) -> bool {
-    BOKMAL
-        .free_vowel_swaps()
+fn is_free_vowel_swap(lang: &dyn language::LanguageSpelling, ascii: u8, utf8_cont: u8) -> bool {
+    lang.free_vowel_swaps()
         .iter()
         .any(|&(a, c)| a == ascii && c == utf8_cont)
 }
 
-/// Check if a word's suffix triggers binding -s- in Norwegian compounds.
-/// Suffix list comes from `language::BokmalLanguage::binding_s_suffixes()`.
+/// Returns true when a word's suffix triggers binding -s- in compounds.
 #[inline]
-fn needs_binding_s(word: &[u8]) -> bool {
-    BOKMAL
-        .binding_s_suffixes()
+fn needs_binding_s(lang: &dyn language::LanguageSpelling, word: &[u8]) -> bool {
+    lang.binding_s_suffixes()
         .iter()
         .any(|suffix| word.ends_with(*suffix))
 }
@@ -125,6 +113,7 @@ fn exact_walk_from_root<D: AsRef<[u8]>>(fst: &Fst<D>, input: &[u8], start: usize
 pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
     fst: &Fst<D>,
     input: &str,
+    lang: &dyn language::LanguageSpelling,
     wordfreq: Option<&HashMap<String, u64>>,
     is_valid_word: Option<&dyn Fn(&str) -> bool>,
     is_noun: Option<&dyn Fn(&str) -> bool>,
@@ -310,7 +299,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     // Binding 'e': only after consonants (laks→lakse OK, innsjø→innsjøe NOT OK)
                     // Binding 's': always allowed (handled by morphological rules too)
                     if state.input_pos < input_bytes.len()
-                        && binding_letters().contains(&input_bytes[state.input_pos])
+                        && binding_letters(lang).contains(&input_bytes[state.input_pos])
                     {
                         let bl = input_bytes[state.input_pos];
                         let last_byte = state.word_bytes.last().copied().unwrap_or(0);
@@ -339,7 +328,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                     // Try INSERTING binding -s- when morphology requires it
                     // Only insert when the matched word ends with a suffix
                     // that triggers -s- (e.g., -ing, -het, -skap, -sjon, -tet)
-                    if needs_binding_s(&state.word_bytes)
+                    if needs_binding_s(lang, &state.word_bytes)
                         && (state.input_pos >= input_bytes.len()
                             || input_bytes[state.input_pos] != b's')
                     {
@@ -434,7 +423,7 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
                         // Free for vowel pairs, 1 edit otherwise
                         let next_node = fst.node(trans.addr);
                         for trans2 in next_node.transitions() {
-                            let cost = if is_free_vowel_swap(inp_byte, trans2.inp) { 0 } else { 1 };
+                            let cost = if is_free_vowel_swap(lang, inp_byte, trans2.inp) { 0 } else { 1 };
                             let mut wb = state.word_bytes.clone();
                             wb.push(0xC3);
                             wb.push(trans2.inp);

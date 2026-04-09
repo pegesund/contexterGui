@@ -38,15 +38,12 @@ pub fn trigrams(word: &str) -> Vec<String> {
 
 /// Try splitting a word into function_word + remainder.
 /// Returns None if the word is already a valid dictionary word (no split needed).
-pub fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer) -> Option<String> {
+pub fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer, lang: &dyn language::LanguageSpelling) -> Option<String> {
     // Don't split valid compound words (avstand, tilstand, imorgen, etc.)
     if analyzer.has_word(&word.to_lowercase()) {
         return None;
     }
-    // Phase 6: function words come from the Language trait. Bokmål is hard-
-    // coded here for now; later phases pipe a runtime language through.
-    let bokmal = language::BokmalLanguage;
-    let function_words = language::LanguageSpelling::function_words(&bokmal);
+    let function_words = lang.function_words();
     let lower = word.to_lowercase();
     for prefix in function_words {
         if lower.len() <= prefix.len() + 1 { continue; }
@@ -103,6 +100,7 @@ pub fn generate_spelling_candidates(
     doc_word_counts: &HashMap<String, u16>,
     word: &str,
     _sentence_ctx: &str,
+    lang: &dyn language::LanguageSpelling,
 ) -> Vec<(String, f32)> {
     let word_lower = word.to_lowercase();
     let word_trigrams = trigrams(&word_lower);
@@ -162,7 +160,7 @@ pub fn generate_spelling_candidates(
     }
 
     // Source 6: Split function word
-    if let Some(split) = try_split_function_word(&word_lower, analyzer) {
+    if let Some(split) = try_split_function_word(&word_lower, analyzer, lang) {
         let sl = split.to_lowercase();
         if seen.insert(sl.clone()) { candidates.push(sl); }
     }

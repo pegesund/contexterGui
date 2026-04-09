@@ -240,12 +240,12 @@ impl PlatformServices for WindowsPlatform {
         }
     }
 
-    fn init_tts(&self) {
+    fn init_tts(&self, lang: &dyn language::LanguageVoice) {
         if let Some(home) = std::env::var_os("USERPROFILE") {
             let sdk_dir = std::path::Path::new(&home)
                 .join("Downloads/Sdk-Amul-Cogni-TTS-WIN_14-000_AIO");
             if sdk_dir.exists() {
-                crate::tts::init_tts(sdk_dir.to_str().unwrap(), "Kari22k_NV");
+                crate::tts::init_tts(sdk_dir.to_str().unwrap(), "Kari22k_NV", lang);
             } else {
                 eprintln!("Acapela SDK not found at {:?}", sdk_dir);
             }
