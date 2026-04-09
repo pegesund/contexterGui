@@ -17,8 +17,6 @@ const WD_UNDERLINE_WAVY: i32 = 11;
 const WD_UNDERLINE_NONE: i32 = 0;
 const WD_COLOR_RED: i32 = 0x0000FF;  // BGR format: red = 0x0000FF
 const WD_COLOR_BLUE: i32 = 0xFF0000; // BGR format: blue = 0xFF0000
-const WD_NORWEGIAN_BOKMAL: i32 = 1044; // wdNorwegianBokmal language ID
-
 // --- Raw VARIANT helpers (COM ABI layout) ---
 
 unsafe fn var_vt(v: &VARIANT) -> u16 {
@@ -258,10 +256,11 @@ fn find_wwg_recursive(parent: HWND) -> HWND {
 pub struct WordComBridge {
     word_hwnd: HWND,
     wwg_hwnd: HWND,
+    lang_word_id: i32,
 }
 
 impl WordComBridge {
-    pub fn try_connect() -> Option<Self> {
+    pub fn try_connect(lang_word_id: i32) -> Option<Self> {
         unsafe {
             let hwnd = FindWindowW(w!("OpusApp"), None).unwrap_or(HWND::default());
             if hwnd == HWND::default() {
@@ -279,7 +278,7 @@ impl WordComBridge {
             let window = Dispatch(disp);
             let _app = window.get_dispatch("Application").ok()?;
 
-            Some(WordComBridge { word_hwnd: hwnd, wwg_hwnd: target })
+            Some(WordComBridge { word_hwnd: hwnd, wwg_hwnd: target, lang_word_id })
         }
     }
 
@@ -409,10 +408,12 @@ impl WordComBridge {
             let doc = app.get_dispatch("ActiveDocument")?;
             doc.put("ShowSpellingErrors", make_bool(true))?;
             doc.put("ShowGrammaticalErrors", make_bool(true))?;
-            // Restore Norwegian Bokmål language
-            if let Ok(content) = doc.get_dispatch("Content") {
-                let _ = content.put("LanguageID", make_i4(WD_NORWEGIAN_BOKMAL));
-                let _ = content.put("NoProofing", make_i4(0)); // VARIANT_FALSE
+            // Restore the document language from the active LanguageBundle
+            if self.lang_word_id != 0 {
+                if let Ok(content) = doc.get_dispatch("Content") {
+                    let _ = content.put("LanguageID", make_i4(self.lang_word_id));
+                    let _ = content.put("NoProofing", make_i4(0)); // VARIANT_FALSE
+                }
             }
             eprintln!("Word: re-enabled built-in spell/grammar checking");
             Ok(true)

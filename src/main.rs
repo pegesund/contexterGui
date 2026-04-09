@@ -284,11 +284,13 @@ struct BridgeManager {
     bridge_switched: bool,
     /// Platform abstraction for OS-specific services
     platform: Box<dyn platform::PlatformServices>,
+    /// Windows Word COM language ID for the active language (from LanguageVoice trait)
+    lang_word_id: i32,
 }
 
 impl BridgeManager {
-    fn new(platform: Box<dyn platform::PlatformServices>) -> Self {
-        let mut bridges: Vec<Box<dyn TextBridge>> = bridge::create_bridges();
+    fn new(platform: Box<dyn platform::PlatformServices>, lang_word_id: i32) -> Self {
+        let mut bridges: Vec<Box<dyn TextBridge>> = bridge::create_bridges(lang_word_id);
         // Browser bridge (via Chrome/Edge extension) — highest priority for browser textareas
         bridges.push(Box::new(bridge::browser::BrowserBridge::new()));
 
@@ -316,6 +318,7 @@ impl BridgeManager {
             last_context: None,
             bridge_switched: false,
             platform,
+            lang_word_id,
         }
     }
 
@@ -324,7 +327,7 @@ impl BridgeManager {
             self.last_check = Instant::now();
             let has_word = self.bridges.iter().any(|b| b.name().contains("Word"));
             if !has_word {
-                for new_bridge in bridge::try_connect_word_bridge() {
+                for new_bridge in bridge::try_connect_word_bridge(self.lang_word_id) {
                     log!("{} bridge connected (late)", new_bridge.name());
                     self.bridges.insert(0, new_bridge);
                 }
@@ -1238,7 +1241,7 @@ impl ContextApp {
 
         ContextApp {
             language: language.clone(),
-            manager: BridgeManager::new(platform::create_platform()),
+            manager: BridgeManager::new(platform::create_platform(), language.word_language_id()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
             poll_interval: Duration::from_millis(100),

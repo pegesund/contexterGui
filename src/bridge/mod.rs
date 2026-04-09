@@ -154,12 +154,12 @@ pub mod browser;
 // pub mod accessibility_mac;
 
 /// Create platform-specific bridges (excluding Browser, which is added separately).
-pub fn create_bridges() -> Vec<Box<dyn TextBridge>> {
+pub fn create_bridges(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
     let mut bridges: Vec<Box<dyn TextBridge>> = Vec::new();
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(word) = word_com::WordComBridge::try_connect() {
+        if let Some(word) = word_com::WordComBridge::try_connect(lang_word_id) {
             crate::log!("Word COM bridge connected");
             let ok = word.disable_word_proofing();
             crate::log!("Word proofing disabled: {}", ok);
@@ -181,12 +181,12 @@ pub fn create_bridges() -> Vec<Box<dyn TextBridge>> {
 }
 
 /// Try to connect a Word bridge (for late connection when Word opens after app startup).
-pub fn try_connect_word_bridge() -> Vec<Box<dyn TextBridge>> {
+pub fn try_connect_word_bridge(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
     let mut bridges: Vec<Box<dyn TextBridge>> = Vec::new();
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(word) = word_com::WordComBridge::try_connect() {
+        if let Some(word) = word_com::WordComBridge::try_connect(lang_word_id) {
             let ok = word.disable_word_proofing();
             crate::log!("Word proofing disabled (late): {}", ok);
             bridges.push(Box::new(word));
