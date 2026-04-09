@@ -5476,7 +5476,7 @@ impl eframe::App for ContextApp {
                 let ly = y as f32 / dpi_scale;
                 // Push the window 5 cm below the caret so it doesn't cover the line
                 // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
-                const CARET_OFFSET_BELOW_PX: f32 = 189.0;
+                const CARET_OFFSET_BELOW_PX: f32 = 246.0;
                 let pos_y = if (ly + CARET_OFFSET_BELOW_PX + win_h) > screen_h {
                     // Not enough room below — flip above the caret with a 30 px gap.
                     ly - win_h - 30.0
@@ -5802,6 +5802,19 @@ impl eframe::App for ContextApp {
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // === Whisper transcription result — shown in separate centered window ===
             // (rendering happens below via show_viewport_immediate)
+
+            // === Space press: speak the word just typed (accessibility TTS) ===
+            if self.platform.take_space_press() {
+                let fg = self.platform.foreground_app();
+                let kind = self.platform.classify_app(&fg);
+                if kind != platform::AppKind::OurApp {
+                    if let Some(word) = self.platform.get_word_before_cursor() {
+                        if !word.is_empty() {
+                            tts::speak_word(&word);
+                        }
+                    }
+                }
+            }
 
             // === Tab: Innhold (0) ===
             if self.selected_tab == 0 {

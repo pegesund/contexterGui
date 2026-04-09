@@ -17,6 +17,7 @@ pub struct MacPlatform {
     screen: (f32, f32),
     intercept_tab: Arc<AtomicBool>,
     tab_pressed: Arc<AtomicBool>,
+    space_pressed: Arc<AtomicBool>,
 }
 
 impl MacPlatform {
@@ -46,8 +47,9 @@ impl MacPlatform {
         let cached_selected_text = Arc::new(Mutex::new(None));
         let intercept_tab = Arc::new(AtomicBool::new(false));
         let tab_pressed = Arc::new(AtomicBool::new(false));
-        { let i = Arc::clone(&intercept_tab); let p = Arc::clone(&tab_pressed);
-          std::thread::Builder::new().name("tab-tap".into()).spawn(move || start_tab_event_tap(i, p)).ok(); }
+        let space_pressed = Arc::new(AtomicBool::new(false));
+        { let i = Arc::clone(&intercept_tab); let p = Arc::clone(&tab_pressed); let sp = Arc::clone(&space_pressed);
+          std::thread::Builder::new().name("key-tap".into()).spawn(move || start_key_event_tap(i, p, sp)).ok(); }
 
         // Background thread polls foreground app every 200ms
         let fg_clone = Arc::clone(&cached_fg);
@@ -82,7 +84,7 @@ impl MacPlatform {
 
         let screen = query_screen_size().unwrap_or((1920.0, 1080.0));
 
-        MacPlatform { cached_fg, last_external_fg, cached_selected_text, screen, intercept_tab, tab_pressed }
+        MacPlatform { cached_fg, last_external_fg, cached_selected_text, screen, intercept_tab, tab_pressed, space_pressed }
     }
 }
 
@@ -138,6 +140,11 @@ impl PlatformServices for MacPlatform {
     fn check_hotkey_state(&self) -> (bool, bool) { (false, false) }
     fn set_tab_intercept(&self, active: bool) { self.intercept_tab.store(active, Ordering::Relaxed); }
     fn take_tab_press(&self) -> bool { self.tab_pressed.swap(false, Ordering::Relaxed) }
+    fn take_space_press(&self) -> bool { self.space_pressed.swap(false, Ordering::Relaxed) }
+
+    fn get_word_before_cursor(&self) -> Option<String> {
+        get_word_before_cursor_ax()
+    }
 
     fn copy_to_clipboard(&self, text: &str) {
         let _ = Command::new("pbcopy")
@@ -742,7 +749,7 @@ fn query_screen_size() -> Option<(f32, f32)> {
     None
 }
 
-fn start_tab_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
+fn start_key_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>, space: Arc<AtomicBool>) {
     unsafe {
         unsafe extern "C" {
             fn CGEventTapCreate(t:u32,p:u32,o:u32,m:u64,cb:extern "C" fn(*const std::ffi::c_void,u32,*const std::ffi::c_void,*mut std::ffi::c_void)->*const std::ffi::c_void,i:*mut std::ffi::c_void)->*const std::ffi::c_void;
@@ -754,20 +761,29 @@ fn start_tab_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
             fn CGEventGetFlags(e:*const std::ffi::c_void)->u64;
             static kCFRunLoopCommonModes: *const std::ffi::c_void;
         }
-        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>}
-        let ctx=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed})) as *mut std::ffi::c_void;
+        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>,sp:Arc<AtomicBool>}
+        let ctx=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed,sp:space})) as *mut std::ffi::c_void;
         extern "C" fn cb(_:*const std::ffi::c_void,et:u32,ev:*const std::ffi::c_void,ui:*mut std::ffi::c_void)->*const std::ffi::c_void{
             unsafe{
                 let c=&*(ui as*const Ctx);
                 if et!=10{return ev;}
-                if !c.i.load(Ordering::Relaxed){return ev;}
-                if CGEventGetIntegerValueField(ev,9)!=48{return ev;}
-                // Pass through Tab if any modifier is held (Cmd+Tab, Ctrl+Tab, etc.)
+                let keycode = CGEventGetIntegerValueField(ev,9);
                 let flags = CGEventGetFlags(ev);
                 let modifiers = flags & 0x1F0000; // Cmd, Shift, Ctrl, Option, Fn
-                if modifiers != 0 { return ev; }
-                c.p.store(true,Ordering::Relaxed);
-                std::ptr::null()
+
+                // Space (keycode 49): observe-only, never suppress
+                if keycode == 49 && modifiers == 0 {
+                    c.sp.store(true, Ordering::Relaxed);
+                    return ev;
+                }
+
+                // Tab (keycode 48): suppress when interception is active
+                if keycode == 48 && c.i.load(Ordering::Relaxed) && modifiers == 0 {
+                    c.p.store(true,Ordering::Relaxed);
+                    return std::ptr::null();
+                }
+
+                ev
             }
         }
         let tap=CGEventTapCreate(0,0,0,1<<10,cb,ctx);
@@ -775,5 +791,83 @@ fn start_tab_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
         let src=CFMachPortCreateRunLoopSource(std::ptr::null(),tap,0);
         CFRunLoopAddSource(CFRunLoopGetCurrent(),src,kCFRunLoopCommonModes);
         CFRunLoopRun();
+    }
+}
+
+/// Read the word immediately before the cursor using the Accessibility API.
+/// Works in any app that exposes AXSelectedTextRange + AXStringForRange.
+fn get_word_before_cursor_ax() -> Option<String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, TCFType};
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let sys = AXUIElementCreateSystemWide();
+        let key = CFString::new("AXFocusedUIElement");
+        let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(sys, key.as_concrete_TypeRef(), &mut focused);
+        CFRelease(sys as _);
+        if err != 0 || focused.is_null() { return None; }
+
+        // Get cursor position via AXSelectedTextRange → CFRange
+        let range_key = CFString::new("AXSelectedTextRange");
+        let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
+        if err != 0 || range_val.is_null() {
+            CFRelease(focused);
+            return None;
+        }
+
+        let mut cf_range = core_foundation::base::CFRange { location: 0, length: 0 };
+        let ok = AXValueGetValue(
+            range_val as AXValueRef,
+            kAXValueTypeCFRange,
+            &mut cf_range as *mut _ as *mut std::ffi::c_void,
+        );
+        CFRelease(range_val);
+        if !ok || cf_range.location <= 0 {
+            CFRelease(focused);
+            return None;
+        }
+
+        // Read up to 50 chars before the cursor
+        let lookback: isize = 50;
+        let start = if cf_range.location > lookback { cf_range.location - lookback } else { 0 };
+        let len = cf_range.location - start;
+        let lookback_range = core_foundation::base::CFRange { location: start, length: len };
+
+        // Create AXValue for the lookback range
+        let ax_range = AXValueCreate(
+            kAXValueTypeCFRange,
+            &lookback_range as *const _ as *const std::ffi::c_void,
+        );
+        if ax_range.is_null() {
+            CFRelease(focused);
+            return None;
+        }
+
+        // Get text for the range
+        let str_key = CFString::new("AXStringForRange");
+        let mut text_val: core_foundation::base::CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyParameterizedAttributeValue(
+            focused as AXUIElementRef,
+            str_key.as_concrete_TypeRef(),
+            ax_range as core_foundation::base::CFTypeRef,
+            &mut text_val,
+        );
+        CFRelease(ax_range as _);
+        CFRelease(focused);
+
+        if err != 0 || text_val.is_null() { return None; }
+
+        // Convert CFString to Rust String
+        let cf_str = core_foundation::string::CFString::wrap_under_create_rule(text_val as _);
+        let text = cf_str.to_string();
+
+        // Last whitespace-separated token is the word just typed
+        let word = text.trim_end().rsplit(|c: char| c.is_whitespace()).next()
+            .map(|w| w.to_string())
+            .filter(|w| !w.is_empty());
+        word
     }
 }

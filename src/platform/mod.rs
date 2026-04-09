@@ -86,6 +86,8 @@ pub trait PlatformServices: Send + Sync {
     fn caret_screen_position(&self) -> Option<(i32, i32)> { None }
     fn set_tab_intercept(&self, _active: bool) {}
     fn take_tab_press(&self) -> bool { false }
+    fn take_space_press(&self) -> bool { false }
+    fn get_word_before_cursor(&self) -> Option<String> { None }
 
     /// Initialize TTS engine (platform-specific).
     fn init_tts(&self, lang: &dyn language::LanguageVoice);
