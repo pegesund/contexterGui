@@ -734,6 +734,7 @@ struct ContextApp {
     embedding_sync_interval: Duration,
     // Settings
     grammar_completion: bool,
+    speak_on_space: bool,
     quality: u8, // 0=fast, 1=balanced, 2=full
     // Debounce: wait before running completion
     last_prefix_change: Instant,
@@ -767,6 +768,7 @@ struct ContextApp {
     /// User dictionary — words added by the user (persisted in redb)
     user_dict: Option<user_dict::UserDict>,
     /// Show user dictionary editor window
+    show_settings_window: bool,
     show_userdict_window: bool,
     /// Text input for new word in user dict editor
     userdict_new_word: String,
@@ -1281,6 +1283,7 @@ impl ContextApp {
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
+            speak_on_space: true,
             quality,
             last_prefix_change: Instant::now(),
             debounce_ms: if quality == 0 { 100 } else { 150 },
@@ -1311,6 +1314,7 @@ impl ContextApp {
                     Err(e) => { eprintln!("User dictionary unavailable: {}", e); None }
                 }
             },
+            show_settings_window: false,
             show_userdict_window: false,
             userdict_new_word: String::new(),
             last_spell_checked_word: String::new(),
@@ -5466,7 +5470,11 @@ impl eframe::App for ContextApp {
 
         if self.follow_cursor && self.goto_freeze_until.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+            if self.show_settings_window {
+                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+            }
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
                 // DPI scaling: caret position from GetGUIThreadInfo is in physical pixels,
@@ -5757,11 +5765,11 @@ impl eframe::App for ContextApp {
                 }
 
                 // ⚙ Settings
-                let settings_color = if self.selected_tab == 2 { active } else { inactive };
+                let settings_color = if self.show_settings_window { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
                 ).sense(egui::Sense::click())).on_hover_text(self.language.ui_settings()).clicked() {
-                    self.selected_tab = 2;
+                    self.show_settings_window = !self.show_settings_window;
                 }
 
                 // ▁ Minimize
@@ -5804,7 +5812,7 @@ impl eframe::App for ContextApp {
             // (rendering happens below via show_viewport_immediate)
 
             // === Space press: speak the word just typed (accessibility TTS) ===
-            if self.platform.take_space_press() {
+            if self.platform.take_space_press() && self.speak_on_space {
                 let fg = self.platform.foreground_app();
                 let kind = self.platform.classify_app(&fg);
                 if kind != platform::AppKind::OurApp {
@@ -6945,128 +6953,7 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // === Tab: Innstillinger (2) ===
-            if self.selected_tab == 2 {
-                ui.label(
-                    egui::RichText::new(format!("Bro: {}", self.manager.active_bridge_name()))
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(100, 100, 100)),
-                );
-                {
-                    let quality_label = match self.quality {
-                        0 => "Raskere",
-                        1 => "Normal",
-                        _ => "Høyeste kvalitet",
-                    };
-                    let mut selected = self.quality as usize;
-                    egui::ComboBox::from_id_salt("quality_combo")
-                        .selected_text(egui::RichText::new(quality_label).size(11.0))
-                        .width(120.0)
-                        .show_index(ui, &mut selected, 3, |i| {
-                            match i { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" }.to_string()
-                        });
-                    if selected as u8 != self.quality {
-                        self.quality = selected as u8;
-                        self.debounce_ms = if self.quality == 0 { 100 } else { 150 };
-                        log!("Quality changed to {}", self.quality);
-                    }
-                }
-                if self.grammar_completion {
-                    ui.label(
-                        egui::RichText::new("Grammatikkfilter: PÅ")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(0, 120, 60)),
-                    );
-                }
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Talegjenkjenning:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
-                ui.horizontal(|ui| {
-                    let rask_color = if self.whisper_mode == 0 {
-                        egui::Color32::from_rgb(0, 70, 160)
-                    } else {
-                        egui::Color32::from_rgb(100, 100, 100)
-                    };
-                    let beste_color = if self.whisper_mode == 1 {
-                        egui::Color32::from_rgb(0, 70, 160)
-                    } else {
-                        egui::Color32::from_rgb(100, 100, 100)
-                    };
-                    if ui.add(egui::Label::new(
-                        egui::RichText::new("Rask (75 MB)").size(12.0).color(rask_color)
-                    ).sense(egui::Sense::click())).clicked() {
-                        if self.whisper_mode != 0 {
-                            self.whisper_mode = 0;
-                            // Unload existing models to free memory
-                            self.whisper_engine = None;
-                            self.whisper_streaming = None;
-                            log!("Whisper mode: Rask (tiny)");
-                        }
-                    }
-                    ui.label(egui::RichText::new(" | ").size(12.0).color(egui::Color32::from_rgb(160, 160, 160)));
-                    if ui.add(egui::Label::new(
-                        egui::RichText::new("Beste (650 MB)").size(12.0).color(beste_color)
-                    ).sense(egui::Sense::click())).clicked() {
-                        if self.whisper_mode != 1 {
-                            self.whisper_mode = 1;
-                            // Unload existing models to free memory
-                            self.whisper_engine = None;
-                            self.whisper_streaming = None;
-                            log!("Whisper mode: Beste (base+medium-q5)");
-                        }
-                    }
-                });
-                // Load errors
-                for err in &self.load_errors {
-                    ui.label(
-                        egui::RichText::new(err)
-                            .size(10.0)
-                            .color(egui::Color32::from_rgb(200, 50, 50)),
-                    );
-                }
-
-                // Voice selection
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Stemme:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
-                    let current = tts::current_voice();
-                    ui.label(egui::RichText::new(&current).size(12.0).color(egui::Color32::from_rgb(0, 70, 160)));
-                    if ui.add(egui::Button::new(
-                        egui::RichText::new("Velg...").size(11.0)
-                    ).small()).clicked() {
-                        self.voice_list = tts::available_voices();
-                        self.show_voice_window = true;
-                    }
-                });
-
-                // UI scale
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Størrelse:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
-                    if ui.small_button("−").clicked() {
-                        self.ui_scale = (self.ui_scale - 0.1).max(0.5);
-                    }
-                    ui.label(egui::RichText::new(format!("{:.0}%", self.ui_scale * 100.0)).size(12.0)
-                        .color(egui::Color32::from_rgb(0, 70, 160)));
-                    if ui.small_button("+").clicked() {
-                        self.ui_scale = (self.ui_scale + 0.1).min(2.5);
-                    }
-                });
-
-                // User dictionary
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Egen ordbok:").size(12.0).color(egui::Color32::from_rgb(80, 80, 80)));
-                    let count = self.user_dict.as_ref().map_or(0, |ud| ud.list_words().len());
-                    ui.label(egui::RichText::new(format!("{} ord", count)).size(12.0)
-                        .color(egui::Color32::from_rgb(0, 70, 160)));
-                    if ui.add(egui::Button::new(
-                        egui::RichText::new("Rediger...").size(11.0)
-                    ).small()).clicked() {
-                        self.show_userdict_window = true;
-                    }
-                });
-
-            }
+            // (Settings tab removed — settings now open in a separate window via the ⚙ icon)
 
             // === Tab: Debug (3) ===
             if self.selected_tab == 3 {
@@ -7110,6 +6997,216 @@ impl eframe::App for ContextApp {
                 }
             }
         });
+
+        // Settings window (separate OS window, dyslexia-friendly large fonts)
+        if self.show_settings_window {
+            let mut do_close = false;
+            let quality = self.quality;
+            let grammar_completion = self.grammar_completion;
+            let whisper_mode = self.whisper_mode;
+            let speak_on_space = self.speak_on_space;
+            let ui_scale = self.ui_scale;
+            let dict_count = self.user_dict.as_ref().map_or(0, |ud| ud.list_words().len());
+            let bridge_name = self.manager.active_bridge_name().to_string();
+            let load_errors: Vec<String> = self.load_errors.clone();
+
+            let mut new_quality = quality;
+            let mut new_whisper_mode = whisper_mode;
+            let mut new_speak_on_space = speak_on_space;
+            let mut new_ui_scale = ui_scale;
+            let mut open_voice = false;
+            let mut open_userdict = false;
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("settings_window"),
+                egui::ViewportBuilder::default()
+                    .with_title("Innstillinger")
+                    .with_inner_size([500.0, 600.0])
+                    .with_decorations(true),
+                |vp_ctx, _class| {
+                    vp_ctx.set_visuals(egui::Visuals::light());
+
+                    if vp_ctx.input(|i| i.viewport().close_requested()) {
+                        do_close = true;
+                    }
+
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
+                        .show(vp_ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                            let heading = 22.0_f32;
+                            let body = 18.0_f32;
+                            let label_color = egui::Color32::from_rgb(50, 50, 50);
+                            let active_color = egui::Color32::from_rgb(0, 100, 180);
+                            let on_color = egui::Color32::from_rgb(0, 130, 60);
+                            let off_color = egui::Color32::from_rgb(140, 140, 140);
+
+                            // -- Quality --
+                            ui.label(egui::RichText::new("Kvalitet").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            {
+                                let quality_label = match new_quality {
+                                    0 => "Raskere",
+                                    1 => "Normal",
+                                    _ => "Høyeste kvalitet",
+                                };
+                                let mut selected = new_quality as usize;
+                                egui::ComboBox::from_id_salt("settings_quality_combo")
+                                    .selected_text(egui::RichText::new(quality_label).size(body))
+                                    .width(220.0)
+                                    .show_index(ui, &mut selected, 3, |i| {
+                                        match i { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" }.to_string()
+                                    });
+                                new_quality = selected as u8;
+                            }
+                            if grammar_completion {
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Grammatikkfilter: PÅ").size(body).color(on_color));
+                            }
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // -- Speech recognition --
+                            ui.label(egui::RichText::new("Talegjenkjenning").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                let rask_color = if new_whisper_mode == 0 { active_color } else { off_color };
+                                let beste_color = if new_whisper_mode == 1 { active_color } else { off_color };
+                                if ui.add(egui::Label::new(
+                                    egui::RichText::new("Rask (75 MB)").size(body).color(rask_color)
+                                ).sense(egui::Sense::click())).clicked() {
+                                    new_whisper_mode = 0;
+                                }
+                                ui.label(egui::RichText::new("  |  ").size(body).color(off_color));
+                                if ui.add(egui::Label::new(
+                                    egui::RichText::new("Beste (650 MB)").size(body).color(beste_color)
+                                ).sense(egui::Sense::click())).clicked() {
+                                    new_whisper_mode = 1;
+                                }
+                            });
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // -- Voice --
+                            ui.label(egui::RichText::new("Stemme").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                let current = tts::current_voice();
+                                ui.label(egui::RichText::new(&current).size(body).color(active_color));
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Velg...").size(body)
+                                )).clicked() {
+                                    open_voice = true;
+                                }
+                            });
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // -- Speak on space --
+                            ui.label(egui::RichText::new("Les ord høgt").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            {
+                                let (label, color) = if new_speak_on_space {
+                                    ("Les ord ved mellomrom: PÅ", on_color)
+                                } else {
+                                    ("Les ord ved mellomrom: AV", off_color)
+                                };
+                                if ui.add(egui::Label::new(
+                                    egui::RichText::new(label).size(body).color(color)
+                                ).sense(egui::Sense::click())).clicked() {
+                                    new_speak_on_space = !new_speak_on_space;
+                                }
+                            }
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // -- UI scale --
+                            ui.label(egui::RichText::new("Størrelse").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.add(egui::Button::new(egui::RichText::new("  −  ").size(body))).clicked() {
+                                    new_ui_scale = (new_ui_scale - 0.1).max(0.5);
+                                }
+                                ui.label(egui::RichText::new(format!("{:.0}%", new_ui_scale * 100.0)).size(body)
+                                    .color(active_color));
+                                if ui.add(egui::Button::new(egui::RichText::new("  +  ").size(body))).clicked() {
+                                    new_ui_scale = (new_ui_scale + 0.1).min(2.5);
+                                }
+                            });
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // -- User dictionary --
+                            ui.label(egui::RichText::new("Eigen ordbok").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{} ord", dict_count)).size(body).color(active_color));
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Rediger...").size(body)
+                                )).clicked() {
+                                    open_userdict = true;
+                                }
+                            });
+
+                            // Load errors (if any)
+                            if !load_errors.is_empty() {
+                                ui.add_space(16.0);
+                                ui.separator();
+                                ui.add_space(12.0);
+                                for err in &load_errors {
+                                    ui.label(egui::RichText::new(err).size(16.0)
+                                        .color(egui::Color32::from_rgb(200, 50, 50)));
+                                }
+                            }
+
+                            ui.add_space(12.0);
+                            ui.label(egui::RichText::new(format!("Bro: {}", bridge_name))
+                                .size(14.0).color(off_color));
+                            }); // end ScrollArea
+                        });
+                },
+            );
+
+            // Apply changes back
+            if new_quality != self.quality {
+                self.quality = new_quality;
+                self.debounce_ms = if self.quality == 0 { 100 } else { 150 };
+                log!("Quality changed to {}", self.quality);
+            }
+            if new_whisper_mode != self.whisper_mode {
+                self.whisper_mode = new_whisper_mode;
+                self.whisper_engine = None;
+                self.whisper_streaming = None;
+                log!("Whisper mode changed to {}", self.whisper_mode);
+            }
+            if new_speak_on_space != self.speak_on_space {
+                self.speak_on_space = new_speak_on_space;
+                log!("Speak on space: {}", self.speak_on_space);
+            }
+            if (new_ui_scale - self.ui_scale).abs() > 0.01 {
+                self.ui_scale = new_ui_scale;
+            }
+            if open_voice {
+                self.voice_list = tts::available_voices();
+                self.show_voice_window = true;
+            }
+            if open_userdict {
+                self.show_userdict_window = true;
+            }
+            if do_close {
+                self.show_settings_window = false;
+            }
+        }
 
         // Voice selection window (separate from main panel)
         if self.show_voice_window {
