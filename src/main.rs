@@ -23,6 +23,60 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// ---------------------------------------------------------------------------
+// Persistent user settings (saved to ~/Library/Application Support/NorskTale/)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UserSettings {
+    quality: u8,
+    whisper_mode: u8,
+    speak_on_space: bool,
+    ui_scale: f32,
+    voice: String,
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        UserSettings {
+            quality: 1,
+            whisper_mode: 1,
+            speak_on_space: true,
+            ui_scale: 1.0,
+            voice: String::new(),
+        }
+    }
+}
+
+fn settings_path() -> PathBuf {
+    let dir = if cfg!(target_os = "macos") {
+        dirs::home_dir()
+            .map(|h| h.join("Library/Application Support/NorskTale"))
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    } else {
+        dirs::config_dir()
+            .map(|c| c.join("NorskTale"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("settings.json")
+}
+
+fn load_settings() -> UserSettings {
+    let path = settings_path();
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => UserSettings::default(),
+    }
+}
+
+fn save_settings(s: &UserSettings) {
+    let path = settings_path();
+    if let Ok(json) = serde_json::to_string_pretty(s) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
 /// Truncate a string to at most `max` bytes, backing up to the nearest char boundary.
 /// Compute boost multiplier for a candidate word based on document frequency and user dictionary.
 /// Returns 1.0 (no boost) for common function words or words not in doc/user_dict.
@@ -1169,6 +1223,7 @@ impl ContextApp {
         grammar_completion: bool,
         quality: u8,
         show_debug_tab: bool,
+        saved_settings: UserSettings,
     ) -> Self {
         let platform = platform::create_platform();
         platform.init_runtime();
@@ -1283,7 +1338,7 @@ impl ContextApp {
             last_embedding_sync: Instant::now(),
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
-            speak_on_space: true,
+            speak_on_space: saved_settings.speak_on_space,
             quality,
             last_prefix_change: Instant::now(),
             debounce_ms: if quality == 0 { 100 } else { 150 },
@@ -1361,13 +1416,13 @@ impl ContextApp {
             mic_result_text: None,
             improve_rx: None,
             improve_running: false,
-            whisper_mode: 1, // default: Beste (base+medium-q5)
+            whisper_mode: saved_settings.whisper_mode,
             whisper_load_rx: None,
             whisper_loading: false,
             whisper_load_status: String::new(),
             whisper_pending_record: false,
             show_voice_window: false,
-            ui_scale: 1.0,
+            ui_scale: saved_settings.ui_scale,
             voice_list: Vec::new(),
             startup_rx: Some(startup_rx),
             startup_done: Vec::new(),
@@ -7203,6 +7258,19 @@ impl eframe::App for ContextApp {
             if open_userdict {
                 self.show_userdict_window = true;
             }
+            // Save to disk whenever any setting changed
+            if new_quality != quality || new_whisper_mode != whisper_mode
+                || new_speak_on_space != speak_on_space
+                || (new_ui_scale - ui_scale).abs() > 0.01
+            {
+                save_settings(&UserSettings {
+                    quality: self.quality,
+                    whisper_mode: self.whisper_mode,
+                    speak_on_space: self.speak_on_space,
+                    ui_scale: self.ui_scale,
+                    voice: tts::current_voice(),
+                });
+            }
             if do_close {
                 self.show_settings_window = false;
             }
@@ -7239,6 +7307,13 @@ impl eframe::App for ContextApp {
                                 egui::RichText::new(&label).size(13.0).color(color)
                             ).sense(egui::Sense::click())).clicked() {
                                 tts::set_voice(&voice.name);
+                                save_settings(&UserSettings {
+                                    quality: self.quality,
+                                    whisper_mode: self.whisper_mode,
+                                    speak_on_space: self.speak_on_space,
+                                    ui_scale: self.ui_scale,
+                                    voice: voice.name.clone(),
+                                });
                                 tts::speak_word(&voice.sample_text);
                             }
                             ui.label(egui::RichText::new(&voice.language).size(10.0)
@@ -7502,7 +7577,7 @@ fn main() -> eframe::Result {
         eprintln!("=== Spelling test mode ===");
         let test_language: std::sync::Arc<dyn language::LanguageBundle> =
             std::sync::Arc::new(language::BokmalLanguage);
-        let mut app = ContextApp::new(test_language, true, 2, false);
+        let mut app = ContextApp::new(test_language, true, 2, false, UserSettings::default());
         // Wait for startup (BERT model loading) to complete
         if let Some(rx) = app.startup_rx.take() {
             eprintln!("Waiting for BERT model to load...");
@@ -7595,6 +7670,7 @@ fn main() -> eframe::Result {
         std::process::exit(if fail == 0 { 0 } else { 1 });
     }
 
+    let saved = load_settings();
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
     let show_debug_tab = std::env::args().any(|a| a == "--debug");
     let quality: u8 = {
@@ -7603,7 +7679,7 @@ fn main() -> eframe::Result {
             .position(|a| a == "--quality")
             .and_then(|i| args.get(i + 1))
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1) // default: Normal (1)
+            .unwrap_or(saved.quality)
     };
 
     // Phase 13: parse --language flag (default "nb"). Resolve through the
@@ -7639,6 +7715,9 @@ fn main() -> eframe::Result {
 
     // Initialize TTS engine (platform-specific)
     setup_platform.init_tts(&*selected_language);
+    if !saved.voice.is_empty() {
+        tts::set_voice(&saved.voice);
+    }
 
     fn make_pen_icon(size: u32) -> egui::IconData {
         let mut rgba = vec![0u8; (size * size * 4) as usize];
@@ -7737,7 +7816,7 @@ fn main() -> eframe::Result {
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab);
+                let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab, saved);
                 // Start HTTP /errors endpoint for integration tests
                 let errors_json = app.shared_errors_json.clone();
                 std::thread::Builder::new().name("test-http".into()).spawn(move || {
