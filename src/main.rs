@@ -4815,7 +4815,7 @@ impl eframe::App for ContextApp {
                         log!("Whisper: final model loaded");
                         self.whisper_engine = Some(Arc::new(Mutex::new(engine)));
                         if self.whisper_mode == 1 {
-                            self.whisper_load_status = "Stor modell lastet (medium-q5)".into();
+                            self.whisper_load_status = self.language.ui_whisper_large_loaded().into();
                         }
                     }
                     WhisperLoadItem::Final(Err(e)) => {
@@ -4825,7 +4825,7 @@ impl eframe::App for ContextApp {
                     WhisperLoadItem::Streaming(Ok(engine)) => {
                         log!("Whisper: streaming model loaded");
                         self.whisper_streaming = Some(Arc::new(Mutex::new(engine)));
-                        self.whisper_load_status = "Hurtigmodell lastet (base), venter på stor modell...".into();
+                        self.whisper_load_status = self.language.ui_whisper_fast_loaded().into();
                     }
                     WhisperLoadItem::Streaming(Err(e)) => {
                         log!("Whisper streaming model failed: {}", e);
@@ -5587,9 +5587,9 @@ impl eframe::App for ContextApp {
                         .copied()
                         .collect();
                     let label = if loading.is_empty() {
-                        "Klar!".to_string()
+                        self.language.ui_ready().to_string()
                     } else {
-                        format!("Laster {}...", loading.join(", "))
+                        self.language.ui_loading(&loading.join(", "))
                     };
                     ui.add(egui::ProgressBar::new(progress)
                         .text(label)
@@ -5615,7 +5615,7 @@ impl eframe::App for ContextApp {
                 let innhold_color = if self.selected_tab == 0 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{1F4A1}").size(16.0).color(innhold_color)
-                ).sense(egui::Sense::click())).on_hover_text("Forslag").clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_suggestions()).clicked() {
                     self.selected_tab = 0;
                 }
 
@@ -5628,7 +5628,7 @@ impl eframe::App for ContextApp {
                 let gram_color = if self.selected_tab == 1 { active } else { inactive };
                 if ui.add(egui::Label::new(
                     egui::RichText::new("\u{270F}").size(16.0).color(gram_color)
-                ).sense(egui::Sense::click())).on_hover_text("Grammatikk").clicked() {
+                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_grammar()).clicked() {
                     self.selected_tab = 1;
                 }
 
@@ -5642,13 +5642,13 @@ impl eframe::App for ContextApp {
                     if self.mic_transcribing {
                         ui.add(egui::Label::new(
                             egui::RichText::new("⏳").size(13.0)
-                        )).on_hover_text("Transkriberer...");
+                        )).on_hover_text(self.language.ui_transcribing());
                     } else {
                         if ui.add(egui::Button::new(
                             egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
                         ).fill(egui::Color32::from_rgb(200, 40, 40))
                          .min_size(egui::vec2(22.0, 16.0))
-                        ).on_hover_text("Stopp opptak").clicked() {
+                        ).on_hover_text(self.language.ui_stop_recording()).clicked() {
                             if let Some(handle) = &self.mic_handle {
                                 handle.stop();
                                 self.mic_transcribing = true;
@@ -5658,14 +5658,14 @@ impl eframe::App for ContextApp {
                 } else if self.whisper_loading {
                     ui.add(egui::Label::new(
                         egui::RichText::new("⏳").size(13.0)
-                    )).on_hover_text("Laster talemodell...");
+                    )).on_hover_text(self.language.ui_loading_speech_model());
                     ctx.request_repaint_after(Duration::from_millis(100));
                 } else {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     if ui.add(egui::Label::new(
                         egui::RichText::new("\u{1F3A4}").size(13.0).color(mic_color)
-                    ).sense(egui::Sense::click())).on_hover_text("Talegjenkjenning").clicked() {
+                    ).sense(egui::Sense::click())).on_hover_text(self.language.ui_speech_recognition()).clicked() {
                             if whisper_ready {
                                 // Models already loaded — start recording immediately
                                 let final_eng = self.whisper_engine.as_ref().unwrap().clone();
@@ -5753,14 +5753,14 @@ impl eframe::App for ContextApp {
                         egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
                      .min_size(egui::vec2(22.0, 16.0))
-                    ).on_hover_text("Stopp opplesing").clicked() {
+                    ).on_hover_text(self.language.ui_stop_reading()).clicked() {
                         tts::stop_speaking();
                         self.ocr_text = None;
                     }
                 } else {
                     if ui.add(egui::Label::new(
                         egui::RichText::new("▶").size(14.0).color(inactive)
-                    ).sense(egui::Sense::click())).on_hover_text("Les opp markert tekst").clicked() {
+                    ).sense(egui::Sense::click())).on_hover_text(self.language.ui_read_selected_text()).clicked() {
                         log!("Speak button clicked!");
                         match self.manager.read_selected_text().or_else(|| self.platform.read_selected_text()) {
                             Some(text) => {
@@ -5783,7 +5783,7 @@ impl eframe::App for ContextApp {
                     let err_count = self.writing_errors.iter().filter(|e| !e.ignored).count();
                     if err_count > 0 {
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new("Tips:").size(9.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                     }
                 }
@@ -6129,21 +6129,21 @@ impl eframe::App for ContextApp {
                                 // --- Sentence boundary suggestion ---
                                 let err_suggestion = error.suggestion.clone();
                                 ui.horizontal(|ui| {
-                                    if icon_button(ui, "👍", "Sett inn punktum") {
+                                    if icon_button(ui, "👍", self.language.ui_insert_period()) {
                                         action = Some((idx, "fix"));
                                     }
-                                    if icon_button(ui, "👎", "Ignorer") {
+                                    if icon_button(ui, "👎", self.language.ui_ignore()) {
                                         action = Some((idx, "ignore"));
                                     }
-                                    if icon_button(ui, "🔊", "Les opp") {
+                                    if icon_button(ui, "🔊", self.language.ui_read_aloud()) {
                                         tts::speak_word(&err_suggestion);
                                     }
-                                    if icon_button(ui, "▶", "Vis i dokument") {
+                                    if icon_button(ui, "▶", self.language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
                                 ui.label(
-                                    egui::RichText::new("Mangler punktum:")
+                                    egui::RichText::new(self.language.ui_missing_period())
                                         .size(11.0)
                                         .strong()
                                         .color(egui::Color32::from_rgb(0, 100, 180)),
@@ -6183,17 +6183,17 @@ impl eframe::App for ContextApp {
                                 let err_ctx = error.sentence_context.clone();
                                 ui.horizontal(|ui| {
                                     if let Some(alt_idx) = first_alt {
-                                        if icon_button(ui, "👍", "Rett opp") {
+                                        if icon_button(ui, "👍", self.language.ui_fix()) {
                                             action = Some((alt_idx, "fix"));
                                         }
                                     }
-                                    if icon_button(ui, "👎", "Ignorer") {
+                                    if icon_button(ui, "👎", self.language.ui_ignore()) {
                                         action = Some((idx, "ignore_group"));
                                     }
-                                    if icon_button(ui, "🔊", "Les opp") {
+                                    if icon_button(ui, "🔊", self.language.ui_read_aloud()) {
                                         tts::speak_word(&first_suggestion);
                                     }
-                                    if icon_button(ui, "💡", "Vis regelinfo") {
+                                    if icon_button(ui, "💡", self.language.ui_show_rule_info()) {
                                         let fix_idx = first_alt.unwrap_or(idx);
                                         // Extract LLM changes if present
                                         self.rule_info_llm_changes = if err_expl.starts_with("LLM_CHANGES:") {
@@ -6214,7 +6214,7 @@ impl eframe::App for ContextApp {
                                         };
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                     }
-                                    if icon_button(ui, "▶", "Vis i dokument") {
+                                    if icon_button(ui, "▶", self.language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
@@ -6250,24 +6250,24 @@ impl eframe::App for ContextApp {
                                 let err_word = error.word.clone();
                                 ui.horizontal(|ui| {
                                     if !error.suggestion.is_empty() {
-                                        if icon_button(ui, "👍", "Rett opp") {
+                                        if icon_button(ui, "👍", self.language.ui_fix()) {
                                             action = Some((idx, "fix"));
                                         }
                                     }
-                                    if icon_button(ui, "👎", "Ignorer") {
+                                    if icon_button(ui, "👎", self.language.ui_ignore()) {
                                         action = Some((idx, "ignore"));
                                     }
-                                    if icon_button(ui, "+", "Legg til i ordbok") {
+                                    if icon_button(ui, "+", self.language.ui_add_to_dictionary()) {
                                         action = Some((idx, "add_to_dict"));
                                     }
-                                    if icon_button(ui, "🔊", "Les opp") {
+                                    if icon_button(ui, "🔊", self.language.ui_read_aloud()) {
                                         let speak = if !err_suggestion.is_empty() { &err_suggestion } else { &err_word };
                                         tts::speak_word(speak);
                                     }
-                                    if icon_button(ui, "?", "Flere forslag") {
+                                    if icon_button(ui, "?", self.language.ui_more_suggestions()) {
                                         action = Some((idx, "suggest"));
                                     }
-                                    if icon_button(ui, "▶", "Vis i dokument") {
+                                    if icon_button(ui, "▶", self.language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
@@ -6450,6 +6450,7 @@ impl eframe::App for ContextApp {
                 let (word, candidates) = self.suggestion_window.as_ref().unwrap();
                 let word_clone = word.clone();
                 let candidates_clone: Vec<(String, f32)> = candidates.clone();
+                let lang_for_vp = self.language.clone();
 
                 if let Some(idx) = prev_selection {
                     if idx < candidates_clone.len() {
@@ -6484,7 +6485,7 @@ impl eframe::App for ContextApp {
                     ctx.show_viewport_immediate(
                         egui::ViewportId::from_hash_of("suggestion_viewport"),
                         egui::ViewportBuilder::default()
-                            .with_title(format!("Forslag for «{}»", word_clone))
+                            .with_title(lang_for_vp.ui_suggestions_for(&word_clone))
                             .with_inner_size([win_w, win_h])
                             .with_position(screen_center)
                             .with_always_on_top()
@@ -6506,7 +6507,7 @@ impl eframe::App for ContextApp {
                                     ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
 
                                     ui.label(
-                                        egui::RichText::new(format!("Forslag for «{}»", word_clone))
+                                        egui::RichText::new(lang_for_vp.ui_suggestions_for(&word_clone))
                                             .size(16.0)
                                             .strong()
                                             .color(egui::Color32::from_rgb(30, 70, 150)),
@@ -6514,12 +6515,12 @@ impl eframe::App for ContextApp {
                                     ui.add_space(8.0);
 
                                     if candidates_clone.is_empty() {
-                                        ui.label("Ingen forslag funnet.");
+                                        ui.label(lang_for_vp.ui_no_suggestions());
                                     } else {
                                         egui::ScrollArea::vertical().max_height(win_h - 80.0).show(ui, |ui| {
                                             for (i, (candidate, _score)) in candidates_clone.iter().enumerate() {
                                                 ui.horizontal(|ui| {
-                                                    if icon_button(ui, "🔊", "Les opp") {
+                                                    if icon_button(ui, "🔊", lang_for_vp.ui_read_aloud()) {
                                                         tts::speak_word(candidate);
                                                     }
                                                     if ui.button(
@@ -6566,6 +6567,7 @@ impl eframe::App for ContextApp {
                     String::new()
                 };
                 let (category, description, wrong, right) = rule_info(&rule_name);
+                let lang_for_rule = self.language.clone();
 
                 // Center on screen using actual monitor size
                 let win_w = 560.0_f32;
@@ -6579,7 +6581,7 @@ impl eframe::App for ContextApp {
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("rule_info_viewport"),
                     egui::ViewportBuilder::default()
-                        .with_title("Regelinfo")
+                        .with_title(lang_for_rule.ui_rule_info())
                         .with_inner_size([win_w, win_h])
                         .with_position(screen_center)
                         .with_always_on_top()
@@ -6732,7 +6734,7 @@ impl eframe::App for ContextApp {
                                     // Explanation (skip for LLM corrections — diff tooltips explain)
                                     if rule_name != "llm_correction" {
                                     ui.label(
-                                        egui::RichText::new("Forklaring:")
+                                        egui::RichText::new(lang_for_rule.ui_explanation())
                                             .size(14.0)
                                             .strong()
                                             .color(egui::Color32::from_rgb(50, 50, 50)),
@@ -6753,7 +6755,7 @@ impl eframe::App for ContextApp {
                                         ui.separator();
                                         ui.add_space(8.0);
                                         ui.label(
-                                            egui::RichText::new("Eksempler")
+                                            egui::RichText::new(lang_for_rule.ui_examples())
                                                 .size(18.0)
                                                 .strong()
                                                 .color(egui::Color32::from_rgb(30, 70, 150)),
@@ -6779,16 +6781,16 @@ impl eframe::App for ContextApp {
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     if !suggestion.is_empty() {
-                                        if ui.button(egui::RichText::new("Rett opp").size(14.0).strong().color(egui::Color32::from_rgb(0, 120, 60))).clicked() {
+                                        if ui.button(egui::RichText::new(lang_for_rule.ui_fix()).size(14.0).strong().color(egui::Color32::from_rgb(0, 120, 60))).clicked() {
                                             do_fix = true;
                                         }
                                         ui.add_space(8.0);
                                     }
-                                    if ui.button(egui::RichText::new("Ignorer").size(14.0).color(egui::Color32::from_rgb(150, 60, 60))).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_rule.ui_ignore()).size(14.0).color(egui::Color32::from_rgb(150, 60, 60))).clicked() {
                                         do_ignore = true;
                                     }
                                     ui.add_space(8.0);
-                                    if ui.button(egui::RichText::new("Lukk").size(14.0).color(egui::Color32::from_rgb(80, 80, 80))).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_rule.ui_close()).size(14.0).color(egui::Color32::from_rgb(80, 80, 80))).clicked() {
                                         do_close = true;
                                     }
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -6846,6 +6848,7 @@ impl eframe::App for ContextApp {
                 let mut do_stop = false;
                 let mut do_improve = false;
                 let text_clone = self.mic_result_text.clone().unwrap_or_default();
+                let lang_for_stt = self.language.clone();
 
                 let win_w = 600.0_f32;
                 let win_h = 400.0_f32;
@@ -6858,7 +6861,7 @@ impl eframe::App for ContextApp {
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("whisper_result_viewport"),
                     egui::ViewportBuilder::default()
-                        .with_title("Talegjenkjenning")
+                        .with_title(lang_for_stt.ui_speech_recognition())
                         .with_inner_size([win_w, win_h])
                         .with_position(screen_center)
                         .with_always_on_top()
@@ -6882,7 +6885,7 @@ impl eframe::App for ContextApp {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
                                         let msg = if self.whisper_load_status.is_empty() {
-                                            "Laster talemodell...".to_string()
+                                            lang_for_stt.ui_loading_speech_model().to_string()
                                         } else {
                                             self.whisper_load_status.clone()
                                         };
@@ -6893,7 +6896,7 @@ impl eframe::App for ContextApp {
                                 } else if is_recording {
                                     ui.horizontal(|ui| {
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("■ Stopp").size(14.0).color(egui::Color32::WHITE)
+                                            egui::RichText::new(lang_for_stt.ui_stop()).size(14.0).color(egui::Color32::WHITE)
                                         ).fill(egui::Color32::from_rgb(200, 40, 40))).clicked() {
                                             do_stop = true;
                                         }
@@ -6903,9 +6906,9 @@ impl eframe::App for ContextApp {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
                                         let msg = if self.whisper_mode == 1 && cfg!(target_os = "macos") {
-                                            "Forbedrer med stor modell..."
+                                            lang_for_stt.ui_improving_with_large_model()
                                         } else {
-                                            "Transkriberer..."
+                                            lang_for_stt.ui_transcribing()
                                         };
                                         ui.label(egui::RichText::new(msg).size(14.0)
                                             .color(egui::Color32::from_rgb(100, 80, 140)));
@@ -6931,7 +6934,7 @@ impl eframe::App for ContextApp {
                                 if self.improve_running {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        ui.label(egui::RichText::new("Forbedrer med stor modell...").size(14.0)
+                                        ui.label(egui::RichText::new(lang_for_stt.ui_improving_with_large_model()).size(14.0)
                                             .color(egui::Color32::from_rgb(100, 80, 140)));
                                     });
                                     ui.add_space(4.0);
@@ -6940,27 +6943,26 @@ impl eframe::App for ContextApp {
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     if !is_streaming {
-                                        if ui.button(egui::RichText::new("Kopier").size(14.0)).clicked() {
+                                        if ui.button(egui::RichText::new(lang_for_stt.ui_copy()).size(14.0)).clicked() {
                                             do_copy = true;
                                         }
                                         ui.add_space(8.0);
-                                        if ui.button(egui::RichText::new("\u{1F50A} Les opp").size(14.0)).clicked() {
+                                        if ui.button(egui::RichText::new(format!("\u{1F50A} {}", lang_for_stt.ui_read_aloud())).size(14.0)).clicked() {
                                             tts::speak_word(&text_clone);
                                         }
                                         ui.add_space(8.0);
-                                        // "Forbedre" button — only on Windows, when final model available, not already improving
                                         if cfg!(target_os = "windows")
                                             && self.whisper_mode == 1
                                             && self.whisper_engine.is_some()
                                             && !self.improve_running
                                         {
-                                            if ui.button(egui::RichText::new("Forbedre resultat").size(14.0)).clicked() {
+                                            if ui.button(egui::RichText::new(lang_for_stt.ui_improve_result()).size(14.0)).clicked() {
                                                 do_improve = true;
                                             }
                                             ui.add_space(8.0);
                                         }
                                     }
-                                    if ui.button(egui::RichText::new("Lukk").size(14.0)).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_stt.ui_close()).size(14.0)).clicked() {
                                         do_close = true;
                                     }
                                 });
@@ -7071,11 +7073,12 @@ impl eframe::App for ContextApp {
             let mut new_ui_scale = ui_scale;
             let mut open_voice = false;
             let mut open_userdict = false;
+            let lang_for_settings = self.language.clone();
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings_window"),
                 egui::ViewportBuilder::default()
-                    .with_title("Innstillinger")
+                    .with_title(lang_for_settings.ui_settings())
                     .with_inner_size([500.0, 600.0])
                     .with_decorations(true),
                 |vp_ctx, _class| {
@@ -7097,26 +7100,30 @@ impl eframe::App for ContextApp {
                             let off_color = egui::Color32::from_rgb(140, 140, 140);
 
                             // -- Quality --
-                            ui.label(egui::RichText::new("Kvalitet").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(lang_for_settings.ui_quality()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             {
                                 let quality_label = match new_quality {
-                                    0 => "Raskere",
-                                    1 => "Normal",
-                                    _ => "Høyeste kvalitet",
+                                    0 => lang_for_settings.ui_faster(),
+                                    1 => lang_for_settings.ui_normal_quality(),
+                                    _ => lang_for_settings.ui_highest_quality(),
                                 };
                                 let mut selected = new_quality as usize;
                                 egui::ComboBox::from_id_salt("settings_quality_combo")
                                     .selected_text(egui::RichText::new(quality_label).size(body))
                                     .width(220.0)
                                     .show_index(ui, &mut selected, 3, |i| {
-                                        match i { 0 => "Raskere", 1 => "Normal", _ => "Høyeste kvalitet" }.to_string()
+                                        match i {
+                                            0 => lang_for_settings.ui_faster(),
+                                            1 => lang_for_settings.ui_normal_quality(),
+                                            _ => lang_for_settings.ui_highest_quality(),
+                                        }.to_string()
                                     });
                                 new_quality = selected as u8;
                             }
                             if grammar_completion {
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Grammatikkfilter: PÅ").size(body).color(on_color));
+                                ui.label(egui::RichText::new(lang_for_settings.ui_grammar_filter_on()).size(body).color(on_color));
                             }
 
                             ui.add_space(16.0);
@@ -7124,19 +7131,19 @@ impl eframe::App for ContextApp {
                             ui.add_space(12.0);
 
                             // -- Speech recognition --
-                            ui.label(egui::RichText::new("Talegjenkjenning").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(lang_for_settings.ui_speech_recognition()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 let rask_color = if new_whisper_mode == 0 { active_color } else { off_color };
                                 let beste_color = if new_whisper_mode == 1 { active_color } else { off_color };
                                 if ui.add(egui::Label::new(
-                                    egui::RichText::new("Rask (75 MB)").size(body).color(rask_color)
+                                    egui::RichText::new(lang_for_settings.ui_stt_fast_model()).size(body).color(rask_color)
                                 ).sense(egui::Sense::click())).clicked() {
                                     new_whisper_mode = 0;
                                 }
                                 ui.label(egui::RichText::new("  |  ").size(body).color(off_color));
                                 if ui.add(egui::Label::new(
-                                    egui::RichText::new("Beste (650 MB)").size(body).color(beste_color)
+                                    egui::RichText::new(lang_for_settings.ui_stt_best_model()).size(body).color(beste_color)
                                 ).sense(egui::Sense::click())).clicked() {
                                     new_whisper_mode = 1;
                                 }
@@ -7147,13 +7154,13 @@ impl eframe::App for ContextApp {
                             ui.add_space(12.0);
 
                             // -- Voice --
-                            ui.label(egui::RichText::new("Stemme").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(lang_for_settings.ui_voice()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 let current = tts::current_voice();
                                 ui.label(egui::RichText::new(&current).size(body).color(active_color));
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new("Velg...").size(body)
+                                    egui::RichText::new(lang_for_settings.ui_choose()).size(body)
                                 )).clicked() {
                                     open_voice = true;
                                 }
@@ -7164,13 +7171,13 @@ impl eframe::App for ContextApp {
                             ui.add_space(12.0);
 
                             // -- Speak on space --
-                            ui.label(egui::RichText::new("Les ord høgt").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(lang_for_settings.ui_read_words_aloud()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             {
                                 let (label, color) = if new_speak_on_space {
-                                    ("Les ord ved mellomrom: PÅ", on_color)
+                                    (lang_for_settings.ui_speak_on_space_on(), on_color)
                                 } else {
-                                    ("Les ord ved mellomrom: AV", off_color)
+                                    (lang_for_settings.ui_speak_on_space_off(), off_color)
                                 };
                                 if ui.add(egui::Label::new(
                                     egui::RichText::new(label).size(body).color(color)
@@ -7184,7 +7191,7 @@ impl eframe::App for ContextApp {
                             ui.add_space(12.0);
 
                             // -- UI scale --
-                            ui.label(egui::RichText::new("Størrelse").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(lang_for_settings.ui_size()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 if ui.add(egui::Button::new(egui::RichText::new("  −  ").size(body))).clicked() {
@@ -7202,12 +7209,12 @@ impl eframe::App for ContextApp {
                             ui.add_space(12.0);
 
                             // -- User dictionary --
-                            ui.label(egui::RichText::new("Eigen ordbok").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(lang_for_settings.ui_user_dict()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(format!("{} ord", dict_count)).size(body).color(active_color));
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new("Rediger...").size(body)
+                                    egui::RichText::new(lang_for_settings.ui_edit()).size(body)
                                 )).clicked() {
                                     open_userdict = true;
                                 }
@@ -7279,14 +7286,14 @@ impl eframe::App for ContextApp {
         // Voice selection window (separate from main panel)
         if self.show_voice_window {
             let mut open = self.show_voice_window;
-            egui::Window::new("Velg stemme")
+            egui::Window::new(self.language.ui_choose_voice())
                 .open(&mut open)
                 .resizable(true)
                 .default_width(300.0)
                 .show(ctx, |ui| {
                     let current = tts::current_voice();
                     if self.voice_list.is_empty() {
-                        ui.label(egui::RichText::new("Ingen norske stemmer funnet.").size(12.0));
+                        ui.label(egui::RichText::new(self.language.ui_no_voices_found()).size(12.0));
                         ui.label(egui::RichText::new(self.language.ui_voice_download_help()).size(11.0)
                             .color(egui::Color32::from_rgb(100, 100, 100)));
                     }
@@ -7333,11 +7340,12 @@ impl eframe::App for ContextApp {
             words.sort();
             let mut new_word_buf = self.userdict_new_word.clone();
             let scale = self.ui_scale;
+            let lang_for_dict = self.language.clone();
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("userdict_editor"),
                 egui::ViewportBuilder::default()
-                    .with_title("Egen ordbok")
+                    .with_title(lang_for_dict.ui_user_dict())
                     .with_inner_size([350.0 * scale, 400.0 * scale])
                     .with_decorations(true),
                 |vp_ctx, _class| {
@@ -7351,17 +7359,17 @@ impl eframe::App for ContextApp {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(12.0))
                         .show(vp_ctx, |ui| {
-                            ui.label(egui::RichText::new("Ord du har lagt til:")
+                            ui.label(egui::RichText::new(lang_for_dict.ui_words_you_added())
                                 .size(14.0).color(egui::Color32::from_rgb(30, 30, 30)));
                             ui.add_space(4.0);
 
                             ui.horizontal(|ui| {
                                 let response = ui.add(
                                     egui::TextEdit::singleline(&mut new_word_buf)
-                                        .hint_text("Nytt ord...")
+                                        .hint_text(lang_for_dict.ui_new_word_hint())
                                         .desired_width(220.0)
                                 );
-                                if ui.button("Legg til").clicked()
+                                if ui.button(lang_for_dict.ui_add()).clicked()
                                     || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                                 {
                                     let trimmed = new_word_buf.trim().to_string();
@@ -7378,13 +7386,13 @@ impl eframe::App for ContextApp {
 
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 if words.is_empty() {
-                                    ui.label(egui::RichText::new("Ingen ord lagt til enda.").size(11.0)
+                                    ui.label(egui::RichText::new(lang_for_dict.ui_no_words_added()).size(11.0)
                                         .color(egui::Color32::from_rgb(140, 140, 140)));
                                 }
                                 for w in &words {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(w).size(13.0));
-                                        if ui.small_button("Fjern").clicked() {
+                                        if ui.small_button(lang_for_dict.ui_remove()).clicked() {
                                             word_to_remove = Some(w.clone());
                                         }
                                     });
@@ -7445,10 +7453,11 @@ impl eframe::App for ContextApp {
                 (monitor.y - win_h) / 2.0,
             );
 
+            let lang_for_ocr = self.language.clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("ocr_prompt"),
                 egui::ViewportBuilder::default()
-                    .with_title("Skjermbilde oppdaget")
+                    .with_title(lang_for_ocr.ui_screenshot_detected())
                     .with_inner_size([win_w, win_h])
                     .with_position(screen_center)
                     .with_always_on_top()
@@ -7464,22 +7473,22 @@ impl eframe::App for ContextApp {
                         .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(16.0))
                         .show(vp_ctx, |ui| {
                             ui.label(
-                                egui::RichText::new("Tekst funnet i skjermbildet")
+                                egui::RichText::new(lang_for_ocr.ui_text_found_in_screenshot())
                                     .size(14.0)
                                     .color(egui::Color32::from_rgb(30, 30, 30))
                             );
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                if ui.button(egui::RichText::new("Les tekst").size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_read_text()).size(13.0)).clicked() {
                                     do_read = true;
                                 }
-                                if ui.button(egui::RichText::new("Kopier tekst").size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_copy_text()).size(13.0)).clicked() {
                                     do_copy = true;
                                 }
-                                if ui.button(egui::RichText::new("Matte").size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_math()).size(13.0)).clicked() {
                                     do_math = true;
                                 }
-                                if ui.button(egui::RichText::new("Avbryt").size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_cancel()).size(13.0)).clicked() {
                                     do_dismiss = true;
                                 }
                             });
