@@ -36,6 +36,9 @@ pub struct WordAddinBridge {
     reset_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Current document name — used to detect document switches
     current_doc_name: Arc<Mutex<String>>,
+    /// Set to true when a document switch is detected on /context so the
+    /// next /reset from any document is accepted without name matching.
+    pending_doc_switch: Arc<std::sync::atomic::AtomicBool>,
     /// Changed sentences received from add-in (paragraph events).
     /// Main thread picks these up for grammar checking.
     changed_paragraphs: Arc<Mutex<Vec<ChangedParagraph>>>,
@@ -61,6 +64,7 @@ impl WordAddinBridge {
         let deleted_paragraphs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let current_doc_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let pending_doc_switch = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let errors_json: Arc<Mutex<String>> = Arc::new(Mutex::new("[]".to_string()));
 
         let ctx_clone = Arc::clone(&cached_context);
@@ -70,6 +74,7 @@ impl WordAddinBridge {
         let reset_clone = Arc::clone(&reset_requested);
         let errors_clone = Arc::clone(&errors_json);
         let doc_name_clone = Arc::clone(&current_doc_name);
+        let pending_switch_clone = Arc::clone(&pending_doc_switch);
 
         std::thread::Builder::new()
             .name("word-addin-https".into())
@@ -116,6 +121,7 @@ impl WordAddinBridge {
                         let deleted = Arc::clone(&deleted_clone);
                         let reset = Arc::clone(&reset_clone);
                         let doc_name = Arc::clone(&doc_name_clone);
+                        let pending_switch = Arc::clone(&pending_switch_clone);
                         let errors = Arc::clone(&errors_clone);
                         let tls = tls_acceptor.clone();
                         let html = html.clone();
@@ -125,7 +131,7 @@ impl WordAddinBridge {
                                 match acceptor.accept(tcp_stream) {
                                     Ok(mut tls_stream) => {
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &errors, &html, &js);
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &errors, &html, &js);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -133,7 +139,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &errors, &html, &js);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &errors, &html, &js);
                             }
                         });
                     }
@@ -146,6 +152,7 @@ impl WordAddinBridge {
             reply_queue,
             current_doc_name,
             reset_requested,
+            pending_doc_switch,
             changed_paragraphs,
             deleted_paragraphs,
             errors_json,
@@ -389,6 +396,7 @@ fn handle_request_rw<S: Read + Write>(
     deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
     reset_requested: &Arc<std::sync::atomic::AtomicBool>,
     current_doc_name: &Arc<Mutex<String>>,
+    pending_doc_switch: &Arc<std::sync::atomic::AtomicBool>,
     errors_json: &Arc<Mutex<String>>,
     static_html: &str,
     static_js: &str,
@@ -477,6 +485,7 @@ fn handle_request_rw<S: Read + Write>(
                         // Different non-empty name — real document switch
                         crate::log!("DOC SWITCH: '{}' → '{}' — requesting rescan", *current, doc_name);
                         *current = doc_name;
+                        pending_doc_switch.store(true, std::sync::atomic::Ordering::Relaxed);
                         true
                     } else {
                         if current.is_empty() {
@@ -597,13 +606,16 @@ fn handle_request_rw<S: Read + Write>(
 
         ("POST", "/reset") => {
             let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
-            // Only accept reset from active document or first doc to connect
+            // Accept reset from: the active document, the first doc to connect,
+            // OR any document immediately after a doc-switch was detected on /context.
+            let switch_pending = pending_doc_switch.load(std::sync::atomic::Ordering::Relaxed);
             let is_active_reset = if let Ok(current) = current_doc_name.lock() {
-                current.is_empty() || *current == doc_name
+                current.is_empty() || *current == doc_name || switch_pending
             } else {
                 false
             };
             if is_active_reset {
+                pending_doc_switch.store(false, std::sync::atomic::Ordering::Relaxed);
                 reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
                 if !doc_name.is_empty() {
                     if let Ok(mut current) = current_doc_name.lock() {

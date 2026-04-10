@@ -410,22 +410,26 @@ impl BridgeManager {
         }
 
         // Word Add-in bridge is data-driven (HTTP POST), not foreground-driven.
-        // Check it first — if it has fresh data, use it regardless of foreground.
-        for (i, bridge) in self.bridges.iter().enumerate() {
-            if bridge.name() == "Word Add-in" {
-                if let Some(ctx) = bridge.read_context() {
-                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                        if self.active_idx != i {
-                            log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
-                            self.bridge_switched = true;
+        // Check it first — but ONLY when Word is actually foreground (or our own
+        // window is). If the user has switched to a browser or other app, skip
+        // the Add-in cache so the correct bridge can win immediately.
+        if !is_browser {
+            for (i, bridge) in self.bridges.iter().enumerate() {
+                if bridge.name() == "Word Add-in" {
+                    if let Some(ctx) = bridge.read_context() {
+                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                            if self.active_idx != i {
+                                log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
+                                self.bridge_switched = true;
+                            }
+                            self.active_idx = i;
+                            self.last_user_pid = fg_pid;
+                            self.last_context = Some(ctx.clone());
+                            return Some(ctx);
                         }
-                        self.active_idx = i;
-                        self.last_user_pid = fg_pid;
-                        self.last_context = Some(ctx.clone());
-                        return Some(ctx);
                     }
+                    break;
                 }
-                break;
             }
         }
 
@@ -524,6 +528,12 @@ impl BridgeManager {
 
     fn active_bridge_name(&self) -> &str {
         self.effective_bridge().map(|b| b.name()).unwrap_or("none")
+    }
+
+    /// Clear cached context so stale Word data is not shown after an app switch.
+    fn clear_context(&mut self) {
+        self.last_context = None;
+        self.last_user_was_browser = false;
     }
 
     #[allow(dead_code)]
@@ -916,6 +926,15 @@ struct ContextApp {
     startup_rx: Option<std::sync::mpsc::Receiver<StartupItem>>,
     startup_done: Vec<String>,    // labels of completed items
     startup_total: usize,         // total items to load
+    /// Tracks whether the foreground app was a browser in the previous poll,
+    /// so we can detect the Word→Browser transition and clear stale errors.
+    prev_fg_was_browser: bool,
+    /// Window title of the last foreground Word window, used to detect
+    /// document switches (Document1 → Document2) and clear stale errors.
+    prev_word_title: String,
+    /// True when the foreground app is a browser this frame. Set at the
+    /// top of every update() so grammar/BERT pollers can gate on it.
+    suppress_errors: bool,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -1218,6 +1237,26 @@ fn build_right_completions(
 }
 
 impl ContextApp {
+    /// Reset all error/spelling/grammar state when the user switches to a
+    /// different app or document, so stale results don't bleed across contexts.
+    fn clear_for_app_switch(&mut self) {
+        self.writing_errors.clear();
+        self.context = Default::default();
+        self.spelling_queue.clear();
+        self.pending_spelling_bert.clear();
+        self.pending_grammar_bert.clear();
+        self.pending_consonant_bert.clear();
+        self.grammar_queue.clear();
+        self.grammar_queue_total = 0;
+        self.processed_sentence_hashes.clear();
+        self.last_doc_hash = 0;
+        // Clear paragraph tracking so in-flight grammar actor results are
+        // treated as stale and discarded (the guard checks this map).
+        self.paragraph_sentence_hashes.clear();
+        self.grammar_inflight.clear();
+        self.manager.clear_context();
+    }
+
     fn new(
         language: std::sync::Arc<dyn language::LanguageBundle>,
         grammar_completion: bool,
@@ -1427,6 +1466,9 @@ impl ContextApp {
             startup_rx: Some(startup_rx),
             startup_done: Vec::new(),
             startup_total: 1, // completer only
+            prev_fg_was_browser: false,
+            prev_word_title: String::new(),
+            suppress_errors: false,
         }
     }
 
@@ -1851,6 +1893,13 @@ impl ContextApp {
 
     /// Poll BERT worker for all response types and handle them.
     fn poll_bert_responses(&mut self, ctx: &egui::Context) {
+        // Drain and discard all BERT results while browser is foreground.
+        if self.suppress_errors {
+            if let Some(worker) = &mut self.bert_worker {
+                while worker.try_recv().is_some() {}
+            }
+            return;
+        }
         // Collect all available responses first (avoids borrow conflicts)
         let mut responses: Vec<bert_worker::BertResponse> = Vec::new();
         if let Some(worker) = &mut self.bert_worker {
@@ -3762,6 +3811,12 @@ impl ContextApp {
         };
 
         while let Some(resp) = actor.try_recv() {
+            // Discard grammar results while browser is foreground — they belong
+            // to a previous Word session and must not bleed into browser mode.
+            if self.suppress_errors {
+                log!("Grammar response discarded (browser foreground): para='{}'", trunc(&resp.paragraph_id, 10));
+                continue;
+            }
             log!("Grammar response: sentence='{}' errors={} unknown={} para='{}'",
                 trunc(&resp.sentence, 40), resp.errors.len(), resp.unknown_words.len(),
                 trunc(&resp.paragraph_id, 10));
@@ -3771,15 +3826,17 @@ impl ContextApp {
                 hash_str(&format!("{}|{}", resp.paragraph_id, resp.sentence))
             };
 
-            // Guard: if this response is for a paragraph whose sentence has already changed,
-            // discard it — inserting a stale hash would prevent re-detection when the same
-            // error is reintroduced.
+            // Guard: discard if the paragraph is no longer tracked (app switched and
+            // paragraph_sentence_hashes was cleared) OR if the sentence hash no longer
+            // matches the current paragraph content (user edited the text).
             if !resp.paragraph_id.is_empty() {
-                if let Some(current_hashes) = self.paragraph_sentence_hashes.get(&resp.paragraph_id) {
-                    if !current_hashes.contains(&sent_h) {
-                        log!("Stale grammar response discarded: sentence no longer in para={}", trunc(&resp.paragraph_id, 10));
-                        continue;
-                    }
+                let is_stale = match self.paragraph_sentence_hashes.get(&resp.paragraph_id) {
+                    Some(current_hashes) => !current_hashes.contains(&sent_h),
+                    None => true, // paragraph cleared on app switch → stale
+                };
+                if is_stale {
+                    log!("Stale grammar response discarded: sentence no longer in para={}", trunc(&resp.paragraph_id, 10));
+                    continue;
                 }
             }
 
@@ -4477,6 +4534,33 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 
 impl eframe::App for ContextApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // App-switch detection runs unconditionally at the very top of every frame,
+        // before any processing or drawing, so stale errors are cleared immediately.
+        {
+            let fg = self.platform.foreground_app();
+            let kind = self.platform.classify_app(&fg);
+            let now_browser = kind == platform::AppKind::Browser;
+            let now_word = kind == platform::AppKind::Word;
+
+            if now_browser && !self.suppress_errors {
+                log!("Browser foreground — clearing stale errors");
+                self.clear_for_app_switch();
+                ctx.request_repaint();
+            }
+
+            if now_word {
+                let title = fg.title.clone();
+                if !self.prev_word_title.is_empty() && title != self.prev_word_title {
+                    log!("Word doc switch: '{}' → '{}' — clearing", self.prev_word_title, title);
+                    self.clear_for_app_switch();
+                    ctx.request_repaint();
+                }
+                self.prev_word_title = title;
+            }
+
+            self.suppress_errors = now_browser;
+        }
+
         // In selection mode: handle keys at the top, set skip_processing flag
         let mut skip_processing = false;
         if self.selection_mode {
@@ -4547,6 +4631,9 @@ impl eframe::App for ContextApp {
         }
 
         
+        // suppress_errors and app-switch detection are handled at the very top
+        // of update() (above the skip_processing gate) — nothing to do here.
+
         self.poll_grammar_responses();
        
         if let Some(actor) = &self.grammar_actor {
@@ -4898,7 +4985,11 @@ impl eframe::App for ContextApp {
         if self.last_poll.elapsed() >= self.poll_interval {
             self.last_poll = Instant::now();
 
-            
+            // Track prev_fg_was_browser for legacy code paths.
+            // The actual clear_for_app_switch() now runs in the pre-poll block
+            // every frame so it's not gated by poll_interval.
+            self.prev_fg_was_browser = self.suppress_errors;
+
             let ctx_result = self.manager.read_context();
            
             if ctx_result.is_none() {
