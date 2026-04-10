@@ -5697,10 +5697,11 @@ impl eframe::App for ContextApp {
                                     // Windows: lazy-load Whisper models, then auto-start recording
                                     self.whisper_loading = true;
                                     self.whisper_pending_record = true;
+                                    let (fast_model, streaming_model, final_model) = self.language.whisper_model_names();
                                     self.whisper_load_status = if self.whisper_mode == 0 {
-                                        "Laster talemodell (tiny, 75 MB)...".into()
+                                        self.language.ui_loading(self.language.whisper_fast_model_label())
                                     } else {
-                                        "Laster talemodeller (base + medium-q5, 690 MB)...".into()
+                                        self.language.ui_loading(self.language.whisper_best_model_label())
                                     };
                                     let (tx, rx) = std::sync::mpsc::channel();
                                     self.whisper_load_rx = Some(rx);
@@ -5713,7 +5714,7 @@ impl eframe::App for ContextApp {
                                         let lang0 = self.language.clone();
                                         std::thread::spawn(move || {
                                             let model_path = data_dir()
-                                                .join("ggml-nb-whisper-tiny.bin")
+                                                .join(fast_model)
                                                 .to_string_lossy().to_string();
                                             let _ = tx.send(WhisperLoadItem::Final(
                                                 stt::WhisperEngine::load(&dll, &model_path, &*lang0).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
@@ -5726,7 +5727,7 @@ impl eframe::App for ContextApp {
                                         let lang2 = self.language.clone();
                                         std::thread::spawn(move || {
                                             let model_path = data_dir()
-                                                .join("ggml-nb-whisper-base.bin")
+                                                .join(streaming_model)
                                                 .to_string_lossy().to_string();
                                             let _ = tx2.send(WhisperLoadItem::Streaming(
                                                 stt::WhisperEngine::load(&dll2, &model_path, &*lang1).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
@@ -5734,7 +5735,7 @@ impl eframe::App for ContextApp {
                                         });
                                         std::thread::spawn(move || {
                                             let model_path = data_dir()
-                                                .join("ggml-nb-whisper-medium-q5.bin")
+                                                .join(final_model)
                                                 .to_string_lossy().to_string();
                                             let _ = tx.send(WhisperLoadItem::Final(
                                                 stt::WhisperEngine::load(&dll_dir, &model_path, &*lang2).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
