@@ -7171,6 +7171,8 @@ impl eframe::App for ContextApp {
             let mut new_ui_scale = ui_scale;
             let mut open_voice = false;
             let mut open_userdict = false;
+            let mut switch_to_language: Option<String> = None;
+            let current_lang_code = self.language.code().to_string();
             let lang_for_settings = self.language.clone();
 
             ctx.show_viewport_immediate(
@@ -7318,6 +7320,53 @@ impl eframe::App for ContextApp {
                                 }
                             });
 
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // -- Language --
+                            ui.label(egui::RichText::new("Språk").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+
+                            for lang in AVAILABLE_LANGUAGES {
+                                let is_active = lang.code == current_lang_code;
+                                let is_cached = downloader::language_cached(lang.code);
+
+                                ui.horizontal(|ui| {
+                                    // Flag + name
+                                    let label_text = format!("{}  {}", lang.flag, lang.name);
+                                    let color = if is_active {
+                                        on_color
+                                    } else if is_cached {
+                                        active_color
+                                    } else {
+                                        off_color
+                                    };
+                                    ui.label(egui::RichText::new(&label_text).size(body).color(color));
+
+                                    ui.add_space(8.0);
+
+                                    if is_active {
+                                        ui.label(egui::RichText::new("(aktiv)").size(14.0).color(on_color));
+                                    } else if is_cached {
+                                        // Already downloaded — offer to activate
+                                        if ui.add(egui::Button::new(
+                                            egui::RichText::new("Aktiver").size(15.0)
+                                        )).clicked() {
+                                            switch_to_language = Some(lang.code.to_string());
+                                        }
+                                    } else {
+                                        // Not downloaded — offer to download + activate
+                                        if ui.add(egui::Button::new(
+                                            egui::RichText::new("Last ned").size(15.0)
+                                        )).clicked() {
+                                            switch_to_language = Some(lang.code.to_string());
+                                        }
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            }
+
                             // Load errors (if any)
                             if !load_errors.is_empty() {
                                 ui.add_space(16.0);
@@ -7376,6 +7425,27 @@ impl eframe::App for ContextApp {
                     voice: tts::current_voice(),
                     language: self.language.code().to_string(),
                 });
+            }
+            if let Some(new_lang) = switch_to_language {
+                // Download if not cached, then restart the app with new language
+                if !downloader::language_cached(&new_lang) {
+                    run_download_window(&new_lang);
+                }
+                // Save the new language and request app restart
+                save_settings(&UserSettings {
+                    quality: self.quality,
+                    whisper_mode: self.whisper_mode,
+                    speak_on_space: self.speak_on_space,
+                    ui_scale: self.ui_scale,
+                    voice: tts::current_voice(),
+                    language: new_lang.clone(),
+                });
+                // Restart the process with the new language
+                let exe = std::env::current_exe().unwrap();
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg("--language").arg(&new_lang);
+                let _ = cmd.spawn();
+                std::process::exit(0);
             }
             if do_close {
                 self.show_settings_window = false;
@@ -7625,7 +7695,85 @@ impl eframe::App for ContextApp {
     }
 }
 
-// ── Download window: shown on first run or when language data is missing ──
+// ── Language definitions for picker UI ──
+
+struct LangOption {
+    code: &'static str,
+    name: &'static str,
+    flag: &'static str,
+}
+
+const AVAILABLE_LANGUAGES: &[LangOption] = &[
+    LangOption { code: "nb", name: "Bokmål",  flag: "\u{1F1F3}\u{1F1F4}" },
+    LangOption { code: "nn", name: "Nynorsk", flag: "\u{1F1F3}\u{1F1F4}" },
+];
+
+// ── Language picker: shown on first run ──
+
+fn run_language_picker() -> Option<String> {
+    let chosen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 340.0])
+            .with_decorations(true)
+            .with_title("NorskTale — Vel språk"),
+        ..Default::default()
+    };
+
+    struct PickerApp {
+        chosen: Arc<Mutex<Option<String>>>,
+    }
+
+    impl eframe::App for PickerApp {
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            ctx.set_visuals(egui::Visuals::light());
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(32.0))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Vel språk")
+                            .size(26.0).strong().color(egui::Color32::from_rgb(40, 40, 40)));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Språkdata blir lasta ned etter valet.")
+                            .size(16.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.add_space(24.0);
+
+                        for lang in AVAILABLE_LANGUAGES {
+                            let btn_text = format!("{}  {}", lang.flag, lang.name);
+                            let btn = egui::Button::new(
+                                egui::RichText::new(&btn_text).size(22.0)
+                            )
+                            .min_size(egui::vec2(280.0, 52.0));
+
+                            if ui.add(btn).clicked() {
+                                if let Ok(mut c) = self.chosen.lock() {
+                                    *c = Some(lang.code.to_string());
+                                }
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            ui.add_space(10.0);
+                        }
+                    });
+                });
+        }
+    }
+
+    let chosen_clone = Arc::clone(&chosen);
+    let _ = eframe::run_native(
+        "NorskTale — Vel språk",
+        options,
+        Box::new(move |_cc| {
+            Ok(Box::new(PickerApp { chosen: chosen_clone }) as Box<dyn eframe::App>)
+        }),
+    );
+
+    chosen.lock().ok().and_then(|c| c.clone())
+}
+
+// ── Download window: shown when language data is missing ──
 
 fn run_download_window(lang_code: &str) {
     let items = downloader::language_files(lang_code);
@@ -7912,11 +8060,26 @@ fn main() -> eframe::Result {
     };
 
     // ── First-run: language picker + download ──
-    // If language data isn't cached locally, show a picker/download window.
-    if !downloader::language_cached(&lang_code) {
-        eprintln!("Language data not cached for '{}' — starting download...", lang_code);
-        run_download_window(&lang_code);
-    }
+    let lang_code = if !downloader::language_cached(&lang_code) {
+        // No cached data — show language picker first (unless CLI forced a language)
+        let cli_forced = std::env::args().any(|a| a == "--language");
+        let picked = if cli_forced {
+            lang_code.clone()
+        } else {
+            match run_language_picker() {
+                Some(code) => code,
+                None => {
+                    eprintln!("No language selected — exiting.");
+                    std::process::exit(0);
+                }
+            }
+        };
+        eprintln!("Downloading language data for '{}'...", picked);
+        run_download_window(&picked);
+        picked
+    } else {
+        lang_code
+    };
 
     // Persist the chosen language
     if saved.language != lang_code {
