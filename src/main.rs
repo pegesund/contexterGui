@@ -7210,8 +7210,9 @@ impl eframe::App for ContextApp {
             let mut new_whisper_mode = whisper_mode;
             let mut new_speak_on_space = speak_on_space;
             let mut new_ui_scale = ui_scale;
-            let mut open_voice = false;
             let mut open_userdict = false;
+            let mut selected_voice: Option<String> = None;
+            let voice_list = tts::available_voices();
             let mut switch_to_language: Option<String> = None;
             let current_lang_code = self.language.code().to_string();
             let lang_for_settings = self.language.clone();
@@ -7297,15 +7298,24 @@ impl eframe::App for ContextApp {
                             // -- Voice --
                             ui.label(egui::RichText::new(lang_for_settings.ui_voice()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                let current = tts::current_voice();
-                                ui.label(egui::RichText::new(&current).size(body).color(active_color));
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new(lang_for_settings.ui_choose()).size(body)
-                                )).clicked() {
-                                    open_voice = true;
+                            let current = tts::current_voice();
+                            for voice in &voice_list {
+                                let is_selected = voice.name == current;
+                                let color = if is_selected { on_color } else { label_color };
+                                let label = if is_selected {
+                                    format!("{} (aktiv)", &voice.name)
+                                } else {
+                                    voice.name.clone()
+                                };
+                                if ui.add(egui::Label::new(
+                                    egui::RichText::new(&label).size(body).color(color)
+                                ).sense(egui::Sense::click())).clicked() {
+                                    selected_voice = Some(voice.name.clone());
                                 }
-                            });
+                            }
+                            if voice_list.is_empty() {
+                                ui.label(egui::RichText::new(lang_for_settings.ui_no_voices_found()).size(body).color(off_color));
+                            }
 
                             ui.add_space(16.0);
                             ui.separator();
@@ -7447,9 +7457,20 @@ impl eframe::App for ContextApp {
             if (new_ui_scale - self.ui_scale).abs() > 0.01 {
                 self.ui_scale = new_ui_scale;
             }
-            if open_voice {
-                self.voice_list = tts::available_voices();
-                self.show_voice_window = true;
+            if let Some(ref voice) = selected_voice {
+                tts::set_voice(voice);
+                tts::speak_word(&tts::available_voices().iter()
+                    .find(|v| v.name == *voice)
+                    .map(|v| v.sample_text.clone())
+                    .unwrap_or_else(|| voice.clone()));
+                save_settings(&UserSettings {
+                    quality: self.quality,
+                    whisper_mode: self.whisper_mode,
+                    speak_on_space: self.speak_on_space,
+                    ui_scale: self.ui_scale,
+                    voice: voice.clone(),
+                    language: self.language.code().to_string(),
+                });
             }
             if open_userdict {
                 self.show_userdict_window = true;
@@ -7488,55 +7509,6 @@ impl eframe::App for ContextApp {
             if do_close {
                 self.show_settings_window = false;
             }
-        }
-
-        // Voice selection window (separate from main panel)
-        if self.show_voice_window {
-            let mut open = self.show_voice_window;
-            egui::Window::new(self.language.ui_choose_voice())
-                .open(&mut open)
-                .resizable(true)
-                .default_width(300.0)
-                .show(ctx, |ui| {
-                    let current = tts::current_voice();
-                    if self.voice_list.is_empty() {
-                        ui.label(egui::RichText::new(self.language.ui_no_voices_found()).size(12.0));
-                        ui.label(egui::RichText::new(self.language.ui_voice_download_help()).size(11.0)
-                            .color(egui::Color32::from_rgb(100, 100, 100)));
-                    }
-                    for voice in &self.voice_list {
-                        ui.horizontal(|ui| {
-                            let is_selected = voice.name == current;
-                            let color = if is_selected {
-                                egui::Color32::from_rgb(0, 70, 160)
-                            } else {
-                                egui::Color32::from_rgb(60, 60, 60)
-                            };
-                            let label = if is_selected {
-                                format!("{} (valgt)", &voice.name)
-                            } else {
-                                voice.name.clone()
-                            };
-                            if ui.add(egui::Label::new(
-                                egui::RichText::new(&label).size(13.0).color(color)
-                            ).sense(egui::Sense::click())).clicked() {
-                                tts::set_voice(&voice.name);
-                                save_settings(&UserSettings {
-                                    quality: self.quality,
-                                    whisper_mode: self.whisper_mode,
-                                    speak_on_space: self.speak_on_space,
-                                    ui_scale: self.ui_scale,
-                                    voice: voice.name.clone(),
-                                    language: self.language.code().to_string(),
-                                });
-                                tts::speak_word(&voice.sample_text);
-                            }
-                            ui.label(egui::RichText::new(&voice.language).size(10.0)
-                                .color(egui::Color32::from_rgb(140, 140, 140)));
-                        });
-                    }
-                });
-            self.show_voice_window = open;
         }
 
         // User dictionary editor window (separate OS window)
