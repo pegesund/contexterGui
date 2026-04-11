@@ -1,314 +1,3350 @@
 [
-  {"sentence": "She has always known.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He likes to goes.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "They should often come.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must ran.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "I have finished.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him went to school.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form, should be he"},
-  {"sentence": "She has written a letter.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He should always helps.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form after adverbs"},
-  {"sentence": "They like to swim.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have a the house.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "I can always find.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must spoke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has eaten.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They likes to reads.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We should dance.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a ugly dog.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an before vowel"},
-  {"sentence": "She can sit.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them went home.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form, should be they"},
-  {"sentence": "He has always tried.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They must walks.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "We like to cook.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I will never went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She has gone.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought a car too a house.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have played.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We should never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I like to write.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has a the cat.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "He must learn.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have been.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We likes to dances.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I have spoken.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She should not drove.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He likes to sing.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him sang.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form, should be he"},
-  {"sentence": "They have decided.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must eats.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "I have a the table.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "She can always help.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He will often sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to help.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have found.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I must gave.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "She has started.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He likes to teaches.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "They should always read.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them ate.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form, should be they"},
-  {"sentence": "We have worked.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a old house.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an before vowel"},
-  {"sentence": "She must sit.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has closed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They cannot sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "We like to paint.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have kept.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She should reads.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "He has always helped.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They like to walks.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We have arrived.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I will sold.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form"},
-  {"sentence": "She has found.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought a pen too a book.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have taken.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must comes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "I like to dance.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has a the dog.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "He has bought.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him helped.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form, should be he"},
-  {"sentence": "They should stand.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have cooked.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I should often went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to study.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has kept.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They will began.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form"},
-  {"sentence": "We like to sleep.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have opened.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must walks.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "He has always believed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They like to cooks.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We should never sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I have done.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has learned.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them sang.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form, should be they"},
-  {"sentence": "He likes to run.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have changed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must always help.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a the pen.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "She can always dance.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has returned.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They should sits.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "We have seen.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I like to listen.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has chosen.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have lived.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We like to helps.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I have studied.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has a old car.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an before vowel"},
-  {"sentence": "He should always come.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have lost.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We cannot wrote.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to travel.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him laughed.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form, should be he"},
-  {"sentence": "She has sold.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He will always try.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They like to sing.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We should dances.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "I have believed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must not went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has improved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have always tried.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We like to reads.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I should help.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has finished the book.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought bread too milk.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have given.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have a the chair.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "I can always swim.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must ate.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has always studied.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them worked.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form, should be they"},
-  {"sentence": "They should learn.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have thought.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I will often helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to walk.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has been here before.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They must plays.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "We have closed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a empty box.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an before vowel"},
-  {"sentence": "She should often help.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has written.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They like to teaches.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We have opened.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I will sang.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form"},
-  {"sentence": "She has moved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him ate.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form, should be he"},
-  {"sentence": "They have won.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We should always study.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I must learns.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "She has lived.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He should not stole.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to paint.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have prepared.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I like to drives.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "She has spoken.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought a hat too shoes.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have improved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have a the garden.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "I can always learn.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must bought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has hoped.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them danced.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form, should be they"},
-  {"sentence": "They should always help.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have enjoyed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I should always went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to learn.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has always worked.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They must sells.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not -s"},
-  {"sentence": "We have sung.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a the book.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "She has always kept.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He likes to builds.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "They must stay.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We will brought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form"},
-  {"sentence": "I have decided.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him played football.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form"},
-  {"sentence": "She has written a letter.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He should always listens.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "They like to grow.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have a the mirror.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "I can always swim.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must threw.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has driven.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They likes to studies.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We should always read.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a awful cold.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an"},
-  {"sentence": "She can always paint.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them finished the race.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form"},
-  {"sentence": "He has always enjoyed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must cooks.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "I like to learn.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She will never chose.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has stopped.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They bought milk too eggs.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "We have worked.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I should never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to drive.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has a the trophy.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "They must find.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have spoken.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I likes to dances.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "She has chosen.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He should not broke.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to fly.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him laughed loudly.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form"},
-  {"sentence": "We have believed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I must talks.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "She has a the necklace.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "He can always cook.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They will often ran.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We like to fix.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have saved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must flew.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has found the answer.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They likes to writes.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We should always dance.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them drove fast.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form"},
-  {"sentence": "I have given.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has a ancient artifact.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an"},
-  {"sentence": "He must sleep.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have taken.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We cannot flew.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to play.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has won.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He should teaches.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "They have always loved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We like to grows.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I have enjoyed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She will bought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form"},
-  {"sentence": "He has solved the puzzle.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him ran quickly.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form"},
-  {"sentence": "They have improved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We should work.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a the pillow.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "She has returned.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought eggs too milk.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have sold.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must never broke.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I like to travel.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has always believed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He must reads.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "They have cooked.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We likes to walks.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I have thought.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She should often drove.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has been here.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them helped us.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form"},
-  {"sentence": "They have changed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We must always study.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a the blanket.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "She can always learn.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has been kind.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They should runs.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "We have seen the movie.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I like to listen.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must spoke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has always prepared.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have enjoyed the party.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We like to helps.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I have studied.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has a ugly painting.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an"},
-  {"sentence": "He should always try.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have lost.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We cannot brought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to build.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him cooked breakfast.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form"},
-  {"sentence": "She has opened.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He will always read.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They like to dance.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We should writes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "I have played.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must not sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has hoped.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They have always won.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We likes to sings.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "I should always sit.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She has finished the work.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought bread too cheese.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have kept.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have a the lamp.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "I can always draw.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must ate.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has always given.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them cleaned the house.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form"},
-  {"sentence": "They should read.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have believed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I will often taught.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to fix.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has been there before.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They must walks.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "We have painted.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a excellent grade.", "is_correct": false, "error_type": "article_a_an", "explanation": "Error: a should be an"},
-  {"sentence": "She should often sing.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has written.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They like to teaches.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "We have opened.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I will fought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form"},
-  {"sentence": "She has moved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Him cleaned the room.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: him is object form"},
-  {"sentence": "They have won.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We should always listen.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I must learns.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "She has lived here.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He should not flew.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to fix.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have prepared.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I like to watches.", "is_correct": false, "error_type": "infinitive+present", "explanation": "Error: to requires base form"},
-  {"sentence": "She has spoken.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He bought sugar too flour.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be and"},
-  {"sentence": "They have improved.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have a the rug.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"},
-  {"sentence": "I can always teach.", "is_correct": true, "error_type": "none"},
-  {"sentence": "She must swam.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He has always hoped.", "is_correct": true, "error_type": "none"},
-  {"sentence": "Them danced all night.", "is_correct": false, "error_type": "pronoun_case_subject", "explanation": "Error: them is object form"},
-  {"sentence": "They should always come.", "is_correct": true, "error_type": "none"},
-  {"sentence": "We have enjoyed.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I should always went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to grow.", "is_correct": true, "error_type": "none"},
-  {"sentence": "He has always read.", "is_correct": true, "error_type": "none"},
-  {"sentence": "They must sings.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form"},
-  {"sentence": "We have sung.", "is_correct": true, "error_type": "none"},
-  {"sentence": "I have a the basket.", "is_correct": false, "error_type": "double_article", "explanation": "Error: double article"}
+  {
+    "sentence": "She has always known.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He likes to goes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "They should often come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must ran.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "I have finished.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him went to school.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form, should be he"
+  },
+  {
+    "sentence": "She has written a letter.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should always helps.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form after adverbs"
+  },
+  {
+    "sentence": "They like to swim.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I can always find.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has eaten.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They likes to reads.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We should dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a ugly dog.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "She can sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them went home.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form, should be they"
+  },
+  {
+    "sentence": "He has always tried.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They must walks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "We like to cook.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will never went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She has gone.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought a car too a house.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have played.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I like to write.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has a the cat.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "He must learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have been.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We likes to dances.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I have spoken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She should not drove.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He likes to sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him sang.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form, should be he"
+  },
+  {
+    "sentence": "They have decided.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must eats.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I have a the table.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "She can always help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He will often sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have found.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I must gave.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "She has started.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He likes to teaches.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "They should always read.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them ate.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form, should be they"
+  },
+  {
+    "sentence": "We have worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a old house.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "She must sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has closed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They cannot sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "We like to paint.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have kept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She should reads.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "He has always helped.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They like to walks.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We have arrived.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will sold.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form"
+  },
+  {
+    "sentence": "She has found.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought a pen too a book.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have taken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must comes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I like to dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has a the dog.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "He has bought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him helped.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form, should be he"
+  },
+  {
+    "sentence": "They should stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have cooked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I should often went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to study.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has kept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They will began.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form"
+  },
+  {
+    "sentence": "We like to sleep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have opened.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must walks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "He has always believed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They like to cooks.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We should never sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I have done.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has learned.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them sang.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form, should be they"
+  },
+  {
+    "sentence": "He likes to run.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have changed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must always help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a the pen.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "She can always dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has returned.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They should sits.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "We have seen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I like to listen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has chosen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have lived.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We like to helps.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I have studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has a old car.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "He should always come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have lost.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We cannot wrote.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to travel.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him laughed.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form, should be he"
+  },
+  {
+    "sentence": "She has sold.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He will always try.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They like to sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should dances.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I have believed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must not went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has improved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have always tried.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We like to reads.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I should help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has finished the book.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought bread too milk.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have given.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have a the chair.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I can always swim.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must ate.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has always studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them worked.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form, should be they"
+  },
+  {
+    "sentence": "They should learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have thought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will often helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to walk.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has been here before.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They must plays.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "We have closed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a empty box.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "She should often help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has written.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They like to teaches.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We have opened.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will sang.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form"
+  },
+  {
+    "sentence": "She has moved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him ate.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form, should be he"
+  },
+  {
+    "sentence": "They have won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should always study.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I must learns.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "She has lived.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should not stole.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to paint.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have prepared.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I like to drives.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "She has spoken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought a hat too shoes.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have improved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have a the garden.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I can always learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must bought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has hoped.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them danced.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form, should be they"
+  },
+  {
+    "sentence": "They should always help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have enjoyed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I should always went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has always worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They must sells.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "We have sung.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a the book.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "She has always kept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He likes to builds.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "They must stay.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We will brought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form"
+  },
+  {
+    "sentence": "I have decided.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him played football.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form"
+  },
+  {
+    "sentence": "She has written a letter.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should always listens.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "They like to grow.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have a the mirror.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I can always swim.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has driven.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They likes to studies.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We should always read.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a awful cold.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an"
+  },
+  {
+    "sentence": "She can always paint.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them finished the race.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form"
+  },
+  {
+    "sentence": "He has always enjoyed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must cooks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "I like to learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She will never chose.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has stopped.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They bought milk too eggs.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "We have worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I should never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to drive.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has a the trophy.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "They must find.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have spoken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I likes to dances.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "She has chosen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should not broke.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to fly.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him laughed loudly.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form"
+  },
+  {
+    "sentence": "We have believed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I must talks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "She has a the necklace.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "He can always cook.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They will often ran.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We like to fix.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have saved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must flew.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has found the answer.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They likes to writes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We should always dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them drove fast.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form"
+  },
+  {
+    "sentence": "I have given.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has a ancient artifact.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an"
+  },
+  {
+    "sentence": "He must sleep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have taken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We cannot flew.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to play.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should teaches.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "They have always loved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We like to grows.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I have enjoyed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She will bought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form"
+  },
+  {
+    "sentence": "He has solved the puzzle.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him ran quickly.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form"
+  },
+  {
+    "sentence": "They have improved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should work.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a the pillow.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "She has returned.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought eggs too milk.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have sold.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must never broke.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I like to travel.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has always believed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He must reads.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "They have cooked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We likes to walks.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I have thought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She should often drove.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has been here.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them helped us.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form"
+  },
+  {
+    "sentence": "They have changed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We must always study.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a the blanket.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "She can always learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has been kind.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They should runs.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "We have seen the movie.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I like to listen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has always prepared.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have enjoyed the party.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We like to helps.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I have studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has a ugly painting.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an"
+  },
+  {
+    "sentence": "He should always try.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have lost.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We cannot brought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to build.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him cooked breakfast.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form"
+  },
+  {
+    "sentence": "She has opened.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He will always read.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They like to dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should writes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "I have played.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must not sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has hoped.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They have always won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We likes to sings.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I should always sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has finished the work.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought bread too cheese.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have kept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have a the lamp.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I can always draw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must ate.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has always given.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them cleaned the house.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form"
+  },
+  {
+    "sentence": "They should read.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have believed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will often taught.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to fix.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has been there before.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They must walks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "We have painted.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a excellent grade.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an"
+  },
+  {
+    "sentence": "She should often sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has written.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They like to teaches.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We have opened.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will fought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form"
+  },
+  {
+    "sentence": "She has moved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him cleaned the room.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: him is object form"
+  },
+  {
+    "sentence": "They have won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should always listen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I must learns.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "She has lived here.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should not flew.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to fix.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have prepared.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I like to watches.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "She has spoken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought sugar too flour.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have improved.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have a the rug.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I can always teach.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She must swam.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He has always hoped.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them danced all night.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: them is object form"
+  },
+  {
+    "sentence": "They should always come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have enjoyed.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I should always went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to grow.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He has always read.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They must sings.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form"
+  },
+  {
+    "sentence": "We have sung.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have a the basket.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The nurse must study.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy likes to fights.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The doctor likes to hide.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog finds.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl could usually sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman has fought.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "Her studied.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The children like to loses.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "Me read.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The student would lose well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer has a the book.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The children found a enormous house.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The students like to sleep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer has always spent.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children must throw well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers like to choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse would threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The singer would often drove.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The teacher has sent.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child has studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children like to choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She should sends.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I will wear.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook can speaks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The boy has rarely studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer would usually hide.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog thinks.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students like to learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Her cooked.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "I cannot sell.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student has felt.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer cannot stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer might drink.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student has sometimes chosen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He found a ugly hat.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The nurse bought coffee too soup.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The officer has fought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer has found.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The teacher has stood.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "He cannot read.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man will feels.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The girl could broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The officer likes to loses.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "He has begun.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist bought cheese too butter.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The girl has studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child drinks.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers has a the bag.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "He has rarely chosen.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor might broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "They has a the cat.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The player likes to goes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "We like to takes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The nurse will choose well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse must takes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The workers can speak well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy can always hid.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "Me spoke.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The student found a ugly dog.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "I like to comes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "He has a the book.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The teacher could dances.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The cat has kept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child has felt.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them wrote.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The student has led.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child can felt.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The student bought coffee too pasta.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The man has felt.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "Him took.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "She has flown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They cannot teach.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman shall sometimes come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children cannot drink.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player bought eggs too tea.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The player likes to sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Me taught.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The woman might speaks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The nurse likes to sits.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "They bought fruit too salt.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The singer has a the book.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The cat might won.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The cat should never worked.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The nurse could throw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat found a old car.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The students should never win.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should spent.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The child cannot drink.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child found a egg.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The student should broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The dog can work.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have taught.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The man could spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The workers like to finds.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The girl shall spent.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The boy will rarely give.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat has given.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse should swim well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist should often take.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Her flew.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "We have eaten.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog likes to grows.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "They would usually learned.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The player has wrote.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The man runs.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor has began.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The boy could sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer should took.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The boy feels.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students might drew.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The doctor would eat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog could speak well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat could reads.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The cat breaks.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl likes to stands.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "Him played.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The teacher has sometimes sat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student can fly.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat cannot help.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat has a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I cannot throw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has usually grown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse might sleep well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy has a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The teacher must caught.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The dog has often gone.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child can draw well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We shall walks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The dog found a enormous house.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The dog has worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him drank.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The singer thinks.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers would learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor must stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "Her sent.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The dog has stood.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The woman has went.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The girl found a egg.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The dog has always found.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player likes to choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse has fought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He bought water too salt.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The man has caught.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child should threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The nurse has a the book.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The dog must usually found.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The children would sends.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The artist has cooked.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The students have won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat has a the lamp.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The player will ate.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The player will buys.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The child found a ancient ruin.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "Us sold.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The teacher likes to take.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students should danced.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "They would gave.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "She has always won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor has a the table.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The girl has written.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse has helped.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers bought cheese too sugar.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The students can never learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We like to stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children have sold.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The cook must sit well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I will spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The teacher shall stand well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher has helped.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The cat feels.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Us helped.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The student shall sometimes cooked.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The singer has rarely slept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist swims.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy could takes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The artist would fly.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse cannot sell.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man must sits.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The artist should lose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer must speak.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse has gave.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The girl has a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The doctor likes to grows.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "Us taught.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The dog likes to hide.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor bought cheese too honey.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The player has chose.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The nurse has often driven.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl cannot draw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students wear.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I can usually play.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor found a orange.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "We spend.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man likes to keep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy has thought.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The man shall threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The child likes to chooses.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The officer has sold.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student has a the wallet.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The boy can choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook found a ugly hat.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "Me grew.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "Them played.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "She must usually speak.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers have never learned.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Us came.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The dog has flown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have always swum.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children bought eggs too juice.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The woman found a enormous house.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The students shall sell.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse would often hide.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher might sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "They found a exciting game.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The child likes to write.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers should write well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl would begin.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man has often gone.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students might throw well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player can came.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The workers have sometimes begun.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist found a exciting game.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The cook takes.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer cannot wear.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher found a ugly dog.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The boy found a ugly hat.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The student could tell.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them slept.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The cook likes to drink.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman shall built.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "We like to learns.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "I would study well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She has worked.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The teacher shall choose well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child has sang.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The singer cannot sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have danced.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "They bought meat too sugar.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "We like to draws.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The student should swim.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child sings.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children found a umbrella.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The students teach.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher might send well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist must eat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist found a ugly dog.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The girl must never wrote.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The player must never lose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy can buy.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I fight.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Us fought.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "He has usually thrown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse should grew.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The officer found a empty box.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The workers will ran.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "She must build.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children have sent.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player would buys.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The child would cook.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher might wears.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The nurse likes to tell.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student will choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat likes to sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student has run.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist has never broken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They bought fruit too salt.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The officer might rarely drive.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Her swam.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "We would help well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman has a the table.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "I should broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The cat has a the book.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The cook should often learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer has often studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We will always came.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The dog likes to buys.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The officer shall sometimes walked.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The man found a enormous house.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "He should grows.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The officer has a the dog.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The officer will sometimes come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player must dances.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The woman likes to teaches.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The doctor likes to fight.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player has a the plate.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The children might usually catch.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl must goes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The girl has a the cup.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The student must drive well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students might went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The officer sits.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy cannot throw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students must work.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student might always speak.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They would stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The workers cannot find.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers have usually studied.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child should drink well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist might sell well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl cannot take.",
+    "is_correct": true,
+    "error_type": "none"
+  }
 ]

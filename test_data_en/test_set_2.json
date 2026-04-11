@@ -1,537 +1,4526 @@
 [
-  {"sentence": "You must always help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "The cook has hoped.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The dog must eat the water.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The cat has began.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (begun)"},
-  {"sentence": "The cook will stood.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The student has traveled.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat should always sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The dog has forgot.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (forgotten)"},
-  {"sentence": "The doctor will remembered.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The woman cannot think.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "You should always ran.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "You have began.", "is_correct": false, "error_type": "has+past", "explanation": "Error: have requires past participle (begun)"},
-  {"sentence": "The doctor must stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The cat likes to say.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The child cannot drink.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "You must try the book.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "We have lost.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "He has sang.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (sung)"},
-  {"sentence": "They like to sell.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The dog has lost.", "is_correct": false, "error_type": "auxiliary+past", "explanation": "Error: has requires past participle"},
-  {"sentence": "They like to drive.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "She must work the car.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "They must stopped.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "The man must forget the book.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The man has remembered.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He cannot stood.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "She likes to say.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "You must give.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "You should stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I cannot steal.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The man should hoped.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "The cook must work the water.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The man should often help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "The dog should never sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "The student can worked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "The cat cannot run.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The cat has drunk.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cook can wished.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "The student has was.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (been)"},
-  {"sentence": "They must work the house.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The dog has learned.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We have said.", "is_correct": false, "error_type": "has+past", "explanation": "Error: have requires past participle"},
-  {"sentence": "The dog must remembered.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "She has stood.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle"},
-  {"sentence": "You should not helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The student likes to drink.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The doctor must often sowed.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The cook cannot lay.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "He has won.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat has lost.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "She likes to drive.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "We must write the food.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The man can stood.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "I cannot think.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The student can sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "The man has worked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They like to drive.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "He must learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She cannot sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "The cook has worked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The teacher must help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I will stood.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The cat has spoken.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They will never sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We have written.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has taught.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The student has asked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cook has worked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat has dressed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The child has spoken.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cook has sat.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat has written.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They have bought.", "is_correct": false, "error_type": "has+past", "explanation": "Error: have requires past participle"},
-  {"sentence": "The student has thought.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The teacher has sold.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I have wished.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "The cat has stopped.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We have read.", "is_correct": false, "error_type": "has+past", "explanation": "Error: have requires past participle"},
-  {"sentence": "She has loved.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He has answered.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They should often sat.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "You have tried.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "You have taught.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "The student has asked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The man will sold.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The teacher must read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has studied.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat has talked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We have continued.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She can thought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "He cannot helped.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The man has stood.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I have wished.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She will drank.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The cook has kissed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He cannot read.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The student shall stopped.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: shall requires base form, not past tense"},
-  {"sentence": "We like to drive.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I have told.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She can wrote.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "He likes to think.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The woman should always went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They have eaten.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "The dog will continued.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "We must study.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has run.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "She has learned.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The teacher will always taught.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I can never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He must often studied.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We shall always loved.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They have worked.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She should not sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The cook likes to begin.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He must travel.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I can learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have swum.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She must walked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "The cat has sat.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He will studied.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "We can sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has driven.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The man cannot talked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to hope.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The child can spoke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "They should give.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The woman has gone.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He must not sat.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She will always helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We cannot went.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The teacher has seen.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He has done.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They should helped.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "I have read.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She must learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The dog can sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "He has spoken.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We will always helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They have arrived.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She cannot stole.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I should never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The cook must come.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He likes to hope.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "She has begun.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They must ran.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "I have kept.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "He can wrote.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "The woman must open.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She will sang.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The man can think.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have gone.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "He should wrote.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "I like to swim.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "We must keep.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The cat should sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has chosen.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He can never helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They must tell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I have forgotten.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She will always read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He cannot drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The cook has begun.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They will always taught.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We should buy.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I can never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She must often studied.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has kept.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The woman can sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have chosen.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I should taught.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "He likes to write.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "We have been.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She will drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "They cannot thought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I must sleep.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has walked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "She should stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The dog must stayed.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "They like to sit.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "We have slept.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "He can always ran.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She has returned.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I will never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The man must come.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They should often went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She has left.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He can sit.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "We will bought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "I have studied.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "The student cannot thought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "She must always helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They have decided.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "He should often studied.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The cat has played.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I will sold.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "She like to cook.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They can read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has eaten.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We cannot talked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I must give.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has taken.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He should went.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "The dog can stayed.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "They must always helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We have finished.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She will began.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "He likes to run.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "I have spoken.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They should always came.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She cannot went.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "He has finished.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We like to eat.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I must told.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "The teacher has gone.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The dog has found.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He likes to get.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The dog will write.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He must ask the food.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "You cannot stole.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "You can asked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: can requires base form, not past tense"},
-  {"sentence": "She has was.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (been)"},
-  {"sentence": "The man will find.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The student has continued.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat must wish the food.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "We like to win.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "She has found.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cook cannot found.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "They like to do.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "We have sang.", "is_correct": false, "error_type": "has+past", "explanation": "Error: have requires past participle (sung)"},
-  {"sentence": "They can never lay.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The man cannot lie.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The man cannot find.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "They cannot won.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The child likes to hope.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "She must travel.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The child must remember the house.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The woman has began.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (begun)"},
-  {"sentence": "The dog likes to say.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The teacher must now lay.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The cat likes to sell.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The man must forget the food.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "I can study.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The cook can dig.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The woman has given.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cook cannot sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "The cat has got.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle"},
-  {"sentence": "You cannot got.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The cat has given.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The man likes to give.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The doctor has taught.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I cannot think.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The doctor has found.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We cannot sold.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "They will always did.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The doctor cannot found.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "He cannot drank.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "They like to ask.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The cook cannot sleep.", "is_correct": true, "error_type": "correct", "explanation": "cannot + base form"},
-  {"sentence": "The doctor can try.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "We have wished.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "You will talked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "We have hoped.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "The dog shall win.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The cook has worked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "You must worked.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "You have loved.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "The teacher must teach the book.", "is_correct": true, "error_type": "correct", "explanation": "must + base form + object"},
-  {"sentence": "The student shall forgot.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: shall requires base form, not past tense"},
-  {"sentence": "He has lain.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The teacher likes to travel.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The man will sing.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "You cannot found.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The man has left.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle"},
-  {"sentence": "The woman has stood.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle"},
-  {"sentence": "The student cannot drank.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "The child has taught.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He should sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The man has ran.", "is_correct": false, "error_type": "has+past", "explanation": "Error: has requires past participle (run)"},
-  {"sentence": "They cannot won.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I shall drink.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The man has slept.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "She has dreamed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He has thought.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cook has hoped.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "She must always helped.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They will sold.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The man likes to drive.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "I should run.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has never told.", "is_correct": true, "error_type": "correct", "explanation": "has + adverb + past participle"},
-  {"sentence": "They cannot spoke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "We must always come.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He has learned.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The dog likes to run.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "She will never drove.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has arrived.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We should sing.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I must wrote.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "They have decided.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She can always read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He has always known.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "We cannot bought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to swim.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The teacher has kept.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They shall always go.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She must gave.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form"},
-  {"sentence": "He likes to teach.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "We have begun.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I should not went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They can always help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She has lived.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He must stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The cook has sold.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We cannot drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to think.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The student has studied.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They should never left.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She will always study.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He has chosen.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We must tell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I have written.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She cannot spoke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "They like to learn.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "He must often sat.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The woman has seen.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We should buy.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I will drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "She has returned.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The teacher has sat.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He cannot lay.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "They have kept.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I must sleep.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She likes to find.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He has always sung.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "We will ran.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "The child must help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have spoken.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I cannot threw.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "She should learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has stopped.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We must often went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to paint.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I have enjoyed.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She should drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "He likes to cook.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The man has answered.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We can never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They have helped.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I must give.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has always tried.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "He cannot stole.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "We like to dance.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They have come.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I should always help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She must broke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "He has played.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The cat has eaten.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We cannot ate.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "They like to sell.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I have closed.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has always worked.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "He should never stole.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "The teacher must sing.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "We have lost.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I will taught.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "They have studied.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has won.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He likes to draw.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "We should not spoke.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I have been.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They must often sit.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She has kissed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He cannot swam.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "We like to listen.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The dog has closed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I must always learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "They have opened.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She should sang.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "He likes to lie.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "We must cook.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "The teacher has remembered.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "I will never sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They have started.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She likes to go.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He should always tell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "We cannot threw.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I have read.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They must build.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has drunk.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He will always teach.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "We cannot sang.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to sell.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The student has tried.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They must always work.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She should drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form"},
-  {"sentence": "He has lived.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We like to buy.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I have sung.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They cannot wrote.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "She likes to travel.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He must often read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "The cook has opened.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We should always come.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "I will went.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "They have believed.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has always learned.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "He cannot stood.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "We like to give.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I should study.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have driven.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She must always came.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He likes to walk.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The child has eaten.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We will never forgot.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I have gone.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They must stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has done.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He should ran.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: should requires base form, not past tense"},
-  {"sentence": "We like to sleep.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I have started.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They have taken.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She cannot went.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "He must always try.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "The man has hoped.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We should often sit.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "I will never sold.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to study.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "She has been.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He must never went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We have done.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I should always listen.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "The woman likes to cook.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "They have forgotten.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She cannot broke.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "He has prepared.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We will always give.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "I must came.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "They should help.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She likes to find.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He has always helped.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "We cannot gave.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to build.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They have closed.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She should never went.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "He has walked.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "The student likes to sing.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "We must always read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "I will taught.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "They have won.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has given.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He must sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "We cannot drank.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to drive.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They should always write.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She has moved.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He should always stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "We have arrived.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I must never stole.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "They like to work.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "She has changed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He has always believed.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "We should sell.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I cannot sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "The cook has finished.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They must never drove.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "She likes to sit.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He has closed.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We will ate.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "I like to help.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "The woman has gone.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "They should often learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She must always stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He has said.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We cannot bought.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I must teach.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have loved.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She will always cook.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He should never gave.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We have played.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I like to ask.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They must always sing.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She has kept.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He cannot stole.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "We have spoken.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I should always read.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "They likes to write.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "She must drive.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has always cooked.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "We will never spoke.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I have returned.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They like to sleep.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "She should always stand.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He has decided.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We must came.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: must requires base form, not past tense"},
-  {"sentence": "I like to dance.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They have finished.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has always given.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "He should never ate.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "We have seen.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I must listen.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "They have enjoyed.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She cannot drove.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "He likes to paint.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "The woman has spoken.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We should always dance.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "I will stole.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: will requires base form, not past tense"},
-  {"sentence": "They have changed.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She has always told.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "He must always think.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "We cannot threw.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I have loved.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They should often walk.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She has always tried.", "is_correct": true, "error_type": "correct", "explanation": "has + always + past participle"},
-  {"sentence": "He will always win.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "We must buy.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "I like to sing.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They have been here.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She should swim.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "He has found the book.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We must never broke.", "is_correct": false, "error_type": "modal+adverb+past", "explanation": "Error: modal requires base form after adverbs"},
-  {"sentence": "I have cooked.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "They should often dance.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "She likes to read.", "is_correct": true, "error_type": "correct", "explanation": "likes + to + infinitive"},
-  {"sentence": "He has lived.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "We cannot stole.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "I like to watch.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "They have opened.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "She should always come.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "He must sat.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: sat is past tense, not base form"},
-  {"sentence": "We have thought.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"},
-  {"sentence": "I will always learn.", "is_correct": true, "error_type": "correct", "explanation": "Modal + adverb + base form"},
-  {"sentence": "They should work.", "is_correct": true, "error_type": "correct", "explanation": "Modal + base form"},
-  {"sentence": "She has improved.", "is_correct": true, "error_type": "correct", "explanation": "has + past participle"},
-  {"sentence": "He cannot taught.", "is_correct": false, "error_type": "modal+past", "explanation": "Error: cannot requires base form"},
-  {"sentence": "We like to play.", "is_correct": true, "error_type": "correct", "explanation": "like + to + infinitive"},
-  {"sentence": "I have told.", "is_correct": true, "error_type": "correct", "explanation": "have + past participle"}
+  {
+    "sentence": "You must always help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "The cook has hoped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The dog must eat the water.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The cat has began.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (begun)"
+  },
+  {
+    "sentence": "The cook will stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The student has traveled.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat should always sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The dog has forgot.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (forgotten)"
+  },
+  {
+    "sentence": "The doctor will remembered.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The woman cannot think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "You should always ran.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "You have began.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: have requires past participle (begun)"
+  },
+  {
+    "sentence": "The doctor must stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The cat likes to say.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The child cannot drink.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "You must try the book.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "We have lost.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "He has sang.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (sung)"
+  },
+  {
+    "sentence": "They like to sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The dog has lost.",
+    "is_correct": false,
+    "error_type": "auxiliary+past",
+    "explanation": "Error: has requires past participle"
+  },
+  {
+    "sentence": "They like to drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "She must work the car.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "They must stopped.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "The man must forget the book.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The man has remembered.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He cannot stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "She likes to say.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "You must give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "You should stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I cannot steal.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The man should hoped.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "The cook must work the water.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The man should often help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "The dog should never sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "The student can worked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "The cat cannot run.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The cat has drunk.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cook can wished.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "The student has was.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (been)"
+  },
+  {
+    "sentence": "They must work the house.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The dog has learned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We have said.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: have requires past participle"
+  },
+  {
+    "sentence": "The dog must remembered.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "She has stood.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle"
+  },
+  {
+    "sentence": "You should not helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The student likes to drink.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The doctor must often sowed.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cook cannot lay.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "He has won.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat has lost.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "She likes to drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "We must write the food.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The man can stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "I cannot think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The student can sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "The man has worked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They like to drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "He must learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She cannot sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "The cook has worked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The teacher must help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I will stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The cat has spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They will never sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We have written.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has taught.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The student has asked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cook has worked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat has dressed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The child has spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cook has sat.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat has written.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They have bought.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: have requires past participle"
+  },
+  {
+    "sentence": "The student has thought.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The teacher has sold.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I have wished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "The cat has stopped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We have read.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: have requires past participle"
+  },
+  {
+    "sentence": "She has loved.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He has answered.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They should often sat.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "You have tried.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "You have taught.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "The student has asked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The man will sold.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The teacher must read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has studied.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat has talked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We have continued.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She can thought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "He cannot helped.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The man has stood.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I have wished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She will drank.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The cook has kissed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He cannot read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The student shall stopped.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: shall requires base form, not past tense"
+  },
+  {
+    "sentence": "We like to drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I have told.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She can wrote.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "He likes to think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The woman should always went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have eaten.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "The dog will continued.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "We must study.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has run.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "She has learned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The teacher will always taught.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I can never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He must often studied.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We shall always loved.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have worked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She should not sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cook likes to begin.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He must travel.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I can learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have swum.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She must walked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "The cat has sat.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He will studied.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "We can sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has driven.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The man cannot talked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to hope.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The child can spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "They should give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The woman has gone.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He must not sat.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She will always helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We cannot went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The teacher has seen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He has done.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They should helped.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "I have read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She must learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The dog can sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "He has spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We will always helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have arrived.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She cannot stole.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I should never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cook must come.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He likes to hope.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "She has begun.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They must ran.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "I have kept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "He can wrote.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "The woman must open.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She will sang.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The man can think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have gone.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "He should wrote.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "I like to swim.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "We must keep.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The cat should sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has chosen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He can never helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They must tell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I have forgotten.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She will always read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He cannot drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The cook has begun.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They will always taught.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We should buy.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I can never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She must often studied.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has kept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The woman can sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have chosen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I should taught.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "He likes to write.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "We have been.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She will drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "They cannot thought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I must sleep.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has walked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "She should stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The dog must stayed.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "They like to sit.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "We have slept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "He can always ran.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She has returned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I will never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The man must come.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They should often went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She has left.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He can sit.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "We will bought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "I have studied.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "The student cannot thought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "She must always helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have decided.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "He should often studied.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cat has played.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I will sold.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "She like to cook.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They can read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has eaten.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We cannot talked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I must give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has taken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He should went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "The dog can stayed.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "They must always helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We have finished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She will began.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "He likes to run.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "I have spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They should always came.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She cannot went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "He has finished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We like to eat.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I must told.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "The teacher has gone.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The dog has found.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He likes to get.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The dog will write.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He must ask the food.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "You cannot stole.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "You can asked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: can requires base form, not past tense"
+  },
+  {
+    "sentence": "She has was.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (been)"
+  },
+  {
+    "sentence": "The man will find.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The student has continued.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat must wish the food.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "We like to win.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "She has found.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cook cannot found.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "They like to do.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "We have sang.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: have requires past participle (sung)"
+  },
+  {
+    "sentence": "They can never lay.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The man cannot lie.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The man cannot find.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "They cannot won.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The child likes to hope.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "She must travel.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The child must remember the house.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The woman has began.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (begun)"
+  },
+  {
+    "sentence": "The dog likes to say.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The teacher must now lay.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cat likes to sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The man must forget the food.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "I can study.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The cook can dig.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The woman has given.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cook cannot sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "The cat has got.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle"
+  },
+  {
+    "sentence": "You cannot got.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The cat has given.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The man likes to give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The doctor has taught.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I cannot think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The doctor has found.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We cannot sold.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "They will always did.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The doctor cannot found.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "He cannot drank.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "They like to ask.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The cook cannot sleep.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "cannot + base form"
+  },
+  {
+    "sentence": "The doctor can try.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "We have wished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "You will talked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "We have hoped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "The dog shall win.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The cook has worked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "You must worked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "You have loved.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "The teacher must teach the book.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "must + base form + object"
+  },
+  {
+    "sentence": "The student shall forgot.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: shall requires base form, not past tense"
+  },
+  {
+    "sentence": "He has lain.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The teacher likes to travel.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The man will sing.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "You cannot found.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The man has left.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle"
+  },
+  {
+    "sentence": "The woman has stood.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle"
+  },
+  {
+    "sentence": "The student cannot drank.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "The child has taught.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He should sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The man has ran.",
+    "is_correct": false,
+    "error_type": "has+past",
+    "explanation": "Error: has requires past participle (run)"
+  },
+  {
+    "sentence": "They cannot won.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I shall drink.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The man has slept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "She has dreamed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He has thought.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cook has hoped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "She must always helped.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They will sold.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The man likes to drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "I should run.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has never told.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + adverb + past participle"
+  },
+  {
+    "sentence": "They cannot spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "We must always come.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He has learned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The dog likes to run.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "She will never drove.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has arrived.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We should sing.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I must wrote.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "They have decided.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She can always read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He has always known.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "We cannot bought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to swim.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The teacher has kept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They shall always go.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She must gave.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form"
+  },
+  {
+    "sentence": "He likes to teach.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "We have begun.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I should not went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They can always help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She has lived.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He must stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The cook has sold.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We cannot drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The student has studied.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They should never left.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She will always study.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He has chosen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We must tell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I have written.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She cannot spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "They like to learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "He must often sat.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The woman has seen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We should buy.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I will drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "She has returned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The teacher has sat.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He cannot lay.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "They have kept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I must sleep.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She likes to find.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He has always sung.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "We will ran.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "The child must help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I cannot threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "She should learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has stopped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We must often went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to paint.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I have enjoyed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She should drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "He likes to cook.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The man has answered.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We can never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have helped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I must give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has always tried.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "He cannot stole.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "We like to dance.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They have come.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I should always help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She must broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "He has played.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The cat has eaten.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We cannot ate.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "They like to sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I have closed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has always worked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "He should never stole.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The teacher must sing.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "We have lost.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I will taught.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "They have studied.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has won.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He likes to draw.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "We should not spoke.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I have been.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They must often sit.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She has kissed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He cannot swam.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "We like to listen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The dog has closed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I must always learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "They have opened.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She should sang.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "He likes to lie.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "We must cook.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "The teacher has remembered.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "I will never sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have started.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She likes to go.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He should always tell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "We cannot threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I have read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They must build.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has drunk.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He will always teach.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "We cannot sang.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The student has tried.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They must always work.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She should drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form"
+  },
+  {
+    "sentence": "He has lived.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We like to buy.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I have sung.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They cannot wrote.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "She likes to travel.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He must often read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "The cook has opened.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We should always come.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "I will went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "They have believed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has always learned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "He cannot stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "We like to give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I should study.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have driven.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She must always came.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He likes to walk.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The child has eaten.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We will never forgot.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I have gone.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They must stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has done.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He should ran.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: should requires base form, not past tense"
+  },
+  {
+    "sentence": "We like to sleep.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I have started.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They have taken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She cannot went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "He must always try.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "The man has hoped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We should often sit.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "I will never sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to study.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "She has been.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He must never went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We have done.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I should always listen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "The woman likes to cook.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "They have forgotten.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She cannot broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "He has prepared.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We will always give.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "I must came.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "They should help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She likes to find.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He has always helped.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "We cannot gave.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to build.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They have closed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She should never went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "He has walked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "The student likes to sing.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "We must always read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "I will taught.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "They have won.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has given.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He must sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "We cannot drank.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They should always write.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She has moved.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He should always stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "We have arrived.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I must never stole.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to work.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "She has changed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He has always believed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "We should sell.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I cannot sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "The cook has finished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They must never drove.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "She likes to sit.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He has closed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We will ate.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "I like to help.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "The woman has gone.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "They should often learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She must always stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He has said.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We cannot bought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I must teach.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have loved.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She will always cook.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He should never gave.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We have played.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I like to ask.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They must always sing.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She has kept.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He cannot stole.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "We have spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I should always read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "They likes to write.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "She must drive.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has always cooked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "We will never spoke.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I have returned.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They like to sleep.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "She should always stand.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He has decided.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We must came.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: must requires base form, not past tense"
+  },
+  {
+    "sentence": "I like to dance.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They have finished.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has always given.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "He should never ate.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "We have seen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I must listen.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "They have enjoyed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She cannot drove.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "He likes to paint.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "The woman has spoken.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We should always dance.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "I will stole.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: will requires base form, not past tense"
+  },
+  {
+    "sentence": "They have changed.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She has always told.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "He must always think.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "We cannot threw.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I have loved.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They should often walk.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She has always tried.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + always + past participle"
+  },
+  {
+    "sentence": "He will always win.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "We must buy.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "I like to sing.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They have been here.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She should swim.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "He has found the book.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We must never broke.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "I have cooked.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "They should often dance.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "She likes to read.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "likes + to + infinitive"
+  },
+  {
+    "sentence": "He has lived.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "We cannot stole.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "I like to watch.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "They have opened.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "She should always come.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "He must sat.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: sat is past tense, not base form"
+  },
+  {
+    "sentence": "We have thought.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "I will always learn.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + adverb + base form"
+  },
+  {
+    "sentence": "They should work.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "Modal + base form"
+  },
+  {
+    "sentence": "She has improved.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "has + past participle"
+  },
+  {
+    "sentence": "He cannot taught.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: cannot requires base form"
+  },
+  {
+    "sentence": "We like to play.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "like + to + infinitive"
+  },
+  {
+    "sentence": "I have told.",
+    "is_correct": true,
+    "error_type": "correct",
+    "explanation": "have + past participle"
+  },
+  {
+    "sentence": "We can finds.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The workers must stands.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The officer has usually thought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student shall sits.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The officer has taught.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children shall run well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy can stand well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Me slept.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The nurse likes to draw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have fought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook found a umbrella.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The player should caught.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The cook has grew.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "We could throw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children must speak.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers has a the cat.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The doctor would grows.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The student bought bread too pasta.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "She should usually went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The child has sung.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist might goes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The workers like to build.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl has rarely run.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers bought water too honey.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The nurse found a interesting book.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The workers found a old car.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The girl has held.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Us wrote.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "We have ran.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The boy likes to win.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor can buy well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl can work well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl likes to dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She likes to grow.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students like to holds.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The officer would drinks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The cook likes to begin.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat has hidden.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy likes to fight.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student would sang.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The girl might always read.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cat cannot draw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students have held.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They feel.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He will usually sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student cannot sleep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player has a the key.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The player should drew.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "I like to choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She could plays.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I will swim well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man likes to helps.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The girl can held.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The girl cannot sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child likes to drives.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The player likes to keep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student has caught.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The cook bought cheese too tea.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The man should cook well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer would always choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man might rarely slept.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The workers would write well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Him gave.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The singer has kept.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They should hold.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have built.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The doctor should held.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The singer has never run.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman might sometimes stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor shall fights.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "We bought cheese too juice.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The artist could tells.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The boy found a empty box.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "They shall sometimes study.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer has stood.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man found a orange.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The officer likes to hides.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The students have held.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man shall rarely sold.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The girl has eaten.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He likes to eats.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The singer would flew.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The children have found.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat might teach well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player cannot buy.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them wrote.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "Us drew.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The dog can come well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Us fought.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The boy bought rice too sugar.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They have sat.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The officer must wore.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The workers must stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher would gave.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The cat has took.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The artist can sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We should fight well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player must takes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The students should never buy.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player bought eggs too cake.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The boy will sometimes drive.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog has sometimes played.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor bought milk too juice.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The player has thrown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman bought water too cake.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The woman has began.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "She would rarely told.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They like to spends.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The nurse must never played.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The student might usually read.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cat has worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog has felt.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The workers could holds.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The cat likes to walk.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man can always gave.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The officer bought bread too cream.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "We have always drawn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She likes to walks.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The player drinks.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man could always catch.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman found a exciting game.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The students found a egg.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "They have helped.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "I has a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The dog shall tells.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The player has a the phone.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The woman has never lost.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man has read.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "She goes.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist has often flown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl can eats.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The student has sold.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "She likes to build.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy likes to comes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The students would sometimes take.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "He should rarely break.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog found a exciting game.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The doctor eats.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog shall rarely draw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman has helped.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The student could comes.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I would fights.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The teacher would often ran.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The boy will feel well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog would wins.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The children shall usually sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student can rarely cook.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer has a the table.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The player has often driven.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist shall throw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook could catch well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist has a the cup.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The student should swim well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students wear.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl likes to sends.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The boy likes to comes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The student might always wear.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The singer has found.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player might drive well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse has fought.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The student has worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers might usually come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook likes to helps.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The officer bought milk too cream.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "She bought milk too pasta.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The artist has flown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They might rarely hide.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Me spoke.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The doctor has come.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child found a awful day.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The nurse might swam.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The children have felt.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook could usually give.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The children bought coffee too soup.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The cook shall take.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The artist likes to takes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The nurse bought water too salt.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The doctor should rarely drew.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The woman bought eggs too cream.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "They would thinks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The teacher likes to draw.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The player shall lose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy has fought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse likes to lead.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman would usually begin.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students bought meat too juice.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The cat has driven.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer likes to feels.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The man has rarely grown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer must sing well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer has won.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man cannot catch.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student has led.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The nurse has learned.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The cook has usually fought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl likes to comes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The woman cannot choose.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog would study.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student likes to writes.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The boy bought eggs too cream.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "Him drank.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The woman bought milk too cake.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The child should feels.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The dog found a exciting game.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The teacher found a egg.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "We must throws.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The woman could drinks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The girl has always gone.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students have spent.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The nurse might cooked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The boy shall always swim.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The boy has sold.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students like to learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The officer can often run.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Them spoke.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The child draws.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook sits.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Her hid.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The boy will broke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The student can sometimes bought.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The students must think.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "Us danced.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The students will rarely danced.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cat bought meat too juice.",
+    "is_correct": false,
+    "error_type": "to_too_confusion",
+    "explanation": "Error: too should be and"
+  },
+  {
+    "sentence": "The player might always went.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cook found a orange.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "She has a the pen.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The students have sung.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog can build well.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher likes to begin.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The workers have always thrown.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The students have found.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The girl found a ugly hat.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "He likes to drive.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She could throws.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The cat likes to walk.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat likes to take.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student speaks.",
+    "is_correct": true,
+    "error_type": "none"
+  }
 ]
