@@ -1,0 +1,560 @@
+[
+  {
+    "sentence": "Us ran.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "He shall always studied.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "They have gave.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "They found a empty box.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The child found a old car.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "She has sat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student likes to give.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman will stood.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "I would drive.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher could stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child should bought.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The dog has studied.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "Her came.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "I have found.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The cat has taught.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I shall helped.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "We will stand.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat likes to stands.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The student swims.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman has stood.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "We likes to finds.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The dog has always taken.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook would sometimes ran.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The doctor likes to take.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I would sometimes worked.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The child has helped.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The teacher studies.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man has sat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We found a egg.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The woman has a the cat.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The doctor found a umbrella.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "He eats.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man would sits.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "She has took.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "They have always bought.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "She can sometimes gave.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cook found a old car.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The doctor shall gave.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The cat likes to dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student found a orange.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The student will sits.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I can go.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I has a the dog.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The teacher buys.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They likes to drinks.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The cook sells.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child likes to learns.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The cat can always sing.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child likes to swims.",
+    "is_correct": false,
+    "error_type": "infinitive+present",
+    "explanation": "Error: to requires base form"
+  },
+  {
+    "sentence": "The man likes to learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The woman will often played.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The woman must never sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man likes to learn.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I found a elephant.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The cook has always danced.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog has worked.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "Us studied.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "Us cooked.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The doctor has always worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They could cooks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "I have slept.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "The man has worked.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "I have always driven.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We eat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man would never took.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The cook likes to give.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The man will sleeps.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "Me studied.",
+    "is_correct": false,
+    "error_type": "pronoun_case_subject",
+    "explanation": "Error: object pronoun as subject"
+  },
+  {
+    "sentence": "The doctor has a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "He will sings.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The student likes to dance.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook has a the house.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The child has a the pen.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "The cat has stood.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "I found a orange.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "He must always swim.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher will often eat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The student found a umbrella.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The cat has walked.",
+    "is_correct": false,
+    "error_type": "have+past",
+    "explanation": "Error: have/has requires past participle"
+  },
+  {
+    "sentence": "I has a the pen.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "We like to sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat speaks.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cat will spoke.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "She must never sit.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The dog would went.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "They sleep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook studies.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "We have stood.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "They sleep.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The cook has eaten.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor could drinks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "They has a the pen.",
+    "is_correct": false,
+    "error_type": "double_article",
+    "explanation": "Error: double article"
+  },
+  {
+    "sentence": "He must never drank.",
+    "is_correct": false,
+    "error_type": "modal+adverb+past",
+    "explanation": "Error: modal requires base form after adverbs"
+  },
+  {
+    "sentence": "The teacher will walks.",
+    "is_correct": false,
+    "error_type": "modal+inflected",
+    "explanation": "Error: modal + base form, not -s"
+  },
+  {
+    "sentence": "The man takes.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The teacher reads.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The doctor has always sat.",
+    "is_correct": true,
+    "error_type": "none"
+  },
+  {
+    "sentence": "The child must cooked.",
+    "is_correct": false,
+    "error_type": "modal+past",
+    "explanation": "Error: modal requires base form"
+  },
+  {
+    "sentence": "The cook found a orange.",
+    "is_correct": false,
+    "error_type": "article_a_an",
+    "explanation": "Error: a should be an before vowel"
+  },
+  {
+    "sentence": "The child can run.",
+    "is_correct": true,
+    "error_type": "none"
+  }
+]
