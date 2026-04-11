@@ -850,6 +850,7 @@ struct ContextApp {
     // Settings
     grammar_completion: bool,
     speak_on_space: bool,
+    last_space_speak: Instant,
     quality: u8, // 0=fast, 1=balanced, 2=full
     // Debounce: wait before running completion
     last_prefix_change: Instant,
@@ -1423,6 +1424,7 @@ impl ContextApp {
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
             speak_on_space: saved_settings.speak_on_space,
+            last_space_speak: Instant::now(),
             quality,
             last_prefix_change: Instant::now(),
             debounce_ms: if quality == 0 { 100 } else { 150 },
@@ -5663,22 +5665,24 @@ impl eframe::App for ContextApp {
             }
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
-                // DPI scaling: caret position from GetGUIThreadInfo is in physical pixels,
-                // egui uses logical pixels. Scale down by DPI factor.
-                let dpi_scale = ctx.pixels_per_point();
-                let lx = x as f32 / dpi_scale;
-                let ly = y as f32 / dpi_scale;
+                // DPI scaling: Windows returns physical pixels, macOS returns logical points.
+                let (lx, ly) = if self.platform.caret_is_physical_pixels() {
+                    let dpi_scale = ctx.pixels_per_point();
+                    (x as f32 / dpi_scale, y as f32 / dpi_scale)
+                } else {
+                    (x as f32, y as f32)
+                };
                 // Push the window 5 cm below the caret so it doesn't cover the line
                 // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
-                const CARET_OFFSET_BELOW_PX: f32 = 246.0;
-                let pos_y = if (ly + CARET_OFFSET_BELOW_PX + win_h) > screen_h {
+                let caret_offset = self.platform.caret_offset_below();
+                let pos_y = if (ly + caret_offset + win_h) > screen_h {
                     // Not enough room below — flip above the caret with a 30 px gap.
                     ly - win_h - 30.0
                 } else {
-                    ly + CARET_OFFSET_BELOW_PX
+                    ly + caret_offset
                 };
                 let pos_y = pos_y.max(0.0).min(screen_h - win_h);
-                let pos_x = lx.min(screen_w - win_w).max(0.0);
+                let pos_x = (lx + self.platform.caret_offset_right()).min(screen_w - win_w).max(0.0);
 
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     egui::pos2(pos_x, pos_y),
@@ -5999,12 +6003,15 @@ impl eframe::App for ContextApp {
             // (rendering happens below via show_viewport_immediate)
 
             // === Space press: speak the word just typed (accessibility TTS) ===
-            if self.platform.take_space_press() && self.speak_on_space {
+            if self.platform.take_space_press() && self.speak_on_space
+                && self.last_space_speak.elapsed() > Duration::from_millis(400)
+            {
                 let fg = self.platform.foreground_app();
                 let kind = self.platform.classify_app(&fg);
                 if kind != platform::AppKind::OurApp {
                     if let Some(word) = self.platform.get_word_before_cursor() {
                         if !word.is_empty() {
+                            self.last_space_speak = Instant::now();
                             tts::speak_word(&word);
                         }
                     }

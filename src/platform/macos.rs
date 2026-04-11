@@ -146,6 +146,10 @@ impl PlatformServices for MacPlatform {
         get_word_before_cursor_ax()
     }
 
+    fn caret_offset_below(&self) -> f32 { -18.0 }
+    fn caret_offset_right(&self) -> f32 { -38.0 }
+    fn caret_is_physical_pixels(&self) -> bool { false }
+
     fn copy_to_clipboard(&self, text: &str) {
         let _ = Command::new("pbcopy")
             .stdin(std::process::Stdio::piped())
@@ -761,11 +765,23 @@ fn start_key_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>, spa
             fn CGEventGetFlags(e:*const std::ffi::c_void)->u64;
             static kCFRunLoopCommonModes: *const std::ffi::c_void;
         }
-        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>,sp:Arc<AtomicBool>}
-        let ctx=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed,sp:space})) as *mut std::ffi::c_void;
+        unsafe extern "C" {
+            fn CGEventTapEnable(tap: *const std::ffi::c_void, enable: bool);
+        }
+        // Store tap pointer in context so callback can re-enable it
+        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>,sp:Arc<AtomicBool>,tap:std::sync::atomic::AtomicPtr<std::ffi::c_void>}
+        let ctx2=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed,sp:space,tap:std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())}));
         extern "C" fn cb(_:*const std::ffi::c_void,et:u32,ev:*const std::ffi::c_void,ui:*mut std::ffi::c_void)->*const std::ffi::c_void{
             unsafe{
                 let c=&*(ui as*const Ctx);
+                // Re-enable tap if macOS disabled it due to timeout
+                if et == 0xFFFFFFFE {
+                    let tap = c.tap.load(Ordering::Relaxed);
+                    if !tap.is_null() {
+                        CGEventTapEnable(tap as _, true);
+                    }
+                    return ev;
+                }
                 if et!=10{return ev;}
                 let keycode = CGEventGetIntegerValueField(ev,9);
                 let flags = CGEventGetFlags(ev);
@@ -786,8 +802,11 @@ fn start_key_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>, spa
                 ev
             }
         }
-        let tap=CGEventTapCreate(0,0,0,1<<10,cb,ctx);
+        let ctx_ptr = ctx2 as *mut std::ffi::c_void;
+        let tap=CGEventTapCreate(0,0,0,1<<10,cb,ctx_ptr);
         if tap.is_null(){return;}
+        // Store tap pointer so callback can re-enable
+        (*ctx2).tap.store(tap as *mut _, Ordering::Relaxed);
         let src=CFMachPortCreateRunLoopSource(std::ptr::null(),tap,0);
         CFRunLoopAddSource(CFRunLoopGetCurrent(),src,kCFRunLoopCommonModes);
         CFRunLoopRun();

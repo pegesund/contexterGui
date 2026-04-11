@@ -170,7 +170,7 @@ fn main() {
 
     // Detailed dump for 3 hard cases
     for word in &["netbuttikk", "lekssehjlep", "allergittes", "temperaturfel"] {
-        let r = compound_fuzzy_walk(&fst, word, Some(&wordfreq), Some(&word_check), Some(&noun_check));
+        let r = compound_fuzzy_walk(&fst, word, &language::BokmalLanguage, Some(&wordfreq), Some(&word_check), Some(&noun_check));
         println!("\n  === {} ({} results) ===", word, r.len());
         for (i, x) in r.iter().take(10).enumerate() {
             let parts: Vec<String> = x.parts.iter()
@@ -184,7 +184,7 @@ fn main() {
 
     for (input, expected, desc) in &tests {
         let t = Instant::now();
-        let results = compound_fuzzy_walk(&fst, &input.to_lowercase(), Some(&wordfreq), Some(&word_check), Some(&noun_check));
+        let results = compound_fuzzy_walk(&fst, &input.to_lowercase(), &language::BokmalLanguage, Some(&wordfreq), Some(&word_check), Some(&noun_check));
         let elapsed = t.elapsed();
 
         let result_words: Vec<&str> = results.iter().take(50).map(|r| r.compound_word.as_str()).collect();

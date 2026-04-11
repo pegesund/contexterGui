@@ -177,7 +177,7 @@ fn main() {
     ];
 
     for (word, expected_split) in &split_tests {
-        let result = acatts_rust::spelling_scorer::try_split_function_word(word, &analyzer);
+        let result = acatts_rust::spelling_scorer::try_split_function_word(word, &analyzer, &language::BokmalLanguage);
         let ok = match (expected_split, &result) {
             (Some(exp), Some(got)) => got == exp,
             (None, None) => true,

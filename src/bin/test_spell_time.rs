@@ -112,7 +112,7 @@ fn main() {
     // Source 6
     let t = Instant::now();
     let before = candidates.len();
-    if let Some(split) = acatts_rust::spelling_scorer::try_split_function_word(&word_lower, &analyzer) {
+    if let Some(split) = acatts_rust::spelling_scorer::try_split_function_word(&word_lower, &analyzer, &language::BokmalLanguage) {
         let sl = split.to_lowercase();
         if seen.insert(sl.clone()) { candidates.push(sl); }
     }
@@ -213,7 +213,7 @@ fn main() {
             };
             let results = acatts_rust::compound_walker::compound_fuzzy_walk(
                 fst, &word_lower,
-                Some(&wordfreq),
+                &language::BokmalLanguage, Some(&wordfreq),
                 Some(&word_check), Some(&noun_check),
             );
             for r in results.iter().take(10) {
