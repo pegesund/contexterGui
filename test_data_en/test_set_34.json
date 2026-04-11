@@ -1,0 +1,20 @@
+[
+  {"sentence": "He should goes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "She can goes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "He will goes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "She must goes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "He would likes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "She might comes.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "He could runs.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "She shall eats.", "is_correct": false, "error_type": "modal+inflected", "explanation": "Error: modal + base form, not 3rd person -s"},
+  {"sentence": "He should go.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "She can go.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "He will go.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "She must go.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "He would like.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "She might come.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "He could run.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "She shall eat.", "is_correct": true, "error_type": "correct", "explanation": "Correct: modal + base form"},
+  {"sentence": "He goes to school.", "is_correct": true, "error_type": "correct", "explanation": "Correct: simple present with 3rd person -s"},
+  {"sentence": "She likes chocolate.", "is_correct": true, "error_type": "correct", "explanation": "Correct: simple present with 3rd person -s"}
+]

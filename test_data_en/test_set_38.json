@@ -1,0 +1,14 @@
+[
+  {"sentence": "She is taller then me.", "is_correct": false, "error_type": "then_than_confusion", "explanation": "Error: then should be than (comparison)"},
+  {"sentence": "He is smarter then her.", "is_correct": false, "error_type": "then_than_confusion", "explanation": "Error: then should be than"},
+  {"sentence": "This is better then that.", "is_correct": false, "error_type": "then_than_confusion", "explanation": "Error: then should be than"},
+  {"sentence": "I would rather stay then go.", "is_correct": false, "error_type": "then_than_confusion", "explanation": "Error: then should be than"},
+  {"sentence": "He runs faster then me.", "is_correct": false, "error_type": "then_than_confusion", "explanation": "Error: then should be than"},
+  {"sentence": "She is taller than me.", "is_correct": true, "error_type": "none", "explanation": "Correct: than for comparison"},
+  {"sentence": "He is smarter than her.", "is_correct": true, "error_type": "none", "explanation": "Correct: than for comparison"},
+  {"sentence": "This is better than that.", "is_correct": true, "error_type": "none", "explanation": "Correct: than for comparison"},
+  {"sentence": "First we eat, then we go.", "is_correct": true, "error_type": "none", "explanation": "Correct: then for sequence"},
+  {"sentence": "He runs faster than me.", "is_correct": true, "error_type": "none", "explanation": "Correct: than for comparison"},
+  {"sentence": "I ate dinner, then went to bed.", "is_correct": true, "error_type": "none", "explanation": "Correct: then for sequence"},
+  {"sentence": "She is more beautiful than her sister.", "is_correct": true, "error_type": "none", "explanation": "Correct: than for comparison"}
+]
