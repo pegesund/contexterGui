@@ -196,11 +196,12 @@ pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
     let mut items = Vec::new();
 
     // Shared BERT model (same for nb and nn — NorBERT4)
+    let model_label = if lang_code == "nn" { "Språkmodell" } else { "Språkmodell" };
     let bert_dir = base.join("models/bert");
     items.push(DownloadItem {
         s3_key: "models/bert/norbert4_base_int8.onnx".into(),
         local_path: bert_dir.join("norbert4_base_int8.onnx"),
-        label: "Språkmodell".into(),
+        label: model_label.into(),
     });
     items.push(DownloadItem {
         s3_key: "models/bert/tokenizer.json".into(),
@@ -208,14 +209,14 @@ pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
         label: "Tokenizer".into(),
     });
 
-    // Per-language files
+    // Per-language files — labels in the target language
     match lang_code {
         "nb" => {
             let dir = base.join("lang/nb");
             items.push(DownloadItem { s3_key: "lang/nb/fullform_bm.mfst".into(), local_path: dir.join("fullform_bm.mfst"), label: "Ordbok".into() });
-            items.push(DownloadItem { s3_key: "lang/nb/wordfreq_bm.tsv".into(), local_path: dir.join("wordfreq_bm.tsv"), label: "Ordfrekvens".into() });
+            items.push(DownloadItem { s3_key: "lang/nb/wordfreq_bm.tsv".into(), local_path: dir.join("wordfreq_bm.tsv"), label: "Ordfrekvenser".into() });
             items.push(DownloadItem { s3_key: "lang/nb/grammar_rules.pl".into(), local_path: dir.join("grammar_rules.pl"), label: "Grammatikk".into() });
-            items.push(DownloadItem { s3_key: "lang/nb/compound_data.pl".into(), local_path: dir.join("compound_data.pl"), label: "Samansette ord".into() });
+            items.push(DownloadItem { s3_key: "lang/nb/compound_data.pl".into(), local_path: dir.join("compound_data.pl"), label: "Sammensatte ord".into() });
             items.push(DownloadItem { s3_key: "lang/nb/sentence_split.pl".into(), local_path: dir.join("sentence_split.pl"), label: "Setningsdeling".into() });
         }
         "nn" => {

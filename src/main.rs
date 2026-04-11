@@ -7709,6 +7709,7 @@ const AVAILABLE_LANGUAGES: &[LangOption] = &[
 ];
 
 // ── Language picker: shown on first run ──
+// Default UI language is Bokmål for the picker itself.
 
 fn run_language_picker() -> Option<String> {
     let chosen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -7717,7 +7718,7 @@ fn run_language_picker() -> Option<String> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 340.0])
             .with_decorations(true)
-            .with_title("NorskTale — Vel språk"),
+            .with_title("NorskTale — Velg språk"),
         ..Default::default()
     };
 
@@ -7734,10 +7735,10 @@ fn run_language_picker() -> Option<String> {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Vel språk")
+                        ui.label(egui::RichText::new("Velg språk")
                             .size(26.0).strong().color(egui::Color32::from_rgb(40, 40, 40)));
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Språkdata blir lasta ned etter valet.")
+                        ui.label(egui::RichText::new("Språkdata lastes ned etter valget.")
                             .size(16.0).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.add_space(24.0);
 
@@ -7763,7 +7764,7 @@ fn run_language_picker() -> Option<String> {
 
     let chosen_clone = Arc::clone(&chosen);
     let _ = eframe::run_native(
-        "NorskTale — Vel språk",
+        "NorskTale — Velg språk",
         options,
         Box::new(move |_cc| {
             Ok(Box::new(PickerApp { chosen: chosen_clone }) as Box<dyn eframe::App>)
@@ -7784,18 +7785,43 @@ fn run_download_window(lang_code: &str) {
         return;
     }
 
+    // Find flag + name for this language
+    let lang_info = AVAILABLE_LANGUAGES.iter().find(|l| l.code == lang_code);
+    let flag = lang_info.map(|l| l.flag).unwrap_or("");
+    let lang_name = lang_info.map(|l| l.name).unwrap_or(lang_code);
+
+    // Title and heading in the selected language
+    let (win_title, heading_text) = if lang_code == "nn" {
+        (
+            format!("NorskTale — Lastar ned {}", lang_name),
+            format!("{}  Lastar ned {}...", flag, lang_name),
+        )
+    } else {
+        (
+            format!("NorskTale — Laster ned {}", lang_name),
+            format!("{}  Laster ned {}...", flag, lang_name),
+        )
+    };
+    let error_text = if lang_code == "nn" {
+        "Nedlasting feila. Start programmet på nytt."
+    } else {
+        "Nedlasting feilet. Start programmet på nytt."
+    };
+
     let prog = std::sync::Arc::clone(&progress);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 320.0])
+            .with_inner_size([480.0, 340.0])
             .with_decorations(true)
-            .with_title("NorskTale — Lastar ned språkdata"),
+            .with_title(&win_title),
         ..Default::default()
     };
 
     struct DownloadApp {
         progress: downloader::SharedProgress,
         done: bool,
+        heading: String,
+        error_text: &'static str,
     }
 
     impl eframe::App for DownloadApp {
@@ -7805,7 +7831,7 @@ fn run_download_window(lang_code: &str) {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new("Lastar ned språkdata...")
+                    ui.label(egui::RichText::new(&self.heading)
                         .size(22.0).strong().color(egui::Color32::from_rgb(50, 50, 50)));
                     ui.add_space(16.0);
 
@@ -7858,7 +7884,7 @@ fn run_download_window(lang_code: &str) {
                         self.done = true;
                         ui.add_space(12.0);
                         if downloader::any_error(&self.progress).is_some() {
-                            ui.label(egui::RichText::new("Nedlasting feila. Start programmet på nytt.")
+                            ui.label(egui::RichText::new(self.error_text)
                                 .size(16.0).color(egui::Color32::from_rgb(200, 50, 50)));
                         } else {
                             // Auto-close after download completes
@@ -7872,11 +7898,21 @@ fn run_download_window(lang_code: &str) {
         }
     }
 
+    let error_text_static: &'static str = if lang_code == "nn" {
+        "Nedlasting feila. Start programmet på nytt."
+    } else {
+        "Nedlasting feilet. Start programmet på nytt."
+    };
     let _ = eframe::run_native(
-        "NorskTale — Lastar ned",
+        &win_title,
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(DownloadApp { progress: prog, done: false }) as Box<dyn eframe::App>)
+            Ok(Box::new(DownloadApp {
+                progress: prog,
+                done: false,
+                heading: heading_text,
+                error_text: error_text_static,
+            }) as Box<dyn eframe::App>)
         }),
     );
 }
