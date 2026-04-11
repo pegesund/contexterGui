@@ -327,6 +327,51 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contexter-repo/training-data")
 }
 
+/// Resolve a data file path: use S3-downloaded cache if available, otherwise
+/// fall back to the language trait path (local dev layout).
+fn cached_or_trait(cached: &std::path::Path, trait_path: PathBuf) -> PathBuf {
+    if cached.exists() { cached.to_path_buf() } else { trait_path }
+}
+
+/// Resolve all language data paths, preferring S3-cached files.
+struct ResolvedPaths {
+    mtag_fst: PathBuf,
+    onnx: PathBuf,
+    tokenizer: PathBuf,
+    wordfreq: PathBuf,
+    prolog_rules: PathBuf,
+    /// Directory containing compound_data.pl + sentence_split.pl
+    prolog_dir: PathBuf,
+}
+
+fn resolve_paths(lang: &dyn language::LanguageBundle) -> ResolvedPaths {
+    let cache = downloader::data_dir();
+    let code = lang.code(); // "nb" or "nn"
+    let lang_dir = cache.join(format!("lang/{}", code));
+    let bert_dir = cache.join("models/bert");
+
+    // Per-language file names in cache
+    let fst_name = if code == "nn" { "fullform_nn.mfst" } else { "fullform_bm.mfst" };
+    let wf_name = if code == "nn" { "wordfreq_nn.tsv" } else { "wordfreq_bm.tsv" };
+
+    let mtag_fst = cached_or_trait(&lang_dir.join(fst_name), lang.mtag_fst_path());
+    let onnx = cached_or_trait(&bert_dir.join("norbert4_base_int8.onnx"), lang.onnx_path());
+    let tokenizer = cached_or_trait(&bert_dir.join("tokenizer.json"), lang.tokenizer_path());
+    let wordfreq = cached_or_trait(&lang_dir.join(wf_name), lang.wordfreq_path());
+    let prolog_rules = cached_or_trait(&lang_dir.join("grammar_rules.pl"), lang.prolog_rules_path());
+
+    // Prolog dir: parent of grammar_rules.pl (compound_data.pl lives there)
+    let prolog_dir = prolog_rules.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+
+    eprintln!("Resolved paths for '{}':", code);
+    eprintln!("  FST:     {}", mtag_fst.display());
+    eprintln!("  ONNX:    {}", onnx.display());
+    eprintln!("  Wordfreq:{}", wordfreq.display());
+    eprintln!("  Prolog:  {}", prolog_rules.display());
+
+    ResolvedPaths { mtag_fst, onnx, tokenizer, wordfreq, prolog_rules, prolog_dir }
+}
+
 // --- Bridge manager: picks the best available bridge ---
 
 struct BridgeManager {
@@ -817,6 +862,8 @@ struct ContextApp {
     app_handle: Option<isize>,
     /// Platform abstraction for OS-specific services
     platform: Box<dyn platform::PlatformServices>,
+    /// Resolved data paths (S3 cache or local dev)
+    resolved_paths: ResolvedPaths,
     /// Track Ctrl+Space held to prevent repeated activation
     ctrl_space_held: bool,
     /// Which column is selected: 0=left (completions), 1=right (open_completions)
@@ -1269,18 +1316,15 @@ impl ContextApp {
         quality: u8,
         show_debug_tab: bool,
         saved_settings: UserSettings,
+        paths: ResolvedPaths,
     ) -> Self {
         let platform = platform::create_platform();
         platform.init_runtime();
 
         let mut load_errors = Vec::new();
 
-        // Load dictionary (analyzer) on main thread for fast lookups.
-        // SWI-Prolog grammar checker loads on the grammar actor thread (later).
-        // Phase 14: dictionary path comes from the runtime-selected language
-        // stored on ContextApp. The Phase 2 hard-coded BokmalLanguage local
-        // is gone — we read directly from `language.mtag_fst_path()`.
-        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&language.mtag_fst_path()) {
+        // Load dictionary from resolved path (S3 cache or local dev).
+        let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&paths.mtag_fst) {
             Ok(a) => {
                 eprintln!("Loaded dictionary with {} entries", a.dict_size());
                 Some(std::sync::Arc::new(a))
@@ -1292,25 +1336,20 @@ impl ContextApp {
                 None
             }
         };
-        // Load raw FST for compound word walker (Source 13).
-        // Phase 16: same path as the analyzer above, sourced from the Language trait.
         let compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>> =
-            compound_walker::load_fst_from_mfst(language.mtag_fst_path().to_str().unwrap())
+            compound_walker::load_fst_from_mfst(paths.mtag_fst.to_str().unwrap())
                 .ok().map(|f| Arc::new(f));
 
         // Spawn heavy model loading on background threads
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
 
-        // Thread 1: NorBERT4 + completer
+        // Thread 1: NorBERT4 + completer (using resolved paths)
         let tx2 = startup_tx.clone();
-        let language_for_bert = std::sync::Arc::clone(&language);
+        let onnx_path = paths.onnx.clone();
+        let tokenizer_path = paths.tokenizer.clone();
+        let wordfreq_path = paths.wordfreq.clone();
         std::thread::spawn(move || {
-            // Phase 14: BERT model + tokenizer + wordfreq paths come from
-            // the runtime-selected language passed in via Arc clone.
             let data = data_dir();
-            let onnx_path = language_for_bert.onnx_path();
-            let tokenizer_path = language_for_bert.tokenizer_path();
-            let wordfreq_path = language_for_bert.wordfreq_path();
             let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
             let minilm_tok = data.join("minilm-onnx/tokenizer.json");
             let embed_cache = data.join("word_embeddings.bin");
@@ -1392,6 +1431,7 @@ impl ContextApp {
             selection_mode: false,
             app_handle: None,
             platform,
+            resolved_paths: paths,
             ctrl_space_held: false,
             selected_column: 0,
             load_errors,
@@ -1478,14 +1518,12 @@ impl ContextApp {
         }
     }
 
-    fn load_swipl_checker(swipl_path: &str, language: &dyn language::LanguageBundle) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
-        let prolog_rules = language.prolog_rules_path();
-        let syntaxer = prolog_rules.parent().unwrap_or_else(|| std::path::Path::new("."));
+    fn load_swipl_checker(swipl_path: &str, fst_path: &str, prolog_rules: &str, prolog_dir: &str) -> Result<SwiGrammarChecker, Box<dyn std::error::Error>> {
         SwiGrammarChecker::new(
             swipl_path,
-            language.mtag_fst_path().to_str().unwrap(),
-            prolog_rules.to_str().unwrap(),
-            syntaxer.to_str().unwrap(),
+            fst_path,
+            prolog_rules,
+            prolog_dir,
         )
     }
 
@@ -4615,16 +4653,12 @@ impl eframe::App for ContextApp {
       if !skip_processing {
         // Spawn grammar actor on first update — loads SWI-Prolog on its own thread.
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
-            let prolog_rules = self.language.prolog_rules_path();
-            let syntaxer_dir = prolog_rules.parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .to_path_buf();
-            let compound_data_path = syntaxer_dir.join("compound_data.pl");
+            let compound_data_path = self.resolved_paths.prolog_dir.join("compound_data.pl");
             self.grammar_actor = Some(grammar_actor::spawn_grammar_actor_with_loader(
                 self.platform.swipl_path().to_string(),
-                self.language.mtag_fst_path().to_str().unwrap().to_string(),
-                prolog_rules.to_str().unwrap().to_string(),
-                syntaxer_dir.to_str().unwrap().to_string(),
+                self.resolved_paths.mtag_fst.to_str().unwrap().to_string(),
+                self.resolved_paths.prolog_rules.to_str().unwrap().to_string(),
+                self.resolved_paths.prolog_dir.to_str().unwrap().to_string(),
                 std::fs::read_to_string(&compound_data_path).unwrap_or_default(),
                 ctx.clone(),
             ));
@@ -8013,6 +8047,17 @@ fn main() -> eframe::Result {
             .output();
     }
 
+    // --clear-cache: remove all downloaded data and settings (for testing)
+    if std::env::args().any(|a| a == "--clear-cache") {
+        let data = downloader::data_dir();
+        eprintln!("Clearing cache: {}", data.display());
+        let _ = std::fs::remove_dir_all(&data);
+        let settings = settings_path();
+        eprintln!("Clearing settings: {}", settings.display());
+        let _ = std::fs::remove_file(&settings);
+        eprintln!("Cache cleared.");
+    }
+
     // Set ORT_DYLIB_PATH if not already set
     if std::env::var("ORT_DYLIB_PATH").is_err() {
         let candidates = setup_platform.ort_dylib_candidates();
@@ -8062,7 +8107,8 @@ fn main() -> eframe::Result {
         eprintln!("=== Spelling test mode ===");
         let test_language: std::sync::Arc<dyn language::LanguageBundle> =
             std::sync::Arc::new(language::BokmalLanguage);
-        let mut app = ContextApp::new(test_language, true, 2, false, UserSettings::default());
+        let test_paths = resolve_paths(&*test_language);
+        let mut app = ContextApp::new(test_language, true, 2, false, UserSettings::default(), test_paths);
         // Wait for startup (BERT model loading) to complete
         if let Some(rx) = app.startup_rx.take() {
             eprintln!("Waiting for BERT model to load...");
@@ -8330,7 +8376,8 @@ fn main() -> eframe::Result {
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab, saved);
+                let paths = resolve_paths(&*language_for_app);
+                let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab, saved, paths);
                 // Start HTTP /errors endpoint for integration tests
                 let errors_json = app.shared_errors_json.clone();
                 std::thread::Builder::new().name("test-http".into()).spawn(move || {
