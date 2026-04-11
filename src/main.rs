@@ -35,7 +35,11 @@ struct UserSettings {
     speak_on_space: bool,
     ui_scale: f32,
     voice: String,
+    #[serde(default = "default_language")]
+    language: String,
 }
+
+fn default_language() -> String { "nb".into() }
 
 impl Default for UserSettings {
     fn default() -> Self {
@@ -45,6 +49,7 @@ impl Default for UserSettings {
             speak_on_space: true,
             ui_scale: 1.0,
             voice: String::new(),
+            language: "nb".into(),
         }
     }
 }
@@ -7369,6 +7374,7 @@ impl eframe::App for ContextApp {
                     speak_on_space: self.speak_on_space,
                     ui_scale: self.ui_scale,
                     voice: tts::current_voice(),
+                    language: self.language.code().to_string(),
                 });
             }
             if do_close {
@@ -7413,6 +7419,7 @@ impl eframe::App for ContextApp {
                                     speak_on_space: self.speak_on_space,
                                     ui_scale: self.ui_scale,
                                     voice: voice.name.clone(),
+                                    language: self.language.code().to_string(),
                                 });
                                 tts::speak_word(&voice.sample_text);
                             }
@@ -7618,6 +7625,114 @@ impl eframe::App for ContextApp {
     }
 }
 
+// ── Download window: shown on first run or when language data is missing ──
+
+fn run_download_window(lang_code: &str) {
+    let items = downloader::language_files(lang_code);
+    let progress = downloader::download_missing(items);
+
+    // If nothing to download, return immediately
+    if downloader::all_done(&progress) {
+        return;
+    }
+
+    let prog = std::sync::Arc::clone(&progress);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([460.0, 320.0])
+            .with_decorations(true)
+            .with_title("NorskTale — Lastar ned språkdata"),
+        ..Default::default()
+    };
+
+    struct DownloadApp {
+        progress: downloader::SharedProgress,
+        done: bool,
+    }
+
+    impl eframe::App for DownloadApp {
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            ctx.set_visuals(egui::Visuals::light());
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new("Lastar ned språkdata...")
+                        .size(22.0).strong().color(egui::Color32::from_rgb(50, 50, 50)));
+                    ui.add_space(16.0);
+
+                    if let Ok(items) = self.progress.lock() {
+                        for item in items.iter() {
+                            ui.horizontal(|ui| {
+                                let pct = if item.total > 0 {
+                                    item.downloaded as f32 / item.total as f32
+                                } else {
+                                    0.0
+                                };
+                                let status = if item.done {
+                                    if item.error.is_some() { "Feil" } else { "Ferdig" }
+                                } else if item.total > 0 {
+                                    ""
+                                } else {
+                                    "Ventar..."
+                                };
+
+                                let color = if item.error.is_some() {
+                                    egui::Color32::from_rgb(200, 50, 50)
+                                } else if item.done {
+                                    egui::Color32::from_rgb(0, 130, 60)
+                                } else {
+                                    egui::Color32::from_rgb(50, 50, 50)
+                                };
+
+                                ui.label(egui::RichText::new(&item.label).size(16.0).color(color));
+                                ui.add_space(8.0);
+
+                                if !status.is_empty() {
+                                    ui.label(egui::RichText::new(status).size(14.0).color(color));
+                                } else {
+                                    let bar = egui::ProgressBar::new(pct)
+                                        .desired_width(180.0)
+                                        .text(format!("{:.0}%", pct * 100.0));
+                                    ui.add(bar);
+                                    let mb = item.downloaded as f64 / (1024.0 * 1024.0);
+                                    let total_mb = item.total as f64 / (1024.0 * 1024.0);
+                                    ui.label(egui::RichText::new(
+                                        format!("{:.1}/{:.1} MB", mb, total_mb)
+                                    ).size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    }
+
+                    if downloader::all_done(&self.progress) {
+                        self.done = true;
+                        ui.add_space(12.0);
+                        if downloader::any_error(&self.progress).is_some() {
+                            ui.label(egui::RichText::new("Nedlasting feila. Start programmet på nytt.")
+                                .size(16.0).color(egui::Color32::from_rgb(200, 50, 50)));
+                        } else {
+                            // Auto-close after download completes
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                });
+
+            // Repaint frequently to update progress
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    let _ = eframe::run_native(
+        "NorskTale — Lastar ned",
+        options,
+        Box::new(move |_cc| {
+            Ok(Box::new(DownloadApp { progress: prog, done: false }) as Box<dyn eframe::App>)
+        }),
+    );
+}
+
 fn main() -> eframe::Result {
     let setup_platform = platform::create_platform();
 
@@ -7772,7 +7887,7 @@ fn main() -> eframe::Result {
         std::process::exit(if fail == 0 { 0 } else { 1 });
     }
 
-    let saved = load_settings();
+    let mut saved = load_settings();
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
     let show_debug_tab = std::env::args().any(|a| a == "--debug");
     let quality: u8 = {
@@ -7784,16 +7899,30 @@ fn main() -> eframe::Result {
             .unwrap_or(saved.quality)
     };
 
-    // Phase 13: parse --language flag (default "nb"). Resolve through the
-    // language-rs registry; unsupported codes fail loudly with a useful
-    // message instead of silently falling back to Bokmål.
+    // Language: CLI flag overrides saved setting
     let lang_code: String = {
         let args: Vec<String> = std::env::args().collect();
         args.iter()
             .position(|a| a == "--language")
             .and_then(|i| args.get(i + 1).cloned())
-            .unwrap_or_else(|| "nb".to_string())
+            .unwrap_or_else(|| {
+                if saved.language.is_empty() { "nb".to_string() }
+                else { saved.language.clone() }
+            })
     };
+
+    // ── First-run: language picker + download ──
+    // If language data isn't cached locally, show a picker/download window.
+    if !downloader::language_cached(&lang_code) {
+        eprintln!("Language data not cached for '{}' — starting download...", lang_code);
+        run_download_window(&lang_code);
+    }
+
+    // Persist the chosen language
+    if saved.language != lang_code {
+        saved.language = lang_code.clone();
+        save_settings(&saved);
+    }
     let selected_language: std::sync::Arc<dyn language::LanguageBundle> =
         match language::resolve_language(&lang_code) {
             Ok(l) => l,
