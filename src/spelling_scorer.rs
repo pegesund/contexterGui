@@ -225,7 +225,7 @@ pub fn generate_spelling_candidates(
     // Source 10: First-character swap
     if word_lower.len() >= 3 {
         let rest = &word_lower[word_first.len_utf8()..];
-        for c in "abcdefghijklmnopqrstuvwxyzæøå".chars() {
+        for c in lang.first_char_alphabet().chars() {
             if c == word_first { continue; }
             let candidate = format!("{}{}", c, rest);
             if analyzer.has_word(&candidate) && seen.insert(candidate.clone()) {
@@ -262,28 +262,13 @@ pub fn generate_spelling_candidates(
     }
 
     // Source 12: Phonetic substitutions for dyslexic users
-    // Norwegian-specific sound confusions where UTF-8 byte distance exceeds char distance
+    // Language-specific sound confusions from the LanguageSpelling trait
     {
-        const PHONETIC_SUBS: &[(&str, &str)] = &[
-            // Vowel confusions (å,ø,æ are 2-byte UTF-8 → extra byte edit cost in FST)
-            ("å", "o"), ("o", "å"),
-            ("ø", "e"), ("e", "ø"),
-            ("æ", "a"), ("a", "æ"),
-            ("æ", "e"),
-            ("y", "i"), ("i", "y"),
-            // Silent consonant patterns
-            ("dt", "tt"), ("tt", "dt"),
-            ("ld", "ll"), ("ll", "ld"),
-            ("nd", "nn"), ("nn", "nd"),
-            // Silent initial consonant
-            ("gj", "j"), ("j", "gj"),
-            ("hj", "j"), ("j", "hj"),
-            ("hv", "v"), ("v", "hv"),
-        ];
+        let phonetic_subs = lang.phonetic_substitutions();
 
         // Single substitution pass
         let mut phonetic_candidates: Vec<String> = Vec::new();
-        for &(from, to) in PHONETIC_SUBS {
+        for &(from, to) in phonetic_subs {
             let mut pos = 0;
             while let Some(idx) = word_lower[pos..].find(from) {
                 let abs_idx = pos + idx;
@@ -301,7 +286,7 @@ pub fn generate_spelling_candidates(
         // Catches "gåtterier" → "gotterier" (å→o) → "godterier" (tt→dt)
         let chain_candidates = phonetic_candidates.clone();
         for base in &chain_candidates {
-            for &(from, to) in PHONETIC_SUBS {
+            for &(from, to) in phonetic_subs {
                 let mut pos = 0;
                 while let Some(idx) = base[pos..].find(from) {
                     let abs_idx = pos + idx;
