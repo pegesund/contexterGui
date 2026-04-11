@@ -3,6 +3,7 @@ pub mod logging;
 
 mod bert_worker;
 mod bridge;
+pub mod downloader;
 mod grammar_actor;
 mod latext_no;
 mod math_ocr;
