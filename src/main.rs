@@ -351,12 +351,15 @@ fn resolve_paths(lang: &dyn language::LanguageBundle) -> ResolvedPaths {
     let bert_dir = cache.join("models/bert");
 
     // Per-language file names in cache
-    let fst_name = if code == "nn" { "fullform_nn.mfst" } else { "fullform_bm.mfst" };
-    let wf_name = if code == "nn" { "wordfreq_nn.tsv" } else { "wordfreq_bm.tsv" };
+    let (fst_name, wf_name, onnx_name, tok_name) = match code {
+        "nn" => ("fullform_nn.mfst", "wordfreq_nn.tsv", "norbert4_base_int8.onnx", "tokenizer.json"),
+        "en" => ("fullform_en.mfst", "wordfreq_en.tsv", "modernbert_base_int8.onnx", "tokenizer_en.json"),
+        _    => ("fullform_bm.mfst", "wordfreq_bm.tsv", "norbert4_base_int8.onnx", "tokenizer.json"),
+    };
 
     let mtag_fst = cached_or_trait(&lang_dir.join(fst_name), lang.mtag_fst_path());
-    let onnx = cached_or_trait(&bert_dir.join("norbert4_base_int8.onnx"), lang.onnx_path());
-    let tokenizer = cached_or_trait(&bert_dir.join("tokenizer.json"), lang.tokenizer_path());
+    let onnx = cached_or_trait(&bert_dir.join(onnx_name), lang.onnx_path());
+    let tokenizer = cached_or_trait(&bert_dir.join(tok_name), lang.tokenizer_path());
     let wordfreq = cached_or_trait(&lang_dir.join(wf_name), lang.wordfreq_path());
     let prolog_rules = cached_or_trait(&lang_dir.join("grammar_rules.pl"), lang.prolog_rules_path());
 
@@ -7715,6 +7718,7 @@ struct LangOption {
 const AVAILABLE_LANGUAGES: &[LangOption] = &[
     LangOption { code: "nb", name: "Bokmål" },
     LangOption { code: "nn", name: "Nynorsk" },
+    LangOption { code: "en", name: "English" },
 ];
 
 /// Paint a small Norwegian flag at the given position.
@@ -7768,12 +7772,77 @@ fn paint_norwegian_flag(painter: &egui::Painter, pos: egui::Pos2, size: f32) {
     painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180)), egui::StrokeKind::Outside);
 }
 
+/// Paint a small Union Jack (UK flag) at the given position.
+fn paint_uk_flag(painter: &egui::Painter, pos: egui::Pos2, size: f32) {
+    let w = size * 1.5;
+    let h = size;
+    let rect = egui::Rect::from_min_size(pos, egui::vec2(w, h));
+
+    // Blue background
+    let blue = egui::Color32::from_rgb(0, 36, 125);
+    painter.rect_filled(rect, 2.0, blue);
+
+    // White diagonal cross (St Andrew's + St Patrick's)
+    let white = egui::Color32::WHITE;
+    let diag_w = h * 0.12;
+    // Top-left to bottom-right
+    painter.line_segment(
+        [rect.left_top(), rect.right_bottom()],
+        egui::Stroke::new(diag_w, white),
+    );
+    // Top-right to bottom-left
+    painter.line_segment(
+        [egui::pos2(rect.right(), rect.top()), egui::pos2(rect.left(), rect.bottom())],
+        egui::Stroke::new(diag_w, white),
+    );
+
+    // Red diagonal (thinner, offset for St Patrick's)
+    let red = egui::Color32::from_rgb(207, 20, 43);
+    let red_w = h * 0.06;
+    painter.line_segment(
+        [rect.left_top(), rect.right_bottom()],
+        egui::Stroke::new(red_w, red),
+    );
+    painter.line_segment(
+        [egui::pos2(rect.right(), rect.top()), egui::pos2(rect.left(), rect.bottom())],
+        egui::Stroke::new(red_w, red),
+    );
+
+    // White cross (St George's background)
+    let cross_w = h * 0.22;
+    let cx = pos.x + w / 2.0;
+    let cy = pos.y + h / 2.0;
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(cx - cross_w / 2.0, pos.y), egui::pos2(cx + cross_w / 2.0, pos.y + h)),
+        0.0, white,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(pos.x, cy - cross_w / 2.0), egui::pos2(pos.x + w, cy + cross_w / 2.0)),
+        0.0, white,
+    );
+
+    // Red cross (St George's)
+    let red_cross_w = h * 0.12;
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(cx - red_cross_w / 2.0, pos.y), egui::pos2(cx + red_cross_w / 2.0, pos.y + h)),
+        0.0, red,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(pos.x, cy - red_cross_w / 2.0), egui::pos2(pos.x + w, cy + red_cross_w / 2.0)),
+        0.0, red,
+    );
+
+    // Border
+    painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180)), egui::StrokeKind::Outside);
+}
+
 /// Paint a flag for the given language code and return the space used.
 fn paint_lang_flag(ui: &mut egui::Ui, lang_code: &str, size: f32) {
     let (rect, _response) = ui.allocate_exact_size(egui::vec2(size * 1.5, size), egui::Sense::hover());
     match lang_code {
         "nb" | "nn" => paint_norwegian_flag(ui.painter(), rect.min, size),
-        _ => {} // future: other flags
+        "en" => paint_uk_flag(ui.painter(), rect.min, size),
+        _ => {}
     }
 }
 

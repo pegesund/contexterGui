@@ -195,21 +195,37 @@ pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
 
     let mut items = Vec::new();
 
-    // Shared BERT model (same for nb and nn — NorBERT4)
-    let model_label = if lang_code == "nn" { "Språkmodell" } else { "Språkmodell" };
+    // BERT model — Norwegian shares NorBERT4, English uses ModernBERT
     let bert_dir = base.join("models/bert");
-    items.push(DownloadItem {
-        s3_key: "models/bert/norbert4_base_int8.onnx".into(),
-        local_path: bert_dir.join("norbert4_base_int8.onnx"),
-        label: model_label.into(),
-    });
-    items.push(DownloadItem {
-        s3_key: "models/bert/tokenizer.json".into(),
-        local_path: bert_dir.join("tokenizer.json"),
-        label: "Tokenizer".into(),
-    });
+    match lang_code {
+        "en" => {
+            items.push(DownloadItem {
+                s3_key: "models/bert/modernbert_base_int8.onnx".into(),
+                local_path: bert_dir.join("modernbert_base_int8.onnx"),
+                label: "Language model".into(),
+            });
+            items.push(DownloadItem {
+                s3_key: "models/bert/tokenizer_en.json".into(),
+                local_path: bert_dir.join("tokenizer_en.json"),
+                label: "Tokenizer".into(),
+            });
+        }
+        _ => {
+            // Norwegian (nb/nn) shares NorBERT4
+            items.push(DownloadItem {
+                s3_key: "models/bert/norbert4_base_int8.onnx".into(),
+                local_path: bert_dir.join("norbert4_base_int8.onnx"),
+                label: "Språkmodell".into(),
+            });
+            items.push(DownloadItem {
+                s3_key: "models/bert/tokenizer.json".into(),
+                local_path: bert_dir.join("tokenizer.json"),
+                label: "Tokenizer".into(),
+            });
+        }
+    }
 
-    // Per-language files — labels in the target language
+    // Per-language files
     match lang_code {
         "nb" => {
             let dir = base.join("lang/nb");
@@ -226,6 +242,14 @@ pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
             items.push(DownloadItem { s3_key: "lang/nn/grammar_rules.pl".into(), local_path: dir.join("grammar_rules.pl"), label: "Grammatikk".into() });
             items.push(DownloadItem { s3_key: "lang/nn/compound_data.pl".into(), local_path: dir.join("compound_data.pl"), label: "Samansette ord".into() });
             items.push(DownloadItem { s3_key: "lang/nn/sentence_split.pl".into(), local_path: dir.join("sentence_split.pl"), label: "Setningsdeling".into() });
+        }
+        "en" => {
+            let dir = base.join("lang/en");
+            items.push(DownloadItem { s3_key: "lang/en/fullform_en.mfst".into(), local_path: dir.join("fullform_en.mfst"), label: "Dictionary".into() });
+            items.push(DownloadItem { s3_key: "lang/en/wordfreq_en.tsv".into(), local_path: dir.join("wordfreq_en.tsv"), label: "Word frequencies".into() });
+            items.push(DownloadItem { s3_key: "lang/en/grammar_rules.pl".into(), local_path: dir.join("grammar_rules.pl"), label: "Grammar".into() });
+            items.push(DownloadItem { s3_key: "lang/en/compound_data.pl".into(), local_path: dir.join("compound_data.pl"), label: "Compound words".into() });
+            items.push(DownloadItem { s3_key: "lang/en/sentence_split.pl".into(), local_path: dir.join("sentence_split.pl"), label: "Sentence splitting".into() });
         }
         _ => {}
     }
