@@ -49,6 +49,7 @@ fn main() {
     let mut total_fp = 0;
     let mut total_fn = 0;
     let mut total_time = std::time::Duration::ZERO;
+    let mut fn_by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for set_num in &sets {
         let path = test_dir.join(format!("test_set_{}.json", set_num));
@@ -81,7 +82,8 @@ fn main() {
                 }
             } else if !test.is_correct && !has_error {
                 set_fn += 1;
-                if set_fn <= 5 {
+                *fn_by_type.entry(test.error_type.clone()).or_insert(0) += 1;
+                if set_fn <= 3 {
                     eprintln!("  FN set {}: '{}' (expected: {})", set_num, test.sentence, test.error_type);
                 }
             }
@@ -101,6 +103,12 @@ fn main() {
     if total_fp == 0 && total_fn == 0 {
         println!("ALL TESTS PASSED");
     } else {
+        println!("\nFN by error type:");
+        let mut fn_vec: Vec<_> = fn_by_type.iter().collect();
+        fn_vec.sort_by(|a, b| b.1.cmp(a.1));
+        for (et, count) in &fn_vec {
+            println!("  {:5} {}", count, et);
+        }
         let precision = if total_sentences > 0 { 100.0 * (1.0 - total_fp as f64 / total_sentences as f64) } else { 0.0 };
         let total_errors = total_sentences - (total_sentences - total_fp - total_fn); // approximate
         println!("Precision: {:.1}%, FP rate: {:.2}%, FN rate: {:.2}%",
