@@ -1316,9 +1316,9 @@
   },
   {
     "sentence": "The artist has caught.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: caught is valid past participle"
   },
   {
     "sentence": "The singer likes to spends.",
@@ -1550,9 +1550,9 @@
   },
   {
     "sentence": "The doctor has held.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: held is valid past participle"
   },
   {
     "sentence": "The student will sometimes wear.",
@@ -1637,9 +1637,9 @@
   },
   {
     "sentence": "The teacher has built.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: built is valid past participle"
   },
   {
     "sentence": "The artist can spends.",
@@ -1809,9 +1809,9 @@
   },
   {
     "sentence": "The artist has sent.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sent is valid past participle"
   },
   {
     "sentence": "The girl has studied.",
@@ -1831,9 +1831,9 @@
   },
   {
     "sentence": "The children have caught.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: caught is valid past participle"
   },
   {
     "sentence": "The teacher found a empty box.",
@@ -1864,9 +1864,9 @@
   },
   {
     "sentence": "The cook has sat.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sat is valid past participle"
   },
   {
     "sentence": "She should study.",

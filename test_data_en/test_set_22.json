@@ -1638,9 +1638,9 @@
   },
   {
     "sentence": "The boy has built.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: built is valid past participle"
   },
   {
     "sentence": "We have eaten.",
@@ -1667,7 +1667,7 @@
     "sentence": "The player has chose.",
     "is_correct": false,
     "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "explanation": "Error: have/has requires past participle, not past tense (chose)"
   },
   {
     "sentence": "The player might sometimes sent.",
@@ -1703,9 +1703,9 @@
   },
   {
     "sentence": "The girl has bought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: bought is valid past participle"
   },
   {
     "sentence": "The dog has often studied.",
@@ -1944,9 +1944,9 @@
   },
   {
     "sentence": "The dog has cooked.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: cooked is valid past participle"
   },
   {
     "sentence": "The student bought milk too butter.",
@@ -2030,9 +2030,9 @@
   },
   {
     "sentence": "The nurse has sold.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sold is valid past participle"
   },
   {
     "sentence": "The officer found a old car.",
@@ -2509,9 +2509,9 @@
   },
   {
     "sentence": "The player has won.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: won is valid past participle"
   },
   {
     "sentence": "The nurse has rarely spent.",
@@ -2920,9 +2920,9 @@
   },
   {
     "sentence": "The girl has sent.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sent is valid past participle"
   },
   {
     "sentence": "The woman likes to grows.",
@@ -3007,9 +3007,9 @@
   },
   {
     "sentence": "They have lost.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: lost is valid past participle"
   },
   {
     "sentence": "The woman sings.",
@@ -3185,15 +3185,15 @@
   },
   {
     "sentence": "They have led.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: led is valid past participle"
   },
   {
     "sentence": "The child has studied.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: studied is valid past participle"
   },
   {
     "sentence": "The children cannot keep.",
@@ -3253,9 +3253,9 @@
   },
   {
     "sentence": "The woman has learned.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: learned is valid past participle"
   },
   {
     "sentence": "The friends have spoken.",
@@ -3695,9 +3695,9 @@
   },
   {
     "sentence": "The cook has danced.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: danced is valid past participle"
   },
   {
     "sentence": "The nurse might study.",
@@ -3915,9 +3915,9 @@
   },
   {
     "sentence": "The woman has built.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: built is valid past participle"
   },
   {
     "sentence": "I might rarely fly the chair.",
@@ -4109,9 +4109,9 @@
   },
   {
     "sentence": "The player has spent.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: spent is valid past participle"
   },
   {
     "sentence": "The boy shall went.",
@@ -4191,9 +4191,9 @@
   },
   {
     "sentence": "The teacher has played.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: played is valid past participle"
   },
   {
     "sentence": "The artist can always wear.",
@@ -4220,7 +4220,7 @@
     "sentence": "The farmer has drove.",
     "is_correct": false,
     "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "explanation": "Error: have/has requires past participle, not past tense (drove)"
   },
   {
     "sentence": "The neighbors can often broke.",
@@ -4258,9 +4258,9 @@
   },
   {
     "sentence": "The student has fought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: fought is valid past participle"
   },
   {
     "sentence": "The children shall work.",
@@ -4387,9 +4387,9 @@
   },
   {
     "sentence": "The man has sent.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sent is valid past participle"
   },
   {
     "sentence": "The woman will seldom come the phone.",
@@ -4444,9 +4444,9 @@
   },
   {
     "sentence": "The artist has helped.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: helped is valid past participle"
   },
   {
     "sentence": "The artist could seldom choose the car.",
@@ -4610,15 +4610,15 @@
   },
   {
     "sentence": "The boy has spent.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: spent is valid past participle"
   },
   {
     "sentence": "The neighbors have fought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: fought is valid past participle"
   },
   {
     "sentence": "We found a old car.",
@@ -5035,9 +5035,9 @@
   },
   {
     "sentence": "The man has slept.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: slept is valid past participle"
   },
   {
     "sentence": "The teacher cannot rise.",
@@ -5067,15 +5067,15 @@
   },
   {
     "sentence": "The driver has slept.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: slept is valid past participle"
   },
   {
     "sentence": "The dog has spent.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: spent is valid past participle"
   },
   {
     "sentence": "Us taught the chair.",
@@ -5085,9 +5085,9 @@
   },
   {
     "sentence": "He has played.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: played is valid past participle"
   },
   {
     "sentence": "The dog likes to build the car.",
@@ -5514,9 +5514,9 @@
   },
   {
     "sentence": "The man has left.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: left is valid past participle"
   },
   {
     "sentence": "The cook might sometimes give the letter.",

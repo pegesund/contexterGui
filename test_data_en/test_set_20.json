@@ -1721,9 +1721,9 @@
   },
   {
     "sentence": "The woman has fought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: fought is valid past participle"
   },
   {
     "sentence": "Her studied.",
@@ -1894,15 +1894,15 @@
   },
   {
     "sentence": "The officer has found.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: found is valid past participle"
   },
   {
     "sentence": "The teacher has stood.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: stood is valid past participle"
   },
   {
     "sentence": "He cannot read.",
@@ -2070,9 +2070,9 @@
   },
   {
     "sentence": "The man has felt.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: felt is valid past participle"
   },
   {
     "sentence": "Him took.",
@@ -2199,9 +2199,9 @@
   },
   {
     "sentence": "We have taught.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: taught is valid past participle"
   },
   {
     "sentence": "The man could spoke.",
@@ -2441,9 +2441,9 @@
   },
   {
     "sentence": "The dog has stood.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: stood is valid past participle"
   },
   {
     "sentence": "The woman has went.",
@@ -2509,9 +2509,9 @@
   },
   {
     "sentence": "The artist has cooked.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: cooked is valid past participle"
   },
   {
     "sentence": "The students have won.",
@@ -2604,9 +2604,9 @@
   },
   {
     "sentence": "The children have sold.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sold is valid past participle"
   },
   {
     "sentence": "The cook must sit well.",
@@ -2626,9 +2626,9 @@
   },
   {
     "sentence": "The teacher has helped.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: helped is valid past participle"
   },
   {
     "sentence": "The cat feels.",
@@ -2728,7 +2728,7 @@
     "sentence": "The player has chose.",
     "is_correct": false,
     "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "explanation": "Error: have/has requires past participle, not past tense (chose)"
   },
   {
     "sentence": "The nurse has often driven.",
@@ -2768,9 +2768,9 @@
   },
   {
     "sentence": "The boy has thought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: thought is valid past participle"
   },
   {
     "sentence": "The man shall threw.",
@@ -2977,9 +2977,9 @@
   },
   {
     "sentence": "She has worked.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: worked is valid past participle"
   },
   {
     "sentence": "The teacher shall choose well.",
@@ -2999,9 +2999,9 @@
   },
   {
     "sentence": "We have danced.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: danced is valid past participle"
   },
   {
     "sentence": "They bought meat too sugar.",
@@ -3472,9 +3472,9 @@
   },
   {
     "sentence": "The artist has helped.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: helped is valid past participle"
   },
   {
     "sentence": "The artist must sometimes walk the book.",
@@ -3851,9 +3851,9 @@
   },
   {
     "sentence": "The artist has met.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: met is valid past participle"
   },
   {
     "sentence": "The workers can rarely lost.",
@@ -3895,9 +3895,9 @@
   },
   {
     "sentence": "They have fought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: fought is valid past participle"
   },
   {
     "sentence": "The dog has sent.",
@@ -4287,7 +4287,7 @@
     "sentence": "The driver has wore.",
     "is_correct": false,
     "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "explanation": "Error: have/has requires past participle, not past tense (wore)"
   },
   {
     "sentence": "The doctor shall dance the book.",
@@ -4334,9 +4334,9 @@
   },
   {
     "sentence": "The woman has worked.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: worked is valid past participle"
   },
   {
     "sentence": "The students have went.",
@@ -4379,9 +4379,9 @@
   },
   {
     "sentence": "I have played.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: played is valid past participle"
   },
   {
     "sentence": "The friends has a the ring.",
@@ -4432,7 +4432,7 @@
     "sentence": "The waiter has chose.",
     "is_correct": false,
     "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "explanation": "Error: have/has requires past participle, not past tense (chose)"
   },
   {
     "sentence": "He bought rice too sugar.",
@@ -4536,7 +4536,7 @@
     "sentence": "The nurse has came.",
     "is_correct": false,
     "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "explanation": "Error: have/has requires past participle, not past tense (came)"
   },
   {
     "sentence": "The baker must swim.",
@@ -4708,9 +4708,9 @@
   },
   {
     "sentence": "The children have sat.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: sat is valid past participle"
   },
   {
     "sentence": "Him cooked the letter.",
@@ -5646,9 +5646,9 @@
   },
   {
     "sentence": "They have bought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: bought is valid past participle"
   },
   {
     "sentence": "The farmer must read.",
@@ -5901,9 +5901,9 @@
   },
   {
     "sentence": "They have bought.",
-    "is_correct": false,
-    "error_type": "have+past",
-    "explanation": "Error: have/has requires past participle"
+    "is_correct": true,
+    "error_type": "none",
+    "explanation": "Fixed: bought is valid past participle"
   },
   {
     "sentence": "I like to gives.",
