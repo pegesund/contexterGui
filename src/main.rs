@@ -7334,7 +7334,8 @@ impl eframe::App for ContextApp {
 
                                 ui.horizontal(|ui| {
                                     // Flag + name
-                                    let label_text = format!("{}  {}", lang.flag, lang.name);
+                                    paint_lang_flag(ui, lang.code, 18.0);
+                                    ui.add_space(6.0);
                                     let color = if is_active {
                                         on_color
                                     } else if is_cached {
@@ -7342,7 +7343,7 @@ impl eframe::App for ContextApp {
                                     } else {
                                         off_color
                                     };
-                                    ui.label(egui::RichText::new(&label_text).size(body).color(color));
+                                    ui.label(egui::RichText::new(lang.name).size(body).color(color));
 
                                     ui.add_space(8.0);
 
@@ -7427,11 +7428,7 @@ impl eframe::App for ContextApp {
                 });
             }
             if let Some(new_lang) = switch_to_language {
-                // Download if not cached, then restart the app with new language
-                if !downloader::language_cached(&new_lang) {
-                    run_download_window(&new_lang);
-                }
-                // Save the new language and request app restart
+                // Save the new language and restart — download happens on startup
                 save_settings(&UserSettings {
                     quality: self.quality,
                     whisper_mode: self.whisper_mode,
@@ -7700,13 +7697,72 @@ impl eframe::App for ContextApp {
 struct LangOption {
     code: &'static str,
     name: &'static str,
-    flag: &'static str,
 }
 
 const AVAILABLE_LANGUAGES: &[LangOption] = &[
-    LangOption { code: "nb", name: "Bokmål",  flag: "\u{1F1F3}\u{1F1F4}" },
-    LangOption { code: "nn", name: "Nynorsk", flag: "\u{1F1F3}\u{1F1F4}" },
+    LangOption { code: "nb", name: "Bokmål" },
+    LangOption { code: "nn", name: "Nynorsk" },
 ];
+
+/// Paint a small Norwegian flag at the given position.
+fn paint_norwegian_flag(painter: &egui::Painter, pos: egui::Pos2, size: f32) {
+    let w = size * 1.5;
+    let h = size;
+    let rect = egui::Rect::from_min_size(pos, egui::vec2(w, h));
+
+    // Red background
+    let red = egui::Color32::from_rgb(186, 12, 47);
+    painter.rect_filled(rect, 2.0, red);
+
+    // White cross
+    let white = egui::Color32::WHITE;
+    let cx = pos.x + w * 0.36; // cross center x (off-center like real flag)
+    let cross_w = h * 0.22;    // white cross width
+    // Vertical bar
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(cx - cross_w / 2.0, pos.y),
+            egui::pos2(cx + cross_w / 2.0, pos.y + h),
+        ), 0.0, white,
+    );
+    // Horizontal bar
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(pos.x, pos.y + h / 2.0 - cross_w / 2.0),
+            egui::pos2(pos.x + w, pos.y + h / 2.0 + cross_w / 2.0),
+        ), 0.0, white,
+    );
+
+    // Blue cross (inside white)
+    let blue = egui::Color32::from_rgb(0, 32, 91);
+    let blue_w = h * 0.12;
+    // Vertical bar
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(cx - blue_w / 2.0, pos.y),
+            egui::pos2(cx + blue_w / 2.0, pos.y + h),
+        ), 0.0, blue,
+    );
+    // Horizontal bar
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(pos.x, pos.y + h / 2.0 - blue_w / 2.0),
+            egui::pos2(pos.x + w, pos.y + h / 2.0 + blue_w / 2.0),
+        ), 0.0, blue,
+    );
+
+    // Border
+    painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180)), egui::StrokeKind::Outside);
+}
+
+/// Paint a flag for the given language code and return the space used.
+fn paint_lang_flag(ui: &mut egui::Ui, lang_code: &str, size: f32) {
+    let (rect, _response) = ui.allocate_exact_size(egui::vec2(size * 1.5, size), egui::Sense::hover());
+    match lang_code {
+        "nb" | "nn" => paint_norwegian_flag(ui.painter(), rect.min, size),
+        _ => {} // future: other flags
+    }
+}
 
 // ── Language picker: shown on first run ──
 // Default UI language is Bokmål for the picker itself.
@@ -7743,13 +7799,42 @@ fn run_language_picker() -> Option<String> {
                         ui.add_space(24.0);
 
                         for lang in AVAILABLE_LANGUAGES {
-                            let btn_text = format!("{}  {}", lang.flag, lang.name);
-                            let btn = egui::Button::new(
-                                egui::RichText::new(&btn_text).size(22.0)
-                            )
-                            .min_size(egui::vec2(280.0, 52.0));
+                            let response = ui.horizontal(|ui| {
+                                let btn_rect = ui.allocate_exact_size(
+                                    egui::vec2(300.0, 48.0), egui::Sense::click()
+                                );
+                                let rect = btn_rect.0;
+                                let response = btn_rect.1;
 
-                            if ui.add(btn).clicked() {
+                                // Button background
+                                let bg = if response.hovered() {
+                                    egui::Color32::from_rgb(230, 240, 250)
+                                } else {
+                                    egui::Color32::from_rgb(245, 245, 245)
+                                };
+                                ui.painter().rect_filled(rect, 8.0, bg);
+                                ui.painter().rect_stroke(rect, 8.0,
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 200, 200)),
+                                    egui::StrokeKind::Outside);
+
+                                // Flag
+                                let flag_y = rect.min.y + (rect.height() - 22.0) / 2.0;
+                                paint_norwegian_flag(ui.painter(),
+                                    egui::pos2(rect.min.x + 16.0, flag_y), 22.0);
+
+                                // Text
+                                ui.painter().text(
+                                    egui::pos2(rect.min.x + 56.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    lang.name,
+                                    egui::FontId::proportional(22.0),
+                                    egui::Color32::from_rgb(40, 40, 40),
+                                );
+
+                                response
+                            });
+
+                            if response.inner.clicked() {
                                 if let Ok(mut c) = self.chosen.lock() {
                                     *c = Some(lang.code.to_string());
                                 }
@@ -7785,27 +7870,20 @@ fn run_download_window(lang_code: &str) {
         return;
     }
 
-    // Find flag + name for this language
     let lang_info = AVAILABLE_LANGUAGES.iter().find(|l| l.code == lang_code);
-    let flag = lang_info.map(|l| l.flag).unwrap_or("");
     let lang_name = lang_info.map(|l| l.name).unwrap_or(lang_code);
+    let dl_lang_code = lang_code.to_string();
 
-    // Title and heading in the selected language
     let (win_title, heading_text) = if lang_code == "nn" {
         (
             format!("NorskTale — Lastar ned {}", lang_name),
-            format!("{}  Lastar ned {}...", flag, lang_name),
+            format!("Lastar ned {}...", lang_name),
         )
     } else {
         (
             format!("NorskTale — Laster ned {}", lang_name),
-            format!("{}  Laster ned {}...", flag, lang_name),
+            format!("Laster ned {}...", lang_name),
         )
-    };
-    let error_text = if lang_code == "nn" {
-        "Nedlasting feila. Start programmet på nytt."
-    } else {
-        "Nedlasting feilet. Start programmet på nytt."
     };
 
     let prog = std::sync::Arc::clone(&progress);
@@ -7821,6 +7899,7 @@ fn run_download_window(lang_code: &str) {
         progress: downloader::SharedProgress,
         done: bool,
         heading: String,
+        lang_code: String,
         error_text: &'static str,
     }
 
@@ -7831,8 +7910,12 @@ fn run_download_window(lang_code: &str) {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new(&self.heading)
-                        .size(22.0).strong().color(egui::Color32::from_rgb(50, 50, 50)));
+                    ui.horizontal(|ui| {
+                        paint_lang_flag(ui, &self.lang_code, 24.0);
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new(&self.heading)
+                            .size(22.0).strong().color(egui::Color32::from_rgb(50, 50, 50)));
+                    });
                     ui.add_space(16.0);
 
                     if let Ok(items) = self.progress.lock() {
@@ -7911,6 +7994,7 @@ fn run_download_window(lang_code: &str) {
                 progress: prog,
                 done: false,
                 heading: heading_text,
+                lang_code: dl_lang_code,
                 error_text: error_text_static,
             }) as Box<dyn eframe::App>)
         }),
