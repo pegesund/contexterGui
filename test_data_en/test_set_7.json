@@ -62,5 +62,12 @@
   {"sentence": "Without eating you get hungry.", "is_correct": true, "error_type": "none", "explanation": "Correct sentence"},
   {"sentence": "It is hard to understand.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"},
   {"sentence": "He tried to come early.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"},
-  {"sentence": "They learned to swim this summer.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"}
+  {"sentence": "They learned to swim this summer.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"},
+  {"sentence": "She wants too help us.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be to"},
+  {"sentence": "He needs too study more.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be to"},
+  {"sentence": "I asked her too come.", "is_correct": false, "error_type": "to_too_confusion", "explanation": "Error: too should be to"},
+  {"sentence": "She wants to help us.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"},
+  {"sentence": "He needs to study more.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"},
+  {"sentence": "I asked her to come.", "is_correct": true, "error_type": "none", "explanation": "Correct: to + infinitive"},
+  {"sentence": "The water is to cold.", "is_correct": false, "error_type": "too_to_confusion", "explanation": "Error: to should be too"}
 ]
