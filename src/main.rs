@@ -131,7 +131,7 @@ fn trunc(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-use nostos_cognio::baseline::{compute_baseline, Baselines};
+use nostos_cognio::baseline::{compute_baseline_with, Baselines};
 use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
 use nostos_cognio::embeddings::EmbeddingStore;
 use nostos_cognio::grammar::swipl_checker::SwiGrammarChecker;
@@ -868,6 +868,8 @@ struct ContextApp {
     platform: Box<dyn platform::PlatformServices>,
     /// Resolved data paths (S3 cache or local dev)
     resolved_paths: ResolvedPaths,
+    /// Mask token for this language's BERT model ("<mask>" or "[MASK]")
+    mask_token: String,
     /// Track Ctrl+Space held to prevent repeated activation
     ctrl_space_held: bool,
     /// Which column is selected: 0=left (completions), 1=right (open_completions)
@@ -1068,7 +1070,8 @@ fn build_bpe_completions(
         }
     }
 
-    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+    let mt = model.mask_token_str();
+    let mask_parts: Vec<&str> = masked.splitn(2, &mt).collect();
     let ctx_before = mask_parts[0].trim_end();
     let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
 
@@ -1166,7 +1169,8 @@ fn build_mtag_completions(
         }
     };
 
-    let mask_parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+    let mt2 = model.mask_token_str();
+    let mask_parts: Vec<&str> = masked.splitn(2, &mt2).collect();
     let ctx_before = mask_parts[0].trim_end();
     let ctx_after = mask_parts.get(1).map(|s| s.trim_start()).unwrap_or(".");
 
@@ -1347,11 +1351,14 @@ impl ContextApp {
         // Spawn heavy model loading on background threads
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
 
-        // Thread 1: NorBERT4 + completer (using resolved paths)
+        // Thread 1: BERT model + completer (using resolved paths)
         let tx2 = startup_tx.clone();
         let onnx_path = paths.onnx.clone();
         let tokenizer_path = paths.tokenizer.clone();
         let wordfreq_path = paths.wordfreq.clone();
+        let mask_token = language.mask_token().to_string();
+        let baseline_preps: Vec<String> = language.baseline_prepositions().iter().map(|s| s.to_string()).collect();
+        let baseline_frame = language.baseline_frame_template().to_string();
         std::thread::spawn(move || {
             let data = data_dir();
             let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
@@ -1363,6 +1370,7 @@ impl ContextApp {
                 match ContextApp::load_completer(
                     &onnx_path, &tokenizer_path, &wordfreq_path,
                     &minilm_onnx, &minilm_tok, &embed_cache,
+                    &mask_token, &baseline_preps, &baseline_frame,
                 ) {
                     Ok(parts) => parts,
                     Err(e) => {
@@ -1437,6 +1445,7 @@ impl ContextApp {
             app_handle: None,
             platform,
             resolved_paths: paths,
+            mask_token: language.mask_token().to_string(),
             ctrl_space_held: false,
             selected_column: 0,
             load_errors,
@@ -1535,6 +1544,7 @@ impl ContextApp {
     fn load_completer(
         onnx_path: &PathBuf, tokenizer_path: &PathBuf, wordfreq_path: &PathBuf,
         minilm_onnx: &PathBuf, minilm_tok: &PathBuf, embed_cache: &PathBuf,
+        mask_token: &str, baseline_preps: &[String], baseline_frame: &str,
     ) -> anyhow::Result<(
         Option<Model>,
         Option<PrefixIndex>,
@@ -1554,7 +1564,8 @@ impl ContextApp {
         eprintln!("Prefix index: {} prefixes", pi.len());
 
         eprintln!("Computing baselines...");
-        let baselines = compute_baseline(&mut model)?;
+        let prep_refs: Vec<&str> = baseline_preps.iter().map(|s| s.as_str()).collect();
+        let baselines = compute_baseline_with(&mut model, mask_token, &prep_refs, baseline_frame)?;
 
         let wf = wordfreq::load_wordfreq(wordfreq_path.as_path(), 10);
         eprintln!("WordFreq: {} words", wf.len());
@@ -2528,9 +2539,9 @@ impl ContextApp {
             let masked_context = if let Some(pos) = sentence_ctx.to_lowercase().find(&word_lower) {
                 let before = &sentence_ctx[..pos];
                 let after = &sentence_ctx[pos + word_lower.len()..];
-                format!("{} <mask>{}", before.trim_end(), after)
+                format!("{} {}{}", before.trim_end(), self.mask_token, after)
             } else {
-                format!("{} <mask>", sentence_ctx)
+                format!("{} {}", sentence_ctx, self.mask_token)
             };
             let _mlm_id = worker.send(|id| bert_worker::BertRequest::MlmForward {
                 id, masked_text: masked_context, top_k: 100,
@@ -3537,12 +3548,13 @@ impl ContextApp {
                         })
                         .unwrap_or(0);
                     let sentence = text[sent_start..].trim();
-                    // Build masked sentence for BERT: sentence with <mask> replacing the word
+                    // Build masked sentence for BERT: sentence with mask token replacing the word
+                    let mt = &self.mask_token;
                     let masked = if !last_word.is_empty() && sentence.ends_with(last_word) {
                         let before = sentence[..sentence.len() - last_word.len()].trim_end();
-                        if before.is_empty() { "<mask>".to_string() } else { format!("{} <mask>", before) }
+                        if before.is_empty() { mt.clone() } else { format!("{} {}", before, mt) }
                     } else {
-                        format!("{} <mask>", sentence)
+                        format!("{} {}", sentence, mt)
                     };
                     let new_word = last_word.to_string();
                     let new_sentence = sentence.to_string();
@@ -5146,7 +5158,7 @@ impl eframe::App for ContextApp {
                     }
                     // Detect paste/cut/move: large jump in text length triggers full doc scan
                     if let Some(ref masked) = new_ctx.masked_sentence {
-                        let approx_len = masked.len() - "<mask>".len() + new_ctx.word.len();
+                        let approx_len = masked.len() - self.mask_token.len() + new_ctx.word.len();
                         let big_change = self.last_doc_approx_len == 0
                             || (approx_len as isize - self.last_doc_approx_len as isize).unsigned_abs() > 20;
                         self.last_doc_approx_len = approx_len;
@@ -5387,7 +5399,7 @@ impl eframe::App for ContextApp {
                             vec![]
                         };
                         let nearby_words: std::collections::HashSet<String> = {
-                            let before_mask = masked.split("<mask>").next().unwrap_or("");
+                            let before_mask = masked.split(&*self.mask_token).next().unwrap_or("");
                             let sent_start = before_mask.rfind(|c: char| ".!?".contains(c))
                                 .map(|i| i + 1).unwrap_or(0);
                             let current_sent = &before_mask[sent_start..];
@@ -5398,7 +5410,7 @@ impl eframe::App for ContextApp {
                         };
                         // Trim masked text to ~3 sentences around <mask>
                         let masked_trimmed = {
-                            let parts: Vec<&str> = masked.splitn(2, "<mask>").collect();
+                            let parts: Vec<&str> = masked.splitn(2, &*self.mask_token).collect();
                             let before = parts[0];
                             let after = parts.get(1).map(|s| *s).unwrap_or("");
                             let trimmed_before = {
@@ -5420,7 +5432,7 @@ impl eframe::App for ContextApp {
                                     after
                                 }
                             };
-                            format!("{}<mask>{}", trimmed_before, trimmed_after)
+                            format!("{}{}{}", trimmed_before, self.mask_token, trimmed_after)
                         };
                         let capitalize = prefix.chars().next().map_or(false, |c| c.is_uppercase());
                         let cancel = self.completion_cancel.clone();
@@ -7901,8 +7913,11 @@ fn run_language_picker() -> Option<String> {
 
                                 // Flag
                                 let flag_y = rect.min.y + (rect.height() - 22.0) / 2.0;
-                                paint_norwegian_flag(ui.painter(),
-                                    egui::pos2(rect.min.x + 16.0, flag_y), 22.0);
+                                let flag_pos = egui::pos2(rect.min.x + 16.0, flag_y);
+                                match lang.code {
+                                    "en" => paint_uk_flag(ui.painter(), flag_pos, 22.0),
+                                    _ => paint_norwegian_flag(ui.painter(), flag_pos, 22.0),
+                                }
 
                                 // Text
                                 ui.painter().text(

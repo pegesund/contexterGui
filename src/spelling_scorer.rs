@@ -357,12 +357,13 @@ pub fn sentence_score(model: &mut Model, sentence: &str, target: &str) -> f32 {
     if words.is_empty() { return f32::NEG_INFINITY; }
     let target_lower = target.to_lowercase();
     let mut total: f32 = 0.0;
+    let mask_str = model.mask_token_str();
     let mut weight_sum: f32 = 0.0;
     for i in 0..words.len() {
         let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
         if word_clean.is_empty() { continue; }
         let masked: String = words.iter().enumerate()
-            .map(|(j, w)| if j == i { "<mask>" } else { *w })
+            .map(|(j, w)| if j == i { mask_str.as_str() } else { *w })
             .collect::<Vec<_>>().join(" ");
         if let Ok((logits, _)) = model.single_forward(&masked) {
             if let Ok(enc) = model.tokenizer.encode(format!(" {}", word_clean.to_lowercase()), false) {
@@ -466,7 +467,9 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
         None => return f32::NEG_INFINITY,
     };
 
-    let mask_id = model.tokenizer.token_to_id("<mask>").unwrap_or(4);
+    let mask_id = model.tokenizer.token_to_id("<mask>")
+        .or_else(|| model.tokenizer.token_to_id("[MASK]"))
+        .unwrap_or(4);
     let mut total: f32 = 0.0;
     let mut scored: usize = 0;
     for k in 0..cand_ids.len() {
