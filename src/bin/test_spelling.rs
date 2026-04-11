@@ -70,7 +70,7 @@ fn main() {
         ("Vi skal reise til Bergern.", "bergern", "bergen"),
         ("Katten sitterr på stolen.", "sitterr", "sitter"),
         ("Han spiller fotballl.", "fotballl", "fotball"),
-        ("Jeg skal skrierl.", "skrierl", "skrive|skrives"),
+        ("Jeg skal skrierl en bok.", "skrierl", "skrive|skrives"),
         ("Barna fikk boller og bbrus.", "bbrus", "brus"),
         ("Barna fikk gåtterier.", "gåtterier", "godterier|godteri"),
         // First-char wrong + grammar inflection: sjøkken → kjøkkenet
