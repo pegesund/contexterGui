@@ -124,8 +124,6 @@ impl GrammarActorHandle {
     }
 }
 
-/// Spawn the grammar actor thread. Takes ownership of the checker.
-/// The egui Context is used to trigger repaint when results are ready.
 /// Grammar batch check using a sender clone. Can be called from any thread.
 pub fn grammar_batch_via_sender(sender: &mpsc::Sender<ActorMessage>, sentences: &[String]) -> Vec<Vec<GrammarError>> {
     {
@@ -146,104 +144,6 @@ pub fn grammar_batch_via_sender(sender: &mpsc::Sender<ActorMessage>, sentences: 
     }
 }
 
-pub fn spawn_grammar_actor(
-    checker: AnyChecker,
-    repaint_ctx: egui::Context,
-) -> GrammarActorHandle {
-    let (req_tx, req_rx) = mpsc::channel::<ActorMessage>();
-    let (resp_tx, resp_rx) = mpsc::channel::<GrammarCheckResponse>();
-
-    std::thread::Builder::new()
-        .name("grammar-actor".into())
-        .spawn(move || {
-            let mut checker = checker;
-            // Helper: process one async request
-            let process_async = |checker: &mut AnyChecker, req: GrammarCheckRequest, resp_tx: &mpsc::Sender<GrammarCheckResponse>, repaint_ctx: &egui::Context| {
-                let mut result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
-                if !req.user_words.is_empty() {
-                    result.unknown_words.retain(|u| {
-                        !req.user_words.iter().any(|uw| uw.eq_ignore_ascii_case(&u.word))
-                    });
-                }
-                let _ = resp_tx.send(GrammarCheckResponse {
-                    sentence: req.sentence,
-                    doc_offset: req.doc_offset,
-                    paragraph_id: req.paragraph_id,
-                    sentence_index: req.sentence_index,
-                    errors: result.errors,
-                    unknown_words: result.unknown_words,
-                    compound_candidates: result.compound_candidates,
-                });
-                repaint_ctx.request_repaint();
-            };
-
-            while let Ok(msg) = req_rx.recv() {
-                // Drain all pending messages: process sync immediately, dedup async by paragraph
-                let mut pending_async: Vec<GrammarCheckRequest> = Vec::new();
-                let mut first = Some(msg);
-                loop {
-                    let m = if let Some(f) = first.take() { f } else {
-                        match req_rx.try_recv() { Ok(m) => m, Err(_) => break }
-                    };
-                    match m {
-                        ActorMessage::Sync(req) => {
-                            // Priority: process sync immediately
-                            let errors = checker.check_sentence(&req.sentence);
-                            let _ = req.reply.send(SyncCheckResponse { errors });
-                        }
-                        ActorMessage::SyncBatch(req) => {
-                            // Priority: process batch immediately
-                            let results: Vec<Vec<GrammarError>> = req.sentences.iter()
-                                .map(|s| checker.check_sentence(s))
-                                .collect();
-                            let _ = req.reply.send(SyncBatchResponse { results });
-                        }
-                        ActorMessage::Async(req) => {
-                            // Dedup: replace older request for same paragraph+sentence
-                            if let Some(pos) = pending_async.iter().position(|p| {
-                                p.paragraph_id == req.paragraph_id && p.sentence == req.sentence
-                            }) {
-                                pending_async[pos] = req;
-                            } else {
-                                pending_async.push(req);
-                            }
-                        }
-                    }
-                }
-                // Process deduped async requests (oldest first)
-                for req in pending_async {
-                    // Before each async, check for new sync requests that arrived
-                    while let Ok(m) = req_rx.try_recv() {
-                        match m {
-                            ActorMessage::Sync(r) => {
-                                let errors = checker.check_sentence(&r.sentence);
-                                let _ = r.reply.send(SyncCheckResponse { errors });
-                            }
-                            ActorMessage::SyncBatch(r) => {
-                                let results: Vec<Vec<GrammarError>> = r.sentences.iter()
-                                    .map(|s| checker.check_sentence(s))
-                                    .collect();
-                                let _ = r.reply.send(SyncBatchResponse { results });
-                            }
-                            ActorMessage::Async(_) => {
-                                // Drop late arrivals — they'll come again on next paragraph change
-                            }
-                        }
-                    }
-                    process_async(&mut checker, req, &resp_tx, &repaint_ctx);
-                }
-            }
-            std::mem::forget(checker);
-            loop { std::thread::park(); }
-        })
-        .expect("Failed to spawn grammar actor");
-
-    GrammarActorHandle {
-        sender: req_tx,
-        receiver: resp_rx,
-    }
-}
-
 /// Spawn grammar actor that loads SWI-Prolog on its own thread.
 /// SWI-Prolog must be initialized and used on the same thread.
 pub fn spawn_grammar_actor_with_loader(
@@ -253,6 +153,9 @@ pub fn spawn_grammar_actor_with_loader(
     syntaxer_dir: String,
     compound_data: String,
     repaint_ctx: egui::Context,
+    compound_fst: Option<std::sync::Arc<fst::raw::Fst<Vec<u8>>>>,
+    language: std::sync::Arc<dyn language::LanguageBundle>,
+    wordfreq: Option<std::sync::Arc<std::collections::HashMap<String, u64>>>,
 ) -> GrammarActorHandle {
     let (req_tx, req_rx) = mpsc::channel::<ActorMessage>();
     let (resp_tx, resp_rx) = mpsc::channel::<GrammarCheckResponse>();
@@ -303,10 +206,27 @@ pub fn spawn_grammar_actor_with_loader(
             };
 
             let mut checker = checker;
+            let compound_fst_ref2 = compound_fst.clone();
+            let lang_ref2 = language.clone();
+            let wf_ref2 = wordfreq.clone();
             while let Ok(msg) = req_rx.recv() {
                 match msg {
                     ActorMessage::Async(req) => {
-                        let mut result = checker.check_sentence_full_with_doc(&req.sentence, &req.doc_text);
+                        let compound_check2: Option<Box<dyn Fn(&str) -> bool>> = compound_fst_ref2.as_ref().map(|fst| {
+                            let fst = fst.clone();
+                            let lang = lang_ref2.clone();
+                            let wf = wf_ref2.clone();
+                            Box::new(move |word: &str| -> bool {
+                                let results = crate::compound_walker::compound_fuzzy_walk(
+                                    &fst, word, &*lang,
+                                    wf.as_ref().map(|w| w.as_ref()),
+                                    None, None,
+                                );
+                                results.iter().any(|r| r.total_edits == 0)
+                            }) as Box<dyn Fn(&str) -> bool>
+                        });
+                        let compound_ref2: Option<&dyn Fn(&str) -> bool> = compound_check2.as_ref().map(|b| b.as_ref());
+                        let mut result = checker.check_sentence_full_with_compound(&req.sentence, &req.doc_text, compound_ref2);
                         // Filter out user dict words from unknowns
                         if !req.user_words.is_empty() {
                             result.unknown_words.retain(|u| {

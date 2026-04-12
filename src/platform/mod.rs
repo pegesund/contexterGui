@@ -95,17 +95,6 @@ pub trait PlatformServices: Send + Sync {
     /// Horizontal offset in logical pixels from the caret to the app window.
     fn caret_offset_right(&self) -> f32 { 0.0 }
 
-    /// Determine if an app-switch event requires clearing stale errors.
-    /// Called every frame with the current and previous foreground app state.
-    /// Returns true if errors should be cleared (e.g. switched from Word to Browser).
-    /// Each platform implements its own focus-transition logic.
-    fn should_clear_errors_on_switch(&self, _current: &ForegroundApp, _prev_word_title: &str) -> bool {
-        // Disabled: aggressive clearing on app switch causes errors to
-        // disappear when focus bounces briefly to another app. Errors are
-        // now cleared per-paragraph when text changes, not on app switch.
-        false
-    }
-
     /// Whether caret_screen_position returns physical pixels (true on Windows)
     /// or logical points (false on macOS). Controls whether DPI scaling is applied.
     fn caret_is_physical_pixels(&self) -> bool { true }

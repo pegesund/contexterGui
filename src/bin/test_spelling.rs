@@ -98,6 +98,7 @@ fn main() {
             misspelled,
             sentence,
             &language::BokmalLanguage,
+            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

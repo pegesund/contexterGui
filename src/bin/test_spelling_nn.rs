@@ -150,6 +150,7 @@ fn main() {
             misspelled,
             sentence,
             &language::NynorskLanguage,
+            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

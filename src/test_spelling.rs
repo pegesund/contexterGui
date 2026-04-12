@@ -62,14 +62,6 @@ fn main() {
     );
     println!("With freq(50): {:?}", unk3.iter().map(|u| &u.word).collect::<Vec<_>>());
 
-    // Check compound splitting
-    let splits = nostos_cognio::grammar::try_splits(checker.analyzer(), "morsson");
-    println!("try_splits('morsson'): {:?}", splits);
-    let splits2 = nostos_cognio::grammar::try_splits(checker.analyzer(), "somx");
-    println!("try_splits('somx'): {:?}", splits2);
-    let splits3 = nostos_cognio::grammar::try_splits(checker.analyzer(), "dettex");
-    println!("try_splits('dettex'): {:?}", splits3);
-
     // Check frequencies of split parts
     let wf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../contexter-repo/training-data/wordfreq.tsv");

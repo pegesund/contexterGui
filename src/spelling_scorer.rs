@@ -101,6 +101,7 @@ pub fn generate_spelling_candidates(
     word: &str,
     _sentence_ctx: &str,
     lang: &dyn language::LanguageSpelling,
+    is_compound: Option<&dyn Fn(&str) -> bool>,
 ) -> Vec<(String, f32)> {
     let word_lower = word.to_lowercase();
     let word_trigrams = trigrams(&word_lower);
@@ -192,21 +193,15 @@ pub fn generate_spelling_candidates(
 
     // Source 9: Long word truncation (>= 10 chars)
     if word_lower.len() >= 10 {
-        let is_known_or_compound = |w: &str| -> bool {
+        let is_known = |w: &str| -> bool {
             if analyzer.has_word(w) { return true; }
-            for j in 3..w.len().saturating_sub(2) {
-                if !w.is_char_boundary(j) { continue; }
-                let left = &w[..j];
-                let right = &w[j..];
-                if right.len() >= 3 && analyzer.has_word(left) && analyzer.has_word(right) { return true; }
-                if right.starts_with('s') && right.len() > 3 && analyzer.has_word(left) && analyzer.has_word(&right[1..]) { return true; }
-            }
+            if let Some(check) = &is_compound { return check(w); }
             false
         };
         for strip in 1..=2usize {
             if word_lower.is_char_boundary(strip) {
                 let trimmed = &word_lower[strip..];
-                if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
+                if trimmed.len() >= 5 && is_known(trimmed) && seen.insert(trimmed.to_string()) {
                     edit_distances.insert(trimmed.to_string(), strip as u32);
                     candidates.push(trimmed.to_string());
                 }
@@ -214,7 +209,7 @@ pub fn generate_spelling_candidates(
             let end = word_lower.len() - strip;
             if word_lower.is_char_boundary(end) {
                 let trimmed = &word_lower[..end];
-                if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
+                if trimmed.len() >= 5 && is_known(trimmed) && seen.insert(trimmed.to_string()) {
                     edit_distances.insert(trimmed.to_string(), strip as u32);
                     candidates.push(trimmed.to_string());
                 }

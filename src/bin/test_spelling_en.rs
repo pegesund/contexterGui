@@ -101,6 +101,7 @@ fn main() {
             misspelled,
             sentence,
             &language::EnglishLanguage,
+            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 
