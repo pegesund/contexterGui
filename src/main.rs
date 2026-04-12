@@ -809,6 +809,8 @@ struct ContextApp {
     last_caret_pos: Option<(i32, i32)>,
     /// After goto, freeze window position for a few seconds so it doesn't jump back
     goto_freeze_until: Option<Instant>,
+    /// Anchor position during Cmd+scroll zoom — forced back every frame
+    zoom_anchor: Option<egui::Pos2>,
     // Grammar checker (kept for main-thread dictionary lookups; SWI grammar ops go through actor)
     checker: Option<AnyChecker>,
     /// Direct analyzer reference for dictionary lookups (cloned from checker before actor takes it)
@@ -1406,6 +1408,7 @@ impl ContextApp {
             poll_interval: Duration::from_millis(100),
             follow_cursor: true,
             goto_freeze_until: None,
+            zoom_anchor: None,
             last_caret_pos: None,
             checker: None,
             analyzer,
@@ -5652,25 +5655,70 @@ impl eframe::App for ContextApp {
 
       } // end if !skip_processing
 
-        // Window sizing (scaled)
+        // Window sizing. Both window dimensions and text sizes scale by `s`,
+        // so proportions stay constant at any scale level.
         let s = self.ui_scale;
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
-        let win_h = s * if self.selected_tab >= 1 {
-            250.0
+
+        // Height: toolbar (~30) + content rows. Each row is ~20 at base scale.
+        // Use the actual row count to avoid empty space below.
+        let content_rows = if self.selected_tab == 0 {
+            let left = self.completions.len();
+            let right = self.open_completions.len();
+            let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
+            (left.max(right).max(errors) as f32).max(2.0).min(10.0)
         } else {
-            150.0
+            10.0 // settings/grammar tabs: fixed height
         };
+        let toolbar_h = 30.0 * s;
+        let row_h = 22.0 * s; // matches render_row's row_h (20-22 * s)
+        let win_h = if self.selected_tab >= 1 {
+            s * 250.0
+        } else {
+            toolbar_h + (content_rows + 1.0) * row_h
+        };
+        // Width: toolbar has ~10 icons/items, each ~24px at base scale.
+        // Ensure enough room at any scale.
         let win_w = s * if self.selected_tab == 0 {
-            242.0
+            320.0
         } else {
             420.0
         };
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
-        // Apply UI scale
-        ctx.set_zoom_factor(self.ui_scale);
+        // Ctrl/Cmd + scroll wheel changes ui_scale.
+        // We don't use set_zoom_factor (it triggers OS window repositioning
+        // on macOS). Instead, ui_scale multiplies win_w/win_h and all text
+        // sizes via the `s` variable defined above.
+        let scroll_delta = ctx.input(|i| {
+            if i.modifiers.ctrl || i.modifiers.command {
+                i.raw_scroll_delta.y
+            } else {
+                0.0
+            }
+        });
+        if scroll_delta != 0.0 {
+            let step = if scroll_delta > 0.0 { 0.1 } else { -0.1 };
+            self.ui_scale = (self.ui_scale + step).clamp(0.5, 2.5);
+        }
+
+        // Scale all default text styles proportionally
+        ctx.style_mut(|style| {
+            use egui::TextStyle::*;
+            let f = |sz: f32| egui::FontId::proportional(sz * s);
+            style.text_styles = [
+                (Small, f(9.0)),
+                (Body, f(12.5)),
+                (Monospace, egui::FontId::monospace(12.0 * s)),
+                (Button, f(12.5)),
+                (Heading, f(18.0)),
+            ].into();
+            // Scale widget spacing so buttons/padding grow too
+            style.spacing.item_spacing = egui::vec2(6.0 * s, 3.0 * s);
+            style.spacing.button_padding = egui::vec2(4.0 * s, 1.0 * s);
+        });
 
         // Check if goto freeze has expired
         if let Some(until) = self.goto_freeze_until {
@@ -5772,7 +5820,7 @@ impl eframe::App for ContextApp {
                 // 💡 Forslag (suggestions tab)
                 let innhold_color = if self.selected_tab == 0 { active } else { inactive };
                 if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{1F4A1}").size(16.0).color(innhold_color)
+                    egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(innhold_color)
                 ).sense(egui::Sense::click())).on_hover_text(self.language.ui_suggestions()).clicked() {
                     self.selected_tab = 0;
                 }
@@ -5785,13 +5833,13 @@ impl eframe::App for ContextApp {
                 ui.painter().circle_filled(center, 4.0, dot_color);
                 let gram_color = if self.selected_tab == 1 { active } else { inactive };
                 if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{270F}").size(16.0).color(gram_color)
+                    egui::RichText::new("\u{270F}").size(16.0 * s).color(gram_color)
                 ).sense(egui::Sense::click())).on_hover_text(self.language.ui_grammar()).clicked() {
                     self.selected_tab = 1;
                 }
 
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("|").size(12.0).color(sep));
+                ui.label(egui::RichText::new("|").size(12.0 * s).color(sep));
                 ui.add_space(2.0);
 
                 // 🎤 Microphone slot: 🎤 idle, ■ recording, ⏳ transcribing
@@ -5799,11 +5847,11 @@ impl eframe::App for ContextApp {
                 if mic_recording {
                     if self.mic_transcribing {
                         ui.add(egui::Label::new(
-                            egui::RichText::new("⏳").size(13.0)
+                            egui::RichText::new("⏳").size(13.0 * s)
                         )).on_hover_text(self.language.ui_transcribing());
                     } else {
                         if ui.add(egui::Button::new(
-                            egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                            egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                         ).fill(egui::Color32::from_rgb(200, 40, 40))
                          .min_size(egui::vec2(22.0, 16.0))
                         ).on_hover_text(self.language.ui_stop_recording()).clicked() {
@@ -5815,14 +5863,14 @@ impl eframe::App for ContextApp {
                     }
                 } else if self.whisper_loading {
                     ui.add(egui::Label::new(
-                        egui::RichText::new("⏳").size(13.0)
+                        egui::RichText::new("⏳").size(13.0 * s)
                     )).on_hover_text(self.language.ui_loading_speech_model());
                     ctx.request_repaint_after(Duration::from_millis(100));
                 } else {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     if ui.add(egui::Label::new(
-                        egui::RichText::new("\u{1F3A4}").size(13.0).color(mic_color)
+                        egui::RichText::new("\u{1F3A4}").size(13.0 * s).color(mic_color)
                     ).sense(egui::Sense::click())).on_hover_text(self.language.ui_speech_recognition()).clicked() {
                             if whisper_ready {
                                 // Models already loaded — start recording immediately
@@ -5909,7 +5957,7 @@ impl eframe::App for ContextApp {
                 // ▶ Speak selection (same group as 🎤)
                 if tts_speaking || ocr_is_busy {
                     if ui.add(egui::Button::new(
-                        egui::RichText::new("■").size(12.0).color(egui::Color32::WHITE)
+                        egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
                      .min_size(egui::vec2(22.0, 16.0))
                     ).on_hover_text(self.language.ui_stop_reading()).clicked() {
@@ -5918,7 +5966,7 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     if ui.add(egui::Label::new(
-                        egui::RichText::new("▶").size(14.0).color(inactive)
+                        egui::RichText::new("▶").size(14.0 * s).color(inactive)
                     ).sense(egui::Sense::click())).on_hover_text(self.language.ui_read_selected_text()).clicked() {
                         log!("Speak button clicked!");
                         match self.manager.read_selected_text().or_else(|| self.platform.read_selected_text()) {
@@ -5942,14 +5990,14 @@ impl eframe::App for ContextApp {
                     let err_count = self.writing_errors.iter().filter(|e| !e.ignored).count();
                     if err_count > 0 {
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0).color(egui::Color32::from_rgb(120, 120, 120)));
-                        ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0).strong().color(egui::Color32::from_rgb(180, 60, 60)));
+                        ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                     }
                 }
 
                 // --- Right side: drag area, 📌 ⚙ – ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = 80.0; // 📌 + ⚙ + – + ✕
+                let right_w = 80.0 * s; // 📌 + ⚙ + – + ✕ (scaled)
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
                     egui::pos2(remaining.max.x - right_w, remaining.max.y),
@@ -5973,7 +6021,7 @@ impl eframe::App for ContextApp {
                     self.language.ui_pin_cursor_off()
                 };
                 if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{1F4CC}").size(14.0).color(pin_color)
+                    egui::RichText::new("\u{1F4CC}").size(14.0 * s).color(pin_color)
                 ).sense(egui::Sense::click())).on_hover_text(pin_tooltip).clicked() {
                     self.follow_cursor = !self.follow_cursor;
                 }
@@ -5981,21 +6029,21 @@ impl eframe::App for ContextApp {
                 // ⚙ Settings
                 let settings_color = if self.show_settings_window { active } else { inactive };
                 if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{2699}").size(16.0).color(settings_color)
+                    egui::RichText::new("\u{2699}").size(16.0 * s).color(settings_color)
                 ).sense(egui::Sense::click())).on_hover_text(self.language.ui_settings()).clicked() {
                     self.show_settings_window = !self.show_settings_window;
                 }
 
                 // ▁ Minimize
                 if ui.add(egui::Label::new(
-                    egui::RichText::new("–").size(14.0).color(inactive)
+                    egui::RichText::new("–").size(14.0 * s).color(inactive)
                 ).sense(egui::Sense::click())).on_hover_text(self.language.ui_minimize()).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
                 // ✕ Close button
                 let close_resp = ui.allocate_rect(
-                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(18.0, 18.0)),
+                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(18.0 * s, 18.0 * s)),
                     egui::Sense::click() | egui::Sense::hover(),
                 );
                 let color = if close_resp.hovered() {
@@ -6004,10 +6052,10 @@ impl eframe::App for ContextApp {
                     egui::Color32::from_rgb(120, 120, 120)
                 };
                 let center = close_resp.rect.center();
-                let s = 4.5;
-                let stroke = egui::Stroke::new(1.5, color);
-                ui.painter().line_segment([center + egui::vec2(-s, -s), center + egui::vec2(s, s)], stroke);
-                ui.painter().line_segment([center + egui::vec2(s, -s), center + egui::vec2(-s, s)], stroke);
+                let cross_sz = 4.5 * s;
+                let stroke = egui::Stroke::new(1.5 * s, color);
+                ui.painter().line_segment([center + egui::vec2(-cross_sz, -cross_sz), center + egui::vec2(cross_sz, cross_sz)], stroke);
+                ui.painter().line_segment([center + egui::vec2(cross_sz, -cross_sz), center + egui::vec2(-cross_sz, cross_sz)], stroke);
                 if close_resp.clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -6065,11 +6113,11 @@ impl eframe::App for ContextApp {
                     let has_right_only = !self.open_completions.is_empty() && self.completions.is_empty();
 
                     let has_tts = tts::tts_available();
-                    let icon_w: f32 = if has_tts { 16.0 } else { 0.0 };
+                    let icon_w: f32 = if has_tts { 18.0 * s } else { 0.0 };
                     let render_row = |ui: &mut egui::Ui, comp: &Completion, _idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
                         let marker = if is_selected { "▸ " } else { "  " };
                         let text = format!("{}{}", marker, comp.word);
-                        let row_h = if is_top || is_selected { 18.0 } else { 16.0 };
+                        let row_h = (if is_top || is_selected { 22.0 } else { 20.0 }) * s;
 
                         // Single allocation for the whole row
                         let (rect, resp) = ui.allocate_exact_size(
@@ -6083,13 +6131,13 @@ impl eframe::App for ContextApp {
                             ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
                         }
 
-                        // Speaker icon at the left edge
+                        // Speaker icon at the left edge, vertically centered
                         let mut spoke = false;
                         if has_tts {
                             let icon_fg = if is_selected { egui::Color32::from_rgba_premultiplied(200, 200, 200, 255) }
                                 else { egui::Color32::from_rgb(150, 150, 150) };
                             let icon_center = egui::pos2(rect.min.x + icon_w * 0.5, rect.center().y);
-                            ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(9.0), icon_fg);
+                            ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(9.0 * s), icon_fg);
 
                             // Check if click was in the icon area
                             if resp.clicked() {
@@ -6106,9 +6154,11 @@ impl eframe::App for ContextApp {
                             else if hovered { egui::Color32::from_rgb(0, 80, 140) }
                             else if is_top { egui::Color32::from_rgb(0, 120, 60) }
                             else { egui::Color32::from_rgb(60, 60, 60) };
-                        let font_size = if is_top || is_selected || hovered { 13.0 } else { 12.0 };
+                        let font_size = (if is_top || is_selected || hovered { 13.0 } else { 12.0 }) * s;
                         let text_x = rect.min.x + icon_w;
-                        ui.painter().text(egui::pos2(text_x, rect.min.y + 1.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(font_size), fg);
+                        // Vertically center the text in the row
+                        let text_y = rect.center().y;
+                        ui.painter().text(egui::pos2(text_x, text_y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(font_size), fg);
                         if hovered { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                         (resp.clicked() && !spoke, spoke)
                     };
@@ -6126,7 +6176,7 @@ impl eframe::App for ContextApp {
                                     let (clicked, _) = render_row(ui, comp, row, is_sel, is_top, col_w);
                                     if clicked { clicked_word = Some((comp.word.clone(), 0)); }
                                 } else {
-                                    ui.allocate_exact_size(egui::vec2(col_w, 16.0), egui::Sense::hover());
+                                    ui.allocate_exact_size(egui::vec2(col_w, 20.0 * s), egui::Sense::hover());
                                 }
                                 ui.add_space(2.0);
                                 if row < self.open_completions.len() {
@@ -6223,7 +6273,7 @@ impl eframe::App for ContextApp {
                 if active_errors.is_empty() {
                     ui.label(
                         egui::RichText::new(self.language.ui_no_errors())
-                            .size(12.0)
+                            .size(12.0 * s)
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
                 } else {
@@ -6239,9 +6289,9 @@ impl eframe::App for ContextApp {
                             } else {
                                 egui::Color32::from_rgb(60, 160, 240)
                             };
-                            ui.label(egui::RichText::new(phase).size(16.0));
+                            ui.label(egui::RichText::new(phase).size(16.0 * s));
                             ui.label(egui::RichText::new(self.language.ui_ai_correcting_seconds(elapsed))
-                                .size(12.0).strong().color(pulse));
+                                .size(12.0 * s).strong().color(pulse));
                             ctx.request_repaint_after(Duration::from_millis(500));
                         } else {
                             let err_count = self.writing_errors.iter()
@@ -6249,7 +6299,7 @@ impl eframe::App for ContextApp {
                                 .count();
                             if err_count > 0 {
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new(self.language.ui_ai_fix_all()).size(11.0)
+                                    egui::RichText::new(self.language.ui_ai_fix_all()).size(11.0 * s)
                                 ).min_size(egui::vec2(0.0, 18.0))).clicked() {
                                     self.dispatch_llm_fix_all();
                                 }
@@ -6306,19 +6356,19 @@ impl eframe::App for ContextApp {
                                 });
                                 ui.label(
                                     egui::RichText::new(self.language.ui_missing_period())
-                                        .size(11.0)
+                                        .size(11.0 * s)
                                         .strong()
                                         .color(egui::Color32::from_rgb(0, 100, 180)),
                                 );
                                 // Show the suggested punctuated version
                                 ui.label(
                                     egui::RichText::new(&error.suggestion)
-                                        .size(11.0)
+                                        .size(11.0 * s)
                                         .color(egui::Color32::from_rgb(0, 120, 60)),
                                 );
                                 ui.label(
                                     egui::RichText::new(&error.explanation)
-                                        .size(10.0)
+                                        .size(10.0 * s)
                                         .color(egui::Color32::from_rgb(100, 100, 100)),
                                 );
                             } else if matches!(error.category, ErrorCategory::Grammar) {
@@ -6383,7 +6433,7 @@ impl eframe::App for ContextApp {
                                 // Original (red, strikethrough) then suggestion (green) — stacked
                                 ui.label(
                                     egui::RichText::new(&error.word)
-                                        .size(11.0)
+                                        .size(11.0 * s)
                                         .strikethrough()
                                         .color(egui::Color32::from_rgb(180, 60, 60)),
                                 );
@@ -6391,7 +6441,7 @@ impl eframe::App for ContextApp {
                                     let alt = &self.writing_errors[alt_idx];
                                     ui.label(
                                         egui::RichText::new(&alt.suggestion)
-                                            .size(11.0)
+                                            .size(11.0 * s)
                                             .strong()
                                             .color(egui::Color32::from_rgb(0, 120, 60)),
                                     );
@@ -6401,7 +6451,7 @@ impl eframe::App for ContextApp {
                                     if let Some(alt_idx) = first_alt {
                                         ui.label(
                                             egui::RichText::new(&self.writing_errors[alt_idx].explanation)
-                                                .size(10.0)
+                                                .size(10.0 * s)
                                                 .color(egui::Color32::from_rgb(100, 100, 100)),
                                         );
                                     }
@@ -6435,14 +6485,14 @@ impl eframe::App for ContextApp {
                                 });
                                 ui.label(
                                     egui::RichText::new(&error.word)
-                                        .size(12.0)
+                                        .size(12.0 * s)
                                         .strong()
                                         .color(egui::Color32::from_rgb(200, 40, 40)),
                                 );
                                 if !error.suggestion.is_empty() {
                                     ui.label(
                                         egui::RichText::new(&error.suggestion)
-                                            .size(12.0)
+                                            .size(12.0 * s)
                                             .strong()
                                             .color(egui::Color32::from_rgb(0, 120, 60)),
                                     );
@@ -6451,7 +6501,7 @@ impl eframe::App for ContextApp {
                                 if error.rule_name != "llm_correction" {
                                     ui.label(
                                         egui::RichText::new(&error.explanation)
-                                            .size(10.0)
+                                            .size(10.0 * s)
                                             .color(egui::Color32::from_rgb(80, 80, 80)),
                                     );
                                 }
@@ -6670,7 +6720,7 @@ impl eframe::App for ContextApp {
 
                                     ui.label(
                                         egui::RichText::new(lang_for_vp.ui_suggestions_for(&word_clone))
-                                            .size(16.0)
+                                            .size(16.0 * s)
                                             .strong()
                                             .color(egui::Color32::from_rgb(30, 70, 150)),
                                     );
@@ -6686,7 +6736,7 @@ impl eframe::App for ContextApp {
                                                         tts::speak_word(candidate);
                                                     }
                                                     if ui.button(
-                                                        egui::RichText::new(candidate).size(14.0).strong()
+                                                        egui::RichText::new(candidate).size(14.0 * s).strong()
                                                     ).clicked() {
                                                         *selection.lock().unwrap() = Some(i);
                                                     }
@@ -6773,7 +6823,7 @@ impl eframe::App for ContextApp {
                                     // Category header
                                     ui.label(
                                         egui::RichText::new(category)
-                                            .size(22.0)
+                                            .size(22.0 * s)
                                             .strong()
                                             .color(egui::Color32::from_rgb(30, 70, 150)),
                                     );
@@ -6782,7 +6832,7 @@ impl eframe::App for ContextApp {
                                     // Description
                                     ui.label(
                                         egui::RichText::new(description)
-                                            .size(15.0)
+                                            .size(15.0 * s)
                                             .color(egui::Color32::from_rgb(30, 30, 30)),
                                     );
                                     ui.add_space(14.0);
@@ -6807,7 +6857,7 @@ impl eframe::App for ContextApp {
                                                         if oi < orig_words.len() && ci < corr_words.len()
                                                             && orig_words[oi].to_lowercase() == corr_words[ci].to_lowercase() {
                                                             // Same word — normal
-                                                            ui.label(egui::RichText::new(orig_words[oi]).size(14.0));
+                                                            ui.label(egui::RichText::new(orig_words[oi]).size(14.0 * s));
                                                             oi += 1;
                                                             ci += 1;
                                                         } else {
@@ -6839,7 +6889,7 @@ impl eframe::App for ContextApp {
                                                             // Show removed words in red strikethrough (with tooltip)
                                                             for _ in 0..skip_orig {
                                                                 if oi < orig_words.len() {
-                                                                    let r = ui.label(egui::RichText::new(orig_words[oi]).size(14.0)
+                                                                    let r = ui.label(egui::RichText::new(orig_words[oi]).size(14.0 * s)
                                                                         .strikethrough().color(egui::Color32::from_rgb(200, 50, 50)));
                                                                     if !tooltip.is_empty() { r.on_hover_text(tooltip); }
                                                                     oi += 1;
@@ -6848,7 +6898,7 @@ impl eframe::App for ContextApp {
                                                             // Show added words in green bold (with tooltip)
                                                             for _ in 0..skip_corr {
                                                                 if ci < corr_words.len() {
-                                                                    let r = ui.label(egui::RichText::new(corr_words[ci]).size(14.0)
+                                                                    let r = ui.label(egui::RichText::new(corr_words[ci]).size(14.0 * s)
                                                                         .strong().color(egui::Color32::from_rgb(0, 140, 50)));
                                                                     if !tooltip.is_empty() { r.on_hover_text(tooltip); }
                                                                     ci += 1;
@@ -6869,7 +6919,7 @@ impl eframe::App for ContextApp {
                                                 ui.set_max_width(max_w - 40.0);
                                                 ui.label(
                                                     egui::RichText::new(&sentence)
-                                                        .size(15.0)
+                                                        .size(15.0 * s)
                                                         .strikethrough()
                                                         .color(egui::Color32::from_rgb(180, 50, 50)),
                                                 );
@@ -6885,7 +6935,7 @@ impl eframe::App for ContextApp {
                                                     ui.set_max_width(max_w - 40.0);
                                                     ui.label(
                                                         egui::RichText::new(&corrected_sentence)
-                                                            .size(15.0)
+                                                            .size(15.0 * s)
                                                             .color(egui::Color32::from_rgb(0, 120, 50)),
                                                     );
                                                 });
@@ -6897,7 +6947,7 @@ impl eframe::App for ContextApp {
                                     if rule_name != "llm_correction" {
                                     ui.label(
                                         egui::RichText::new(lang_for_rule.ui_explanation())
-                                            .size(14.0)
+                                            .size(14.0 * s)
                                             .strong()
                                             .color(egui::Color32::from_rgb(50, 50, 50)),
                                     );
@@ -6906,7 +6956,7 @@ impl eframe::App for ContextApp {
                                     if rule_name != "llm_correction" {
                                     ui.label(
                                         egui::RichText::new(&explanation)
-                                            .size(14.0)
+                                            .size(14.0 * s)
                                             .color(egui::Color32::from_rgb(30, 30, 30)),
                                     );
                                     }
@@ -6918,7 +6968,7 @@ impl eframe::App for ContextApp {
                                         ui.add_space(8.0);
                                         ui.label(
                                             egui::RichText::new(lang_for_rule.ui_examples())
-                                                .size(18.0)
+                                                .size(18.0 * s)
                                                 .strong()
                                                 .color(egui::Color32::from_rgb(30, 70, 150)),
                                         );
@@ -6926,12 +6976,12 @@ impl eframe::App for ContextApp {
 
                                         for (w, r) in wrong.iter().zip(right.iter()) {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("X").size(15.0).strong().color(egui::Color32::from_rgb(200, 40, 40)));
-                                                ui.label(egui::RichText::new(*w).size(15.0).strikethrough().color(egui::Color32::from_rgb(160, 70, 70)));
+                                                ui.label(egui::RichText::new("X").size(15.0 * s).strong().color(egui::Color32::from_rgb(200, 40, 40)));
+                                                ui.label(egui::RichText::new(*w).size(15.0 * s).strikethrough().color(egui::Color32::from_rgb(160, 70, 70)));
                                             });
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("V").size(15.0).strong().color(egui::Color32::from_rgb(0, 140, 60)));
-                                                ui.label(egui::RichText::new(*r).size(15.0).color(egui::Color32::from_rgb(0, 100, 40)));
+                                                ui.label(egui::RichText::new("V").size(15.0 * s).strong().color(egui::Color32::from_rgb(0, 140, 60)));
+                                                ui.label(egui::RichText::new(*r).size(15.0 * s).color(egui::Color32::from_rgb(0, 100, 40)));
                                             });
                                             ui.add_space(5.0);
                                         }
@@ -6943,20 +6993,20 @@ impl eframe::App for ContextApp {
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     if !suggestion.is_empty() {
-                                        if ui.button(egui::RichText::new(lang_for_rule.ui_fix()).size(14.0).strong().color(egui::Color32::from_rgb(0, 120, 60))).clicked() {
+                                        if ui.button(egui::RichText::new(lang_for_rule.ui_fix()).size(14.0 * s).strong().color(egui::Color32::from_rgb(0, 120, 60))).clicked() {
                                             do_fix = true;
                                         }
                                         ui.add_space(8.0);
                                     }
-                                    if ui.button(egui::RichText::new(lang_for_rule.ui_ignore()).size(14.0).color(egui::Color32::from_rgb(150, 60, 60))).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_rule.ui_ignore()).size(14.0 * s).color(egui::Color32::from_rgb(150, 60, 60))).clicked() {
                                         do_ignore = true;
                                     }
                                     ui.add_space(8.0);
-                                    if ui.button(egui::RichText::new(lang_for_rule.ui_close()).size(14.0).color(egui::Color32::from_rgb(80, 80, 80))).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_rule.ui_close()).size(14.0 * s).color(egui::Color32::from_rgb(80, 80, 80))).clicked() {
                                         do_close = true;
                                     }
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(egui::RichText::new(format!("Regel: {}", rule_name)).size(11.0).color(egui::Color32::from_rgb(160, 160, 160)));
+                                        ui.label(egui::RichText::new(format!("Regel: {}", rule_name)).size(11.0 * s).color(egui::Color32::from_rgb(160, 160, 160)));
                                     });
                                 });
                             });
@@ -7051,14 +7101,14 @@ impl eframe::App for ContextApp {
                                         } else {
                                             self.whisper_load_status.clone()
                                         };
-                                        ui.label(egui::RichText::new(msg).size(14.0)
+                                        ui.label(egui::RichText::new(msg).size(14.0 * s)
                                             .color(egui::Color32::from_rgb(80, 80, 140)));
                                     });
                                     ui.add_space(8.0);
                                 } else if is_recording {
                                     ui.horizontal(|ui| {
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new(lang_for_stt.ui_stop()).size(14.0).color(egui::Color32::WHITE)
+                                            egui::RichText::new(lang_for_stt.ui_stop()).size(14.0 * s).color(egui::Color32::WHITE)
                                         ).fill(egui::Color32::from_rgb(200, 40, 40))).clicked() {
                                             do_stop = true;
                                         }
@@ -7072,7 +7122,7 @@ impl eframe::App for ContextApp {
                                         } else {
                                             lang_for_stt.ui_transcribing()
                                         };
-                                        ui.label(egui::RichText::new(msg).size(14.0)
+                                        ui.label(egui::RichText::new(msg).size(14.0 * s)
                                             .color(egui::Color32::from_rgb(100, 80, 140)));
                                     });
                                     ui.add_space(8.0);
@@ -7083,10 +7133,10 @@ impl eframe::App for ContextApp {
                                 egui::ScrollArea::vertical().max_height(scroll_height).show(ui, |ui| {
                                     ui.set_max_width(max_w - 16.0);
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.label(egui::RichText::new(&text_clone).size(20.0)
+                                        ui.label(egui::RichText::new(&text_clone).size(20.0 * s)
                                             .color(egui::Color32::from_rgb(30, 30, 30)));
                                         if is_recording {
-                                            ui.label(egui::RichText::new(" ...").size(20.0)
+                                            ui.label(egui::RichText::new(" ...").size(20.0 * s)
                                                 .color(egui::Color32::from_rgb(150, 150, 150)));
                                         }
                                     });
@@ -7096,7 +7146,7 @@ impl eframe::App for ContextApp {
                                 if self.improve_running {
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        ui.label(egui::RichText::new(lang_for_stt.ui_improving_with_large_model()).size(14.0)
+                                        ui.label(egui::RichText::new(lang_for_stt.ui_improving_with_large_model()).size(14.0 * s)
                                             .color(egui::Color32::from_rgb(100, 80, 140)));
                                     });
                                     ui.add_space(4.0);
@@ -7105,11 +7155,11 @@ impl eframe::App for ContextApp {
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     if !is_streaming {
-                                        if ui.button(egui::RichText::new(lang_for_stt.ui_copy()).size(14.0)).clicked() {
+                                        if ui.button(egui::RichText::new(lang_for_stt.ui_copy()).size(14.0 * s)).clicked() {
                                             do_copy = true;
                                         }
                                         ui.add_space(8.0);
-                                        if ui.button(egui::RichText::new(format!("\u{1F50A} {}", lang_for_stt.ui_read_aloud())).size(14.0)).clicked() {
+                                        if ui.button(egui::RichText::new(format!("\u{1F50A} {}", lang_for_stt.ui_read_aloud())).size(14.0 * s)).clicked() {
                                             tts::speak_word(&text_clone);
                                         }
                                         ui.add_space(8.0);
@@ -7118,13 +7168,13 @@ impl eframe::App for ContextApp {
                                             && self.whisper_engine.is_some()
                                             && !self.improve_running
                                         {
-                                            if ui.button(egui::RichText::new(lang_for_stt.ui_improve_result()).size(14.0)).clicked() {
+                                            if ui.button(egui::RichText::new(lang_for_stt.ui_improve_result()).size(14.0 * s)).clicked() {
                                                 do_improve = true;
                                             }
                                             ui.add_space(8.0);
                                         }
                                     }
-                                    if ui.button(egui::RichText::new(lang_for_stt.ui_close()).size(14.0)).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_stt.ui_close()).size(14.0 * s)).clicked() {
                                         do_close = true;
                                     }
                                 });
@@ -7179,30 +7229,30 @@ impl eframe::App for ContextApp {
                 let grey = egui::Color32::from_rgb(100, 100, 100);
                 let dark = egui::Color32::from_rgb(50, 50, 50);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Bro:").size(11.0).strong().color(grey));
-                    ui.label(egui::RichText::new(self.manager.active_bridge_name()).size(11.0).color(dark));
+                    ui.label(egui::RichText::new("Bro:").size(11.0 * s).strong().color(grey));
+                    ui.label(egui::RichText::new(self.manager.active_bridge_name()).size(11.0 * s).color(dark));
                     ui.add_space(12.0);
-                    ui.label(egui::RichText::new("Ord:").size(11.0).strong().color(grey));
+                    ui.label(egui::RichText::new("Ord:").size(11.0 * s).strong().color(grey));
                     ui.label(
                         egui::RichText::new(if self.context.word.is_empty() { "(tomt)" } else { &self.context.word })
-                            .size(13.0)
+                            .size(13.0 * s)
                             .color(egui::Color32::from_rgb(0, 70, 160)),
                     );
                 });
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("Setning:").size(11.0).strong().color(grey));
+                ui.label(egui::RichText::new("Setning:").size(11.0 * s).strong().color(grey));
                 ui.label(
                     egui::RichText::new(if self.context.sentence.is_empty() { "(tom)" } else { &self.context.sentence })
-                        .size(11.0)
+                        .size(11.0 * s)
                         .color(dark),
                 );
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("Maskert:").size(11.0).strong().color(grey));
+                ui.label(egui::RichText::new("Maskert:").size(11.0 * s).strong().color(grey));
                 let masked_text = self.context.masked_sentence.clone().unwrap_or_else(|| "(ingen)".to_string());
                 egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(&masked_text)
-                            .size(10.0)
+                            .size(10.0 * s)
                             .color(egui::Color32::from_rgb(80, 80, 80)),
                     );
                 });
@@ -7257,8 +7307,8 @@ impl eframe::App for ContextApp {
                         .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
                         .show(vp_ctx, |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                            let heading = 22.0_f32;
-                            let body = 18.0_f32;
+                            let heading = 22.0_f32 * s;
+                            let body = 18.0_f32 * s;
                             let label_color = egui::Color32::from_rgb(50, 50, 50);
                             let active_color = egui::Color32::from_rgb(0, 100, 180);
                             let on_color = egui::Color32::from_rgb(0, 130, 60);
@@ -7422,18 +7472,18 @@ impl eframe::App for ContextApp {
                                     ui.add_space(8.0);
 
                                     if is_active {
-                                        ui.label(egui::RichText::new("(aktiv)").size(14.0).color(on_color));
+                                        ui.label(egui::RichText::new("(aktiv)").size(14.0 * s).color(on_color));
                                     } else if is_cached {
                                         // Already downloaded — offer to activate
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("Aktiver").size(15.0)
+                                            egui::RichText::new("Aktiver").size(15.0 * s)
                                         )).clicked() {
                                             switch_to_language = Some(lang.code.to_string());
                                         }
                                     } else {
                                         // Not downloaded — offer to download + activate
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("Last ned").size(15.0)
+                                            egui::RichText::new("Last ned").size(15.0 * s)
                                         )).clicked() {
                                             switch_to_language = Some(lang.code.to_string());
                                         }
@@ -7448,14 +7498,14 @@ impl eframe::App for ContextApp {
                                 ui.separator();
                                 ui.add_space(12.0);
                                 for err in &load_errors {
-                                    ui.label(egui::RichText::new(err).size(16.0)
+                                    ui.label(egui::RichText::new(err).size(16.0 * s)
                                         .color(egui::Color32::from_rgb(200, 50, 50)));
                                 }
                             }
 
                             ui.add_space(12.0);
                             ui.label(egui::RichText::new(format!("Bro: {}", bridge_name))
-                                .size(14.0).color(off_color));
+                                .size(14.0 * s).color(off_color));
                             }); // end ScrollArea
                         });
                 },
@@ -7563,7 +7613,7 @@ impl eframe::App for ContextApp {
                         .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(12.0))
                         .show(vp_ctx, |ui| {
                             ui.label(egui::RichText::new(lang_for_dict.ui_words_you_added())
-                                .size(14.0).color(egui::Color32::from_rgb(30, 30, 30)));
+                                .size(14.0 * s).color(egui::Color32::from_rgb(30, 30, 30)));
                             ui.add_space(4.0);
 
                             ui.horizontal(|ui| {
@@ -7589,12 +7639,12 @@ impl eframe::App for ContextApp {
 
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 if words.is_empty() {
-                                    ui.label(egui::RichText::new(lang_for_dict.ui_no_words_added()).size(11.0)
+                                    ui.label(egui::RichText::new(lang_for_dict.ui_no_words_added()).size(11.0 * s)
                                         .color(egui::Color32::from_rgb(140, 140, 140)));
                                 }
                                 for w in &words {
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(w).size(13.0));
+                                        ui.label(egui::RichText::new(w).size(13.0 * s));
                                         if ui.small_button(lang_for_dict.ui_remove()).clicked() {
                                             word_to_remove = Some(w.clone());
                                         }
@@ -7677,21 +7727,21 @@ impl eframe::App for ContextApp {
                         .show(vp_ctx, |ui| {
                             ui.label(
                                 egui::RichText::new(lang_for_ocr.ui_text_found_in_screenshot())
-                                    .size(14.0)
+                                    .size(14.0 * s)
                                     .color(egui::Color32::from_rgb(30, 30, 30))
                             );
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_read_text()).size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_read_text()).size(13.0 * s)).clicked() {
                                     do_read = true;
                                 }
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_copy_text()).size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_copy_text()).size(13.0 * s)).clicked() {
                                     do_copy = true;
                                 }
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_math()).size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_math()).size(13.0 * s)).clicked() {
                                     do_math = true;
                                 }
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_cancel()).size(13.0)).clicked() {
+                                if ui.button(egui::RichText::new(lang_for_ocr.ui_cancel()).size(13.0 * s)).clicked() {
                                     do_dismiss = true;
                                 }
                             });
