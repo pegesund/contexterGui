@@ -293,6 +293,8 @@ pub(crate) struct WritingError {
     pub(crate) paragraph_id: String,
     /// The specific trigger word for grammar errors (what gets underlined)
     pub(crate) error_word: String,
+    /// Top spelling candidates (for inline display next to the best suggestion)
+    pub(crate) top_candidates: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -1689,7 +1691,7 @@ impl ContextApp {
                     doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(),
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(), top_candidates: vec![],
                 });
             }
             return;
@@ -1850,7 +1852,7 @@ impl ContextApp {
             doc_offset,
             position: 0,
             ignored: false,
-            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(),
+            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(), top_candidates: vec![],
         });
         if !best.is_empty() {
             log!("Spelling: '{}' → '{}' (unified pipeline, bert_pending={})", clean, best, has_pending_bert);
@@ -2210,7 +2212,7 @@ impl ContextApp {
                     doc_offset: pending.doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(),
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(), top_candidates: vec![],
                 });
             }
         }
@@ -3367,7 +3369,7 @@ impl ContextApp {
                 doc_offset: 0,
                 position: 0,
                 ignored: false,
-                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(),
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(), top_candidates: vec![],
             });
         }
 
@@ -3852,7 +3854,7 @@ impl ContextApp {
                     ignored: false,
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                     paragraph_id: c.paragraph_id.clone(),
-                    error_word: error_word.clone(),
+                    error_word: error_word.clone(), top_candidates: vec![],
                 });
 
                 for b in &self.manager.bridges {
@@ -3958,7 +3960,7 @@ impl ContextApp {
                             doc_offset: resp.doc_offset,
                             position: i,
                             ignored: false,
-                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
+                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(), top_candidates: vec![],
                         });
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
@@ -3978,7 +3980,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(), top_candidates: vec![],
                     });
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
@@ -4024,6 +4026,12 @@ impl ContextApp {
                     && !e.ignored
                 });
                 if !already_exists {
+                    // Collect top 5 alternative candidates (excluding the best pick)
+                    let top5: Vec<String> = unk.spelling_suggestions.iter()
+                        .skip(1)
+                        .take(5)
+                        .cloned()
+                        .collect();
                     self.writing_errors.push(WritingError {
                         category: ErrorCategory::Spelling,
                         word: unk.word.clone(),
@@ -4034,7 +4042,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: unk.position,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(), top_candidates: top5,
                     });
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
@@ -5985,13 +5993,25 @@ impl eframe::App for ContextApp {
                 }
 
 
-                // --- Error count (on Grammatikk tab) ---
+                // --- Error count + AI fix button (on Grammatikk tab) ---
                 if self.selected_tab == 1 {
-                    let err_count = self.writing_errors.iter().filter(|e| !e.ignored).count();
+                    let err_count = self.writing_errors.iter()
+                        .filter(|e| !e.ignored && e.rule_name != "llm_correction")
+                        .count();
                     if err_count > 0 {
-                        ui.add_space(12.0);
+                        ui.add_space(8.0);
                         ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
+                        if !self.llm_waiting {
+                            if ui.add(egui::Label::new(
+                                egui::RichText::new("✨").size(14.0 * s)
+                                    .color(egui::Color32::from_rgb(0, 120, 220))
+                            ).sense(egui::Sense::click()))
+                            .on_hover_text(self.language.ui_ai_fix_all())
+                            .clicked() {
+                                self.dispatch_llm_fix_all();
+                            }
+                        }
                     }
                 }
 
@@ -6277,10 +6297,9 @@ impl eframe::App for ContextApp {
                             .color(egui::Color32::from_rgb(0, 140, 60)),
                     );
                 } else {
-
-                    // AI fix-all button + spinner
-                    ui.horizontal(|ui| {
-                        if self.llm_waiting {
+                    // AI spinner shown inline when waiting
+                    if self.llm_waiting {
+                        ui.horizontal(|ui| {
                             let elapsed = self.llm_waiting_since.elapsed().as_secs();
                             let phases = ["🔄", "🔃"];
                             let phase = phases[(elapsed as usize) % phases.len()];
@@ -6293,22 +6312,11 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(self.language.ui_ai_correcting_seconds(elapsed))
                                 .size(12.0 * s).strong().color(pulse));
                             ctx.request_repaint_after(Duration::from_millis(500));
-                        } else {
-                            let err_count = self.writing_errors.iter()
-                                .filter(|e| !e.ignored && e.rule_name != "llm_correction")
-                                .count();
-                            if err_count > 0 {
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new(self.language.ui_ai_fix_all()).size(11.0 * s)
-                                ).min_size(egui::vec2(0.0, 18.0))).clicked() {
-                                    self.dispatch_llm_fix_all();
-                                }
-                            }
-                        }
-                    });
-                    ui.add_space(2.0);
+                        });
+                    }
 
                     let mut action: Option<(usize, &str)> = None;
+                    let mut clicked_candidate: Option<(usize, String)> = None;
 
                     // Group grammar errors by (sentence_context, doc_offset)
                     let mut shown_contexts: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
@@ -6457,24 +6465,18 @@ impl eframe::App for ContextApp {
                                     }
                                 }
                             } else {
-                                // Spelling error — buttons on top, then word/suggestion stacked
-                                let err_suggestion = error.suggestion.clone();
+                                // Spelling error — compact layout:
+                                // Row 1: buttons (👎 + ? ▶)
+                                // Row 2: 🔊 misspelled word (red)
+                                // Row 3+: two columns — 🔊 best pick (left) | 🔊 alternatives (right)
                                 let err_word = error.word.clone();
+                                // Buttons + misspelled word on same row
                                 ui.horizontal(|ui| {
-                                    if !error.suggestion.is_empty() {
-                                        if icon_button(ui, "👍", self.language.ui_fix()) {
-                                            action = Some((idx, "fix"));
-                                        }
-                                    }
                                     if icon_button(ui, "👎", self.language.ui_ignore()) {
                                         action = Some((idx, "ignore"));
                                     }
                                     if icon_button(ui, "+", self.language.ui_add_to_dictionary()) {
                                         action = Some((idx, "add_to_dict"));
-                                    }
-                                    if icon_button(ui, "🔊", self.language.ui_read_aloud()) {
-                                        let speak = if !err_suggestion.is_empty() { &err_suggestion } else { &err_word };
-                                        tts::speak_word(speak);
                                     }
                                     if icon_button(ui, "?", self.language.ui_more_suggestions()) {
                                         action = Some((idx, "suggest"));
@@ -6482,28 +6484,67 @@ impl eframe::App for ContextApp {
                                     if icon_button(ui, "▶", self.language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
-                                });
-                                ui.label(
-                                    egui::RichText::new(&error.word)
-                                        .size(12.0 * s)
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(200, 40, 40)),
-                                );
-                                if !error.suggestion.is_empty() {
+                                    ui.add_space(8.0 * s);
+                                    if ui.add(egui::Label::new(
+                                        egui::RichText::new("🔊").size(9.0 * s)
+                                            .color(egui::Color32::from_rgb(150, 150, 150))
+                                    ).sense(egui::Sense::click())).clicked() {
+                                        tts::speak_word(&err_word);
+                                    }
                                     ui.label(
-                                        egui::RichText::new(&error.suggestion)
+                                        egui::RichText::new(&error.word)
                                             .size(12.0 * s)
                                             .strong()
-                                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                                            .color(egui::Color32::from_rgb(200, 40, 40)),
                                     );
-                                }
-                                // Skip raw explanation for LLM corrections (shown in 💡 diff view)
-                                if error.rule_name != "llm_correction" {
-                                    ui.label(
-                                        egui::RichText::new(&error.explanation)
-                                            .size(10.0 * s)
-                                            .color(egui::Color32::from_rgb(80, 80, 80)),
-                                    );
+                                });
+                                // Two columns: best suggestion (left) + alternatives (right)
+                                // Each word has a 🔊 icon and is clickable to apply as fix
+                                if !error.suggestion.is_empty() || !error.top_candidates.is_empty() {
+                                    let best = error.suggestion.clone();
+                                    let candidates_cloned: Vec<String> = error.top_candidates.iter()
+                                        .filter(|c| c.to_lowercase() != best.to_lowercase())
+                                        .cloned()
+                                        .collect();
+                                    ui.columns(2, |cols| {
+                                        // Column 1: 🔊 best pick
+                                        if !best.is_empty() {
+                                            cols[0].horizontal(|ui| {
+                                                if ui.add(egui::Label::new(
+                                                    egui::RichText::new("🔊").size(9.0 * s)
+                                                        .color(egui::Color32::from_rgb(100, 160, 100))
+                                                ).sense(egui::Sense::click())).clicked() {
+                                                    tts::speak_word(&best);
+                                                }
+                                                if ui.add(egui::Label::new(
+                                                    egui::RichText::new(&best)
+                                                        .size(13.0 * s)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(0, 120, 60))
+                                                ).sense(egui::Sense::click())).clicked() {
+                                                    clicked_candidate = Some((idx, best.clone()));
+                                                }
+                                            });
+                                        }
+                                        // Column 2: 🔊 alternatives stacked vertically
+                                        for cand in &candidates_cloned {
+                                            cols[1].horizontal(|ui| {
+                                                if ui.add(egui::Label::new(
+                                                    egui::RichText::new("🔊").size(9.0 * s)
+                                                        .color(egui::Color32::from_rgb(120, 140, 180))
+                                                ).sense(egui::Sense::click())).clicked() {
+                                                    tts::speak_word(cand);
+                                                }
+                                                if ui.add(egui::Label::new(
+                                                    egui::RichText::new(cand)
+                                                        .size(11.0 * s)
+                                                        .color(egui::Color32::from_rgb(80, 120, 160))
+                                                ).sense(egui::Sense::click())).clicked() {
+                                                    clicked_candidate = Some((idx, cand.clone()));
+                                                }
+                                            });
+                                        }
+                                    });
                                 }
                             }
                         });
@@ -6514,15 +6555,21 @@ impl eframe::App for ContextApp {
                     }
                     }); // end ScrollArea
 
+                    // Apply clicked candidate (deferred to avoid borrow conflict)
+                    if let Some((idx, cand)) = clicked_candidate {
+                        self.writing_errors[idx].suggestion = cand;
+                        action = Some((idx, "fix"));
+                    }
+
                     // Handle actions after rendering
                     if let Some((idx, act)) = action {
                         log!("ACTION received: act='{}' idx={}", act, idx);
                         // Clear pin when user acts on any error
-                        if matches!(act, "fix" | "ignore" | "ignore_group") {
+                        if matches!(act, "fix" | "fix_candidate" | "ignore" | "ignore_group") {
                             self.writing_errors[idx].pinned = false;
                         }
                         match act {
-                            "fix" => {
+                            "fix" | "fix_candidate" => {
                                 let error = &self.writing_errors[idx];
                                 let suggestion = error.suggestion.clone();
                                 let word = error.word.clone();
