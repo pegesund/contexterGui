@@ -3633,9 +3633,13 @@ impl ContextApp {
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
 
-                    if self.processed_sentence_hashes.contains(&sent_h)
-                        || self.grammar_inflight.contains(&sent_h) {
-                        continue; // Already processed or in-flight, skip
+                    if self.processed_sentence_hashes.contains(&sent_h) {
+                        log!("  SKIP processed: '{}'", trunc(sentence_text, 50));
+                        continue;
+                    }
+                    if self.grammar_inflight.contains(&sent_h) {
+                        log!("  SKIP inflight: '{}'", trunc(sentence_text, 50));
+                        continue;
                     }
 
                     // This sentence is new or changed — clear old errors (underlines stay if word still exists)
@@ -3861,6 +3865,7 @@ impl ContextApp {
 
     /// Poll grammar actor for results and create WritingErrors.
     fn poll_grammar_responses(&mut self) {
+        let t_poll_start = Instant::now();
         let actor = match &self.grammar_actor {
             Some(a) => a,
             None => return,
@@ -4037,6 +4042,9 @@ impl ContextApp {
             // Stale underlines from previous sessions are cleared at app startup
             // via AppleScript (set underline of font to underline none).
         }
+        if t_poll_start.elapsed().as_millis() > 5 {
+            log!("poll_grammar_responses took {:?}", t_poll_start.elapsed());
+        }
 
         // BERT re-rank spelling suggestions from grammar checker
         if self.bert_ready {
@@ -4059,7 +4067,9 @@ impl ContextApp {
                         continue;
                     }
                 }
+                let t_spell = Instant::now();
                 let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
+                log!("find_spelling_suggestions('{}') took {:?}, {} candidates", word, t_spell.elapsed(), suggestions.len());
                 // Pick best ortho+dict candidate (grammar filtering happens async in BERT worker)
                 if let Some((best, score)) = suggestions.first().cloned() {
                     if !best.is_empty() {

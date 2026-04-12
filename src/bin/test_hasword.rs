@@ -2,16 +2,17 @@ fn main() {
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dict = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
     let analyzer = mtag::Analyzer::new(dict.to_str().unwrap()).expect("load");
-    
-    let words = vec!["spilflfler", "fotcaball", "fotaaball", "spilller", "spiiller",
-                     "fotiball", "tets", "skrivver", "fotball", "spiller",
-                     "spillflir", "spillflør", "fotaball", "fotoaball"];
+    let fst = acatts_rust::compound_walker::load_fst_from_mfst(dict.to_str().unwrap()).unwrap();
+
+    let words = vec!["spilflfler", "fotcaball", "fotaaball", "karrierekompasset",
+                     "maskinlæringsalgoritme", "fotball", "spiller", "hus"];
     for w in &words {
+        let t = std::time::Instant::now();
+        let results = acatts_rust::compound_walker::compound_fuzzy_walk(
+            &fst, w, &language::BokmalLanguage, None, None, None);
+        let elapsed = t.elapsed();
+        let exact = results.iter().any(|r| r.total_edits == 0);
         let has = analyzer.has_word(w);
-        let readings = analyzer.dict_lookup(w);
-        let count = readings.as_ref().map_or(0, |r| r.len());
-        let normert = readings.as_ref().map_or(false, |rs| 
-            rs.iter().any(|r| r.tags.contains(&mtag::types::Tag::Normert)));
-        println!("{:15} has_word={:5} readings={} normert={}", w, has, count, normert);
+        println!("{:30} has_word={:5} compound={:5} results={:3} {:?}", w, has, exact, results.len(), elapsed);
     }
 }
