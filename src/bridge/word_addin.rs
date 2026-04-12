@@ -89,15 +89,15 @@ impl WordAddinBridge {
                 let cert_path = addin_dir.join("fullchain.pem");
                 let key_path = addin_dir.join("key.pem");
 
-                // Build native-tls acceptor (uses macOS SecureTransport)
-                let tls_acceptor = if PORT == 3000 {
-                    load_native_tls(&cert_path, &key_path)
+                // Build rustls config (pure Rust TLS — no macOS Keychain prompts)
+                let tls_config = if PORT == 3000 {
+                    load_rustls(&cert_path, &key_path)
                 } else {
                     None
                 };
 
-                if tls_acceptor.is_some() {
-                    eprintln!("Word Add-in HTTPS bridge (native-tls) listening on port {}", PORT);
+                if tls_config.is_some() {
+                    eprintln!("Word Add-in HTTPS bridge (rustls) listening on port {}", PORT);
                 } else {
                     eprintln!("Word Add-in HTTP bridge (no TLS certs) on port {}", PORT);
                 }
@@ -114,8 +114,6 @@ impl WordAddinBridge {
                 let html = std::fs::read_to_string(addin_dir.join("taskpane.html")).unwrap_or_default();
                 let js = std::fs::read_to_string(addin_dir.join("taskpane.js")).unwrap_or_default();
 
-                let tls_acceptor = tls_acceptor.map(Arc::new);
-
                 for stream in listener.incoming() {
                     if let Ok(tcp_stream) = stream {
                         let peer = tcp_stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
@@ -129,13 +127,15 @@ impl WordAddinBridge {
                         let pending_switch = Arc::clone(&pending_switch_clone);
                         let rescan_flag = Arc::clone(&rescan_sent_clone);
                         let errors = Arc::clone(&errors_clone);
-                        let tls = tls_acceptor.clone();
+                        let tls_cfg = tls_config.clone();
                         let html = html.clone();
                         let js = js.clone();
                         std::thread::spawn(move || {
-                            if let Some(ref acceptor) = tls {
-                                match acceptor.accept(tcp_stream) {
-                                    Ok(mut tls_stream) => {
+                            if let Some(ref cfg) = tls_cfg {
+                                let acceptor = rustls::ServerConnection::new(Arc::clone(cfg));
+                                match acceptor {
+                                    Ok(conn) => {
+                                        let mut tls_stream = rustls::StreamOwned::new(conn, tcp_stream);
                                         log_to_file("TLS handshake OK");
                                         handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js);
                                     }
@@ -696,6 +696,27 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
+        // Event-based activation: commands.html + commands.js for OnDocumentOpened
+        ("GET", path) if path.starts_with("/commands.html") => {
+            let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
+            let content = std::fs::read_to_string(addin_dir.join("commands.html")).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: text/html; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
+                cors, content.len(), content
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("GET", path) if path.starts_with("/commands.js") => {
+            let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
+            let content = std::fs::read_to_string(addin_dir.join("commands.js")).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
+                cors, content.len(), content
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
         _ => {
             let response = format!("HTTP/1.1 404 Not Found\r\n{}\r\n", cors);
             let _ = stream.write_all(response.as_bytes());
@@ -703,22 +724,39 @@ fn handle_request_rw<S: Read + Write>(
     }
 }
 
-/// Load TLS identity from PEM cert+key files, build a native-tls acceptor.
-/// native-tls uses macOS SecureTransport — same TLS backend as Python's ssl module.
-fn load_native_tls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<native_tls::TlsAcceptor> {
+/// Load TLS cert+key from PEM files and build a rustls ServerConfig.
+/// rustls is pure Rust — no macOS Keychain involvement, no password prompts.
+fn load_rustls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<Arc<rustls::ServerConfig>> {
+    // Install ring as the crypto provider (must happen before any rustls use)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cert_pem = std::fs::read(cert_path).ok()?;
     let key_pem = std::fs::read(key_path).ok()?;
 
-    // native-tls on macOS needs PKCS#12 format — convert PEM cert+key to PKCS#12
-    let identity = native_tls::Identity::from_pkcs8(&cert_pem, &key_pem)
-        .map_err(|e| eprintln!("native-tls Identity error: {}", e))
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &cert_pem[..])
+            .filter_map(|r| r.ok())
+            .collect();
+    if certs.is_empty() {
+        eprintln!("rustls: no certificates found in {}", cert_path.display());
+        return None;
+    }
+
+    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        .ok()
+        .flatten()
+        .or_else(|| {
+            eprintln!("rustls: no private key found in {}", key_path.display());
+            None
+        })?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| eprintln!("rustls ServerConfig error: {}", e))
         .ok()?;
 
-    let acceptor = native_tls::TlsAcceptor::new(identity)
-        .map_err(|e| eprintln!("native-tls Acceptor error: {}", e))
-        .ok()?;
-
-    Some(acceptor)
+    Some(Arc::new(config))
 }
 
 /// Clean Word special characters from text.
