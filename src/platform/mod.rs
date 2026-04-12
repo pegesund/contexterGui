@@ -99,11 +99,11 @@ pub trait PlatformServices: Send + Sync {
     /// Called every frame with the current and previous foreground app state.
     /// Returns true if errors should be cleared (e.g. switched from Word to Browser).
     /// Each platform implements its own focus-transition logic.
-    fn should_clear_errors_on_switch(&self, current: &ForegroundApp, prev_word_title: &str) -> bool {
-        let kind = self.classify_app(current);
-        let was_word = !prev_word_title.is_empty();
-        // Default: clear when transitioning FROM Word TO Browser
-        kind == AppKind::Browser && was_word
+    fn should_clear_errors_on_switch(&self, _current: &ForegroundApp, _prev_word_title: &str) -> bool {
+        // Disabled: aggressive clearing on app switch causes errors to
+        // disappear when focus bounces briefly to another app. Errors are
+        // now cleared per-paragraph when text changes, not on app switch.
+        false
     }
 
     /// Whether caret_screen_position returns physical pixels (true on Windows)

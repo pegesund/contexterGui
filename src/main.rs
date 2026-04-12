@@ -1303,6 +1303,11 @@ impl ContextApp {
     /// Reset all error/spelling/grammar state when the user switches to a
     /// different app or document, so stale results don't bleed across contexts.
     fn clear_for_app_switch(&mut self) {
+        for e in &self.writing_errors {
+            if e.underlined {
+                self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+            }
+        }
         self.writing_errors.clear();
         self.context = Default::default();
         self.spelling_queue.clear();
@@ -1318,6 +1323,13 @@ impl ContextApp {
         self.paragraph_sentence_hashes.clear();
         self.grammar_inflight.clear();
         self.manager.clear_context();
+    }
+
+    /// Remove writing errors matching a predicate, automatically clearing
+    /// underlines in Word for any removed error. ALL error removal MUST go
+    /// through this method — never call writing_errors.retain() directly.
+    fn retain_errors(&mut self, keep: impl Fn(&WritingError) -> bool) {
+        retain_errors_impl(&mut self.writing_errors, &self.manager, keep);
     }
 
     fn new(
@@ -2877,7 +2889,7 @@ impl ContextApp {
                 e.underlined = false;
             }
         }
-        self.writing_errors.retain(|e| {
+        retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
             if e.ignored {
                 log!("Pruning ignored: {:?} '{}'", e.category, trunc(&e.word, 40));
                 return false;
@@ -2923,7 +2935,7 @@ impl ContextApp {
                     }
                 }
                 // Remove errors for this paragraph
-                self.writing_errors.retain(|e| e.paragraph_id != *old_id);
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| e.paragraph_id != *old_id);
             }
         }
 
@@ -2950,7 +2962,7 @@ impl ContextApp {
             }
 
             // Remove stale errors for this paragraph
-            self.writing_errors.retain(|e| {
+            retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                 if e.paragraph_id == *para_id { return false; }
                 // Also remove errors whose sentence is no longer in this paragraph
                 if e.doc_offset >= *char_start && e.doc_offset < char_start + text.len() {
@@ -3031,7 +3043,7 @@ impl ContextApp {
                 if let Some(hashes) = self.paragraph_sentence_hashes.remove(id) {
                     for h in hashes { self.processed_sentence_hashes.remove(&h); }
                 }
-                self.writing_errors.retain(|e| e.paragraph_id != *id);
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| e.paragraph_id != *id);
             }
         }
 
@@ -3070,23 +3082,15 @@ impl ContextApp {
         // Clear stale errors for this paragraph — also clear their underlines
         let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
         let para_text_lower = clean_text.to_lowercase();
-        let mut to_clear: Vec<(usize, usize)> = Vec::new();
-        self.writing_errors.retain(|e| {
+        // retain_errors_impl handles underline clearing automatically
+        retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
             if e.paragraph_id != para_id { return true; }
             if new_sentence_set.contains(&e.sentence_context.to_lowercase()) { return true; }
             if matches!(e.category, ErrorCategory::Spelling) {
                 if para_text_lower.contains(&e.word.to_lowercase()) { return true; }
             }
-            // Removing this error — clear its underline
-            if e.underlined && e.word_doc_start < e.word_doc_end {
-                to_clear.push((e.word_doc_start, e.word_doc_end));
-            }
             false
         });
-        for (start, end) in &to_clear {
-            log!("Clearing underline {}..{} (error removed from paragraph)", start, end);
-            self.manager.clear_error_underline(*start, *end);
-        }
 
         // Send new/changed sentences to grammar actor
         // Compute per-sentence offsets within the paragraph
@@ -3117,7 +3121,7 @@ impl ContextApp {
 
                 // Clear errors for this changed sentence
                 let sentence_lower = sentence_text.to_lowercase();
-                self.writing_errors.retain(|e| {
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                     !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
                 });
 
@@ -3209,11 +3213,12 @@ impl ContextApp {
             // On any doc change, prune errors whose text is no longer in the document
             // and clear sentence hashes so those sentences get re-scanned
             let doc_lower = doc_text.to_lowercase();
-            let mut pruned_contexts2: Vec<String> = Vec::new();
-            self.writing_errors.retain(|e| {
-                let keep = doc_lower.contains(&e.word.to_lowercase());
-                if !keep { pruned_contexts2.push(e.sentence_context.clone()); }
-                keep
+            let pruned_contexts2: Vec<String> = self.writing_errors.iter()
+                .filter(|e| !doc_lower.contains(&e.word.to_lowercase()))
+                .map(|e| e.sentence_context.clone())
+                .collect();
+            retain_errors_impl(&mut self.writing_errors, &self.manager, |e| {
+                doc_lower.contains(&e.word.to_lowercase())
             });
             for ctx in &pruned_contexts2 {
                 self.processed_sentence_hashes.remove(&hash_str(ctx));
@@ -3337,7 +3342,7 @@ impl ContextApp {
             }
         }
         // Remove errors marked for removal and clear their sentence hashes for rescan
-        self.writing_errors.retain(|e| !e.word.is_empty());
+        retain_errors_impl(&mut self.writing_errors, &self.manager,|e| !e.word.is_empty());
         for ctx in &stale_sentences {
             self.processed_sentence_hashes.remove(&hash_str(ctx));
         }
@@ -3613,24 +3618,17 @@ impl ContextApp {
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
-                // Collect underlines to clear BEFORE removing errors
-                let words_to_clear: Vec<(String, String)> = self.writing_errors.iter()
-                    .filter(|e| {
-                        if e.paragraph_id != p.paragraph_id { return false; }
-                        let e_sent_lower = e.sentence_context.to_lowercase();
-                        if new_sentence_set.contains(&e_sent_lower) { return false; }
-                        if matches!(e.category, ErrorCategory::Spelling) {
-                            let word_lower = e.word.to_lowercase();
-                            if para_text_lower.contains(&word_lower) { return false; }
-                        }
-                        true // this error will be removed
-                    })
-                    .map(|e| (e.word.clone(), e.paragraph_id.clone()))
-                    .collect();
-                // Clear underlines in Word for removed errors
-                for (word, para_id) in &words_to_clear {
-                    self.manager.clear_underline_word(word, para_id);
+                // Clear ALL underlines for this paragraph first — the word text
+                // may have changed so per-word clear can't find the old word.
+                // We'll re-apply underlines for remaining errors after.
+                self.manager.clear_paragraph_underlines(&p.paragraph_id);
+                // Mark all errors in this paragraph as not underlined
+                for e in &mut self.writing_errors {
+                    if e.paragraph_id == p.paragraph_id {
+                        e.underlined = false;
+                    }
                 }
+                // Remove stale errors
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     let e_sent_lower = e.sentence_context.to_lowercase();
@@ -3644,6 +3642,15 @@ impl ContextApp {
                         new_sentence_set.iter().take(3).map(|s| trunc(s, 40)).collect::<Vec<_>>());
                     false
                 });
+                // Re-apply underlines for errors that survived
+                for e in &mut self.writing_errors {
+                    if e.paragraph_id == p.paragraph_id && !e.underlined && !e.ignored {
+                        let color = if matches!(e.category, ErrorCategory::Grammar) { "#0000FF" } else { "#FF0000" };
+                        let word = if e.error_word.is_empty() { &e.word } else { &e.error_word };
+                        self.manager.underline_word(word, &e.paragraph_id, color);
+                        e.underlined = true;
+                    }
+                }
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
                 }
@@ -3662,7 +3669,7 @@ impl ContextApp {
 
                     // This sentence is new or changed — clear old errors (underlines stay if word still exists)
                     let sentence_lower = sentence_text.to_lowercase();
-                    self.writing_errors.retain(|e| {
+                    retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                         !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
@@ -3673,6 +3680,11 @@ impl ContextApp {
                         uw.extend(email_skip_words.iter().cloned());
                         actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
                         self.grammar_inflight.insert(sent_h);
+                    } else if !is_complete {
+                        // Incomplete sentence — queue for delayed check (1s after last change)
+                        self.pending_incomplete_sentence = Some((
+                            sentence_text.to_string(), p.paragraph_id.clone(), Instant::now()
+                        ));
                     }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
@@ -3693,7 +3705,7 @@ impl ContextApp {
                         self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     }
                 }
-                self.writing_errors.retain(|e| e.paragraph_id != para_id);
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| e.paragraph_id != para_id);
                 if self.writing_errors.len() < before {
                     log!("Cleared {} errors for deleted para={}", before - self.writing_errors.len(), trunc(&para_id, 10));
                 }
@@ -3843,7 +3855,7 @@ impl ContextApp {
                         self.manager.clear_underline_word(w, &e.paragraph_id);
                     }
                 }
-                self.writing_errors.retain(|e| {
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                     !(e.paragraph_id == c.paragraph_id
                         && e.sentence_context.to_lowercase() == c.original.to_lowercase())
                 });
@@ -3865,7 +3877,7 @@ impl ContextApp {
                     doc_offset: 0,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false,
                     paragraph_id: c.paragraph_id.clone(),
                     error_word: error_word.clone(),
                 });
@@ -3972,7 +3984,7 @@ impl ContextApp {
                             doc_offset: resp.doc_offset,
                             position: i,
                             ignored: false,
-                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
+                            word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(),
                         });
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
@@ -3992,7 +4004,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: 0,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(),
                     });
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
@@ -4007,7 +4019,22 @@ impl ContextApp {
                 .filter(|u| !self.analyzer.as_ref().map_or(false, |a| a.has_word(&u.word)))
                 .filter(|u| !self.wordfreq.as_ref().map_or(false, |wf| {
                     let freq = wf.get(&u.word.to_lowercase()).copied().unwrap_or(0);
-                    freq >= 1000 // Only skip high-frequency words — low-freq entries may be junk
+                    freq >= 1000
+                }))
+                // Skip valid compound words (foto+ball, data+maskin, etc.)
+                .filter(|u| !self.analyzer.as_ref().map_or(false, |a| {
+                    let w = u.word.to_lowercase();
+                    if w.len() < 5 { return false; }
+                    for i in 3..w.len().saturating_sub(2) {
+                        if !w.is_char_boundary(i) { continue; }
+                        let left = &w[..i];
+                        let right = &w[i..];
+                        if right.len() >= 3 && a.has_word(left) && a.has_word(right) { return true; }
+                        if right.starts_with('s') && right.len() > 3 {
+                            if a.has_word(left) && a.has_word(&right[1..]) { return true; }
+                        }
+                    }
+                    false
                 }))
             {
                 let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default()
@@ -4048,7 +4075,7 @@ impl ContextApp {
                         doc_offset: resp.doc_offset,
                         position: unk.position,
                         ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
+                        word_doc_start: 0, word_doc_end: 0, underlined: true, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(),
                     });
                     for b in &self.manager.bridges {
                         b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
@@ -4094,7 +4121,15 @@ impl ContextApp {
         }
 
         // BERT re-rank spelling suggestions from grammar checker
+        // Clean context: when scoring error X, replace all OTHER errors with their
+        // best-guess suggestion so BERT sees near-correct context.
         if self.bert_ready {
+            // Collect all spelling errors with their current suggestions
+            let all_spelling_errors: Vec<(String, String, String)> = self.writing_errors.iter()
+                .filter(|e| matches!(e.category, ErrorCategory::Spelling) && !e.ignored && !e.suggestion.is_empty())
+                .map(|e| (e.word.to_lowercase(), e.suggestion.clone(), e.sentence_context.clone()))
+                .collect();
+
             let to_rerank: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
                 .filter(|(_, e)| {
                     matches!(e.category, ErrorCategory::Spelling)
@@ -4102,7 +4137,20 @@ impl ContextApp {
                         && e.rule_name == "stavefeil"
                         && !e.sentence_context.is_empty()
                 })
-                .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
+                .map(|(i, e)| {
+                    // Build clean sentence: replace OTHER errors with their best suggestions
+                    let mut clean_ctx = e.sentence_context.clone();
+                    for (err_word, suggestion, _) in &all_spelling_errors {
+                        if *err_word != e.word.to_lowercase() && !suggestion.is_empty() {
+                            // Case-insensitive replacement
+                            let lower = clean_ctx.to_lowercase();
+                            if let Some(pos) = lower.find(err_word.as_str()) {
+                                clean_ctx = format!("{}{}{}", &clean_ctx[..pos], suggestion, &clean_ctx[pos + err_word.len()..]);
+                            }
+                        }
+                    }
+                    (i, e.word.clone(), clean_ctx)
+                })
                 .collect();
             for (idx, word, sentence_ctx) in to_rerank {
                 // Skip long words with close suggestions (compound words)
@@ -4431,6 +4479,16 @@ fn try_split_function_word(
 
 /// Generate single↔double consonant variants of a word.
 /// "spile" → ["spille"], "balle" → ["bale"], "skinn" → ["skin"], etc.
+/// Remove errors from list, clearing underlines for any removed error.
+fn retain_errors_impl(errors: &mut Vec<WritingError>, manager: &BridgeManager, keep: impl Fn(&WritingError) -> bool) {
+    for e in errors.iter() {
+        if !keep(e) && e.underlined {
+            manager.clear_underline_word(&e.word, &e.paragraph_id);
+        }
+    }
+    errors.retain(keep);
+}
+
 fn consonant_variants(word: &str) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
     let mut variants = Vec::new();
@@ -4664,12 +4722,18 @@ impl eframe::App for ContextApp {
 
             if now_word {
                 let title = fg.title.clone();
-                if !self.prev_word_title.is_empty() && title != self.prev_word_title {
+                // Only treat as doc switch when title changes to a DIFFERENT
+                // non-empty document. Empty title = transient state (focus bounce).
+                if !self.prev_word_title.is_empty() && !title.is_empty()
+                    && title != self.prev_word_title
+                {
                     log!("Word doc switch: '{}' → '{}' — clearing", self.prev_word_title, title);
                     self.clear_for_app_switch();
                     ctx.request_repaint();
                 }
-                self.prev_word_title = title;
+                if !title.is_empty() {
+                    self.prev_word_title = title;
+                }
             }
 
             self.suppress_errors = kind == platform::AppKind::Browser;
@@ -4840,7 +4904,7 @@ impl eframe::App for ContextApp {
                 }
                 // Remove the fixed error from the error list
                 let find_lower = find.to_lowercase();
-                self.writing_errors.retain(|e| {
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                     !(e.word.to_lowercase() == find_lower && e.doc_offset == doc_offset)
                 });
                 log!("  Removed error '{}' from list", find);
@@ -4871,7 +4935,7 @@ impl eframe::App for ContextApp {
                 // Remove the fixed error and adjust offsets of remaining errors
                 let find_lower = find.to_lowercase();
                 let len_delta = replace.chars().count() as isize - find.chars().count() as isize;
-                self.writing_errors.retain(|e| {
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                     !(e.word.to_lowercase() == find_lower && e.doc_offset == doc_offset)
                 });
                 // Shift doc_offset of errors after the fix point
@@ -4880,12 +4944,16 @@ impl eframe::App for ContextApp {
                         e.doc_offset = (e.doc_offset as isize + len_delta).max(0) as usize;
                     }
                 }
-                // Force rescan so Step 0 re-maps remaining errors to new offsets
+                // Force rescan: invalidate the sentence hash that contained the fixed word
                 self.last_doc_hash = 0;
-                self.processed_sentence_hashes.remove(&hash_str(&context));
+                // Hash key = "paragraph_id|sentence_text" — remove the OLD sentence
+                let para_id = &self.context.paragraph_id;
+                let old_hash = hash_str(&format!("{}|{}", para_id, context));
+                self.processed_sentence_hashes.remove(&old_hash);
+                // Also try without trailing punctuation
                 let stripped_ctx = context.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?').trim();
-                if !stripped_ctx.is_empty() && stripped_ctx != context {
-                    self.processed_sentence_hashes.remove(&hash_str(stripped_ctx));
+                if !stripped_ctx.is_empty() && stripped_ctx != context.as_str() {
+                    self.processed_sentence_hashes.remove(&hash_str(&format!("{}|{}", para_id, stripped_ctx)));
                 }
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
@@ -4962,7 +5030,7 @@ impl eframe::App for ContextApp {
                         // Retroactively remove spelling errors for words now found in wordfreq
                         if let Some(wf) = &self.wordfreq {
                             let before = self.writing_errors.len();
-                            self.writing_errors.retain(|e| {
+                            retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                                 !(matches!(e.category, ErrorCategory::Spelling) && wf.contains_key(&e.word.to_lowercase()))
                             });
                             let removed = before - self.writing_errors.len();
@@ -6578,7 +6646,7 @@ impl eframe::App for ContextApp {
                                         }
                                     }
                                 }
-                                self.writing_errors.retain(|e| {
+                                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                                     !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == word_lower)
                                 });
                                 // Force rescan so the word is no longer flagged
@@ -7662,7 +7730,7 @@ impl eframe::App for ContextApp {
                 }
                 self.userdict_new_word.clear();
                 let lower = w.to_lowercase();
-                self.writing_errors.retain(|e| {
+                retain_errors_impl(&mut self.writing_errors, &self.manager,|e| {
                     !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == lower)
                 });
                 // processed_sentence_hashes NOT cleared — only invalidate changed sentence
