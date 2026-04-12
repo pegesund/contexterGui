@@ -938,6 +938,8 @@ struct ContextApp {
     pending_fix: Option<(String, String, String, usize)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
+    /// Sentences from grammar responses pending consonant confusion analysis
+    pending_consonant_sentences: Vec<(String, String, usize)>,  // (sentence, para_id, doc_offset)
     /// Pending async BERT scoring for spelling re-ranking
     pending_spelling_bert: Vec<PendingSpellingBert>,
     /// Pending async BERT scoring for grammar correction ranking
@@ -1493,6 +1495,7 @@ impl ContextApp {
             llm_waiting_since: Instant::now(),
             pending_fix: None,
             pending_consonant_checks: Vec::new(),
+            pending_consonant_sentences: Vec::new(),
             pending_spelling_bert: Vec::new(),
             pending_grammar_bert: Vec::new(),
             pending_consonant_bert: Vec::new(),
@@ -4053,8 +4056,41 @@ impl ContextApp {
                 }
             }
 
+            // Queue this sentence for consonant confusion analysis (runs outside borrow)
+            self.pending_consonant_sentences.push((
+                resp.sentence.clone(), resp.paragraph_id.clone(), resp.doc_offset
+            ));
+
             // Stale underlines from previous sessions are cleared at app startup
             // via AppleScript (set underline of font to underline none).
+        }
+
+        // Consonant confusion check on known words from grammar responses
+        // (catches "tvill"→"tvil", "spill"→"spil" where both are valid dictionary words)
+        // Runs OUTSIDE the grammar_actor borrow to avoid borrow conflicts.
+        if self.bert_ready {
+            // Collect pending consonant tasks from recently processed grammar responses
+            let consonant_tasks: Vec<(String, Vec<String>, String, usize)> = if let Some(analyzer) = &self.analyzer {
+                self.pending_consonant_sentences.drain(..).flat_map(|(sentence, para_id, doc_offset)| {
+                    sentence.split_whitespace().filter_map(|w| {
+                        let clean = w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»')
+                            .to_lowercase();
+                        if clean.len() < 4 || !analyzer.has_word(&clean) { return None; }
+                        if self.writing_errors.iter().any(|e| e.word.to_lowercase() == clean && e.paragraph_id == para_id) { return None; }
+                        let variants = consonant_variants(&clean);
+                        let valid_alts: Vec<String> = variants.into_iter()
+                            .filter(|v| analyzer.has_word(v))
+                            .collect();
+                        if valid_alts.is_empty() { return None; }
+                        Some((clean, valid_alts, sentence.clone(), doc_offset))
+                    }).collect::<Vec<_>>()
+                }).collect()
+            } else {
+                vec![]
+            };
+            for (word, alts, sentence, offset) in consonant_tasks {
+                self.send_consonant_bert(&word, alts, &sentence, offset);
+            }
         }
 
         // BERT re-rank spelling suggestions from grammar checker
