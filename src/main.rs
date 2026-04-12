@@ -813,6 +813,8 @@ struct ContextApp {
     goto_freeze_until: Option<Instant>,
     /// Anchor position during Cmd+scroll zoom — forced back every frame
     zoom_anchor: Option<egui::Pos2>,
+    /// Measured content height from previous frame — used for auto-sizing window
+    last_content_height: f32,
     // Grammar checker (kept for main-thread dictionary lookups; SWI grammar ops go through actor)
     checker: Option<AnyChecker>,
     /// Direct analyzer reference for dictionary lookups (cloned from checker before actor takes it)
@@ -1411,6 +1413,7 @@ impl ContextApp {
             follow_cursor: true,
             goto_freeze_until: None,
             zoom_anchor: None,
+            last_content_height: 150.0,
             last_caret_pos: None,
             checker: None,
             analyzer,
@@ -5663,43 +5666,8 @@ impl eframe::App for ContextApp {
 
       } // end if !skip_processing
 
-        // Window sizing. Both window dimensions and text sizes scale by `s`,
-        // so proportions stay constant at any scale level.
-        let s = self.ui_scale;
-        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
-        let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
-
-        // Height: toolbar (~30) + content rows. Each row is ~20 at base scale.
-        // Use the actual row count to avoid empty space below.
-        let content_rows = if self.selected_tab == 0 {
-            let left = self.completions.len();
-            let right = self.open_completions.len();
-            let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
-            (left.max(right).max(errors) as f32).max(2.0).min(10.0)
-        } else {
-            10.0 // settings/grammar tabs: fixed height
-        };
-        let toolbar_h = 30.0 * s;
-        let row_h = 22.0 * s; // matches render_row's row_h (20-22 * s)
-        let win_h = if self.selected_tab >= 1 {
-            s * 250.0
-        } else {
-            toolbar_h + (content_rows + 1.0) * row_h
-        };
-        // Width: toolbar has ~10 icons/items, each ~24px at base scale.
-        // Ensure enough room at any scale.
-        let win_w = s * if self.selected_tab == 0 {
-            320.0
-        } else {
-            420.0
-        };
-
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-
         // Ctrl/Cmd + scroll wheel changes ui_scale.
-        // We don't use set_zoom_factor (it triggers OS window repositioning
-        // on macOS). Instead, ui_scale multiplies win_w/win_h and all text
-        // sizes via the `s` variable defined above.
+        // Process scroll FIRST so `s` has the updated value for everything below.
         let scroll_delta = ctx.input(|i| {
             if i.modifiers.ctrl || i.modifiers.command {
                 i.raw_scroll_delta.y
@@ -5711,6 +5679,32 @@ impl eframe::App for ContextApp {
             let step = if scroll_delta > 0.0 { 0.1 } else { -0.1 };
             self.ui_scale = (self.ui_scale + step).clamp(0.5, 2.5);
         }
+        let s = self.ui_scale;
+
+        // Window sizing. Simple formula: toolbar + rows * row_height.
+        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
+        let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
+
+        let win_w = s * if self.selected_tab == 0 {
+            320.0
+        } else {
+            420.0
+        };
+        let content_rows = if self.selected_tab == 0 {
+            // Completions tab: rows = max of left/right completion lists
+            let left = self.completions.len();
+            let right = self.open_completions.len();
+            left.max(right).max(1) as f32
+        } else if self.selected_tab == 1 {
+            // Grammar tab: each error card ≈ 4 rows (buttons + word + suggestion cols)
+            let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
+            (errors as f32 * 4.0).max(2.0).min(20.0)
+        } else {
+            10.0
+        };
+        let win_h = (s * (28.0 + content_rows * 20.0)).min(233.0 * s);
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
         // Scale all default text styles proportionally
         ctx.style_mut(|style| {
@@ -5735,8 +5729,10 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // Always update window size (even when unpinned, so Cmd+scroll works)
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+
         if self.follow_cursor && self.goto_freeze_until.is_none() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             if self.show_settings_window {
                 ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
             } else {
@@ -6506,41 +6502,44 @@ impl eframe::App for ContextApp {
                                         .filter(|c| c.to_lowercase() != best.to_lowercase())
                                         .cloned()
                                         .collect();
-                                    ui.columns(2, |cols| {
-                                        // Column 1: 🔊 best pick
+                                    ui.horizontal(|ui| {
+                                        // Left: 🔊 best pick
                                         if !best.is_empty() {
-                                            cols[0].horizontal(|ui| {
-                                                if ui.add(egui::Label::new(
-                                                    egui::RichText::new("🔊").size(9.0 * s)
-                                                        .color(egui::Color32::from_rgb(100, 160, 100))
-                                                ).sense(egui::Sense::click())).clicked() {
-                                                    tts::speak_word(&best);
-                                                }
-                                                if ui.add(egui::Label::new(
-                                                    egui::RichText::new(&best)
-                                                        .size(13.0 * s)
-                                                        .strong()
-                                                        .color(egui::Color32::from_rgb(0, 120, 60))
-                                                ).sense(egui::Sense::click())).clicked() {
-                                                    clicked_candidate = Some((idx, best.clone()));
-                                                }
-                                            });
+                                            if ui.add(egui::Label::new(
+                                                egui::RichText::new("🔊").size(9.0 * s)
+                                                    .color(egui::Color32::from_rgb(100, 160, 100))
+                                            ).sense(egui::Sense::click())).clicked() {
+                                                tts::speak_word(&best);
+                                            }
+                                            if ui.add(egui::Label::new(
+                                                egui::RichText::new(&best)
+                                                    .size(13.0 * s)
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(0, 120, 60))
+                                            ).sense(egui::Sense::click())).clicked() {
+                                                clicked_candidate = Some((idx, best.clone()));
+                                            }
                                         }
-                                        // Column 2: 🔊 alternatives stacked vertically
-                                        for cand in &candidates_cloned {
-                                            cols[1].horizontal(|ui| {
-                                                if ui.add(egui::Label::new(
-                                                    egui::RichText::new("🔊").size(9.0 * s)
-                                                        .color(egui::Color32::from_rgb(120, 140, 180))
-                                                ).sense(egui::Sense::click())).clicked() {
-                                                    tts::speak_word(cand);
-                                                }
-                                                if ui.add(egui::Label::new(
-                                                    egui::RichText::new(cand)
-                                                        .size(11.0 * s)
-                                                        .color(egui::Color32::from_rgb(80, 120, 160))
-                                                ).sense(egui::Sense::click())).clicked() {
-                                                    clicked_candidate = Some((idx, cand.clone()));
+                                        // Right: 🔊 alternatives stacked vertically
+                                        if !candidates_cloned.is_empty() {
+                                            ui.add_space(16.0 * s);
+                                            ui.vertical(|ui| {
+                                                for cand in &candidates_cloned {
+                                                    ui.horizontal(|ui| {
+                                                        if ui.add(egui::Label::new(
+                                                            egui::RichText::new("🔊").size(9.0 * s)
+                                                                .color(egui::Color32::from_rgb(120, 140, 180))
+                                                        ).sense(egui::Sense::click())).clicked() {
+                                                            tts::speak_word(cand);
+                                                        }
+                                                        if ui.add(egui::Label::new(
+                                                            egui::RichText::new(cand)
+                                                                .size(11.0 * s)
+                                                                .color(egui::Color32::from_rgb(80, 120, 160))
+                                                        ).sense(egui::Sense::click())).clicked() {
+                                                            clicked_candidate = Some((idx, cand.clone()));
+                                                        }
+                                                    });
                                                 }
                                             });
                                         }
