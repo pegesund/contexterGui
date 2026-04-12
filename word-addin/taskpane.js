@@ -22,6 +22,8 @@ var documentId = (Office.context && Office.context.document && Office.context.do
 
 // Paragraph tracking: paragraphId -> hash of full paragraph text
 var paragraphMap = {};
+var initialScanDone = false; // set true after first successful /changed POST
+var totalSent = 0;
 
 Office.onReady(function (info) {
     statusEl = document.getElementById("status");
@@ -256,7 +258,6 @@ function scheduleRescan() {
     }, 1000);
 }
 
-var totalSent = 0;
 function sendChangedParagraphs(changed) {
     totalSent += changed.length;
     fetch(BRIDGE_URL + "/changed", {
@@ -269,8 +270,28 @@ function sendChangedParagraphs(changed) {
         })
     }).then(function() {
         setStatus("Sendt " + totalSent + " avsnitt", "ok");
+        initialScanDone = true;
+        // Tag this document so the taskpane auto-opens next time.
+        // Once tagged, Word remembers it — the user never has to manually
+        // activate the add-in for this document again.
+        try {
+            Office.context.document.settings.set(
+                "Office.AutoShowTaskpaneWithDocument", true
+            );
+            Office.context.document.settings.saveAsync();
+        } catch(e) { /* ignore if not supported */ }
     }).catch(function (err) {
-        setStatus("Feil: " + (err.message || err), "err");
+        setStatus("Venter på NorskTale...", "err");
+        // App not running yet — retry initial scan after 2s.
+        // This handles the case where the add-in loads before the desktop
+        // app starts (common when Word remembers the taskpane from a previous
+        // session). The retry keeps going until the app accepts the POST.
+        if (!initialScanDone) {
+            setTimeout(function() {
+                setStatus("Prøver skanning på nytt...", "ok");
+                initialScan();
+            }, 2000);
+        }
     });
 }
 
