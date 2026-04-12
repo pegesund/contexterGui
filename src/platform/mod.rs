@@ -95,6 +95,17 @@ pub trait PlatformServices: Send + Sync {
     /// Horizontal offset in logical pixels from the caret to the app window.
     fn caret_offset_right(&self) -> f32 { 0.0 }
 
+    /// Determine if an app-switch event requires clearing stale errors.
+    /// Called every frame with the current and previous foreground app state.
+    /// Returns true if errors should be cleared (e.g. switched from Word to Browser).
+    /// Each platform implements its own focus-transition logic.
+    fn should_clear_errors_on_switch(&self, current: &ForegroundApp, prev_word_title: &str) -> bool {
+        let kind = self.classify_app(current);
+        let was_word = !prev_word_title.is_empty();
+        // Default: clear when transitioning FROM Word TO Browser
+        kind == AppKind::Browser && was_word
+    }
+
     /// Whether caret_screen_position returns physical pixels (true on Windows)
     /// or logical points (false on macOS). Controls whether DPI scaling is applied.
     fn caret_is_physical_pixels(&self) -> bool { true }

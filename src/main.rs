@@ -3610,14 +3610,28 @@ impl ContextApp {
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
-                // When a word is gone from the paragraph (user fixed it),
-                // its underline disappears with the word. No explicit clear needed.
+                // Collect underlines to clear BEFORE removing errors
+                let words_to_clear: Vec<(String, String)> = self.writing_errors.iter()
+                    .filter(|e| {
+                        if e.paragraph_id != p.paragraph_id { return false; }
+                        let e_sent_lower = e.sentence_context.to_lowercase();
+                        if new_sentence_set.contains(&e_sent_lower) { return false; }
+                        if matches!(e.category, ErrorCategory::Spelling) {
+                            let word_lower = e.word.to_lowercase();
+                            if para_text_lower.contains(&word_lower) { return false; }
+                        }
+                        true // this error will be removed
+                    })
+                    .map(|e| (e.word.clone(), e.paragraph_id.clone()))
+                    .collect();
+                // Clear underlines in Word for removed errors
+                for (word, para_id) in &words_to_clear {
+                    self.manager.clear_underline_word(word, para_id);
+                }
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
-                    // Exact sentence match — keep
                     let e_sent_lower = e.sentence_context.to_lowercase();
                     if new_sentence_set.contains(&e_sent_lower) { return true; }
-                    // For spelling errors: keep if the misspelled word is still in the paragraph
                     if matches!(e.category, ErrorCategory::Spelling) {
                         let word_lower = e.word.to_lowercase();
                         if para_text_lower.contains(&word_lower) { return true; }
@@ -4600,12 +4614,15 @@ impl eframe::App for ContextApp {
         {
             let fg = self.platform.foreground_app();
             let kind = self.platform.classify_app(&fg);
-            let now_browser = kind == platform::AppKind::Browser;
             let now_word = kind == platform::AppKind::Word;
 
-            if now_browser && !self.suppress_errors {
-                log!("Browser foreground — clearing stale errors");
+            // Platform-specific app-switch detection
+            if self.platform.should_clear_errors_on_switch(&fg, &self.prev_word_title)
+                && !self.suppress_errors
+            {
+                log!("App switch — clearing stale errors");
                 self.clear_for_app_switch();
+                self.prev_word_title.clear();
                 ctx.request_repaint();
             }
 
@@ -4619,7 +4636,7 @@ impl eframe::App for ContextApp {
                 self.prev_word_title = title;
             }
 
-            self.suppress_errors = now_browser;
+            self.suppress_errors = kind == platform::AppKind::Browser;
         }
 
         // In selection mode: handle keys at the top, set skip_processing flag
