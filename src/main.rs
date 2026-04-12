@@ -5761,7 +5761,7 @@ impl eframe::App for ContextApp {
         // Toolbar at bottom
         let tts_speaking = tts::is_speaking();
         let ocr_is_busy = self.ocr_receiver.is_some();
-        egui::TopBottomPanel::bottom("toolbar").frame(panel_frame).show(ctx, |ui| {
+        egui::TopBottomPanel::top("toolbar").frame(panel_frame).show(ctx, |ui| {
             let header_resp = ui.horizontal(|ui| {
                 let sep = egui::Color32::from_rgb(180, 170, 140);
                 let active = egui::Color32::from_rgb(0, 70, 160);
