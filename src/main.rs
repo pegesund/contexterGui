@@ -3618,14 +3618,26 @@ impl ContextApp {
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
-                // Clear ALL underlines for this paragraph first — the word text
-                // may have changed so per-word clear can't find the old word.
-                // We'll re-apply underlines for remaining errors after.
-                self.manager.clear_paragraph_underlines(&p.paragraph_id);
-                // Mark all errors in this paragraph as not underlined
-                for e in &mut self.writing_errors {
-                    if e.paragraph_id == p.paragraph_id {
-                        e.underlined = false;
+                // Collect words being removed — clear their underlines.
+                // Use clear_paragraph_underlines ONLY if any error is actually removed,
+                // then re-underline the survivors. This avoids the race condition of
+                // clearing underlines that the grammar actor just added.
+                let has_removals = self.writing_errors.iter().any(|e| {
+                    if e.paragraph_id != p.paragraph_id { return false; }
+                    let e_sent_lower = e.sentence_context.to_lowercase();
+                    if new_sentence_set.contains(&e_sent_lower) { return false; }
+                    if matches!(e.category, ErrorCategory::Spelling) {
+                        if para_text_lower.contains(&e.word.to_lowercase()) { return false; }
+                    }
+                    true
+                });
+                if has_removals {
+                    // Clear ALL underlines for this paragraph, then re-apply survivors
+                    self.manager.clear_paragraph_underlines(&p.paragraph_id);
+                    for e in &mut self.writing_errors {
+                        if e.paragraph_id == p.paragraph_id {
+                            e.underlined = false;
+                        }
                     }
                 }
                 // Remove stale errors
@@ -3642,13 +3654,15 @@ impl ContextApp {
                         new_sentence_set.iter().take(3).map(|s| trunc(s, 40)).collect::<Vec<_>>());
                     false
                 });
-                // Re-apply underlines for errors that survived
-                for e in &mut self.writing_errors {
-                    if e.paragraph_id == p.paragraph_id && !e.underlined && !e.ignored {
-                        let color = if matches!(e.category, ErrorCategory::Grammar) { "#0000FF" } else { "#FF0000" };
-                        let word = if e.error_word.is_empty() { &e.word } else { &e.error_word };
-                        self.manager.underline_word(word, &e.paragraph_id, color);
-                        e.underlined = true;
+                // Re-apply underlines for surviving errors (only if we cleared them)
+                if has_removals {
+                    for e in &mut self.writing_errors {
+                        if e.paragraph_id == p.paragraph_id && !e.underlined && !e.ignored {
+                            let color = if matches!(e.category, ErrorCategory::Grammar) { "#0000FF" } else { "#FF0000" };
+                            let word = if e.error_word.is_empty() { &e.word } else { &e.error_word };
+                            self.manager.underline_word(word, &e.paragraph_id, color);
+                            e.underlined = true;
+                        }
                     }
                 }
                 if self.writing_errors.len() < before_count {
@@ -4083,42 +4097,16 @@ impl ContextApp {
                 }
             }
 
-            // Queue this sentence for consonant confusion analysis (runs outside borrow)
-            self.pending_consonant_sentences.push((
-                resp.sentence.clone(), resp.paragraph_id.clone(), resp.doc_offset
-            ));
+            // Consonant confusion is checked per-word during typing (check_spelling),
+            // not on all words — checking all words was too aggressive and flagged
+            // correct words like "spiller" → "spiler".
 
             // Stale underlines from previous sessions are cleared at app startup
             // via AppleScript (set underline of font to underline none).
         }
 
-        // Consonant confusion check on known words from grammar responses
-        // (catches "tvill"→"tvil", "spill"→"spil" where both are valid dictionary words)
-        // Runs OUTSIDE the grammar_actor borrow to avoid borrow conflicts.
-        if self.bert_ready {
-            // Collect pending consonant tasks from recently processed grammar responses
-            let consonant_tasks: Vec<(String, Vec<String>, String, usize)> = if let Some(analyzer) = &self.analyzer {
-                self.pending_consonant_sentences.drain(..).flat_map(|(sentence, para_id, doc_offset)| {
-                    sentence.split_whitespace().filter_map(|w| {
-                        let clean = w.trim_matches(|c: char| c.is_ascii_punctuation() || c == '«' || c == '»')
-                            .to_lowercase();
-                        if clean.len() < 4 || !analyzer.has_word(&clean) { return None; }
-                        if self.writing_errors.iter().any(|e| e.word.to_lowercase() == clean && e.paragraph_id == para_id) { return None; }
-                        let variants = consonant_variants(&clean);
-                        let valid_alts: Vec<String> = variants.into_iter()
-                            .filter(|v| analyzer.has_word(v))
-                            .collect();
-                        if valid_alts.is_empty() { return None; }
-                        Some((clean, valid_alts, sentence.clone(), doc_offset))
-                    }).collect::<Vec<_>>()
-                }).collect()
-            } else {
-                vec![]
-            };
-            for (word, alts, sentence, offset) in consonant_tasks {
-                self.send_consonant_bert(&word, alts, &sentence, offset);
-            }
-        }
+        // Consonant confusion is handled per-word during typing (check_spelling),
+        // not batch-processed from grammar responses.
 
         // BERT re-rank spelling suggestions from grammar checker
         // Clean context: when scoring error X, replace all OTHER errors with their
