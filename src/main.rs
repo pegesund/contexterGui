@@ -975,6 +975,11 @@ struct ContextApp {
     /// target_pid, we send `cursorEnd` to the add-in and clear this state.
     /// Times out after 3s.
     pending_cursor_place: Option<(String, String, u32, Instant)>,
+    /// Paragraphs that need a full underline resync on the NEXT grammar response.
+    /// Set when a user manually corrects a misspelled word (retain removes the
+    /// error but Word's wave underline is orphaned on the new text). Cleared
+    /// once the paragraph is re-underlined from current writing_errors.
+    paragraphs_need_underline_resync: std::collections::HashSet<String>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
     /// Pending async BERT scoring for spelling re-ranking
@@ -1535,6 +1540,7 @@ impl ContextApp {
             llm_waiting_since: Instant::now(),
             pending_fix: None,
             pending_cursor_place: None,
+            paragraphs_need_underline_resync: std::collections::HashSet::new(),
             pending_consonant_checks: Vec::new(),
             pending_spelling_bert: Vec::new(),
             pending_grammar_bert: Vec::new(),
@@ -3642,6 +3648,15 @@ impl ContextApp {
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
+                // Track whether a spelling error was removed because its word is
+                // no longer in the paragraph text (user manually corrected it).
+                // In that case the old underline in Word is ORPHANED — the word
+                // it was attached to is gone, but Word's wave formatting may
+                // remain on whatever text now occupies that range. We can't
+                // clear it with clear_underline_word (search for the gone word
+                // returns nothing). Remember to do a paragraph-level clear +
+                // resync on the NEXT grammar response for this paragraph.
+                let mut orphan_word_removed = false;
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     // Exact sentence match — keep
@@ -3651,6 +3666,8 @@ impl ContextApp {
                     if matches!(e.category, ErrorCategory::Spelling) {
                         let word_lower = e.word.to_lowercase();
                         if para_text_lower.contains(&word_lower) { return true; }
+                        // Spelling error's word is GONE from paragraph — orphan
+                        orphan_word_removed = true;
                     }
                     log!("  Removing stale error: word='{}' sentence='{}' (not in set: {:?})",
                         e.word, trunc(&e.sentence_context, 60),
@@ -3659,12 +3676,10 @@ impl ContextApp {
                 });
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
-                    // Word's underline disappears with the text when a word is
-                    // deleted or modified character-by-character. Paragraph-level
-                    // clear + resync here floods the add-in queue (each Word.run
-                    // takes ~1s) and caused multi-second delays on every keystroke.
-                    // If the rare "formatting-inherited-onto-new-text" case
-                    // resurfaces, fix it more surgically at the fix action site.
+                    if orphan_word_removed {
+                        self.paragraphs_need_underline_resync.insert(p.paragraph_id.clone());
+                        log!("  Marked para={} for underline resync (manual word correction)", trunc(&p.paragraph_id, 10));
+                    }
                 }
 
                 // Check each sentence: skip if already processed (hash unchanged)
@@ -3674,15 +3689,18 @@ impl ContextApp {
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
                     // Word's paragraph.text always ends with whitespace (Word artifact),
-                    // so clean_text.ends_with(' ') is unreliable. Instead, check the
-                    // character immediately before the cursor: if it's a space, the
-                    // user just pressed space (word boundary just crossed).
+                    // so clean_text.ends_with(' ') is unreliable. We use two signals
+                    // that mean "stop and check":
+                    //   - cursor just past a space/tab → user pressed space
+                    //   - cursor_start = None         → cursor left this paragraph, user
+                    //                                   is no longer mid-word here
                     let just_finished_word = match p.cursor_start {
                         Some(c) if c > 0 => {
                             clean_text.chars().nth(c - 1) == Some(' ')
                                 || clean_text.chars().nth(c - 1) == Some('\t')
                         }
-                        _ => false,
+                        Some(_) => false, // cursor at position 0 — just opened para
+                        None => true,     // cursor moved away — safe to check
                     };
 
                     if self.processed_sentence_hashes.contains(&sent_h) {
@@ -3709,6 +3727,16 @@ impl ContextApp {
                         uw.extend(email_skip_words.iter().cloned());
                         actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
                         self.grammar_inflight.insert(sent_h);
+                        self.pending_incomplete_sentence = None;
+                    } else {
+                        // Not at a word boundary, not first view — record as pending.
+                        // If the user pauses for >1 s, the main poll sends it so
+                        // manual corrections made mid-sentence still get checked.
+                        self.pending_incomplete_sentence = Some((
+                            sentence_text.clone(),
+                            p.paragraph_id.clone(),
+                            Instant::now(),
+                        ));
                     }
 
                     // Spelling handled by grammar actor's check_sentence_full — no separate queue needed
@@ -3935,6 +3963,25 @@ impl ContextApp {
             log!("Grammar response: sentence='{}' errors={} unknown={} para='{}'",
                 trunc(&resp.sentence, 40), resp.errors.len(), resp.unknown_words.len(),
                 trunc(&resp.paragraph_id, 10));
+            // If this paragraph had a manual correction earlier (word removed
+            // from text but Word's wave underline is orphaned), clear the whole
+            // paragraph's underlines now and mark remaining errors for re-apply.
+            // Runs only on grammar responses (space/punctuation boundary), so it
+            // doesn't flood the add-in queue on every keystroke.
+            if !resp.paragraph_id.is_empty()
+                && self.paragraphs_need_underline_resync.remove(&resp.paragraph_id)
+            {
+                log!("  Underline resync: clearing para={} and re-applying for remaining errors",
+                    trunc(&resp.paragraph_id, 10));
+                self.manager.clear_paragraph_underlines(&resp.paragraph_id);
+                for e in &mut self.writing_errors {
+                    if e.paragraph_id == resp.paragraph_id {
+                        e.underlined = false;
+                    }
+                }
+                // sync_error_underlines (called in the main poll block) will
+                // re-apply underlines for the errors still in writing_errors.
+            }
             let sent_h = if resp.paragraph_id.is_empty() {
                 hash_str(&resp.sentence)
             } else {
@@ -6260,6 +6307,7 @@ impl eframe::App for ContextApp {
                         let resp = if completions_hover_zoom {
                             let word_for_hover = comp.word.clone();
                             resp.on_hover_ui(|ui| {
+                                ui.set_max_width(600.0);
                                 ui.label(egui::RichText::new(&word_for_hover)
                                     .size(36.0)
                                     .strong()
@@ -6651,6 +6699,7 @@ impl eframe::App for ContextApp {
                                             ).sense(egui::Sense::click()));
                                             let best_resp = if hover_zoom {
                                                 best_resp.on_hover_ui(|ui| {
+                                                    ui.set_max_width(600.0);
                                                     ui.label(egui::RichText::new(&best_for_hover)
                                                         .size(36.0)
                                                         .strong()
@@ -6686,6 +6735,7 @@ impl eframe::App for ContextApp {
                                                         ).sense(egui::Sense::click()));
                                                         let cand_resp = if hover_zoom {
                                                             cand_resp.on_hover_ui(|ui| {
+                                                                ui.set_max_width(600.0);
                                                                 ui.label(egui::RichText::new(&cand_for_hover)
                                                                     .size(36.0)
                                                                     .color(egui::Color32::from_rgb(80, 120, 160)));
