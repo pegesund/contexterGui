@@ -6540,8 +6540,10 @@ impl eframe::App for ContextApp {
                                             .color(egui::Color32::from_rgb(200, 40, 40)),
                                     );
                                     // Right: buttons right-aligned (rendered in reverse order
-                                    // because right_to_left layout adds items from right to left)
+                                    // because right_to_left layout adds items from right to left).
+                                    // 0.5 cm right padding so buttons don't hug the edge.
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add_space(19.0 * s);
                                         if icon_button(ui, "▶", self.language.ui_show_in_document()) {
                                             action = Some((idx, "goto"));
                                         }
@@ -8585,7 +8587,9 @@ fn main() -> eframe::Result {
         Box::new({
             let emoji_font = setup_platform.emoji_font_path().map(|s| s.to_owned());
             move |cc| {
-                // Load Open Sans for dyslexia-friendly UI (recommended by British Dyslexia Association)
+                // Load Open Sans for dyslexia-friendly UI (recommended by British Dyslexia Association).
+                // Use it for BOTH Proportional and Monospace families so no text ever falls back
+                // to a system font that isn't dyslexia-friendly.
                 let font_path = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/OpenSans-Regular.ttf");
                 if let Ok(font_data) = std::fs::read(font_path) {
                     let mut fonts = egui::FontDefinitions::default();
@@ -8594,6 +8598,8 @@ fn main() -> eframe::Result {
                         egui::FontData::from_owned(font_data).into(),
                     );
                     fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+                        .insert(0, "OpenSans".to_owned());
+                    fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap()
                         .insert(0, "OpenSans".to_owned());
                     // Add emoji font as fallback for emoji glyphs
                     if let Some(ref emoji_path) = emoji_font {
@@ -8604,10 +8610,12 @@ fn main() -> eframe::Result {
                             );
                             fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
                                 .push("EmojiFont".to_owned());
+                            fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap()
+                                .push("EmojiFont".to_owned());
                         }
                     }
                     cc.egui_ctx.set_fonts(fonts);
-                    eprintln!("Loaded Open Sans font");
+                    eprintln!("Loaded Open Sans font (Proportional + Monospace)");
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
