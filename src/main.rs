@@ -4793,20 +4793,34 @@ impl eframe::App for ContextApp {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
                 self.manager.active_bridge_name(),
                 trunc(&find, 60), trunc(&replace, 60), doc_offset);
-            // Clear underline BEFORE replacement
+            // Clear underlines BEFORE replacement. Use paragraph-level clear because
+            // Word's per-word underline can span adjacent punctuation (e.g. the period
+            // at the end of a sentence), which clear_underline_word misses since it
+            // searches for the word with matchWholeWord=true.
             let find_lower_pre = find.to_lowercase();
+            let mut cleared_paras: std::collections::HashSet<String> = std::collections::HashSet::new();
             for e in &mut self.writing_errors {
                 if (e.word.to_lowercase() == find_lower_pre || e.sentence_context.to_lowercase() == find_lower_pre)
                     && e.doc_offset == doc_offset
                 {
-                    // Clear both position-based (COM) and word-based (add-in) underlines
-                    if e.underlined {
+                    if !e.paragraph_id.is_empty() && cleared_paras.insert(e.paragraph_id.clone()) {
+                        self.manager.clear_paragraph_underlines(&e.paragraph_id);
+                    } else if e.paragraph_id.is_empty() {
                         self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     }
-                    self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     e.underlined = false;
-                    log!("  Pre-cleared underline word='{}' para='{}'", e.word, trunc(&e.paragraph_id, 10));
+                    log!("  Pre-cleared underlines for para='{}' (word='{}')",
+                        trunc(&e.paragraph_id, 10), e.word);
                     break;
+                }
+            }
+            // Invariant: mark remaining errors in cleared paragraphs as needing
+            // re-underline so sync_error_underlines re-applies them.
+            if !cleared_paras.is_empty() {
+                for e in &mut self.writing_errors {
+                    if cleared_paras.contains(&e.paragraph_id) {
+                        e.underlined = false;
+                    }
                 }
             }
             let ok = if context.is_empty() {
@@ -4883,6 +4897,11 @@ impl eframe::App for ContextApp {
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
                 log!("Fix applied: '{}' removed, {} remaining errors offset-adjusted by {}", find, self.writing_errors.len(), len_delta);
+            }
+            // Re-apply underlines for any errors in paragraphs we cleared above
+            // (underlined flag was reset so sync will re-apply).
+            if !cleared_paras.is_empty() {
+                self.sync_error_underlines();
             }
         }
 
@@ -6375,15 +6394,8 @@ impl eframe::App for ContextApp {
                         }
 
                         ui.separator();
-                        // Highlight and scroll to the focused error (cursor on underlined word)
                         let is_focused = self.focused_error_idx == Some(idx) || error.pinned;
-                        let frame = if is_focused {
-                            egui::Frame::NONE.fill(egui::Color32::from_rgba_premultiplied(255, 255, 180, 255))
-                                .inner_margin(4.0).corner_radius(4.0)
-                        } else {
-                            egui::Frame::NONE
-                        };
-                        let frame_resp = frame.show(ui, |ui| {
+                        let frame_resp = egui::Frame::NONE.show(ui, |ui| {
                             if matches!(error.category, ErrorCategory::SentenceBoundary) {
                                 // --- Sentence boundary suggestion ---
                                 let err_suggestion = error.suggestion.clone();
