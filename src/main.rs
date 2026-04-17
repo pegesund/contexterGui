@@ -4793,6 +4793,10 @@ impl eframe::App for ContextApp {
             log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
                 self.manager.active_bridge_name(),
                 trunc(&find, 60), trunc(&replace, 60), doc_offset);
+            // Freeze window position briefly: Word's find/select/replace sequence
+            // moves the caret through intermediate positions, causing the window
+            // to jump left then back. Skip caret-follow until the dust settles.
+            self.goto_freeze_until = Some(Instant::now() + Duration::from_millis(600));
             // Clear underlines BEFORE replacement. Use paragraph-level clear because
             // Word's per-word underline can span adjacent punctuation (e.g. the period
             // at the end of a sentence), which clear_underline_word misses since it
@@ -5823,6 +5827,13 @@ impl eframe::App for ContextApp {
                 let pos_y = pos_y.max(0.0).min(screen_h - win_h);
                 let pos_x = (lx + self.platform.caret_offset_right()).min(screen_w - win_w).max(0.0);
 
+                static LAST_POS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+                let cur_x = pos_x as i32;
+                let prev = LAST_POS.load(std::sync::atomic::Ordering::Relaxed);
+                if prev != cur_x {
+                    log!("WIN pos x: {} → {} (caret={}, win_w={})", prev, cur_x, x, win_w as i32);
+                    LAST_POS.store(cur_x, std::sync::atomic::Ordering::Relaxed);
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     egui::pos2(pos_x, pos_y),
                 ));
@@ -6630,6 +6641,10 @@ impl eframe::App for ContextApp {
                     if let Some((idx, cand)) = clicked_candidate {
                         self.writing_errors[idx].suggestion = cand;
                         action = Some((idx, "fix"));
+                        // Freeze window position as soon as we know a fix is coming
+                        // — Word's subsequent select/replace would move the caret and
+                        // jerk the window around otherwise.
+                        self.goto_freeze_until = Some(Instant::now() + Duration::from_millis(800));
                     }
 
                     // Handle actions after rendering
@@ -6647,6 +6662,11 @@ impl eframe::App for ContextApp {
                                 let context = error.sentence_context.clone();
                                 let off = error.doc_offset;
                                 self.pending_fix = Some((word.clone(), suggestion.clone(), context, off));
+                                // Freeze window position immediately on click. Word's
+                                // find/select/replace moves the caret through intermediate
+                                // positions, and polling also runs after this frame — so the
+                                // window would jump if we waited until pending_fix processes.
+                                self.goto_freeze_until = Some(Instant::now() + Duration::from_millis(800));
                                 log!("FIX action: idx={} bridge='{}' word='{}' suggestion='{}'",
                                     idx, self.manager.active_bridge_name(),
                                     trunc(&word, 60), trunc(&suggestion, 60));
