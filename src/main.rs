@@ -6521,26 +6521,12 @@ impl eframe::App for ContextApp {
                                     }
                                 }
                             } else {
-                                // Spelling error — compact layout:
-                                // Row 1: buttons (👎 + ? ▶)
-                                // Row 2: 🔊 misspelled word (red)
-                                // Row 3+: two columns — 🔊 best pick (left) | 🔊 alternatives (right)
+                                // Spelling error layout:
+                                // Row 1: 🔊 misspelled word (red) | buttons right-aligned
+                                // Row 2+: 🔊 best pick (green) | 🔊 alternatives stacked
                                 let err_word = error.word.clone();
-                                // Buttons + misspelled word on same row
                                 ui.horizontal(|ui| {
-                                    if icon_button(ui, "👎", self.language.ui_ignore()) {
-                                        action = Some((idx, "ignore"));
-                                    }
-                                    if icon_button(ui, "+", self.language.ui_add_to_dictionary()) {
-                                        action = Some((idx, "add_to_dict"));
-                                    }
-                                    if icon_button(ui, "?", self.language.ui_more_suggestions()) {
-                                        action = Some((idx, "suggest"));
-                                    }
-                                    if icon_button(ui, "▶", self.language.ui_show_in_document()) {
-                                        action = Some((idx, "goto"));
-                                    }
-                                    ui.add_space(8.0 * s);
+                                    // Left: 🔊 + red misspelled word
                                     if ui.add(egui::Label::new(
                                         egui::RichText::new("🔊").size(9.0 * s)
                                             .color(egui::Color32::from_rgb(150, 150, 150))
@@ -6553,6 +6539,22 @@ impl eframe::App for ContextApp {
                                             .strong()
                                             .color(egui::Color32::from_rgb(200, 40, 40)),
                                     );
+                                    // Right: buttons right-aligned (rendered in reverse order
+                                    // because right_to_left layout adds items from right to left)
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if icon_button(ui, "▶", self.language.ui_show_in_document()) {
+                                            action = Some((idx, "goto"));
+                                        }
+                                        if icon_button(ui, "?", self.language.ui_more_suggestions()) {
+                                            action = Some((idx, "suggest"));
+                                        }
+                                        if icon_button(ui, "+", self.language.ui_add_to_dictionary()) {
+                                            action = Some((idx, "add_to_dict"));
+                                        }
+                                        if icon_button(ui, "👎", self.language.ui_ignore()) {
+                                            action = Some((idx, "ignore"));
+                                        }
+                                    });
                                 });
                                 // Two columns: best suggestion (left) + alternatives (right)
                                 // Each word has a 🔊 icon and is clickable to apply as fix
@@ -6562,7 +6564,8 @@ impl eframe::App for ContextApp {
                                         .filter(|c| c.to_lowercase() != best.to_lowercase())
                                         .cloned()
                                         .collect();
-                                    ui.horizontal(|ui| {
+                                    // Top-align so alternatives line up with best pick
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                         // Left: 🔊 best pick
                                         if !best.is_empty() {
                                             if ui.add(egui::Label::new(
@@ -6580,10 +6583,15 @@ impl eframe::App for ContextApp {
                                                 clicked_candidate = Some((idx, best.clone()));
                                             }
                                         }
-                                        // Right: 🔊 alternatives stacked vertically
+                                        // Right: 🔊 alternatives stacked vertically (same font
+                                        // size as best pick). Wider gap, and pull the vertical
+                                        // block up a full row so its first row aligns above
+                                        // the best pick.
                                         if !candidates_cloned.is_empty() {
-                                            ui.add_space(16.0 * s);
+                                            ui.add_space(56.0 * s);
                                             ui.vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 1.0 * s;
+                                                ui.add_space(-20.0 * s);
                                                 for cand in &candidates_cloned {
                                                     ui.horizontal(|ui| {
                                                         if ui.add(egui::Label::new(
@@ -6594,7 +6602,7 @@ impl eframe::App for ContextApp {
                                                         }
                                                         if ui.add(egui::Label::new(
                                                             egui::RichText::new(cand)
-                                                                .size(11.0 * s)
+                                                                .size(13.0 * s)
                                                                 .color(egui::Color32::from_rgb(80, 120, 160))
                                                         ).sense(egui::Sense::click())).clicked() {
                                                             clicked_candidate = Some((idx, cand.clone()));
