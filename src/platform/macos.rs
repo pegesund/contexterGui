@@ -218,9 +218,19 @@ impl PlatformServices for MacPlatform {
 
             if !ok { return None; }
 
+            let x = rect.origin.x as i32;
+            let y = (rect.origin.y + rect.size.height) as i32;
+
+            // Word on Mac returns (0, screen_height) from AXBoundsForRange
+            // when it can't determine real bounds (focus transitions, layout
+            // shifts). Real caret positions always have x > 50 (document
+            // margins) — reject the garbage so the window doesn't jump to
+            // the bottom-left corner every time Word hiccups.
+            if x < 50 { return None; }
+
             // rect.origin is top-left of the selection in screen coords
             // Return bottom of selection (where we want the window)
-            Some((rect.origin.x as i32, (rect.origin.y + rect.size.height) as i32))
+            Some((x, y))
         }
     }
 

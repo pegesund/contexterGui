@@ -216,11 +216,28 @@ pub fn spawn_grammar_actor_with_loader(
                             let fst = fst.clone();
                             let lang = lang_ref2.clone();
                             let wf = wf_ref2.clone();
+                            // Pass the same validators used in the spelling path so
+                            // compound_walker applies the same strictness here as in main.rs —
+                            // parts must be real dictionary words, last part must be a noun.
+                            let analyzer = match &checker {
+                                AnyChecker::Swi(c) => c.analyzer().clone(),
+                            };
                             Box::new(move |word: &str| -> bool {
+                                let word_check = |w: &str| -> bool {
+                                    analyzer.dict_lookup(w).map_or(false, |rs|
+                                        rs.iter().any(|r| r.pos != mtag::types::Pos::Prop))
+                                };
+                                let noun_check = |w: &str| -> bool {
+                                    analyzer.dict_lookup(w).map_or(false, |rs| {
+                                        let n = rs.iter().filter(|r| r.pos == mtag::types::Pos::Subst).count();
+                                        let a = rs.iter().filter(|r| r.pos == mtag::types::Pos::Adj).count();
+                                        n > 0 && n >= a
+                                    })
+                                };
                                 let results = crate::compound_walker::compound_fuzzy_walk(
                                     &fst, word, &*lang,
                                     wf.as_ref().map(|w| w.as_ref()),
-                                    None, None,
+                                    Some(&word_check), Some(&noun_check),
                                 );
                                 results.iter().any(|r| r.total_edits == 0)
                             }) as Box<dyn Fn(&str) -> bool>

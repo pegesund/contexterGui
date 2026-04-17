@@ -3481,6 +3481,7 @@ impl ContextApp {
             Some(a) => a,
             None => return,
         };
+        let mut needs_underline_sync = false;
 
         // Check for reset (new document opened)
         for bridge in &self.manager.bridges {
@@ -3613,8 +3614,6 @@ impl ContextApp {
                 let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
                 let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
                 let before_count = self.writing_errors.len();
-                // When a word is gone from the paragraph (user fixed it),
-                // its underline disappears with the word. No explicit clear needed.
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
                     // Exact sentence match — keep
@@ -3632,6 +3631,19 @@ impl ContextApp {
                 });
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
+                    // Invariant: red underlines in Word must match writing_errors.
+                    // When stale errors are removed, Word may still show their underlines
+                    // (formatting can be inherited when text is edited in the range).
+                    // Wipe all underlines in this paragraph and reset the underlined flag
+                    // for remaining errors. sync_error_underlines is called once at the
+                    // end of this function (outside the actor borrow).
+                    self.manager.clear_paragraph_underlines(&p.paragraph_id);
+                    for e in &mut self.writing_errors {
+                        if e.paragraph_id == p.paragraph_id {
+                            e.underlined = false;
+                        }
+                    }
+                    needs_underline_sync = true;
                 }
 
                 // Check each sentence: skip if already processed (hash unchanged)
@@ -3640,6 +3652,10 @@ impl ContextApp {
 
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
+                    // Paragraph text from add-in ends with a space when the user just
+                    // finished a word (pressed space). We use the whole paragraph text,
+                    // not sentence_text (sentences are trimmed), so check clean_text.
+                    let just_finished_word = clean_text.ends_with(' ') || clean_text.ends_with('\t');
 
                     if self.processed_sentence_hashes.contains(&sent_h) {
                         log!("  SKIP processed: '{}'", trunc(sentence_text, 50));
@@ -3657,8 +3673,10 @@ impl ContextApp {
                     });
 
                     // Send to grammar actor for spelling + grammar checking.
+                    // Triggers: complete sentence, first view of paragraph, or user just
+                    // finished a word (pressed space) — per "spell check after space" rule.
                     let first_seen = !self.paragraph_sentence_hashes.contains_key(&p.paragraph_id);
-                    if is_complete || first_seen {
+                    if is_complete || first_seen || just_finished_word {
                         let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                         uw.extend(email_skip_words.iter().cloned());
                         actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
@@ -3695,6 +3713,12 @@ impl ContextApp {
                     }
                 }
             }
+        }
+
+        // Re-apply underlines for remaining errors if any were cleared above.
+        // Done here so it's outside the `actor` borrow scope.
+        if needs_underline_sync {
+            self.sync_error_underlines();
         }
 
         // Clean stale paragraph_texts entries (paragraphs that were deleted/merged)
@@ -5087,13 +5111,29 @@ impl eframe::App for ContextApp {
                 let kind = self.platform.classify_app(&fg);
                 if kind == platform::AppKind::Word || kind == platform::AppKind::Browser {
                     // Try platform API first (macOS), fall back to bridge caret_pos (Windows)
-                    if let Some((x, y)) = self.platform.caret_screen_position() {
-                        self.last_caret_pos = Some((x, y + 49));
-                    } else if let Some(ref ctx) = ctx_result {
-                        if let Some((x, y)) = ctx.caret_pos {
-                            if x != 0 || y != 0 {
-                                self.last_caret_pos = Some((x, y));
+                    let plat_caret = self.platform.caret_screen_position();
+                    let bridge_caret = ctx_result.as_ref().and_then(|c| c.caret_pos);
+                    if let Some((x, y)) = plat_caret {
+                        let new_pos = (x, y + 49);
+                        if self.last_caret_pos != Some(new_pos) {
+                            log!("caret from platform: ({}, {}) → stored ({}, {})", x, y, new_pos.0, new_pos.1);
+                            self.last_caret_pos = Some(new_pos);
+                        }
+                    } else if let Some((x, y)) = bridge_caret {
+                        if x != 0 || y != 0 {
+                            let new_pos = (x, y);
+                            if self.last_caret_pos != Some(new_pos) {
+                                log!("caret from bridge: ({}, {})", x, y);
+                                self.last_caret_pos = Some(new_pos);
                             }
+                        }
+                    } else {
+                        static LAST_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let now_ms = self.last_poll.elapsed().as_millis() as u64;
+                        let last = LAST_MISS.load(std::sync::atomic::Ordering::Relaxed);
+                        if now_ms.wrapping_sub(last) > 2000 || last == 0 {
+                            LAST_MISS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                            log!("caret: no platform position, no bridge position (kind={:?})", kind);
                         }
                     }
                 }
