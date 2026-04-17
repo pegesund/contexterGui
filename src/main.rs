@@ -37,9 +37,12 @@ struct UserSettings {
     voice: String,
     #[serde(default = "default_language")]
     language: String,
+    #[serde(default = "default_hover_zoom")]
+    hover_zoom: bool,
 }
 
 fn default_language() -> String { "nb".into() }
+fn default_hover_zoom() -> bool { true }
 
 impl Default for UserSettings {
     fn default() -> Self {
@@ -50,6 +53,7 @@ impl Default for UserSettings {
             ui_scale: 1.0,
             voice: String::new(),
             language: "nb".into(),
+            hover_zoom: true,
         }
     }
 }
@@ -879,6 +883,9 @@ struct ContextApp {
     // Settings
     grammar_completion: bool,
     speak_on_space: bool,
+    /// When true, hovering a suggestion/candidate word shows a large-font
+    /// tooltip preview to aid dyslexic readers.
+    hover_zoom: bool,
     last_space_speak: Instant,
     quality: u8, // 0=fast, 1=balanced, 2=full
     // Debounce: wait before running completion
@@ -1469,6 +1476,7 @@ impl ContextApp {
             embedding_sync_interval: Duration::from_secs(3),
             grammar_completion,
             speak_on_space: saved_settings.speak_on_space,
+            hover_zoom: saved_settings.hover_zoom,
             last_space_speak: Instant::now(),
             quality,
             last_prefix_change: Instant::now(),
@@ -6237,6 +6245,7 @@ impl eframe::App for ContextApp {
 
                     let has_tts = tts::tts_available();
                     let icon_w: f32 = if has_tts { 18.0 * s } else { 0.0 };
+                    let completions_hover_zoom = self.hover_zoom;
                     let render_row = |ui: &mut egui::Ui, comp: &Completion, _idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
                         let marker = if is_selected { "▸ " } else { "  " };
                         let text = format!("{}{}", marker, comp.word);
@@ -6248,6 +6257,15 @@ impl eframe::App for ContextApp {
                             egui::Sense::click() | egui::Sense::hover(),
                         );
                         let hovered = resp.hovered();
+                        let resp = if completions_hover_zoom {
+                            let word_for_hover = comp.word.clone();
+                            resp.on_hover_ui(|ui| {
+                                ui.label(egui::RichText::new(&word_for_hover)
+                                    .size(36.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(0, 80, 140)));
+                            })
+                        } else { resp };
                         if is_selected {
                             ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0, 100, 180));
                         } else if hovered {
@@ -6424,6 +6442,7 @@ impl eframe::App for ContextApp {
                     // Group grammar errors by (sentence_context, doc_offset)
                     let mut shown_contexts: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
 
+                    let hover_zoom = self.hover_zoom;
                     egui::ScrollArea::vertical().max_height(ui.available_height() - 4.0).show(ui, |ui| {
                     let mut first_rendered = true;
                     for &idx in &active_errors {
@@ -6623,12 +6642,22 @@ impl eframe::App for ContextApp {
                                             ).sense(egui::Sense::click())).clicked() {
                                                 tts::speak_word(&best);
                                             }
-                                            if ui.add(egui::Label::new(
+                                            let best_for_hover = best.clone();
+                                            let best_resp = ui.add(egui::Label::new(
                                                 egui::RichText::new(&best)
                                                     .size(13.0 * s)
                                                     .strong()
                                                     .color(egui::Color32::from_rgb(0, 120, 60))
-                                            ).sense(egui::Sense::click())).clicked() {
+                                            ).sense(egui::Sense::click()));
+                                            let best_resp = if hover_zoom {
+                                                best_resp.on_hover_ui(|ui| {
+                                                    ui.label(egui::RichText::new(&best_for_hover)
+                                                        .size(36.0)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(0, 120, 60)));
+                                                })
+                                            } else { best_resp };
+                                            if best_resp.clicked() {
                                                 clicked_candidate = Some((idx, best.clone()));
                                             }
                                         }
@@ -6649,11 +6678,20 @@ impl eframe::App for ContextApp {
                                                         ).sense(egui::Sense::click())).clicked() {
                                                             tts::speak_word(cand);
                                                         }
-                                                        if ui.add(egui::Label::new(
+                                                        let cand_for_hover = cand.clone();
+                                                        let cand_resp = ui.add(egui::Label::new(
                                                             egui::RichText::new(cand)
                                                                 .size(13.0 * s)
                                                                 .color(egui::Color32::from_rgb(80, 120, 160))
-                                                        ).sense(egui::Sense::click())).clicked() {
+                                                        ).sense(egui::Sense::click()));
+                                                        let cand_resp = if hover_zoom {
+                                                            cand_resp.on_hover_ui(|ui| {
+                                                                ui.label(egui::RichText::new(&cand_for_hover)
+                                                                    .size(36.0)
+                                                                    .color(egui::Color32::from_rgb(80, 120, 160)));
+                                                            })
+                                                        } else { cand_resp };
+                                                        if cand_resp.clicked() {
                                                             clicked_candidate = Some((idx, cand.clone()));
                                                         }
                                                     });
@@ -7457,6 +7495,8 @@ impl eframe::App for ContextApp {
             let mut new_quality = quality;
             let mut new_whisper_mode = whisper_mode;
             let mut new_speak_on_space = speak_on_space;
+            let hover_zoom_prev = self.hover_zoom;
+            let mut new_hover_zoom = hover_zoom_prev;
             let mut new_ui_scale = ui_scale;
             let mut open_userdict = false;
             let mut selected_voice: Option<String> = None;
@@ -7589,6 +7629,26 @@ impl eframe::App for ContextApp {
                             ui.separator();
                             ui.add_space(12.0);
 
+                            // -- Hover zoom (large-font preview on hover) --
+                            ui.label(egui::RichText::new("Forstørr ord ved hover").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            {
+                                let (label, color) = if new_hover_zoom {
+                                    ("På — forslag vises i stor skrift når musen er over", on_color)
+                                } else {
+                                    ("Av", off_color)
+                                };
+                                if ui.add(egui::Label::new(
+                                    egui::RichText::new(label).size(body).color(color)
+                                ).sense(egui::Sense::click())).clicked() {
+                                    new_hover_zoom = !new_hover_zoom;
+                                }
+                            }
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
                             // -- UI scale --
                             ui.label(egui::RichText::new(lang_for_settings.ui_size()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
@@ -7702,6 +7762,10 @@ impl eframe::App for ContextApp {
                 self.speak_on_space = new_speak_on_space;
                 log!("Speak on space: {}", self.speak_on_space);
             }
+            if new_hover_zoom != self.hover_zoom {
+                self.hover_zoom = new_hover_zoom;
+                log!("Hover zoom: {}", self.hover_zoom);
+            }
             if (new_ui_scale - self.ui_scale).abs() > 0.01 {
                 self.ui_scale = new_ui_scale;
             }
@@ -7718,6 +7782,7 @@ impl eframe::App for ContextApp {
                     ui_scale: self.ui_scale,
                     voice: voice.clone(),
                     language: self.language.code().to_string(),
+                    hover_zoom: self.hover_zoom,
                 });
             }
             if open_userdict {
@@ -7726,6 +7791,7 @@ impl eframe::App for ContextApp {
             // Save to disk whenever any setting changed
             if new_quality != quality || new_whisper_mode != whisper_mode
                 || new_speak_on_space != speak_on_space
+                || new_hover_zoom != hover_zoom_prev
                 || (new_ui_scale - ui_scale).abs() > 0.01
             {
                 save_settings(&UserSettings {
@@ -7735,6 +7801,7 @@ impl eframe::App for ContextApp {
                     ui_scale: self.ui_scale,
                     voice: tts::current_voice(),
                     language: self.language.code().to_string(),
+                    hover_zoom: self.hover_zoom,
                 });
             }
             if let Some(new_lang) = switch_to_language {
@@ -7746,6 +7813,7 @@ impl eframe::App for ContextApp {
                     ui_scale: self.ui_scale,
                     voice: tts::current_voice(),
                     language: new_lang.clone(),
+                    hover_zoom: self.hover_zoom,
                 });
                 // Restart the process with the new language
                 let exe = std::env::current_exe().unwrap();
