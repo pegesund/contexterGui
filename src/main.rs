@@ -4096,15 +4096,8 @@ impl ContextApp {
                 .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
                 .collect();
             for (idx, word, sentence_ctx) in to_rerank {
-                // Skip long words with close suggestions (compound words)
-                let orig = &self.writing_errors[idx].suggestion;
-                if word.len() >= 10 && !orig.is_empty() && orig.len() >= 8 {
-                    let dist = levenshtein_distance(&word.to_lowercase(), &orig.to_lowercase());
-                    if dist <= 2 {
-                        self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
-                        continue;
-                    }
-                }
+                // Always BERT re-rank — the grammar actor's edit-distance-1 fix can be
+                // grammatically wrong (e.g. "som publisert" vs "som publiserer").
                 let t_spell = Instant::now();
                 let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
                 log!("find_spelling_suggestions('{}') took {:?}, {} candidates", word, t_spell.elapsed(), suggestions.len());
