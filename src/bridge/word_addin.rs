@@ -306,6 +306,16 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
+    fn place_cursor_at_end_of_word(&self, word: &str, paragraph_id: &str) -> bool {
+        let json = format!(
+            r#"{{"action":"cursorEnd","word":"{}","paragraphId":"{}"}}"#,
+            escape_json(word),
+            escape_json(paragraph_id)
+        );
+        self.push_reply(json);
+        true
+    }
+
     fn read_full_document(&self) -> Option<String> {
         // The add-in sends before+after text (up to 2000 chars each).
         // Combine them as approximate full doc.

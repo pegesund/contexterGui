@@ -60,6 +60,11 @@ pub trait TextBridge {
         self.find_and_replace_in_context_at(find, replace, context, char_offset)
     }
 
+    /// Place the caret at the end of the last occurrence of `word` in the given
+    /// paragraph. Used after a fix, once Word has focus, to move the cursor
+    /// where the user can continue typing.
+    fn place_cursor_at_end_of_word(&self, _word: &str, _paragraph_id: &str) -> bool { false }
+
     /// Read a larger text window for context (e.g. 5000 chars before cursor).
     /// Used for sentence embeddings / topic extraction.
     fn read_document_context(&self) -> Option<String> { None }

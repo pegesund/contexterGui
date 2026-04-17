@@ -485,7 +485,13 @@ impl BridgeManager {
                                 self.bridge_switched = true;
                             }
                             self.active_idx = i;
-                            self.last_user_pid = fg_pid;
+                            // Only record fg_pid as "last user pid" when it isn't
+                            // OUR app. Our app gets focus when the user clicks a
+                            // suggestion; if we record that, we lose the real
+                            // target app (Word) for subsequent focus-redirects.
+                            if !our_window_focused {
+                                self.last_user_pid = fg_pid;
+                            }
                             self.last_context = Some(ctx.clone());
                             return Some(ctx);
                         }
@@ -629,6 +635,10 @@ impl BridgeManager {
 
     fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, paragraph_id: &str, context: &str, char_offset: usize) -> bool {
         self.effective_bridge().map(|b| b.find_and_replace_in_paragraph(find, replace, paragraph_id, context, char_offset)).unwrap_or(false)
+    }
+
+    fn place_cursor_at_end_of_word(&self, word: &str, paragraph_id: &str) -> bool {
+        self.effective_bridge().map(|b| b.place_cursor_at_end_of_word(word, paragraph_id)).unwrap_or(false)
     }
 
     fn read_document_context(&self) -> Option<String> {
@@ -952,6 +962,12 @@ struct ContextApp {
     /// Recently fixed words — don't re-detect these as errors (cleared when fresh text arrives from extension)
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
     pending_fix: Option<(String, String, String, usize, String)>, // (find, replace, sentence_context, doc_offset, paragraph_id)
+    /// After a successful fix, wait for Word to regain focus before sending the
+    /// cursor-placement command. (replacement_word, paragraph_id, target_pid,
+    /// started_at). Each frame we check the OS foreground app; when it matches
+    /// target_pid, we send `cursorEnd` to the add-in and clear this state.
+    /// Times out after 3s.
+    pending_cursor_place: Option<(String, String, u32, Instant)>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
     /// Pending async BERT scoring for spelling re-ranking
@@ -1510,6 +1526,7 @@ impl ContextApp {
             llm_waiting: false,
             llm_waiting_since: Instant::now(),
             pending_fix: None,
+            pending_cursor_place: None,
             pending_consonant_checks: Vec::new(),
             pending_spelling_bert: Vec::new(),
             pending_grammar_bert: Vec::new(),
@@ -4817,6 +4834,30 @@ impl eframe::App for ContextApp {
                 r
             };
             if ok {
+                // Kick off the focus-then-cursor flow: verify we have a Word PID,
+                // spawn a thread to activate Word via osascript, and queue a
+                // pending_cursor_place state. The main update loop will poll the
+                // OS foreground PID each frame; once it matches the target PID,
+                // it sends the cursorEnd command to the add-in.
+                let word_pid = self.manager.last_user_pid;
+                log!("CURSOR: fix ok, target Word pid={} (replacement='{}' para='{}')",
+                    word_pid, replace, trunc(&paragraph_id, 10));
+                if word_pid > 0 && !paragraph_id.is_empty() {
+                    let pid_copy = word_pid;
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("osascript").arg("-e")
+                            .arg(format!(r#"tell application "System Events"
+                                set frontProcess to first application process whose unix id is {}
+                                set frontmost of frontProcess to true
+                            end tell"#, pid_copy)).output();
+                    });
+                    self.pending_cursor_place = Some((
+                        replace.clone(),
+                        paragraph_id.clone(),
+                        word_pid,
+                        Instant::now(),
+                    ));
+                }
                 // Update cached text by applying replacement locally
                 // (don't re-read COM — Word returns stale text immediately after replace)
                 if let Some(pos) = self.last_doc_text.to_lowercase().find(&find.to_lowercase()) {
@@ -4881,6 +4922,25 @@ impl eframe::App for ContextApp {
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
                 log!("Fix applied: '{}' removed, {} remaining errors offset-adjusted by {}", find, self.writing_errors.len(), len_delta);
+            }
+        }
+
+        // If a fix just happened, we activated Word and stored its PID. Poll the
+        // OS foreground PID each frame; once it matches the target, send the
+        // cursorEnd command to the add-in so it moves the caret after the
+        // replacement. Times out after 3 seconds.
+        if let Some((word, para_id, target_pid, started_at)) = self.pending_cursor_place.clone() {
+            if started_at.elapsed() > Duration::from_millis(3000) {
+                log!("CURSOR: timeout waiting for Word pid={} to focus; giving up", target_pid);
+                self.pending_cursor_place = None;
+            } else {
+                let fg = self.platform.foreground_app();
+                if fg.pid == target_pid {
+                    log!("CURSOR: Word pid={} is now frontmost after {:?}; sending cursorEnd '{}'",
+                        target_pid, started_at.elapsed(), trunc(&word, 30));
+                    self.manager.place_cursor_at_end_of_word(&word, &para_id);
+                    self.pending_cursor_place = None;
+                }
             }
         }
 

@@ -435,6 +435,8 @@ function pollReplies() {
                 }
             } else if (data.action === "underline" && data.word) {
                 doUnderline(data.word, data.paragraphId, data.color || "red");
+            } else if (data.action === "cursorEnd" && data.word && data.paragraphId) {
+                doCursorAtEndOfWord(data.word, data.paragraphId);
             } else if (data.action === "clearParagraphUnderlines" && data.paragraphId) {
                 doClearParagraphUnderlines(data.paragraphId);
             } else if (data.action === "clearUnderline" && data.word) {
@@ -600,6 +602,37 @@ function doClearParagraphUnderlines(paragraphId) {
             return ctx.sync();
         });
     }).catch(function () {});
+}
+
+function doCursorAtEndOfWord(word, paragraphId) {
+    // Called after a fix when Word has focus. Find the last occurrence of `word`
+    // inside the given paragraph and select the END of that range. The caret
+    // lands just after the word, ready for typing.
+    enqueueWordRun(function () { return Word.run(function (ctx) {
+        var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+        var results = para.search(word, { matchCase: false });
+        results.load("items");
+        return ctx.sync().then(function () {
+            if (results.items.length === 0) {
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "CURSOR_END MISS: '" + word + "' not found in para=" + paragraphId.substring(0,10)})
+                }).catch(function(){});
+                return ctx.sync();
+            }
+            // Take the LAST match in the paragraph (in case the word appears
+            // more than once; we want the rightmost — usually the one just fixed).
+            var lastMatch = results.items[results.items.length - 1];
+            lastMatch.select("End");
+            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({msg: "CURSOR_END OK: '" + word + "' selected at end, matches=" + results.items.length})
+            }).catch(function(){});
+            return ctx.sync();
+        });
+    }).catch(function (e) {
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "CURSOR_END ERROR: " + e})
+        }).catch(function(){});
+    }); });
 }
 
 function doClearUnderline(word, paragraphId) {
