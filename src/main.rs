@@ -5869,15 +5869,18 @@ impl eframe::App for ContextApp {
                     self.selected_tab = 0;
                 }
 
-                // ● ✏ Grammatikk (dot + pen)
-                let dot_color = if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
-                    else { egui::Color32::from_rgb(0, 180, 60) };
-                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
-                let center = egui::pos2(dot_rect.min.x + 5.0, dot_rect.center().y);
-                ui.painter().circle_filled(center, 4.0, dot_color);
-                let gram_color = if self.selected_tab == 1 { active } else { inactive };
+                // ✏ Grammatikk — pen colored red when errors exist, green otherwise
+                let pen_color = if self.selected_tab == 1 {
+                    // Selected tab: emphasize red/green with full saturation
+                    if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
+                    else { egui::Color32::from_rgb(0, 160, 60) }
+                } else {
+                    // Unselected: dimmer red/green
+                    if has_grammar { egui::Color32::from_rgb(180, 70, 70) }
+                    else { egui::Color32::from_rgb(70, 140, 90) }
+                };
                 if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{270F}").size(16.0 * s).color(gram_color)
+                    egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color)
                 ).sense(egui::Sense::click())).on_hover_text(self.language.ui_grammar()).clicked() {
                     self.selected_tab = 1;
                 }
