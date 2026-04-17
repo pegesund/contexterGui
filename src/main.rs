@@ -5770,7 +5770,10 @@ impl eframe::App for ContextApp {
         // Base overhead: toolbar (~22) + toolbar panel margins (16) + central panel
         // top margin (8) + separator/scrollbar padding (~10) = ~60px.
         // Each content row is ~20px. Cap at 500px * s — content beyond scrolls.
-        let win_h = (s * (60.0 + content_rows * 20.0)).min(325.0 * s);
+        // Suggestions tab (completions, tab 0) gets 10px extra height so the full
+        // suggestions list stays visible. Base overhead is 60 for other tabs, 70 here.
+        let base_h = if self.selected_tab == 0 { 70.0 } else { 60.0 };
+        let win_h = (s * (base_h + content_rows * 20.0)).min(335.0 * s);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
@@ -6825,7 +6828,8 @@ impl eframe::App for ContextApp {
                     let selection = self.suggestion_selection.clone();
 
                     let win_w = 320.0_f32;
-                    let win_h = 340.0_f32;
+                    // +10 px (≈0.25 cm at 96 DPI) so all suggestions fit without clipping
+                    let win_h = 350.0_f32;
                     let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
                     let screen_center = egui::pos2(
                         (monitor.x - win_w) / 2.0,
