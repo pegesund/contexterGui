@@ -6398,6 +6398,8 @@ impl eframe::App for ContextApp {
                             }
                         }
 
+                        // Extra breathing room between error cards (0.4 cm ≈ 15 px @ 96 DPI)
+                        ui.add_space(15.0 * s);
                         ui.separator();
                         let is_focused = self.focused_error_idx == Some(idx) || error.pinned;
                         let frame_resp = egui::Frame::NONE.show(ui, |ui| {
