@@ -5755,13 +5755,18 @@ impl eframe::App for ContextApp {
             let right = self.open_completions.len();
             left.max(right).max(1) as f32
         } else if self.selected_tab == 1 {
-            // Grammar tab: each error card ≈ 4 rows (buttons + word + suggestion cols)
+            // Grammar tab: each error card ≈ 7 rows (separator + buttons/word +
+            // alternatives stacked vertically). Spelling errors can have up to 5
+            // alternatives below the best suggestion, so we budget 7 rows per card.
             let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
-            (errors as f32 * 4.0).max(2.0).min(20.0)
+            (errors as f32 * 7.0).max(3.0)
         } else {
             10.0
         };
-        let win_h = (s * (28.0 + content_rows * 20.0)).min(233.0 * s);
+        // Base overhead: toolbar (~22) + toolbar panel margins (16) + central panel
+        // top margin (8) + separator/scrollbar padding (~10) = ~60px.
+        // Each content row is ~20px. Cap at 500px * s — content beyond scrolls.
+        let win_h = (s * (60.0 + content_rows * 20.0)).min(325.0 * s);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
