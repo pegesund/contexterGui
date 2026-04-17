@@ -5951,9 +5951,7 @@ impl eframe::App for ContextApp {
                     self.selected_tab = 1;
                 }
 
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("|").size(12.0 * s).color(sep));
-                ui.add_space(2.0);
+                ui.add_space(8.0 * s);
 
                 // 🎤 Microphone slot: 🎤 idle, ■ recording, ⏳ transcribing
                 let mic_recording = stt::is_recording() || self.mic_transcribing;
@@ -6427,6 +6425,7 @@ impl eframe::App for ContextApp {
                     let mut shown_contexts: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
 
                     egui::ScrollArea::vertical().max_height(ui.available_height() - 4.0).show(ui, |ui| {
+                    let mut first_rendered = true;
                     for &idx in &active_errors {
                         let error = &self.writing_errors[idx];
 
@@ -6440,9 +6439,13 @@ impl eframe::App for ContextApp {
                             }
                         }
 
-                        // Extra breathing room between error cards (0.4 cm ≈ 15 px @ 96 DPI)
-                        ui.add_space(15.0 * s);
-                        ui.separator();
+                        // Extra breathing room between error cards (0.4 cm ≈ 15 px @ 96 DPI).
+                        // Skip for the first rendered error — no need for a divider at the top.
+                        if !first_rendered {
+                            ui.add_space(15.0 * s);
+                            ui.separator();
+                        }
+                        first_rendered = false;
                         let is_focused = self.focused_error_idx == Some(idx) || error.pinned;
                         let frame_resp = egui::Frame::NONE.show(ui, |ui| {
                             if matches!(error.category, ErrorCategory::SentenceBoundary) {
