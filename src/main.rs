@@ -4603,6 +4603,21 @@ fn get_screen_size(platform: &dyn platform::PlatformServices) -> (f32, f32) {
     platform.screen_size()
 }
 
+/// Insert thin-space (U+2009) between every pair of letters so the word
+/// renders with extra letter spacing — per Zorzi et al. (PNAS 2012), this
+/// improves reading speed and reduces errors for dyslexic readers by ~20%.
+/// Used only in hover previews; body UI uses default spacing.
+fn letter_spaced(word: &str) -> String {
+    let mut out = String::with_capacity(word.len() * 2);
+    let mut first = true;
+    for c in word.chars() {
+        if !first { out.push('\u{2009}'); }
+        out.push(c);
+        first = false;
+    }
+    out
+}
+
 fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
     let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
         .fill(egui::Color32::WHITE)
@@ -6308,8 +6323,8 @@ impl eframe::App for ContextApp {
                             let word_for_hover = comp.word.clone();
                             resp.on_hover_ui(|ui| {
                                 ui.set_max_width(600.0);
-                                ui.label(egui::RichText::new(&word_for_hover)
-                                    .size(36.0)
+                                ui.label(egui::RichText::new(letter_spaced(&word_for_hover))
+                                    .size(28.0)
                                     .strong()
                                     .color(egui::Color32::from_rgb(0, 80, 140)));
                             })
@@ -6700,8 +6715,8 @@ impl eframe::App for ContextApp {
                                             let best_resp = if hover_zoom {
                                                 best_resp.on_hover_ui(|ui| {
                                                     ui.set_max_width(600.0);
-                                                    ui.label(egui::RichText::new(&best_for_hover)
-                                                        .size(36.0)
+                                                    ui.label(egui::RichText::new(letter_spaced(&best_for_hover))
+                                                        .size(28.0)
                                                         .strong()
                                                         .color(egui::Color32::from_rgb(0, 120, 60)));
                                                 })
@@ -6736,8 +6751,8 @@ impl eframe::App for ContextApp {
                                                         let cand_resp = if hover_zoom {
                                                             cand_resp.on_hover_ui(|ui| {
                                                                 ui.set_max_width(600.0);
-                                                                ui.label(egui::RichText::new(&cand_for_hover)
-                                                                    .size(36.0)
+                                                                ui.label(egui::RichText::new(letter_spaced(&cand_for_hover))
+                                                                    .size(28.0)
                                                                     .color(egui::Color32::from_rgb(80, 120, 160)));
                                                             })
                                                         } else { cand_resp };
