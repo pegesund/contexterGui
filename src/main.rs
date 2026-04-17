@@ -627,6 +627,10 @@ impl BridgeManager {
         self.effective_bridge().map(|b| b.find_and_replace_in_context_at(find, replace, context, char_offset)).unwrap_or(false)
     }
 
+    fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, paragraph_id: &str, context: &str, char_offset: usize) -> bool {
+        self.effective_bridge().map(|b| b.find_and_replace_in_paragraph(find, replace, paragraph_id, context, char_offset)).unwrap_or(false)
+    }
+
     fn read_document_context(&self) -> Option<String> {
         self.effective_bridge().and_then(|b| b.read_document_context())
     }
@@ -947,7 +951,7 @@ struct ContextApp {
     /// Cooldown after a fix — don't prune errors until canvas has repainted with new text
     /// Recently fixed words — don't re-detect these as errors (cleared when fresh text arrives from extension)
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
-    pending_fix: Option<(String, String, String, usize)>,
+    pending_fix: Option<(String, String, String, usize, String)>, // (find, replace, sentence_context, doc_offset, paragraph_id)
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
     /// Pending async BERT scoring for spelling re-ranking
@@ -3481,7 +3485,6 @@ impl ContextApp {
             Some(a) => a,
             None => return,
         };
-        let mut needs_underline_sync = false;
 
         // Check for reset (new document opened)
         for bridge in &self.manager.bridges {
@@ -3631,19 +3634,12 @@ impl ContextApp {
                 });
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
-                    // Invariant: red underlines in Word must match writing_errors.
-                    // When stale errors are removed, Word may still show their underlines
-                    // (formatting can be inherited when text is edited in the range).
-                    // Wipe all underlines in this paragraph and reset the underlined flag
-                    // for remaining errors. sync_error_underlines is called once at the
-                    // end of this function (outside the actor borrow).
-                    self.manager.clear_paragraph_underlines(&p.paragraph_id);
-                    for e in &mut self.writing_errors {
-                        if e.paragraph_id == p.paragraph_id {
-                            e.underlined = false;
-                        }
-                    }
-                    needs_underline_sync = true;
+                    // Word's underline disappears with the text when a word is
+                    // deleted or modified character-by-character. Paragraph-level
+                    // clear + resync here floods the add-in queue (each Word.run
+                    // takes ~1s) and caused multi-second delays on every keystroke.
+                    // If the rare "formatting-inherited-onto-new-text" case
+                    // resurfaces, fix it more surgically at the fix action site.
                 }
 
                 // Check each sentence: skip if already processed (hash unchanged)
@@ -3652,10 +3648,17 @@ impl ContextApp {
 
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
-                    // Paragraph text from add-in ends with a space when the user just
-                    // finished a word (pressed space). We use the whole paragraph text,
-                    // not sentence_text (sentences are trimmed), so check clean_text.
-                    let just_finished_word = clean_text.ends_with(' ') || clean_text.ends_with('\t');
+                    // Word's paragraph.text always ends with whitespace (Word artifact),
+                    // so clean_text.ends_with(' ') is unreliable. Instead, check the
+                    // character immediately before the cursor: if it's a space, the
+                    // user just pressed space (word boundary just crossed).
+                    let just_finished_word = match p.cursor_start {
+                        Some(c) if c > 0 => {
+                            clean_text.chars().nth(c - 1) == Some(' ')
+                                || clean_text.chars().nth(c - 1) == Some('\t')
+                        }
+                        _ => false,
+                    };
 
                     if self.processed_sentence_hashes.contains(&sent_h) {
                         log!("  SKIP processed: '{}'", trunc(sentence_text, 50));
@@ -3713,12 +3716,6 @@ impl ContextApp {
                     }
                 }
             }
-        }
-
-        // Re-apply underlines for remaining errors if any were cleared above.
-        // Done here so it's outside the `actor` borrow scope.
-        if needs_underline_sync {
-            self.sync_error_underlines();
         }
 
         // Clean stale paragraph_texts entries (paragraphs that were deleted/merged)
@@ -4782,45 +4779,35 @@ impl eframe::App for ContextApp {
         }
 
         // Execute deferred find-and-replace
-        if let Some((find, replace, context, doc_offset)) = self.pending_fix.take() {
-            log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={}",
+        if let Some((find, replace, context, doc_offset, paragraph_id)) = self.pending_fix.take() {
+            log!("pending_fix: bridge='{}' find='{}' replace='{}' offset={} para='{}'",
                 self.manager.active_bridge_name(),
-                trunc(&find, 60), trunc(&replace, 60), doc_offset);
+                trunc(&find, 60), trunc(&replace, 60), doc_offset, trunc(&paragraph_id, 10));
             // Freeze window position briefly: Word's find/select/replace sequence
             // moves the caret through intermediate positions, causing the window
             // to jump left then back. Skip caret-follow until the dust settles.
             self.goto_freeze_until = Some(Instant::now() + Duration::from_millis(600));
-            // Clear underlines BEFORE replacement. Use paragraph-level clear because
-            // Word's per-word underline can span adjacent punctuation (e.g. the period
-            // at the end of a sentence), which clear_underline_word misses since it
-            // searches for the word with matchWholeWord=true.
+            // Clear underline BEFORE replacement. Use word-level clear (search by word
+            // text) — adding clearParagraphUnderlines here caused the subsequent replace
+            // to race/fail silently on the add-in queue.
             let find_lower_pre = find.to_lowercase();
-            let mut cleared_paras: std::collections::HashSet<String> = std::collections::HashSet::new();
             for e in &mut self.writing_errors {
                 if (e.word.to_lowercase() == find_lower_pre || e.sentence_context.to_lowercase() == find_lower_pre)
                     && e.doc_offset == doc_offset
                 {
-                    if !e.paragraph_id.is_empty() && cleared_paras.insert(e.paragraph_id.clone()) {
-                        self.manager.clear_paragraph_underlines(&e.paragraph_id);
-                    } else if e.paragraph_id.is_empty() {
-                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
-                    }
+                    self.manager.clear_underline_word(&e.word, &e.paragraph_id);
                     e.underlined = false;
-                    log!("  Pre-cleared underlines for para='{}' (word='{}')",
-                        trunc(&e.paragraph_id, 10), e.word);
+                    log!("  Pre-cleared underline word='{}' para='{}'", e.word, trunc(&e.paragraph_id, 10));
                     break;
                 }
             }
-            // Invariant: mark remaining errors in cleared paragraphs as needing
-            // re-underline so sync_error_underlines re-applies them.
-            if !cleared_paras.is_empty() {
-                for e in &mut self.writing_errors {
-                    if cleared_paras.contains(&e.paragraph_id) {
-                        e.underlined = false;
-                    }
-                }
-            }
-            let ok = if context.is_empty() {
+            let ok = if !paragraph_id.is_empty() {
+                // Scope the search to the specific paragraph — avoids slow
+                // document.body.search on the add-in side.
+                let r = self.manager.find_and_replace_in_paragraph(&find, &replace, &paragraph_id, &context, doc_offset);
+                log!("  find_and_replace_in_paragraph result: {}", r);
+                r
+            } else if context.is_empty() {
                 let r = self.manager.find_and_replace(&find, &replace);
                 log!("  find_and_replace result: {}", r);
                 r
@@ -4894,11 +4881,6 @@ impl eframe::App for ContextApp {
                 self.grammar_queue.clear();
                 self.grammar_scanning = false;
                 log!("Fix applied: '{}' removed, {} remaining errors offset-adjusted by {}", find, self.writing_errors.len(), len_delta);
-            }
-            // Re-apply underlines for any errors in paragraphs we cleared above
-            // (underlined flag was reset so sync will re-apply).
-            if !cleared_paras.is_empty() {
-                self.sync_error_underlines();
             }
         }
 
@@ -5823,13 +5805,6 @@ impl eframe::App for ContextApp {
                 let pos_y = pos_y.max(0.0).min(screen_h - win_h);
                 let pos_x = (lx + self.platform.caret_offset_right()).min(screen_w - win_w).max(0.0);
 
-                static LAST_POS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
-                let cur_x = pos_x as i32;
-                let prev = LAST_POS.load(std::sync::atomic::Ordering::Relaxed);
-                if prev != cur_x {
-                    log!("WIN pos x: {} → {} (caret={}, win_w={})", prev, cur_x, x, win_w as i32);
-                    LAST_POS.store(cur_x, std::sync::atomic::Ordering::Relaxed);
-                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     egui::pos2(pos_x, pos_y),
                 ));
@@ -6657,7 +6632,8 @@ impl eframe::App for ContextApp {
                                 let word = error.word.clone();
                                 let context = error.sentence_context.clone();
                                 let off = error.doc_offset;
-                                self.pending_fix = Some((word.clone(), suggestion.clone(), context, off));
+                                let para_id = error.paragraph_id.clone();
+                                self.pending_fix = Some((word.clone(), suggestion.clone(), context, off, para_id));
                                 // Freeze window position immediately on click. Word's
                                 // find/select/replace moves the caret through intermediate
                                 // positions, and polling also runs after this frame — so the
@@ -6802,11 +6778,11 @@ impl eframe::App for ContextApp {
                     if idx < candidates_clone.len() {
                         let replacement = candidates_clone[idx].0.clone();
                         log!("Suggestion selected: '{}' → '{}'", word_clone, replacement);
-                        let (sent_ctx, sent_off) = self.writing_errors.iter()
+                        let (sent_ctx, sent_off, para_id) = self.writing_errors.iter()
                             .find(|e| e.word == word_clone && !e.ignored)
-                            .map(|e| (e.sentence_context.clone(), e.doc_offset))
+                            .map(|e| (e.sentence_context.clone(), e.doc_offset, e.paragraph_id.clone()))
                             .unwrap_or_default();
-                        self.pending_fix = Some((word_clone.clone(), replacement.clone(), sent_ctx, sent_off));
+                        self.pending_fix = Some((word_clone.clone(), replacement.clone(), sent_ctx, sent_off, para_id));
                         for e in &mut self.writing_errors {
                             if e.word == word_clone && !e.ignored {
                                 e.suggestion = replacement;
@@ -7159,7 +7135,8 @@ impl eframe::App for ContextApp {
                     let w = error.word.clone();
                     let c = error.sentence_context.clone();
                     let o = error.doc_offset;
-                    self.pending_fix = Some((w, s, c, o));
+                    let p = error.paragraph_id.clone();
+                    self.pending_fix = Some((w, s, c, o, p));
                     let sctx = self.writing_errors[fix_idx].sentence_context.clone();
                     let soff = self.writing_errors[fix_idx].doc_offset;
                     for e in &mut self.writing_errors {

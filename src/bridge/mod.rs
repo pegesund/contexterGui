@@ -52,6 +52,14 @@ pub trait TextBridge {
         self.find_and_replace_in_context(find, replace, context)
     }
 
+    /// Replace a word within a specific paragraph (identified by paragraph_id).
+    /// Much faster than body-wide search because it scopes to one paragraph.
+    /// Default: falls back to find_and_replace_in_context_at.
+    fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, paragraph_id: &str, context: &str, char_offset: usize) -> bool {
+        let _ = paragraph_id;
+        self.find_and_replace_in_context_at(find, replace, context, char_offset)
+    }
+
     /// Read a larger text window for context (e.g. 5000 chars before cursor).
     /// Used for sentence embeddings / topic extraction.
     fn read_document_context(&self) -> Option<String> { None }

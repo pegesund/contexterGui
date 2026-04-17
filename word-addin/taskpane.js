@@ -460,34 +460,46 @@ function pollReplies() {
 }
 
 function doReplace(expected, replacement, paragraphId) {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
-        if (paragraphId) {
-            var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
-            var results = para.search(expected, { matchCase: false });
+    var t0 = Date.now();
+    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({msg: "REPLACE START: '" + expected + "' → '" + replacement + "' para=" + (paragraphId ? paragraphId.substring(0,10) : "none")})
+    }).catch(function(){});
+    enqueueWordRun(function () {
+        var t1 = Date.now();
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "REPLACE enqueue→run delay: " + (t1 - t0) + "ms"})
+        }).catch(function(){});
+        return Word.run(function (ctx) {
+            var scope;
+            if (paragraphId) {
+                scope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+            } else {
+                scope = ctx.document.body;
+            }
+            var results = scope.search(expected, { matchCase: false });
             results.load("items");
             return ctx.sync().then(function () {
+                var t2 = Date.now();
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "REPLACE search sync: " + (t2 - t1) + "ms, found=" + results.items.length})
+                }).catch(function(){});
                 if (results.items.length > 0) {
-                    results.items[0].insertText(replacement, "Replace");
+                    var newRange = results.items[0].insertText(replacement, "Replace");
+                    // Collapse selection to the end of the replacement so the cursor
+                    // lands after the new word (ready for the user to keep typing).
+                    newRange.select("End");
                     return ctx.sync().then(function () {
-                        // Trigger rescan so changed paragraph is detected
-                        rescanAll();
+                        var t3 = Date.now();
+                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                            body: JSON.stringify({msg: "REPLACE insert sync: " + (t3 - t2) + "ms (total=" + (t3 - t0) + "ms)"})
+                        }).catch(function(){});
+                        // onParagraphChanged will fire automatically and send POST /changed.
+                        // No need to call rescanAll() which queues more Word.run operations.
                     });
                 }
             });
-        } else {
-            var results = ctx.document.body.search(expected, { matchCase: false });
-            results.load("items");
-            return ctx.sync().then(function () {
-                if (results.items.length > 0) {
-                    results.items[0].insertText(replacement, "Replace");
-                    return ctx.sync().then(function () {
-                        // Trigger rescan so changed paragraph is detected
-                        rescanAll();
-                    });
-                }
-            });
-        }
-    }).catch(function () {}); });
+        }).catch(function () {});
+    });
 }
 
 function doSelectWord(word, paragraphId) {

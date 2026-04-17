@@ -285,6 +285,27 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
+    fn find_and_replace_in_paragraph(
+        &self,
+        find: &str,
+        replace: &str,
+        paragraph_id: &str,
+        _context: &str,
+        char_offset: usize,
+    ) -> bool {
+        // Send paragraphId so the add-in's doReplace scopes the search to one
+        // paragraph instead of scanning document.body — much faster.
+        let json = format!(
+            r#"{{"action":"replace","expected":"{}","text":"{}","paragraphId":"{}","offset":{}}}"#,
+            escape_json(find),
+            escape_json(replace),
+            escape_json(paragraph_id),
+            char_offset
+        );
+        self.push_reply(json);
+        true
+    }
+
     fn read_full_document(&self) -> Option<String> {
         // The add-in sends before+after text (up to 2000 chars each).
         // Combine them as approximate full doc.
