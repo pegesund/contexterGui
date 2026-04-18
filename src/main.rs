@@ -925,6 +925,8 @@ struct ContextApp {
     user_dict: Option<user_dict::UserDict>,
     /// Show user dictionary editor window
     show_settings_window: bool,
+    /// Which tab of the settings window is active: 0=Skriving, 1=Tale, 2=Visning, 3=Språk.
+    settings_tab: u8,
     show_userdict_window: bool,
     /// Text input for new word in user dict editor
     userdict_new_word: String,
@@ -1516,6 +1518,7 @@ impl ContextApp {
                 }
             },
             show_settings_window: false,
+            settings_tab: 0,
             show_userdict_window: false,
             userdict_new_word: String::new(),
             last_spell_checked_word: String::new(),
@@ -7586,7 +7589,6 @@ impl eframe::App for ContextApp {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
                         .show(vp_ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
                             let heading = 22.0_f32 * s;
                             let body = 18.0_f32 * s;
                             let label_color = egui::Color32::from_rgb(50, 50, 50);
@@ -7594,6 +7596,32 @@ impl eframe::App for ContextApp {
                             let on_color = egui::Color32::from_rgb(0, 130, 60);
                             let off_color = egui::Color32::from_rgb(140, 140, 140);
 
+                            // Tab row
+                            let mut settings_tab = self.settings_tab;
+                            ui.horizontal(|ui| {
+                                let tabs = [
+                                    (0u8, "Skriving"),
+                                    (1u8, "Tale"),
+                                    (2u8, "Visning"),
+                                    (3u8, "Språk"),
+                                ];
+                                for (idx, label) in tabs.iter() {
+                                    if ui.selectable_label(
+                                        settings_tab == *idx,
+                                        egui::RichText::new(*label).size(body).strong(),
+                                    ).clicked() {
+                                        settings_tab = *idx;
+                                    }
+                                }
+                            });
+                            self.settings_tab = settings_tab;
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(14.0);
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                            // ============ Tab 0: Skriving (writing) ============
+                            if settings_tab == 0 {
                             // -- Quality --
                             ui.label(egui::RichText::new(lang_for_settings.ui_quality()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
@@ -7621,6 +7649,21 @@ impl eframe::App for ContextApp {
                             ui.separator();
                             ui.add_space(12.0);
 
+                            // -- User dictionary --
+                            ui.label(egui::RichText::new(lang_for_settings.ui_user_dict()).size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{} ord", dict_count)).size(body).color(active_color));
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new(lang_for_settings.ui_edit()).size(body)
+                                )).clicked() {
+                                    open_userdict = true;
+                                }
+                            });
+                            } // end Skriving tab
+
+                            // ============ Tab 1: Tale (speech) ============
+                            if settings_tab == 1 {
                             // -- Speech recognition --
                             ui.label(egui::RichText::new(lang_for_settings.ui_speech_recognition()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
@@ -7679,11 +7722,10 @@ impl eframe::App for ContextApp {
                                     egui::RichText::new(label).size(body),
                                 ));
                             }
+                            } // end Tale tab
 
-                            ui.add_space(16.0);
-                            ui.separator();
-                            ui.add_space(12.0);
-
+                            // ============ Tab 2: Visning (display) ============
+                            if settings_tab == 2 {
                             // -- Hover zoom (large-font preview on hover) --
                             ui.label(egui::RichText::new("Forstørr ord ved hover").size(heading).strong().color(label_color));
                             ui.add_space(6.0);
@@ -7716,28 +7758,10 @@ impl eframe::App for ContextApp {
                                     new_ui_scale = (new_ui_scale + 0.1).min(2.5);
                                 }
                             });
+                            } // end Visning tab
 
-                            ui.add_space(16.0);
-                            ui.separator();
-                            ui.add_space(12.0);
-
-                            // -- User dictionary --
-                            ui.label(egui::RichText::new(lang_for_settings.ui_user_dict()).size(heading).strong().color(label_color));
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("{} ord", dict_count)).size(body).color(active_color));
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new(lang_for_settings.ui_edit()).size(body)
-                                )).clicked() {
-                                    open_userdict = true;
-                                }
-                            });
-
-                            ui.add_space(16.0);
-                            ui.separator();
-                            ui.add_space(12.0);
-
-                            // -- Language --
+                            // ============ Tab 3: Språk (language) ============
+                            if settings_tab == 3 {
                             ui.label(egui::RichText::new("Språk").size(heading).strong().color(label_color));
                             ui.add_space(6.0);
 
@@ -7780,8 +7804,9 @@ impl eframe::App for ContextApp {
                                 });
                                 ui.add_space(4.0);
                             }
+                            } // end Språk tab
 
-                            // Load errors (if any)
+                            // Load errors (if any) — shown on every tab
                             if !load_errors.is_empty() {
                                 ui.add_space(16.0);
                                 ui.separator();
