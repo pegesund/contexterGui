@@ -995,6 +995,11 @@ struct ContextApp {
     suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
     /// Rule info popup: (rule_name, explanation, sentence_context, fix_idx, suggestion)
     rule_info_window: Option<(String, String, String, usize, String)>,
+    /// When true, the rule-info popup shows the full details (description,
+    /// examples, etc). When false, it shows only the minimal teacher's
+    /// red-pen diff (dyslexia-friendly). Reset to false each time the
+    /// popup opens.
+    rule_info_show_more: bool,
     /// LLM changes for the currently open rule_info_window (from, to, why)
     rule_info_llm_changes: Vec<(String, String, String)>,
     // OCR clipboard monitoring
@@ -1551,6 +1556,7 @@ impl ContextApp {
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
+            rule_info_show_more: false,
             rule_info_llm_changes: Vec::new(),
             ocr: match ocr::OcrClipboard::new(&*language) {
                 Ok(o) => { eprintln!("OCR clipboard monitor ready"); Some(o) }
@@ -6590,11 +6596,6 @@ impl eframe::App for ContextApp {
                                 let err_expl = error.explanation.clone();
                                 let err_ctx = error.sentence_context.clone();
                                 ui.horizontal(|ui| {
-                                    if let Some(alt_idx) = first_alt {
-                                        if icon_button(ui, "👍", self.language.ui_fix()) {
-                                            action = Some((alt_idx, "fix"));
-                                        }
-                                    }
                                     if icon_button(ui, "👎", self.language.ui_ignore()) {
                                         action = Some((idx, "ignore_group"));
                                     }
@@ -6621,29 +6622,29 @@ impl eframe::App for ContextApp {
                                             Vec::new()
                                         };
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
+                                        self.rule_info_show_more = false;
                                     }
                                     if icon_button(ui, "▶", self.language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
-                                // Original (red, strikethrough) then suggestion (green) — stacked
-                                ui.label(
-                                    egui::RichText::new(&error.word)
-                                        .size(11.0 * s)
-                                        .strikethrough()
-                                        .color(egui::Color32::from_rgb(180, 60, 60)),
-                                );
+                                // Only the green suggestion — clickable to apply the fix.
+                                // Original (red strikethrough) and explanation moved to
+                                // the details popup to keep the card minimal.
                                 for &alt_idx in &alternatives {
                                     let alt = &self.writing_errors[alt_idx];
-                                    ui.label(
+                                    if ui.add(egui::Label::new(
                                         egui::RichText::new(&alt.suggestion)
                                             .size(11.0 * s)
                                             .strong()
                                             .color(egui::Color32::from_rgb(0, 120, 60)),
-                                    );
+                                    ).sense(egui::Sense::click())).clicked() {
+                                        action = Some((alt_idx, "fix"));
+                                    }
                                 }
-                                // Explanation (skip entirely for LLM corrections)
-                                if error.rule_name != "llm_correction" {
+                                // Explanation intentionally omitted from the card — see
+                                // the 💡 details popup.
+                                if false && error.rule_name != "llm_correction" {
                                     if let Some(alt_idx) = first_alt {
                                         ui.label(
                                             egui::RichText::new(&self.writing_errors[alt_idx].explanation)
@@ -7039,6 +7040,7 @@ impl eframe::App for ContextApp {
                 let mut do_fix = false;
                 let mut do_ignore = false;
                 let mut do_close = false;
+                let mut show_more = self.rule_info_show_more;
                 let (rule_name, explanation, sentence, fix_idx, suggestion) = self.rule_info_window.as_ref().unwrap();
                 let rule_name = rule_name.clone();
                 // Strip LLM_CHANGES: prefix from explanation for display
@@ -7050,7 +7052,13 @@ impl eframe::App for ContextApp {
                 let sentence = sentence.clone();
                 let fix_idx = *fix_idx;
                 let suggestion = suggestion.clone();
-                let error_word = self.writing_errors[fix_idx].word.clone();
+                // For grammar errors, WritingError.word is the full sentence — the
+                // actual misspelled/wrong token lives in .error_word. Fall back to
+                // .word if error_word is empty (spelling errors use .word directly).
+                let error_word = {
+                    let e = &self.writing_errors[fix_idx];
+                    if !e.error_word.is_empty() { e.error_word.clone() } else { e.word.clone() }
+                };
                 let corrected_sentence = if rule_name == "llm_correction" && !suggestion.is_empty() {
                     suggestion.clone() // LLM suggestion is already the full corrected sentence
                 } else if !suggestion.is_empty() {
@@ -7099,6 +7107,127 @@ impl eframe::App for ContextApp {
                                 let scroll_height = ui.available_height() - 50.0;
                                 egui::ScrollArea::vertical().max_height(scroll_height).show(ui, |ui| {
                                     ui.set_max_width(max_w - 16.0);
+
+                                    // --------------------------------------------------
+                                    // MINIMAL INLINE-DIFF VIEW (dyslexia-friendly).
+                                    // The ONE sentence, with the wrong word struck
+                                    // through in red and the corrected word inserted
+                                    // in green right after. Short "fordi" line.
+                                    // "Vis mer" toggles the full detailed view.
+                                    // --------------------------------------------------
+                                    // Compute the replacement WORD (not the whole corrected
+                                    // sentence). `suggestion` here is often the full corrected
+                                    // sentence for grammar rules — we align it with the original
+                                    // by finding the word at the same whitespace-index as
+                                    // `error_word`, which yields the single replacement token.
+                                    let replacement_word: String = (|| {
+                                        // If suggestion looks like a single token (no whitespace),
+                                        // use it directly.
+                                        if !suggestion.trim().contains(char::is_whitespace) {
+                                            return suggestion.trim().to_string();
+                                        }
+                                        // Otherwise diff word-by-word.
+                                        let orig_words: Vec<&str> = sentence.split_whitespace().collect();
+                                        let corr_words: Vec<&str> = suggestion.split_whitespace().collect();
+                                        // Find the index of error_word in the original.
+                                        let err_lower = error_word.to_lowercase();
+                                        let idx = orig_words.iter().position(|w| {
+                                            let stripped: String = w.chars().filter(|c| c.is_alphanumeric() || *c == '\u{00ab}' || *c == '\u{00bb}' || matches!(*c, 'æ'|'ø'|'å'|'Æ'|'Ø'|'Å')).collect();
+                                            stripped.to_lowercase() == err_lower
+                                        });
+                                        match idx {
+                                            Some(i) if i < corr_words.len() => corr_words[i].trim_matches(|c: char| c.is_ascii_punctuation()).to_string(),
+                                            _ => {
+                                                // Fallback: return first word that differs.
+                                                for (i, ow) in orig_words.iter().enumerate() {
+                                                    if let Some(cw) = corr_words.get(i) {
+                                                        if ow.to_lowercase() != cw.to_lowercase() {
+                                                            return cw.trim_matches(|c: char| c.is_ascii_punctuation()).to_string();
+                                                        }
+                                                    }
+                                                }
+                                                suggestion.clone()
+                                            }
+                                        }
+                                    })();
+
+                                    if rule_name != "llm_correction"
+                                        && !replacement_word.is_empty()
+                                        && !error_word.is_empty()
+                                    {
+                                        ui.add_space(8.0);
+                                        let sentence_size = 18.0 * s;
+                                        ui.horizontal_wrapped(|ui| {
+                                            let err_lower = error_word.to_lowercase();
+                                            let sent_lower = sentence.to_lowercase();
+                                            match sent_lower.find(&err_lower) {
+                                                Some(pos) => {
+                                                    let before = &sentence[..pos];
+                                                    let word_slice = &sentence[pos..pos + error_word.len()];
+                                                    let after = &sentence[pos + error_word.len()..];
+                                                    if !before.is_empty() {
+                                                        ui.label(egui::RichText::new(before)
+                                                            .size(sentence_size)
+                                                            .color(egui::Color32::from_rgb(60, 60, 60)));
+                                                    }
+                                                    ui.label(egui::RichText::new(word_slice)
+                                                        .size(sentence_size)
+                                                        .strikethrough()
+                                                        .color(egui::Color32::from_rgb(200, 50, 50)));
+                                                    ui.add_space(2.0);
+                                                    ui.label(egui::RichText::new(&replacement_word)
+                                                        .size(sentence_size)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(0, 130, 60)));
+                                                    if !after.is_empty() {
+                                                        ui.label(egui::RichText::new(after)
+                                                            .size(sentence_size)
+                                                            .color(egui::Color32::from_rgb(60, 60, 60)));
+                                                    }
+                                                }
+                                                None => {
+                                                    ui.label(egui::RichText::new(&sentence)
+                                                        .size(sentence_size)
+                                                        .color(egui::Color32::from_rgb(60, 60, 60)));
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(14.0);
+                                        // Compact word pair: wrong → right. "→" may render
+                                        // as a tofu square depending on font; use "⟶" which
+                                        // is broadly supported, with a space for breathing.
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(&error_word)
+                                                .size(16.0 * s)
+                                                .strong()
+                                                .strikethrough()
+                                                .color(egui::Color32::from_rgb(200, 50, 50)));
+                                            // Use a triangle glyph that's covered by the
+                                            // emoji fallback font (Open Sans lacks most arrow
+                                            // code points — they render as tofu squares).
+                                            ui.label(egui::RichText::new("▶")
+                                                .size(14.0 * s)
+                                                .color(egui::Color32::from_rgb(120, 120, 120)));
+                                            ui.label(egui::RichText::new(&replacement_word)
+                                                .size(16.0 * s)
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(0, 130, 60)));
+                                        });
+                                        ui.add_space(8.0);
+                                        // Toggle to reveal the old detailed view
+                                        if ui.selectable_label(
+                                            show_more,
+                                            egui::RichText::new(if show_more { "Skjul detaljer" } else { "Vis mer" })
+                                                .size(13.0 * s)
+                                                .color(egui::Color32::from_rgb(90, 120, 180)),
+                                        ).clicked() {
+                                            show_more = !show_more;
+                                        }
+                                        ui.add_space(8.0);
+                                    }
+                                    if rule_name == "llm_correction" || show_more || suggestion.is_empty() || error_word.is_empty() {
+                                    ui.separator();
+                                    ui.add_space(12.0);
 
                                     // Category header
                                     ui.label(
@@ -7234,8 +7363,15 @@ impl eframe::App for ContextApp {
                                     ui.add_space(4.0);
                                     }
                                     if rule_name != "llm_correction" {
+                                    // Strip the leading "«X» → «Y»:" prefix — the word pair
+                                    // is already shown in the minimal view.
+                                    let explanation_clean = match explanation.find(": ") {
+                                        Some(i) if explanation[..i].contains('«') =>
+                                            explanation[i + 2..].to_string(),
+                                        _ => explanation.clone(),
+                                    };
                                     ui.label(
-                                        egui::RichText::new(&explanation)
+                                        egui::RichText::new(&explanation_clean)
                                             .size(14.0 * s)
                                             .color(egui::Color32::from_rgb(30, 30, 30)),
                                     );
@@ -7266,6 +7402,7 @@ impl eframe::App for ContextApp {
                                             ui.add_space(5.0);
                                         }
                                     }
+                                    } // end detailed view gate
                                 });
 
                                 // Action buttons — always visible at bottom
@@ -7326,6 +7463,8 @@ impl eframe::App for ContextApp {
                 } else if do_close {
                     self.rule_info_window = None;
                 }
+                // Persist the show_more toggle back to self.
+                self.rule_info_show_more = show_more;
             }
 
             // === OCR: screenshot detected — handled in separate window below ===
