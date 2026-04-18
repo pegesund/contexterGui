@@ -112,7 +112,24 @@ impl TtsEngine for MacTtsEngine {
     }
 
     fn available_voices(&self) -> Vec<VoiceInfo> {
-        Self::query_voices(self.voice_filters)
+        // `say -v ?` spawns a subprocess (~50-100ms). The settings window
+        // re-renders every frame, so without this cache we'd fork `say`
+        // 60x/second while the window is open. Cached per filter set.
+        use std::sync::{Mutex, OnceLock};
+        static CACHE: OnceLock<Mutex<Option<(Vec<&'static str>, Vec<VoiceInfo>)>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        {
+            let guard = cache.lock().unwrap();
+            if let Some((filters, voices)) = guard.as_ref() {
+                if filters.as_slice() == self.voice_filters {
+                    return voices.clone();
+                }
+            }
+        }
+        let voices = Self::query_voices(self.voice_filters);
+        let mut guard = cache.lock().unwrap();
+        *guard = Some((self.voice_filters.to_vec(), voices.clone()));
+        voices
     }
 
     fn current_voice(&self) -> String {

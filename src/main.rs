@@ -7616,10 +7616,6 @@ impl eframe::App for ContextApp {
                                     });
                                 new_quality = selected as u8;
                             }
-                            if grammar_completion {
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new(lang_for_settings.ui_grammar_filter_on()).size(body).color(on_color));
-                            }
 
                             ui.add_space(16.0);
                             ui.separator();
@@ -7629,17 +7625,17 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(lang_for_settings.ui_speech_recognition()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                let rask_color = if new_whisper_mode == 0 { active_color } else { off_color };
-                                let beste_color = if new_whisper_mode == 1 { active_color } else { off_color };
-                                if ui.add(egui::Label::new(
-                                    egui::RichText::new(lang_for_settings.ui_stt_fast_model()).size(body).color(rask_color)
-                                ).sense(egui::Sense::click())).clicked() {
+                                if ui.selectable_label(
+                                    new_whisper_mode == 0,
+                                    egui::RichText::new(lang_for_settings.ui_stt_fast_model()).size(body),
+                                ).clicked() {
                                     new_whisper_mode = 0;
                                 }
-                                ui.label(egui::RichText::new("  |  ").size(body).color(off_color));
-                                if ui.add(egui::Label::new(
-                                    egui::RichText::new(lang_for_settings.ui_stt_best_model()).size(body).color(beste_color)
-                                ).sense(egui::Sense::click())).clicked() {
+                                ui.add_space(6.0);
+                                if ui.selectable_label(
+                                    new_whisper_mode == 1,
+                                    egui::RichText::new(lang_for_settings.ui_stt_best_model()).size(body),
+                                ).clicked() {
                                     new_whisper_mode = 1;
                                 }
                             });
@@ -7654,15 +7650,10 @@ impl eframe::App for ContextApp {
                             let current = tts::current_voice();
                             for voice in &voice_list {
                                 let is_selected = voice.name == current;
-                                let color = if is_selected { on_color } else { label_color };
-                                let label = if is_selected {
-                                    format!("{} (aktiv)", &voice.name)
-                                } else {
-                                    voice.name.clone()
-                                };
-                                if ui.add(egui::Label::new(
-                                    egui::RichText::new(&label).size(body).color(color)
-                                ).sense(egui::Sense::click())).clicked() {
+                                if ui.selectable_label(
+                                    is_selected,
+                                    egui::RichText::new(&voice.name).size(body),
+                                ).clicked() {
                                     selected_voice = Some(voice.name.clone());
                                 }
                             }
@@ -7678,16 +7669,15 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(lang_for_settings.ui_read_words_aloud()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             {
-                                let (label, color) = if new_speak_on_space {
-                                    (lang_for_settings.ui_speak_on_space_on(), on_color)
+                                let label = if new_speak_on_space {
+                                    lang_for_settings.ui_speak_on_space_on()
                                 } else {
-                                    (lang_for_settings.ui_speak_on_space_off(), off_color)
+                                    lang_for_settings.ui_speak_on_space_off()
                                 };
-                                if ui.add(egui::Label::new(
-                                    egui::RichText::new(label).size(body).color(color)
-                                ).sense(egui::Sense::click())).clicked() {
-                                    new_speak_on_space = !new_speak_on_space;
-                                }
+                                ui.add(egui::Checkbox::new(
+                                    &mut new_speak_on_space,
+                                    egui::RichText::new(label).size(body),
+                                ));
                             }
 
                             ui.add_space(16.0);
@@ -7698,16 +7688,15 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new("Forstørr ord ved hover").size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             {
-                                let (label, color) = if new_hover_zoom {
-                                    ("På — forslag vises i stor skrift når musen er over", on_color)
+                                let label = if new_hover_zoom {
+                                    "På — forslag vises i stor skrift når musen er over"
                                 } else {
-                                    ("Av", off_color)
+                                    "Av"
                                 };
-                                if ui.add(egui::Label::new(
-                                    egui::RichText::new(label).size(body).color(color)
-                                ).sense(egui::Sense::click())).clicked() {
-                                    new_hover_zoom = !new_hover_zoom;
-                                }
+                                ui.add(egui::Checkbox::new(
+                                    &mut new_hover_zoom,
+                                    egui::RichText::new(label).size(body),
+                                ));
                             }
 
                             ui.add_space(16.0);
