@@ -162,9 +162,8 @@ pub mod word_addin;
 
 pub mod browser;
 
-// Future:
-// #[cfg(target_os = "macos")]
-// pub mod accessibility_mac;
+#[cfg(target_os = "macos")]
+pub mod ax_mac;
 
 /// Create platform-specific bridges (excluding Browser, which is added separately).
 pub fn create_bridges(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
@@ -188,6 +187,11 @@ pub fn create_bridges(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
         let addin_bridge = word_addin::WordAddinBridge::new();
         crate::log!("Word Add-in bridge started (HTTP port {})", 52525);
         bridges.push(Box::new(addin_bridge));
+
+        // Accessibility fallback for Teams, Safari, Chrome inputs, TextEdit, etc.
+        // Consumed only for AppKind::Other or when the Browser bridge has no data
+        // (see BridgeManager::read_context).
+        bridges.push(Box::new(ax_mac::AxMacBridge::new()));
     }
 
     bridges

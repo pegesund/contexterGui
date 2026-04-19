@@ -515,14 +515,21 @@ impl BridgeManager {
             return self.last_context.clone();
         }
 
-        // Only activate for supported programs: Word, Edge, Chrome, Notepad
+        // Only activate for supported programs: Word, Edge, Chrome, Notepad.
+        // On macOS also handle AppKind::Other via the AX fallback bridge
+        // (Teams, generic Electron/Cocoa/web text fields).
         let is_notepad = app_kind == platform::AppKind::Notepad;
-        let is_supported = word_is_foreground || is_browser || is_notepad;
+        let is_supported = word_is_foreground || is_browser || is_notepad
+            || cfg!(target_os = "macos");
         if !is_supported {
             return self.last_context.clone();
         }
 
-        // --- BROWSER: ONLY use Browser bridge. No fallbacks. Ever. ---
+        // --- BROWSER ---
+        // Prefer the native-messaging Browser bridge (rich cursor info from
+        // the Chrome/Edge extension). On macOS, if that bridge has no data
+        // (no extension installed, or Safari which has no extension), fall
+        // through to the AX bridge below instead of giving up.
         if is_browser {
             self.last_user_was_browser = true;
             if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
@@ -538,11 +545,13 @@ impl BridgeManager {
                         return Some(ctx);
                     }
                 }
-                // Browser bridge has no data — just return last context. NO fallback.
+            }
+            // On non-macOS: keep the original "no fallback" behaviour.
+            #[cfg(not(target_os = "macos"))]
+            {
                 return self.last_context.clone();
             }
-            // No Browser bridge exists — return last context. NO fallback.
-            return self.last_context.clone();
+            // On macOS: fall through to the AX fallback block below.
         }
 
         // --- WORD ---
@@ -582,6 +591,38 @@ impl BridgeManager {
                         if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                             if self.active_idx != i {
                                 log!("Bridge switch: {} → Accessibility", self.bridges[self.active_idx].name());
+                                self.bridge_switched = true;
+                            }
+                            self.active_idx = i;
+                            self.last_user_pid = fg_pid;
+                            self.last_context = Some(ctx.clone());
+                            return Some(ctx);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        // --- macOS AX fallback: Teams, Safari/Chrome inputs, TextEdit, etc. ---
+        // Runs when: foreground app isn't Word, and either isn't a browser or
+        // the browser bridge had no data. Produces context via AXStringForRange
+        // (Path 1) or AXValue (Path 2).
+        #[cfg(target_os = "macos")]
+        {
+            self.last_user_was_browser = false;
+            for bridge in self.bridges.iter() {
+                if bridge.name() == "Accessibility (macOS)" {
+                    // Pass PID via the existing hwnd plumbing.
+                    bridge.set_fg_hwnd(fg_pid as isize);
+                }
+            }
+            for (i, bridge) in self.bridges.iter().enumerate() {
+                if bridge.name() == "Accessibility (macOS)" {
+                    if let Some(ctx) = bridge.read_context() {
+                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                            if self.active_idx != i {
+                                log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
                                 self.bridge_switched = true;
                             }
                             self.active_idx = i;
@@ -4701,10 +4742,29 @@ fn letter_spaced(word: &str) -> String {
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
-    let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
-        .fill(egui::Color32::WHITE)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(160, 160, 160)));
-    ui.add(btn).on_hover_text(hover).clicked()
+    // Theme-aware: dark theme gets a dark chip + light glyph; light theme
+    // keeps the original white chip + dark stroke. Emoji glyphs (color
+    // fonts like 👍) ignore the text color and render natively either way.
+    let dark = ui.visuals().dark_mode;
+    let (fill, stroke_col, text_col) = if dark {
+        (
+            egui::Color32::from_rgb(50, 52, 70),
+            egui::Color32::from_rgb(120, 125, 145),
+            egui::Color32::from_rgb(230, 228, 218),
+        )
+    } else {
+        (
+            egui::Color32::WHITE,
+            egui::Color32::from_rgb(160, 160, 160),
+            egui::Color32::BLACK,
+        )
+    };
+    let btn = egui::Button::new(egui::RichText::new(icon).size(14.0).color(text_col))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke_col));
+    let resp = ui.add(btn);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hover));
+    resp.on_hover_text(hover).clicked()
 }
 
 /// Returns (category, description, examples_wrong, examples_right) for a grammar rule.
@@ -5315,11 +5375,18 @@ impl eframe::App for ContextApp {
                     log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
-            // Update caret position — platform-specific or from bridge context
+            // Update caret position — platform-specific or from bridge context.
+            // On macOS we also poll for AppKind::Other (Teams, Slack, TextEdit,
+            // etc.) so the follow-cursor window tracks those apps via the AX
+            // bridge. The classification doesn't cover every Electron app, so
+            // widening here is intentional.
             {
                 let fg = self.platform.foreground_app();
                 let kind = self.platform.classify_app(&fg);
-                if kind == platform::AppKind::Word || kind == platform::AppKind::Browser {
+                let ax_poll_kinds = kind == platform::AppKind::Word
+                    || kind == platform::AppKind::Browser
+                    || (cfg!(target_os = "macos") && kind == platform::AppKind::Other);
+                if ax_poll_kinds {
                     // Try platform API first (macOS), fall back to bridge caret_pos (Windows)
                     let plat_caret = self.platform.caret_screen_position();
                     let bridge_caret = ctx_result.as_ref().and_then(|c| c.caret_pos);
@@ -5960,7 +6027,11 @@ impl eframe::App for ContextApp {
         // Suggestions tab (completions, tab 0) gets 10px extra height so the full
         // suggestions list stays visible. Base overhead is 60 for other tabs, 70 here.
         let base_h = if self.selected_tab == 0 { 70.0 } else { 60.0 };
-        let win_h = (s * (base_h + content_rows * 20.0)).min(335.0 * s);
+        // Minimum height so the window doesn't shrink+grow on every keystroke
+        // (distracting while typing). Content beyond the minimum still grows
+        // up to the cap, but the empty → filled jump is eliminated.
+        let min_h = 240.0;
+        let win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, 335.0 * s);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
@@ -6040,7 +6111,11 @@ impl eframe::App for ContextApp {
         let theme_is_dark = self.theme == 3;
         ctx.set_visuals(if theme_is_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
         ctx.style_mut(|style| {
-            style.visuals.override_text_color = Some(theme.text);
+            // Tint default text to theme.text WITHOUT overriding explicit
+            // RichText::color() — icons with semantic red/green/blue stay
+            // distinguishable in dark mode. `override_text_color` would
+            // wash them all out.
+            style.visuals.widgets.noninteractive.fg_stroke.color = theme.text;
         });
         // Stroke: a subtle darker (light theme) / lighter (dark theme) shade of
         // bg for the frame border.
@@ -6107,9 +6182,10 @@ impl eframe::App for ContextApp {
 
                 // 💡 Forslag (suggestions tab)
                 let innhold_color = if self.selected_tab == 0 { active } else { inactive };
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(innhold_color)
-                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_suggestions()).clicked() {
+                if ax_icon(ui,
+                    egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(innhold_color),
+                    self.language.ui_suggestions(),
+                ).clicked() {
                     self.selected_tab = 0;
                 }
 
@@ -6123,9 +6199,10 @@ impl eframe::App for ContextApp {
                     if has_grammar { egui::Color32::from_rgb(180, 70, 70) }
                     else { egui::Color32::from_rgb(70, 140, 90) }
                 };
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color)
-                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_grammar()).clicked() {
+                if ax_icon(ui,
+                    egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color),
+                    self.language.ui_grammar(),
+                ).clicked() {
                     self.selected_tab = 1;
                 }
 
@@ -6158,9 +6235,10 @@ impl eframe::App for ContextApp {
                 } else {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
-                    if ui.add(egui::Label::new(
-                        egui::RichText::new("\u{1F3A4}").size(13.0 * s).color(mic_color)
-                    ).sense(egui::Sense::click())).on_hover_text(self.language.ui_speech_recognition()).clicked() {
+                    if ax_icon(ui,
+                        egui::RichText::new("\u{1F3A4}").size(13.0 * s).color(mic_color),
+                        self.language.ui_speech_recognition(),
+                    ).clicked() {
                             if whisper_ready {
                                 // Models already loaded — start recording immediately
                                 let final_eng = self.whisper_engine.as_ref().unwrap().clone();
@@ -6254,9 +6332,10 @@ impl eframe::App for ContextApp {
                         self.ocr_text = None;
                     }
                 } else {
-                    if ui.add(egui::Label::new(
-                        egui::RichText::new("▶").size(14.0 * s).color(inactive)
-                    ).sense(egui::Sense::click())).on_hover_text(self.language.ui_read_selected_text()).clicked() {
+                    if ax_icon(ui,
+                        egui::RichText::new("▶").size(14.0 * s).color(inactive),
+                        self.language.ui_read_selected_text(),
+                    ).clicked() {
                         log!("Speak button clicked!");
                         match self.manager.read_selected_text().or_else(|| self.platform.read_selected_text()) {
                             Some(text) => {
@@ -6284,12 +6363,11 @@ impl eframe::App for ContextApp {
                         ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                         if !self.llm_waiting {
-                            if ui.add(egui::Label::new(
+                            if ax_icon(ui,
                                 egui::RichText::new("✨").size(14.0 * s)
-                                    .color(egui::Color32::from_rgb(0, 120, 220))
-                            ).sense(egui::Sense::click()))
-                            .on_hover_text(self.language.ui_ai_fix_all())
-                            .clicked() {
+                                    .color(egui::Color32::from_rgb(0, 120, 220)),
+                                self.language.ui_ai_fix_all(),
+                            ).clicked() {
                                 self.dispatch_llm_fix_all();
                             }
                         }
@@ -6321,32 +6399,39 @@ impl eframe::App for ContextApp {
                 } else {
                     self.language.ui_pin_cursor_off()
                 };
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{1F4CC}").size(14.0 * s).color(pin_color)
-                ).sense(egui::Sense::click())).on_hover_text(pin_tooltip).clicked() {
+                if ax_icon(ui,
+                    egui::RichText::new("\u{1F4CC}").size(14.0 * s).color(pin_color),
+                    pin_tooltip,
+                ).clicked() {
                     self.follow_cursor = !self.follow_cursor;
                 }
 
                 // ⚙ Settings
                 let settings_color = if self.show_settings_window { active } else { inactive };
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("\u{2699}").size(16.0 * s).color(settings_color)
-                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_settings()).clicked() {
+                if ax_icon(ui,
+                    egui::RichText::new("\u{2699}").size(16.0 * s).color(settings_color),
+                    self.language.ui_settings(),
+                ).clicked() {
                     self.show_settings_window = !self.show_settings_window;
                 }
 
                 // ▁ Minimize
-                if ui.add(egui::Label::new(
-                    egui::RichText::new("–").size(14.0 * s).color(inactive)
-                ).sense(egui::Sense::click())).on_hover_text(self.language.ui_minimize()).clicked() {
+                if ax_icon(ui,
+                    egui::RichText::new("–").size(14.0 * s).color(inactive),
+                    self.language.ui_minimize(),
+                ).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
-                // ✕ Close button
+                // ✕ Close button (painter-drawn; no widget info by default,
+                // so add one explicitly for screen readers)
                 let close_resp = ui.allocate_rect(
                     egui::Rect::from_min_size(ui.cursor().min, egui::vec2(18.0 * s, 18.0 * s)),
                     egui::Sense::click() | egui::Sense::hover(),
                 );
+                let close_label = self.language.ui_close();
+                close_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, close_label));
+                let close_resp = close_resp.on_hover_text(close_label);
                 let color = if close_resp.hovered() {
                     egui::Color32::from_rgb(220, 50, 50)
                 } else {
@@ -7158,20 +7243,28 @@ impl eframe::App for ContextApp {
                     let e = &self.writing_errors[fix_idx];
                     if !e.error_word.is_empty() { e.error_word.clone() } else { e.word.clone() }
                 };
-                let corrected_sentence = if rule_name == "llm_correction" && !suggestion.is_empty() {
-                    suggestion.clone() // LLM suggestion is already the full corrected sentence
-                } else if !suggestion.is_empty() {
-                    sentence.replacen(&error_word, &suggestion, 1)
-                } else {
-                    String::new()
-                };
+                // `suggestion` already holds the FULL corrected sentence for all
+                // grammar error paths (see push sites around lines 3941 and 4068).
+                // Previous code did `sentence.replacen(error_word, suggestion)` —
+                // which spliced the full corrected sentence *into* the original,
+                // producing duplicated text like
+                // "Jeg liker å Jeg liker å spille fotball. fotball."
+                let corrected_sentence = suggestion.clone();
                 let (category, description, wrong, right) = rule_info(&rule_name);
                 let lang_for_rule = self.language.clone();
                 let popup_theme = theme;
 
-                // Center on screen using actual monitor size
+                // Center on screen using actual monitor size.
+                // Minimal view (inline diff + word pair + Vis mer + buttons) fits
+                // in ~260 px. Detailed view (description, green/red sentence cards,
+                // explanation, examples, buttons) needs ~520 px. Grow the window
+                // only when the user has opted into the detailed view.
                 let win_w = 560.0_f32;
-                let win_h = 520.0_f32;
+                let win_h = if show_more || rule_name == "llm_correction" || suggestion.is_empty() || error_word.is_empty() {
+                    520.0_f32
+                } else {
+                    260.0_f32
+                };
                 let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
                 let screen_center = egui::pos2(
                     (monitor.x - win_w) / 2.0,
@@ -7327,7 +7420,7 @@ impl eframe::App for ContextApp {
                                         egui::RichText::new(category)
                                             .size(22.0 * s)
                                             .strong()
-                                            .color(egui::Color32::from_rgb(30, 70, 150)),
+                                            .color(popup_theme.info),
                                     );
                                     ui.add_space(10.0);
 
@@ -7335,7 +7428,7 @@ impl eframe::App for ContextApp {
                                     ui.label(
                                         egui::RichText::new(description)
                                             .size(15.0 * s)
-                                            .color(egui::Color32::from_rgb(30, 30, 30)),
+                                            .color(popup_theme.text),
                                     );
                                     ui.add_space(14.0);
 
@@ -7412,33 +7505,39 @@ impl eframe::App for ContextApp {
                                             });
                                     } else {
                                         // Standard: original (red) and corrected (green)
+                                        // Frame fill/stroke derived from theme err/ok so dark mode
+                                        // doesn't get blinding white cards.
+                                        let err_fill = tint_bg(popup_theme.bg, popup_theme.err, 0.10);
+                                        let err_stroke = tint_bg(popup_theme.bg, popup_theme.err, 0.35);
+                                        let ok_fill = tint_bg(popup_theme.bg, popup_theme.ok, 0.10);
+                                        let ok_stroke = tint_bg(popup_theme.bg, popup_theme.ok, 0.35);
                                         egui::Frame::new()
-                                            .fill(egui::Color32::from_rgb(255, 245, 245))
+                                            .fill(err_fill)
                                             .inner_margin(10.0)
                                             .corner_radius(6.0)
-                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 180, 180)))
+                                            .stroke(egui::Stroke::new(1.0, err_stroke))
                                             .show(ui, |ui| {
                                                 ui.set_max_width(max_w - 40.0);
                                                 ui.label(
                                                     egui::RichText::new(&sentence)
                                                         .size(15.0 * s)
                                                         .strikethrough()
-                                                        .color(egui::Color32::from_rgb(180, 50, 50)),
+                                                        .color(popup_theme.err),
                                                 );
                                             });
                                         ui.add_space(4.0);
                                         if !corrected_sentence.is_empty() {
                                             egui::Frame::new()
-                                                .fill(egui::Color32::from_rgb(240, 255, 245))
+                                                .fill(ok_fill)
                                                 .inner_margin(10.0)
                                                 .corner_radius(6.0)
-                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 220, 190)))
+                                                .stroke(egui::Stroke::new(1.0, ok_stroke))
                                                 .show(ui, |ui| {
                                                     ui.set_max_width(max_w - 40.0);
                                                     ui.label(
                                                         egui::RichText::new(&corrected_sentence)
                                                             .size(15.0 * s)
-                                                            .color(egui::Color32::from_rgb(0, 120, 50)),
+                                                            .color(popup_theme.ok),
                                                     );
                                                 });
                                         }
@@ -7451,13 +7550,11 @@ impl eframe::App for ContextApp {
                                         egui::RichText::new(lang_for_rule.ui_explanation())
                                             .size(14.0 * s)
                                             .strong()
-                                            .color(egui::Color32::from_rgb(50, 50, 50)),
+                                            .color(popup_theme.muted),
                                     );
                                     ui.add_space(4.0);
                                     }
                                     if rule_name != "llm_correction" {
-                                    // Strip the leading "«X» → «Y»:" prefix — the word pair
-                                    // is already shown in the minimal view.
                                     let explanation_clean = match explanation.find(": ") {
                                         Some(i) if explanation[..i].contains('«') =>
                                             explanation[i + 2..].to_string(),
@@ -7466,7 +7563,7 @@ impl eframe::App for ContextApp {
                                     ui.label(
                                         egui::RichText::new(&explanation_clean)
                                             .size(14.0 * s)
-                                            .color(egui::Color32::from_rgb(30, 30, 30)),
+                                            .color(popup_theme.text),
                                     );
                                     }
 
@@ -7479,18 +7576,18 @@ impl eframe::App for ContextApp {
                                             egui::RichText::new(lang_for_rule.ui_examples())
                                                 .size(18.0 * s)
                                                 .strong()
-                                                .color(egui::Color32::from_rgb(30, 70, 150)),
+                                                .color(popup_theme.info),
                                         );
                                         ui.add_space(8.0);
 
                                         for (w, r) in wrong.iter().zip(right.iter()) {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("X").size(15.0 * s).strong().color(egui::Color32::from_rgb(200, 40, 40)));
-                                                ui.label(egui::RichText::new(*w).size(15.0 * s).strikethrough().color(egui::Color32::from_rgb(160, 70, 70)));
+                                                ui.label(egui::RichText::new("X").size(15.0 * s).strong().color(popup_theme.err));
+                                                ui.label(egui::RichText::new(*w).size(15.0 * s).strikethrough().color(popup_theme.err));
                                             });
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("V").size(15.0 * s).strong().color(egui::Color32::from_rgb(0, 140, 60)));
-                                                ui.label(egui::RichText::new(*r).size(15.0 * s).color(egui::Color32::from_rgb(0, 100, 40)));
+                                                ui.label(egui::RichText::new("V").size(15.0 * s).strong().color(popup_theme.ok));
+                                                ui.label(egui::RichText::new(*r).size(15.0 * s).color(popup_theme.ok));
                                             });
                                             ui.add_space(5.0);
                                         }
@@ -7503,20 +7600,20 @@ impl eframe::App for ContextApp {
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     if !suggestion.is_empty() {
-                                        if ui.button(egui::RichText::new(lang_for_rule.ui_fix()).size(14.0 * s).strong().color(egui::Color32::from_rgb(0, 120, 60))).clicked() {
+                                        if ui.button(egui::RichText::new(lang_for_rule.ui_fix()).size(14.0 * s).strong().color(popup_theme.ok)).clicked() {
                                             do_fix = true;
                                         }
                                         ui.add_space(8.0);
                                     }
-                                    if ui.button(egui::RichText::new(lang_for_rule.ui_ignore()).size(14.0 * s).color(egui::Color32::from_rgb(150, 60, 60))).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_rule.ui_ignore()).size(14.0 * s).color(popup_theme.err)).clicked() {
                                         do_ignore = true;
                                     }
                                     ui.add_space(8.0);
-                                    if ui.button(egui::RichText::new(lang_for_rule.ui_close()).size(14.0 * s).color(egui::Color32::from_rgb(80, 80, 80))).clicked() {
+                                    if ui.button(egui::RichText::new(lang_for_rule.ui_close()).size(14.0 * s).color(popup_theme.muted)).clicked() {
                                         do_close = true;
                                     }
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(egui::RichText::new(format!("Regel: {}", rule_name)).size(11.0 * s).color(egui::Color32::from_rgb(160, 160, 160)));
+                                        ui.label(egui::RichText::new(format!("Regel: {}", rule_name)).size(11.0 * s).color(popup_theme.muted));
                                     });
                                 });
                             });
@@ -8010,12 +8107,16 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(lang_for_settings.ui_size()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new(egui::RichText::new("  −  ").size(body))).clicked() {
+                                let minus = ui.add(egui::Button::new(egui::RichText::new("  −  ").size(body)));
+                                minus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Reduser UI-størrelse"));
+                                if minus.clicked() {
                                     new_ui_scale = (new_ui_scale - 0.1).max(0.5);
                                 }
                                 ui.label(egui::RichText::new(format!("{:.0}%", new_ui_scale * 100.0)).size(body)
                                     .color(active_color));
-                                if ui.add(egui::Button::new(egui::RichText::new("  +  ").size(body))).clicked() {
+                                let plus = ui.add(egui::Button::new(egui::RichText::new("  +  ").size(body)));
+                                plus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Øk UI-størrelse"));
+                                if plus.clicked() {
                                     new_ui_scale = (new_ui_scale + 0.1).min(2.5);
                                 }
                             });
@@ -8381,6 +8482,29 @@ const AVAILABLE_LANGUAGES: &[LangOption] = &[
     LangOption { code: "nn", name: "Nynorsk" },
     LangOption { code: "en", name: "English" },
 ];
+
+/// Blend an accent color toward the base (theme.bg) by `amount` (0..1).
+/// Used to produce subtle tinted cards that don't blow out dark themes.
+fn tint_bg(base: egui::Color32, accent: egui::Color32, amount: f32) -> egui::Color32 {
+    let a = amount.clamp(0.0, 1.0);
+    let mix = |b: u8, c: u8| ((b as f32) * (1.0 - a) + (c as f32) * a) as u8;
+    egui::Color32::from_rgb(
+        mix(base.r(), accent.r()),
+        mix(base.g(), accent.g()),
+        mix(base.b(), accent.b()),
+    )
+}
+
+/// Clickable icon label with a proper accessibility name.
+/// egui's default Label widget_info uses the raw text (often an emoji
+/// like "\u{1F4CC}") — screen readers read the Unicode name which is
+/// useless. Override with the human-readable label, which also becomes
+/// the hover tooltip.
+fn ax_icon(ui: &mut egui::Ui, icon: egui::RichText, label: &str) -> egui::Response {
+    let resp = ui.add(egui::Label::new(icon).sense(egui::Sense::click()));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    resp.on_hover_text(label)
+}
 
 /// Paint a small Norwegian flag at the given position.
 fn paint_norwegian_flag(painter: &egui::Painter, pos: egui::Pos2, size: f32) {

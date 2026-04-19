@@ -4,6 +4,18 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// Log each distinct caret-trace message at most once per 3s.
+fn trace_caret(msg: &str) {
+    static LAST: std::sync::OnceLock<Mutex<(String, Instant)>> = std::sync::OnceLock::new();
+    let slot = LAST.get_or_init(|| Mutex::new((String::new(), Instant::now() - Duration::from_secs(60))));
+    let mut g = slot.lock().unwrap();
+    if g.0 != msg || g.1.elapsed() > Duration::from_secs(3) {
+        crate::log!("{}", msg);
+        g.0 = msg.to_string();
+        g.1 = Instant::now();
+    }
+}
+
 /// macOS platform services.
 ///
 /// Foreground app detection runs on a background thread to avoid
@@ -58,33 +70,45 @@ impl MacPlatform {
         std::thread::Builder::new()
             .name("fg-poller".into())
             .spawn(move || {
-                let mut enabled_word_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                // Track the previous foreground pid so we can detect the
+                // "focus returned to Word" transition. Word drops its AX state
+                // when it loses focus (browser/other app takes over); without
+                // this, returning to Word leaves AXFocusedUIElement stuck at
+                // -25211 because we only enabled once per pid.
+                let mut prev_fg_pid: u32 = 0;
                 loop {
                     if let Some(app) = query_foreground_app() {
                         let is_our_app = app.exe_name == "acatts-rust"
                             || app.exe_name == "norsktale"
                             || app.title == "NorskTale";
+                        let pid = app.pid;
                         if !is_our_app {
                             if let Ok(mut lock) = ext_clone.lock() {
                                 *lock = app.clone();
                             }
-                            let sel = read_selected_text_for_app(app.pid, &app.exe_name);
+                            let sel = read_selected_text_for_app(pid, &app.exe_name);
                             if let Ok(mut lock) = sel_clone.lock() {
                                 *lock = sel;
                             }
-                            // Word on macOS disables AX by default for performance.
-                            // Setting AXEnhancedUserInterface=true tells Word to
-                            // expose its document UI elements (what VoiceOver does).
-                            // Without this, AXFocusedUIElement returns -25211.
-                            if app.exe_name == "microsoft word" && !enabled_word_pids.contains(&app.pid) {
-                                if enable_ax_for_app(app.pid) {
-                                    enabled_word_pids.insert(app.pid);
-                                }
+                            // Re-enable accessibility on every transition INTO
+                            // an app known to gate AX behind enhanced UI (Word,
+                            // Teams, and other Office / Electron apps that copy
+                            // Office's pattern). Mirrors VoiceOver's activation
+                            // behaviour. Idempotent when AX is already up.
+                            let needs_ax_poke = matches!(
+                                app.exe_name.as_str(),
+                                "microsoft word" | "microsoft teams" | "msteams"
+                                    | "microsoft excel" | "microsoft powerpoint"
+                                    | "microsoft outlook"
+                            );
+                            if needs_ax_poke && pid != prev_fg_pid {
+                                let _ = enable_ax_for_app(pid);
                             }
                         }
                         if let Ok(mut lock) = fg_clone.lock() {
                             *lock = (app, Instant::now());
                         }
+                        prev_fg_pid = pid;
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -195,12 +219,16 @@ impl PlatformServices for MacPlatform {
             let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
             let err = AXUIElementCopyAttributeValue(root, key.as_concrete_TypeRef(), &mut focused);
             CFRelease(root as _);
-            if err != 0 || focused.is_null() { return None; }
+            if err != 0 || focused.is_null() {
+                trace_caret(&format!("caret pid={} step=focus err={} null={}", ext_pid, err, focused.is_null()));
+                return None;
+            }
 
             let range_key = CFString::new("AXSelectedTextRange");
             let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
             let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
             if err != 0 || range_val.is_null() {
+                trace_caret(&format!("caret pid={} step=selrange err={} null={}", ext_pid, err, range_val.is_null()));
                 CFRelease(focused);
                 return None;
             }
@@ -216,7 +244,10 @@ impl PlatformServices for MacPlatform {
             CFRelease(range_val);
             CFRelease(focused);
 
-            if err != 0 || bounds_val.is_null() { return None; }
+            if err != 0 || bounds_val.is_null() {
+                trace_caret(&format!("caret pid={} step=bounds err={} null={}", ext_pid, err, bounds_val.is_null()));
+                return None;
+            }
 
             let mut rect = core_graphics::geometry::CGRect::new(
                 &core_graphics::geometry::CGPoint::new(0.0, 0.0),
