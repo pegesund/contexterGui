@@ -6519,20 +6519,20 @@ impl eframe::App for ContextApp {
                                 ui.label(egui::RichText::new(letter_spaced(&word_for_hover))
                                     .size(28.0)
                                     .strong()
-                                    .color(egui::Color32::from_rgb(0, 80, 140)));
+                                    .color(theme.info));
                             })
                         } else { resp };
                         if is_selected {
-                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0, 100, 180));
+                            ui.painter().rect_filled(rect, 2.0, theme.info);
                         } else if hovered {
-                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(220, 235, 250));
+                            ui.painter().rect_filled(rect, 2.0, tint_bg(theme.bg, theme.info, 0.15));
                         }
 
                         // Speaker icon at the left edge, vertically centered
                         let mut spoke = false;
                         if has_tts {
-                            let icon_fg = if is_selected { egui::Color32::from_rgba_premultiplied(200, 200, 200, 255) }
-                                else { egui::Color32::from_rgb(150, 150, 150) };
+                            let icon_fg = if is_selected { egui::Color32::from_rgba_premultiplied(230, 230, 230, 255) }
+                                else { theme.muted };
                             let icon_center = egui::pos2(rect.min.x + icon_w * 0.5, rect.center().y);
                             ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(9.0 * s), icon_fg);
 
@@ -6548,9 +6548,9 @@ impl eframe::App for ContextApp {
                         }
 
                         let fg = if is_selected { egui::Color32::WHITE }
-                            else if hovered { egui::Color32::from_rgb(0, 80, 140) }
-                            else if is_top { egui::Color32::from_rgb(0, 120, 60) }
-                            else { egui::Color32::from_rgb(60, 60, 60) };
+                            else if hovered { theme.info }
+                            else if is_top { theme.ok }
+                            else { theme.text };
                         let font_size = (if is_top || is_selected || hovered { 13.0 } else { 12.0 }) * s;
                         let text_x = rect.min.x + icon_w;
                         // Vertically center the text in the row
@@ -6744,7 +6744,7 @@ impl eframe::App for ContextApp {
                                     egui::RichText::new(self.language.ui_missing_period())
                                         .size(11.0 * s)
                                         .strong()
-                                        .color(egui::Color32::from_rgb(0, 100, 180)),
+                                        .color(theme.info),
                                 );
                                 // Show the suggested punctuated version
                                 ui.label(
@@ -6846,7 +6846,7 @@ impl eframe::App for ContextApp {
                                     // Left: 🔊 + red misspelled word
                                     if ui.add(egui::Label::new(
                                         egui::RichText::new("🔊").size(9.0 * s)
-                                            .color(egui::Color32::from_rgb(150, 150, 150))
+                                            .color(theme.muted)
                                     ).sense(egui::Sense::click())).clicked() {
                                         tts::speak_word(&err_word);
                                     }
@@ -6889,7 +6889,7 @@ impl eframe::App for ContextApp {
                                         if !best.is_empty() {
                                             if ui.add(egui::Label::new(
                                                 egui::RichText::new("🔊").size(9.0 * s)
-                                                    .color(egui::Color32::from_rgb(100, 160, 100))
+                                                    .color(theme.ok)
                                             ).sense(egui::Sense::click())).clicked() {
                                                 tts::speak_word(&best);
                                             }
@@ -6898,7 +6898,7 @@ impl eframe::App for ContextApp {
                                                 egui::RichText::new(&best)
                                                     .size(13.0 * s)
                                                     .strong()
-                                                    .color(egui::Color32::from_rgb(0, 120, 60))
+                                                    .color(theme.ok)
                                             ).sense(egui::Sense::click()));
                                             let best_resp = if hover_zoom {
                                                 best_resp.on_hover_ui(|ui| {
@@ -6906,7 +6906,7 @@ impl eframe::App for ContextApp {
                                                     ui.label(egui::RichText::new(letter_spaced(&best_for_hover))
                                                         .size(28.0)
                                                         .strong()
-                                                        .color(egui::Color32::from_rgb(0, 120, 60)));
+                                                        .color(theme.ok));
                                                 })
                                             } else { best_resp };
                                             if best_resp.clicked() {
@@ -6926,7 +6926,7 @@ impl eframe::App for ContextApp {
                                                     ui.horizontal(|ui| {
                                                         if ui.add(egui::Label::new(
                                                             egui::RichText::new("🔊").size(9.0 * s)
-                                                                .color(egui::Color32::from_rgb(120, 140, 180))
+                                                                .color(theme.info)
                                                         ).sense(egui::Sense::click())).clicked() {
                                                             tts::speak_word(cand);
                                                         }
@@ -6934,14 +6934,14 @@ impl eframe::App for ContextApp {
                                                         let cand_resp = ui.add(egui::Label::new(
                                                             egui::RichText::new(cand)
                                                                 .size(13.0 * s)
-                                                                .color(egui::Color32::from_rgb(80, 120, 160))
+                                                                .color(theme.info)
                                                         ).sense(egui::Sense::click()));
                                                         let cand_resp = if hover_zoom {
                                                             cand_resp.on_hover_ui(|ui| {
                                                                 ui.set_max_width(600.0);
                                                                 ui.label(egui::RichText::new(letter_spaced(&cand_for_hover))
                                                                     .size(28.0)
-                                                                    .color(egui::Color32::from_rgb(80, 120, 160)));
+                                                                    .color(theme.info));
                                                             })
                                                         } else { cand_resp };
                                                         if cand_resp.clicked() {

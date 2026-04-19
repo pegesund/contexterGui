@@ -43,11 +43,17 @@ pub struct AxMacBridge {
     /// Target process PID stored via `set_fg_hwnd`. On macOS we reuse the
     /// hwnd plumbing to pass the foreground app's PID.
     target_pid: AtomicI64,
+    /// Last word at cursor — cached so `replace_word` knows how many
+    /// backspaces to send (Electron doesn't expose AXSetSelectedText).
+    last_word: Mutex<String>,
 }
 
 impl AxMacBridge {
     pub fn new() -> Self {
-        Self { target_pid: AtomicI64::new(0) }
+        Self {
+            target_pid: AtomicI64::new(0),
+            last_word: Mutex::new(String::new()),
+        }
     }
 }
 
@@ -87,13 +93,99 @@ impl TextBridge for AxMacBridge {
             };
             CFRelease(focused);
             trace_once(&format!("ax_mac pid={} role={} via={}", pid, role, via));
-            via_range.or(via_value)
+            let ctx = via_range.or(via_value);
+            if let Some(c) = &ctx {
+                if let Ok(mut w) = self.last_word.lock() {
+                    *w = c.word.clone();
+                }
+            }
+            ctx
         }
     }
 
-    fn replace_word(&self, _new_text: &str) -> bool {
-        // Replacement path uses AXSetSelectedText / AXSetValue — deferred.
-        false
+    fn replace_word(&self, new_text: &str) -> bool {
+        // Completion flow uses `"{prefix}|{word}"` format: prefix = what's
+        // already typed before the cursor, word = the completed word the
+        // user picked. We just need to insert the missing SUFFIX after the
+        // cursor — no deletes required.
+        if let Some((prefix, word)) = new_text.split_once('|') {
+            let suffix = if word.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                &word[prefix.len()..]
+            } else {
+                // Prefix mismatch — treat as full replacement of the prefix.
+                return self.backspace_paste(prefix, word);
+            };
+            return self.paste_text(suffix);
+        }
+        // Plain replace — use cached word as the thing to delete.
+        let cached_word = self.last_word.lock().ok().map(|w| w.clone()).unwrap_or_default();
+        self.backspace_paste(&cached_word, new_text)
+    }
+
+    fn find_and_replace(&self, find: &str, replace: &str) -> bool {
+        self.backspace_paste(find, replace)
+    }
+
+    fn find_and_replace_in_context(&self, find: &str, replace: &str, _context: &str) -> bool {
+        self.backspace_paste(find, replace)
+    }
+
+    fn find_and_replace_in_context_at(&self, find: &str, replace: &str, _context: &str, _off: usize) -> bool {
+        self.backspace_paste(find, replace)
+    }
+
+    fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, _p: &str, _c: &str, _o: usize) -> bool {
+        self.backspace_paste(find, replace)
+    }
+}
+
+impl AxMacBridge {
+    /// Replace the misspelled word at cursor: ⌫×len(find) + Cmd+V(replace).
+    /// Electron / Teams refuses AXSetValue / AXSetSelectedText, so synthesized
+    /// keystrokes + clipboard is the only portable path. User's clipboard is
+    /// saved and restored asynchronously.
+    fn backspace_paste(&self, find: &str, replace: &str) -> bool {
+        let pid = self.target_pid.load(Ordering::Relaxed);
+        let word_len = find.chars().count();
+        crate::log!("ax_mac backspace_paste: pid={} find='{}' len={} replace='{}'",
+            pid, find, word_len, replace);
+        if pid <= 0 || word_len == 0 { return false; }
+
+        let saved_clip = pbpaste();
+        pbcopy(replace);
+
+        let target = pid as u32;
+        bring_app_to_front(target);
+        send_backspaces_to(target, word_len);
+        // Give Teams a beat to process the deletes before the paste event.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        send_cmd_v_to(target);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            pbcopy(&saved_clip);
+        });
+        true
+    }
+
+    /// Paste text at cursor without deleting anything (completion suffix).
+    fn paste_text(&self, text: &str) -> bool {
+        let pid = self.target_pid.load(Ordering::Relaxed);
+        crate::log!("ax_mac paste_text: pid={} text='{}'", pid, text);
+        if pid <= 0 || text.is_empty() { return false; }
+
+        let saved_clip = pbpaste();
+        pbcopy(text);
+
+        let target = pid as u32;
+        bring_app_to_front(target);
+        send_cmd_v_to(target);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            pbcopy(&saved_clip);
+        });
+        true
     }
 }
 
@@ -275,6 +367,94 @@ unsafe fn read_string_for_range(
     CFRelease(ax_range as _);
     if err != 0 || result.is_null() { return None; }
     Some(CFString::wrap_under_create_rule(result as _).to_string())
+}
+
+// ── Keyboard / clipboard helpers ──
+
+/// Backspace key code (kVK_Delete).
+const KEY_DELETE: u16 = 0x33;
+/// V key code (kVK_ANSI_V).
+const KEY_V: u16 = 0x09;
+/// Cmd modifier flag (kCGEventFlagMaskCommand).
+const FLAG_CMD: u64 = 1 << 20;
+/// Post to "session" event tap (kCGSessionEventTap).
+const SESSION_TAP: u32 = 1;
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventCreateKeyboardEvent(source: *mut std::ffi::c_void, keyCode: u16, keyDown: bool)
+        -> *mut std::ffi::c_void;
+    fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+    fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+    fn CGEventPostToPid(pid: u32, event: *mut std::ffi::c_void);
+}
+
+fn post_key_to_pid(pid: u32, keycode: u16, down: bool, flags: u64) {
+    unsafe {
+        let event = CGEventCreateKeyboardEvent(std::ptr::null_mut(), keycode, down);
+        if event.is_null() { return; }
+        if flags != 0 {
+            CGEventSetFlags(event, flags);
+        }
+        if pid > 0 {
+            CGEventPostToPid(pid, event);
+        } else {
+            CGEventPost(SESSION_TAP, event);
+        }
+        core_foundation::base::CFRelease(event as _);
+    }
+}
+
+fn send_backspaces_to(pid: u32, n: usize) {
+    for _ in 0..n {
+        post_key_to_pid(pid, KEY_DELETE, true, 0);
+        post_key_to_pid(pid, KEY_DELETE, false, 0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+fn send_cmd_v_to(pid: u32) {
+    post_key_to_pid(pid, KEY_V, true, FLAG_CMD);
+    post_key_to_pid(pid, KEY_V, false, FLAG_CMD);
+}
+
+/// Bring an app to frontmost via `osascript` — required so our synthesized
+/// keystrokes land on the target app rather than our egui window.
+fn bring_app_to_front(pid: u32) {
+    let script = format!(
+        r#"tell application "System Events"
+            set frontProcess to first application process whose unix id is {}
+            set frontmost of frontProcess to true
+        end tell"#,
+        pid
+    );
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output();
+    // Tiny delay so the OS processes the focus change before keys are sent.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+}
+
+fn pbpaste() -> String {
+    std::process::Command::new("pbpaste")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default()
+}
+
+fn pbcopy(text: &str) {
+    use std::io::Write;
+    if let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }
 
 /// Path 2: full-value read. Assumes the cursor sits at the end of the text
