@@ -58,6 +58,7 @@ impl MacPlatform {
         std::thread::Builder::new()
             .name("fg-poller".into())
             .spawn(move || {
+                let mut enabled_word_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
                 loop {
                     if let Some(app) = query_foreground_app() {
                         let is_our_app = app.exe_name == "acatts-rust"
@@ -67,10 +68,18 @@ impl MacPlatform {
                             if let Ok(mut lock) = ext_clone.lock() {
                                 *lock = app.clone();
                             }
-                            // Read selected text while external app still has focus
                             let sel = read_selected_text_for_app(app.pid, &app.exe_name);
                             if let Ok(mut lock) = sel_clone.lock() {
                                 *lock = sel;
+                            }
+                            // Word on macOS disables AX by default for performance.
+                            // Setting AXEnhancedUserInterface=true tells Word to
+                            // expose its document UI elements (what VoiceOver does).
+                            // Without this, AXFocusedUIElement returns -25211.
+                            if app.exe_name == "microsoft word" && !enabled_word_pids.contains(&app.pid) {
+                                if enable_ax_for_app(app.pid) {
+                                    enabled_word_pids.insert(app.pid);
+                                }
                             }
                         }
                         if let Ok(mut lock) = fg_clone.lock() {
@@ -172,16 +181,22 @@ impl PlatformServices for MacPlatform {
         use core_foundation::base::{CFRelease, TCFType};
         use core_foundation::string::CFString;
 
+        // Target the last external app directly by PID — queries its focused
+        // element regardless of which window is globally focused now. System-wide
+        // AX returns -25211 when our AlwaysOnTop window is the focused element.
+        let ext_pid = self.last_external_fg.lock().map(|l| l.pid).unwrap_or(0);
         unsafe {
-            // Get the system-wide accessibility element
-            let sys = AXUIElementCreateSystemWide();
+            let root = if ext_pid > 0 {
+                AXUIElementCreateApplication(ext_pid as i32)
+            } else {
+                AXUIElementCreateSystemWide()
+            };
             let key = CFString::new("AXFocusedUIElement");
             let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyAttributeValue(sys, key.as_concrete_TypeRef(), &mut focused);
-            CFRelease(sys as _);
+            let err = AXUIElementCopyAttributeValue(root, key.as_concrete_TypeRef(), &mut focused);
+            CFRelease(root as _);
             if err != 0 || focused.is_null() { return None; }
 
-            // Get AXSelectedTextRange
             let range_key = CFString::new("AXSelectedTextRange");
             let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
             let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
@@ -190,7 +205,6 @@ impl PlatformServices for MacPlatform {
                 return None;
             }
 
-            // Get AXBoundsForRange for the selection — gives us screen coordinates
             let bounds_key = CFString::new("AXBoundsForRange");
             let mut bounds_val: core_foundation::base::CFTypeRef = std::ptr::null();
             let err = AXUIElementCopyParameterizedAttributeValue(
@@ -204,7 +218,6 @@ impl PlatformServices for MacPlatform {
 
             if err != 0 || bounds_val.is_null() { return None; }
 
-            // bounds_val is an AXValue containing a CGRect
             let mut rect = core_graphics::geometry::CGRect::new(
                 &core_graphics::geometry::CGPoint::new(0.0, 0.0),
                 &core_graphics::geometry::CGSize::new(0.0, 0.0),
@@ -221,15 +234,13 @@ impl PlatformServices for MacPlatform {
             let x = rect.origin.x as i32;
             let y = (rect.origin.y + rect.size.height) as i32;
 
-            // Word on Mac returns (0, screen_height) from AXBoundsForRange
-            // when it can't determine real bounds (focus transitions, layout
-            // shifts). Real caret positions always have x > 50 (document
-            // margins) — reject the garbage so the window doesn't jump to
-            // the bottom-left corner every time Word hiccups.
-            if x < 50 { return None; }
+            // Word on Mac returns (0, screen_height) when it can't determine
+            // real bounds (focus transitions, layout shifts). Real caret
+            // positions always have x > 50 (document margins).
+            if x < 50 { return None;
+            }
 
-            // rect.origin is top-left of the selection in screen coords
-            // Return bottom of selection (where we want the window)
+            crate::log!("caret OK: x={} y={}", x, y);
             Some((x, y))
         }
     }
@@ -273,6 +284,28 @@ fn run_applescript(script: &str) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+/// Enable Word's accessibility by setting AXEnhancedUserInterface=true.
+/// Word (and older Office apps) disable AX by default for performance.
+/// Returns true if the attribute was successfully set.
+fn enable_ax_for_app(pid: u32) -> bool {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let app = AXUIElementCreateApplication(pid as i32);
+        if app.is_null() { return false; }
+        let val = CFBoolean::true_value();
+        let key1 = CFString::new("AXEnhancedUserInterface");
+        let err1 = AXUIElementSetAttributeValue(app, key1.as_concrete_TypeRef(), val.as_CFTypeRef());
+        let key2 = CFString::new("AXManualAccessibility");
+        let err2 = AXUIElementSetAttributeValue(app, key2.as_concrete_TypeRef(), val.as_CFTypeRef());
+        CFRelease(app as _);
+        err1 == 0 || err2 == 0
     }
 }
 

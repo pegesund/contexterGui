@@ -39,6 +39,9 @@ struct UserSettings {
     language: String,
     #[serde(default = "default_hover_zoom")]
     hover_zoom: bool,
+    /// Color theme: 0=Krem (default), 1=Havblå, 2=Sval grå, 3=Mørk.
+    #[serde(default)]
+    theme: u8,
 }
 
 fn default_language() -> String { "nb".into() }
@@ -54,6 +57,7 @@ impl Default for UserSettings {
             voice: String::new(),
             language: "nb".into(),
             hover_zoom: true,
+            theme: 0,
         }
     }
 }
@@ -886,6 +890,8 @@ struct ContextApp {
     /// When true, hovering a suggestion/candidate word shows a large-font
     /// tooltip preview to aid dyslexic readers.
     hover_zoom: bool,
+    /// Active color theme (0=Krem, 1=Havblå, 2=Sval grå, 3=Mørk).
+    theme: u8,
     last_space_speak: Instant,
     quality: u8, // 0=fast, 1=balanced, 2=full
     // Debounce: wait before running completion
@@ -1489,6 +1495,7 @@ impl ContextApp {
             grammar_completion,
             speak_on_space: saved_settings.speak_on_space,
             hover_zoom: saved_settings.hover_zoom,
+            theme: saved_settings.theme,
             last_space_speak: Instant::now(),
             quality,
             last_prefix_change: Instant::now(),
@@ -4616,6 +4623,72 @@ fn get_screen_size(platform: &dyn platform::PlatformServices) -> (f32, f32) {
 /// renders with extra letter spacing — per Zorzi et al. (PNAS 2012), this
 /// improves reading speed and reduces errors for dyslexic readers by ~20%.
 /// Used only in hover previews; body UI uses default spacing.
+/// Color palette shared by the main window, grammar cards, hover tooltips, and
+/// the rule-info popup. Four themes are offered because dyslexic readers
+/// differ (Irlen Institute guidance: yellow overlay for some, blue for others).
+#[derive(Clone, Copy)]
+struct Theme {
+    /// Panel / window background.
+    bg: egui::Color32,
+    /// Primary body text (dark gray).
+    text: egui::Color32,
+    /// Error / wrong / strikethrough color.
+    err: egui::Color32,
+    /// Correct / accepted / suggestion color.
+    ok: egui::Color32,
+    /// Info / heading / accent color.
+    info: egui::Color32,
+    /// Muted / secondary text, icons, separators.
+    muted: egui::Color32,
+}
+
+fn theme_for(id: u8) -> Theme {
+    match id {
+        1 => Theme {
+            // Havblå — Irlen-inspired blue pastel. Low-contrast calming bg, all
+            // accents live on the cool axis except the terracotta error marker.
+            bg: egui::Color32::from_rgb(232, 238, 244),
+            text: egui::Color32::from_rgb(27, 43, 63),
+            err: egui::Color32::from_rgb(177, 69, 72),
+            ok: egui::Color32::from_rgb(31, 122, 58),
+            info: egui::Color32::from_rgb(31, 75, 143),
+            muted: egui::Color32::from_rgb(100, 115, 135),
+        },
+        2 => Theme {
+            // Sval grå — neutral minimal. Office-document feel for users who
+            // find cream too warm. Desaturated accents for long sessions.
+            bg: egui::Color32::from_rgb(242, 242, 242),
+            text: egui::Color32::from_rgb(35, 35, 35),
+            err: egui::Color32::from_rgb(165, 64, 64),
+            ok: egui::Color32::from_rgb(46, 125, 50),
+            info: egui::Color32::from_rgb(63, 81, 181),
+            muted: egui::Color32::from_rgb(110, 110, 110),
+        },
+        3 => Theme {
+            // Mørk — dark mode for late sessions. Lighter, saturated accents
+            // because dark colors disappear on dark bg; off-white body text to
+            // avoid retinal afterglow from pure white.
+            bg: egui::Color32::from_rgb(31, 32, 48),
+            text: egui::Color32::from_rgb(228, 225, 212),
+            err: egui::Color32::from_rgb(240, 138, 134),
+            ok: egui::Color32::from_rgb(158, 207, 160),
+            info: egui::Color32::from_rgb(143, 180, 249),
+            muted: egui::Color32::from_rgb(165, 170, 190),
+        },
+        _ => Theme {
+            // Krem — default; British Dyslexia Association baseline. Tinted
+            // cream kills the glare of pure white; brick red + forest green
+            // evoke the printed-book / teacher-pen intuition.
+            bg: egui::Color32::from_rgb(255, 252, 232),
+            text: egui::Color32::from_rgb(34, 34, 34),
+            err: egui::Color32::from_rgb(200, 50, 46),
+            ok: egui::Color32::from_rgb(0, 130, 60),
+            info: egui::Color32::from_rgb(30, 70, 150),
+            muted: egui::Color32::from_rgb(120, 120, 120),
+        },
+    }
+}
+
 fn letter_spaced(word: &str) -> String {
     let mut out = String::with_capacity(word.len() * 2);
     let mut first = true;
@@ -5961,9 +6034,35 @@ impl eframe::App for ContextApp {
         let has_grammar = !self.grammar_errors.is_empty()
             || self.writing_errors.iter().any(|e| !e.ignored);
 
+        let theme = theme_for(self.theme);
+        // Flip egui's light/dark visuals so widget chrome (scrollbars, button
+        // backgrounds, checkboxes) doesn't clash with the theme bg.
+        let theme_is_dark = self.theme == 3;
+        ctx.set_visuals(if theme_is_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+        ctx.style_mut(|style| {
+            style.visuals.override_text_color = Some(theme.text);
+        });
+        // Stroke: a subtle darker (light theme) / lighter (dark theme) shade of
+        // bg for the frame border.
+        let stroke_col = {
+            let [r, g, b, _] = theme.bg.to_array();
+            if theme_is_dark {
+                egui::Color32::from_rgb(
+                    r.saturating_add(25),
+                    g.saturating_add(25),
+                    b.saturating_add(25),
+                )
+            } else {
+                egui::Color32::from_rgb(
+                    r.saturating_sub(40),
+                    g.saturating_sub(40),
+                    b.saturating_sub(40),
+                )
+            }
+        };
         let panel_frame = egui::Frame::new()
-            .fill(egui::Color32::from_rgb(255, 255, 235))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 170, 140)))
+            .fill(theme.bg)
+            .stroke(egui::Stroke::new(1.0, stroke_col))
             .inner_margin(8.0);
 
         // Startup loading status bar
@@ -6566,12 +6665,12 @@ impl eframe::App for ContextApp {
                                 ui.label(
                                     egui::RichText::new(&error.suggestion)
                                         .size(11.0 * s)
-                                        .color(egui::Color32::from_rgb(0, 120, 60)),
+                                        .color(theme.ok),
                                 );
                                 ui.label(
                                     egui::RichText::new(&error.explanation)
                                         .size(10.0 * s)
-                                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                                        .color(theme.muted),
                                 );
                             } else if matches!(error.category, ErrorCategory::Grammar) {
                                 shown_contexts.insert((error.sentence_context.clone(), error.doc_offset));
@@ -6637,7 +6736,7 @@ impl eframe::App for ContextApp {
                                         egui::RichText::new(&alt.suggestion)
                                             .size(11.0 * s)
                                             .strong()
-                                            .color(egui::Color32::from_rgb(0, 120, 60)),
+                                            .color(theme.ok),
                                     ).sense(egui::Sense::click())).clicked() {
                                         action = Some((alt_idx, "fix"));
                                     }
@@ -6670,7 +6769,7 @@ impl eframe::App for ContextApp {
                                         egui::RichText::new(&error.word)
                                             .size(12.0 * s)
                                             .strong()
-                                            .color(egui::Color32::from_rgb(200, 40, 40)),
+                                            .color(theme.err),
                                     );
                                     // Right: buttons right-aligned (rendered in reverse order
                                     // because right_to_left layout adds items from right to left).
@@ -7068,6 +7167,7 @@ impl eframe::App for ContextApp {
                 };
                 let (category, description, wrong, right) = rule_info(&rule_name);
                 let lang_for_rule = self.language.clone();
+                let popup_theme = theme;
 
                 // Center on screen using actual monitor size
                 let win_w = 560.0_f32;
@@ -7087,17 +7187,16 @@ impl eframe::App for ContextApp {
                         .with_always_on_top()
                         .with_decorations(true),
                     |vp_ctx, _class| {
-                        // Switch to light visuals for this viewport
-                        vp_ctx.set_visuals(egui::Visuals::light());
+                        vp_ctx.set_visuals(if popup_theme.bg.r() < 80 { egui::Visuals::dark() } else { egui::Visuals::light() });
 
                         egui::CentralPanel::default()
                             .frame(
                                 egui::Frame::new()
-                                    .fill(egui::Color32::WHITE)
+                                    .fill(popup_theme.bg)
                                     .inner_margin(24.0),
                             )
                             .show(vp_ctx, |ui| {
-                                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+                                ui.visuals_mut().override_text_color = Some(popup_theme.text);
 
                                 // Wrap text for long sentences
                                 let max_w = ui.available_width();
@@ -7168,50 +7267,44 @@ impl eframe::App for ContextApp {
                                                     if !before.is_empty() {
                                                         ui.label(egui::RichText::new(before)
                                                             .size(sentence_size)
-                                                            .color(egui::Color32::from_rgb(60, 60, 60)));
+                                                            .color(popup_theme.text));
                                                     }
                                                     ui.label(egui::RichText::new(word_slice)
                                                         .size(sentence_size)
                                                         .strikethrough()
-                                                        .color(egui::Color32::from_rgb(200, 50, 50)));
+                                                        .color(popup_theme.err));
                                                     ui.add_space(2.0);
                                                     ui.label(egui::RichText::new(&replacement_word)
                                                         .size(sentence_size)
                                                         .strong()
-                                                        .color(egui::Color32::from_rgb(0, 130, 60)));
+                                                        .color(popup_theme.ok));
                                                     if !after.is_empty() {
                                                         ui.label(egui::RichText::new(after)
                                                             .size(sentence_size)
-                                                            .color(egui::Color32::from_rgb(60, 60, 60)));
+                                                            .color(popup_theme.text));
                                                     }
                                                 }
                                                 None => {
                                                     ui.label(egui::RichText::new(&sentence)
                                                         .size(sentence_size)
-                                                        .color(egui::Color32::from_rgb(60, 60, 60)));
+                                                        .color(popup_theme.text));
                                                 }
                                             }
                                         });
                                         ui.add_space(14.0);
-                                        // Compact word pair: wrong → right. "→" may render
-                                        // as a tofu square depending on font; use "⟶" which
-                                        // is broadly supported, with a space for breathing.
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new(&error_word)
                                                 .size(16.0 * s)
                                                 .strong()
                                                 .strikethrough()
-                                                .color(egui::Color32::from_rgb(200, 50, 50)));
-                                            // Use a triangle glyph that's covered by the
-                                            // emoji fallback font (Open Sans lacks most arrow
-                                            // code points — they render as tofu squares).
+                                                .color(popup_theme.err));
                                             ui.label(egui::RichText::new("▶")
                                                 .size(14.0 * s)
-                                                .color(egui::Color32::from_rgb(120, 120, 120)));
+                                                .color(popup_theme.muted));
                                             ui.label(egui::RichText::new(&replacement_word)
                                                 .size(16.0 * s)
                                                 .strong()
-                                                .color(egui::Color32::from_rgb(0, 130, 60)));
+                                                .color(popup_theme.ok));
                                         });
                                         ui.add_space(8.0);
                                         // Toggle to reveal the old detailed view
@@ -7704,6 +7797,8 @@ impl eframe::App for ContextApp {
             let mut new_speak_on_space = speak_on_space;
             let hover_zoom_prev = self.hover_zoom;
             let mut new_hover_zoom = hover_zoom_prev;
+            let theme_prev = self.theme;
+            let mut new_theme = theme_prev;
             let mut new_ui_scale = ui_scale;
             let mut open_userdict = false;
             let mut selected_voice: Option<String> = None;
@@ -7865,6 +7960,33 @@ impl eframe::App for ContextApp {
 
                             // ============ Tab 2: Visning (display) ============
                             if settings_tab == 2 {
+                            // -- Fargetema --
+                            ui.label(egui::RichText::new("Fargetema").size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                let themes = [
+                                    (0u8, "Krem"),
+                                    (1u8, "Havblå"),
+                                    (2u8, "Sval grå"),
+                                    (3u8, "Mørk"),
+                                ];
+                                for (idx, label) in themes.iter() {
+                                    let tc = theme_for(*idx);
+                                    // Show a little swatch so the user sees the theme bg.
+                                    let resp = ui.selectable_label(
+                                        new_theme == *idx,
+                                        egui::RichText::new(*label).size(body).color(tc.text).background_color(tc.bg),
+                                    );
+                                    if resp.clicked() {
+                                        new_theme = *idx;
+                                    }
+                                }
+                            });
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
                             // -- Hover zoom (large-font preview on hover) --
                             ui.label(egui::RichText::new("Forstørr ord ved hover").size(heading).strong().color(label_color));
                             ui.add_space(6.0);
@@ -7984,6 +8106,10 @@ impl eframe::App for ContextApp {
                 self.hover_zoom = new_hover_zoom;
                 log!("Hover zoom: {}", self.hover_zoom);
             }
+            if new_theme != self.theme {
+                self.theme = new_theme;
+                log!("Theme: {}", self.theme);
+            }
             if (new_ui_scale - self.ui_scale).abs() > 0.01 {
                 self.ui_scale = new_ui_scale;
             }
@@ -8001,6 +8127,7 @@ impl eframe::App for ContextApp {
                     voice: voice.clone(),
                     language: self.language.code().to_string(),
                     hover_zoom: self.hover_zoom,
+                    theme: self.theme,
                 });
             }
             if open_userdict {
@@ -8010,6 +8137,7 @@ impl eframe::App for ContextApp {
             if new_quality != quality || new_whisper_mode != whisper_mode
                 || new_speak_on_space != speak_on_space
                 || new_hover_zoom != hover_zoom_prev
+                || new_theme != theme_prev
                 || (new_ui_scale - ui_scale).abs() > 0.01
             {
                 save_settings(&UserSettings {
@@ -8020,6 +8148,7 @@ impl eframe::App for ContextApp {
                     voice: tts::current_voice(),
                     language: self.language.code().to_string(),
                     hover_zoom: self.hover_zoom,
+                    theme: self.theme,
                 });
             }
             if let Some(new_lang) = switch_to_language {
@@ -8032,6 +8161,7 @@ impl eframe::App for ContextApp {
                     voice: tts::current_voice(),
                     language: new_lang.clone(),
                     hover_zoom: self.hover_zoom,
+                    theme: self.theme,
                 });
                 // Restart the process with the new language
                 let exe = std::env::current_exe().unwrap();
