@@ -43,6 +43,11 @@ struct UserSettings {
     /// Color theme: 0=Krem (default), 1=Havblå, 2=Sval grå, 3=Mørk.
     #[serde(default)]
     theme: u8,
+    /// Set true once the user has dismissed the Word-integration wizard
+    /// ("Hopp over"). Prevents re-prompting on every launch. Re-set to
+    /// false from the Settings menu to surface the wizard again.
+    #[serde(default)]
+    word_addin_wizard_dismissed: bool,
 }
 
 fn default_language() -> String { "nb".into() }
@@ -59,6 +64,7 @@ impl Default for UserSettings {
             language: "nb".into(),
             hover_zoom: true,
             theme: 0,
+            word_addin_wizard_dismissed: false,
         }
     }
 }
@@ -8230,6 +8236,9 @@ impl eframe::App for ContextApp {
                     language: self.language.code().to_string(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
+                    // Preserve any fields not explicitly set above (e.g.
+                    // word_addin_wizard_dismissed) by loading current values.
+                    ..load_settings()
                 });
             }
             if open_userdict {
@@ -8251,6 +8260,7 @@ impl eframe::App for ContextApp {
                     language: self.language.code().to_string(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
+                    ..load_settings()
                 });
             }
             if let Some(new_lang) = switch_to_language {
@@ -8264,6 +8274,7 @@ impl eframe::App for ContextApp {
                     language: new_lang.clone(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
+                    ..load_settings()
                 });
                 // Restart the process with the new language
                 let exe = std::env::current_exe().unwrap();
@@ -8634,6 +8645,187 @@ fn paint_lang_flag(ui: &mut egui::Ui, lang_code: &str, size: f32) {
 
 // ── Language picker: shown on first run ──
 // Default UI language is Bokmål for the picker itself.
+
+// ── Word add-in setup wizard (macOS only) ──────────────────────────────────
+//
+// Shown once after the language picker if Microsoft Word is installed and the
+// integration isn't fully set up yet. The same wizard is also reachable from
+// Settings later. Idempotent: each step (cert gen, CA trust, manifest copy)
+// is safe to re-run, so school IT admins can pre-deploy via MDM/M365 and the
+// wizard will detect "Ready" and skip silently.
+//
+// Returns true if the user took an action that means we should NOT prompt
+// again at next launch (Installed or explicitly dismissed). Returns false
+// if the wizard wasn't shown (no Word, already Ready, etc.).
+
+#[cfg(target_os = "macos")]
+fn run_word_addin_wizard() -> bool {
+    use crate::setup::word_addin_setup as setup;
+
+    // Skip silently if there's nothing to do
+    match setup::check_status() {
+        setup::SetupStatus::NoWord | setup::SetupStatus::Ready => return false,
+        setup::SetupStatus::NeedsSetup => {}
+    }
+
+    #[derive(Clone, PartialEq)]
+    enum Phase {
+        Initial,
+        Installing,
+        Done,
+        Error(String),
+    }
+
+    let phase: Arc<Mutex<Phase>> = Arc::new(Mutex::new(Phase::Initial));
+    let dismissed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([480.0, 380.0])
+            .with_decorations(true)
+            .with_title("Spell — Word-integrasjon"),
+        ..Default::default()
+    };
+
+    struct WizardApp {
+        phase: Arc<Mutex<Phase>>,
+        dismissed: Arc<Mutex<bool>>,
+    }
+
+    impl eframe::App for WizardApp {
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            ctx.set_visuals(egui::Visuals::light());
+            let phase = self.phase.lock().map(|p| p.clone()).unwrap_or(Phase::Initial);
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(28.0))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Word-integrasjon")
+                            .size(24.0).strong().color(egui::Color32::from_rgb(40, 40, 40)));
+                        ui.add_space(14.0);
+
+                        match &phase {
+                            Phase::Initial => {
+                                ui.label(egui::RichText::new(
+                                    "Spell kan rette stavefeil direkte i Microsoft Word.\n\n\
+                                     For å aktivere må Spell installere et sikkerhetssertifikat \
+                                     (du må skrive inn passordet ditt én gang) og legge til \
+                                     Spell som tillegg i Word.")
+                                    .size(14.5).color(egui::Color32::from_rgb(80, 80, 80)));
+                                ui.add_space(28.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(40.0);
+                                    if ui.add_sized([130.0, 36.0],
+                                        egui::Button::new(egui::RichText::new("Hopp over").size(15.0)),
+                                    ).clicked() {
+                                        if let Ok(mut d) = self.dismissed.lock() { *d = true; }
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                    ui.add_space(12.0);
+                                    if ui.add_sized([200.0, 36.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("Installer integrasjon").size(15.0).strong()
+                                        ).fill(egui::Color32::from_rgb(40, 110, 200)),
+                                    ).clicked() {
+                                        // Run setup in a background thread. The osascript admin
+                                        // prompt is itself modal, so the UI just shows a spinner.
+                                        let phase_arc = Arc::clone(&self.phase);
+                                        let ctx_clone = ctx.clone();
+                                        if let Ok(mut p) = phase_arc.lock() { *p = Phase::Installing; }
+                                        ctx_clone.request_repaint();
+                                        std::thread::spawn(move || {
+                                            let result = crate::setup::word_addin_setup::run_full_setup();
+                                            if let Ok(mut p) = phase_arc.lock() {
+                                                *p = match result {
+                                                    Ok(()) => Phase::Done,
+                                                    Err(e) => Phase::Error(e.to_string()),
+                                                };
+                                            }
+                                            ctx_clone.request_repaint();
+                                        });
+                                    }
+                                });
+                            }
+                            Phase::Installing => {
+                                ui.add_space(48.0);
+                                ui.spinner();
+                                ui.add_space(14.0);
+                                ui.label(egui::RichText::new("Installerer …").size(15.0));
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new(
+                                    "Hvis du ser et passordvindu, skriv inn passordet ditt for å \
+                                     fortsette.")
+                                    .size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                            }
+                            Phase::Done => {
+                                ui.label(egui::RichText::new("✓").size(56.0)
+                                    .color(egui::Color32::from_rgb(40, 160, 80)));
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Ferdig!").size(20.0).strong());
+                                ui.add_space(10.0);
+                                ui.label(egui::RichText::new(
+                                    "Start Microsoft Word på nytt for å se Spell under \
+                                     Sett inn → Mine tillegg.")
+                                    .size(14.0).color(egui::Color32::from_rgb(80, 80, 80)));
+                                ui.add_space(22.0);
+                                if ui.add_sized([120.0, 36.0],
+                                    egui::Button::new(egui::RichText::new("Lukk").size(15.0)),
+                                ).clicked() {
+                                    if let Ok(mut d) = self.dismissed.lock() { *d = true; }
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                            }
+                            Phase::Error(msg) => {
+                                ui.label(egui::RichText::new("⚠").size(48.0)
+                                    .color(egui::Color32::from_rgb(200, 130, 30)));
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Noe gikk galt").size(18.0).strong());
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new(msg)
+                                    .size(13.0).color(egui::Color32::from_rgb(120, 60, 60)));
+                                ui.add_space(20.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(80.0);
+                                    if ui.add_sized([110.0, 32.0],
+                                        egui::Button::new("Prøv igjen"),
+                                    ).clicked() {
+                                        if let Ok(mut p) = self.phase.lock() { *p = Phase::Initial; }
+                                    }
+                                    ui.add_space(12.0);
+                                    if ui.add_sized([110.0, 32.0],
+                                        egui::Button::new("Lukk"),
+                                    ).clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                });
+                            }
+                        }
+                    });
+                });
+        }
+    }
+
+    let phase_for_app = Arc::clone(&phase);
+    let dismissed_for_app = Arc::clone(&dismissed);
+    let _ = eframe::run_native(
+        "Spell — Word-integrasjon",
+        options,
+        Box::new(move |_cc| Ok(Box::new(WizardApp {
+            phase: phase_for_app,
+            dismissed: dismissed_for_app,
+        }) as Box<dyn eframe::App>)),
+    );
+
+    // "Don't show again" if user installed successfully OR clicked Hopp over.
+    let installed = matches!(*phase.lock().unwrap(), Phase::Done);
+    let was_dismissed = *dismissed.lock().unwrap();
+    installed || was_dismissed
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_word_addin_wizard() -> bool { false }
 
 fn run_language_picker() -> Option<String> {
     let chosen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -9089,6 +9281,22 @@ fn main() -> eframe::Result {
         saved.language = lang_code.clone();
         save_settings(&saved);
     }
+
+    // ── Word-integrasjon wizard (macOS only, runs once) ────────────────────
+    // Show if Word is installed AND we haven't completed/dismissed the wizard
+    // yet. Idempotent: if a school IT admin already deployed cert + manifest
+    // via MDM/M365, check_status() returns Ready and the wizard skips.
+    #[cfg(target_os = "macos")]
+    {
+        if !saved.word_addin_wizard_dismissed {
+            let dismissed_now = run_word_addin_wizard();
+            if dismissed_now {
+                saved.word_addin_wizard_dismissed = true;
+                save_settings(&saved);
+            }
+        }
+    }
+
     let selected_language: std::sync::Arc<dyn language::LanguageBundle> =
         match language::resolve_language(&lang_code) {
             Ok(l) => l,

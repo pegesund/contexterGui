@@ -199,15 +199,21 @@ step "Bundle resources"
 cp "$PROJECT_DIR/fonts/OpenSans-Regular.ttf" "$RESOURCES/"
 
 # Word add-in static files (server reads them from Contents/Resources/word-addin/)
+# Only PUBLIC files are bundled — manifest + UI assets that Word fetches over
+# the local HTTPS connection. The TLS cert + key are NOT bundled; the
+# first-launch wizard (src/setup/word_addin_setup.rs) generates a per-user
+# CA + leaf cert at ~/Library/Application Support/Spell/word-addin-certs/
+# and adds the CA to the system keychain via a graphical sudo prompt.
+#
+# CRITICAL: do NOT add fullchain.pem or key.pem to the list below. Bundling a
+# private key in a public installer would let anyone who downloads the .dmg
+# MITM every Spell user's localhost traffic.
 mkdir -p "$RESOURCES/word-addin"
-for f in manifest.xml taskpane.html taskpane.js commands.html commands.js fullchain.pem; do
+for f in manifest.xml taskpane.html taskpane.js commands.html commands.js; do
     if [ -f "$PROJECT_DIR/word-addin/$f" ]; then
         cp "$PROJECT_DIR/word-addin/$f" "$RESOURCES/word-addin/"
     fi
 done
-# Note: key.pem deliberately NOT bundled — each install gets its own mkcert key
-# generated at first launch. (Bundling a private key in a public installer is
-# a security disaster.)
 
 # ── 6. Sign (inside-out) ─────────────────────────────────────────────────────
 if $SIGN; then
