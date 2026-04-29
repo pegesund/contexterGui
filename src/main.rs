@@ -4880,21 +4880,36 @@ impl eframe::App for ContextApp {
             let now_word = kind == platform::AppKind::Word;
             let now_our_app = kind == platform::AppKind::OurApp;
 
-            // Cross-app switch: clear stale context whenever the user moves
-            // between two different external apps. Without this the BERT
-            // completion popup keeps showing the previous app's prefix matches
-            // (e.g. "ar*" completions from VS Code still visible after switching
-            // to Word and typing "yo"). Skip when transitioning TO our own
-            // window so brief clicks on Spell don't blow away the active state.
+            // Cross-app switch: clear ONLY the cached cursor context (the thing
+            // that drives the BERT next-word popup) when the user moves between
+            // two different external apps. Without this the BERT completion
+            // popup keeps showing the previous app's prefix matches (e.g. "ar*"
+            // completions from VS Code still visible after switching to Word
+            // and typing "yo").
+            //
+            // CRITICAL: do NOT call clear_for_app_switch() here — that wipes
+            // writing_errors + spelling_queue + paragraph hashes etc, which
+            // breaks Spell's standalone editor when the user briefly switches
+            // away (e.g. to take a screenshot) and comes back. The clear-all
+            // is appropriate for browser-foreground and Word doc-switch where
+            // the user is genuinely starting a new document, not a brief
+            // detour. Cross-app transitions to non-document apps (screenshot
+            // tools, finders, system dialogs) don't qualify.
+            //
+            // Skip when transitioning TO our own window so brief clicks on
+            // Spell don't blow away the active state.
             if !now_our_app
                 && self.prev_fg_pid != 0
                 && fg.pid != self.prev_fg_pid
             {
                 log!(
-                    "App switch: pid {} → {} (kind={:?}) — clearing stale context",
+                    "App switch: pid {} → {} (kind={:?}) — clearing stale BERT context only",
                     self.prev_fg_pid, fg.pid, kind
                 );
-                self.clear_for_app_switch();
+                // Just the BERT next-word completion context + bridge cache.
+                // writing_errors, spelling_queue, paragraph hashes are preserved.
+                self.context = Default::default();
+                self.manager.clear_context();
                 ctx.request_repaint();
             }
 
