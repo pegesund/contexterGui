@@ -231,7 +231,13 @@ pub fn generate_certs_if_missing() -> Result<()> {
         .signed_by(&leaf_keypair, &ca_cert, &ca_keypair)
         .context("sign leaf with CA")?;
 
-    fs::write(&leaf_pem, leaf.pem())?;
+    // fullchain.pem = leaf cert FOLLOWED BY CA cert (standard PEM chain order).
+    // rustls reads the file as a chain and serves all certs in the TLS handshake
+    // so strict TLS clients (like Office's WKWebView) can validate without
+    // needing to look up the CA separately. Many TLS clients require the chain
+    // in the handshake even when the CA is in their trust store.
+    let chain_pem = format!("{}{}", leaf.pem(), ca_cert.pem());
+    fs::write(&leaf_pem, chain_pem)?;
     fs::write(&leaf_key, leaf_keypair.serialize_pem())?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&leaf_key, fs::Permissions::from_mode(0o600))?;
