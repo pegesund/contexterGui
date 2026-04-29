@@ -56,6 +56,11 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
+    # Win32_UI_Input_KeyboardAndMouse is required for INPUT, SendInput,
+    # VIRTUAL_KEY, GetAsyncKeyState (used by bridge/accessibility_win.rs and
+    # platform/windows.rs). Was implicitly enabled via accesskit-windows
+    # before the macOS-26 fix dropped accesskit; now needs to be explicit.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
     "Win32_System_Threading",
