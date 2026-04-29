@@ -14,8 +14,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. 0.1.0)'
+        description: 'Semver version, e.g. 0.1.0 (no leading "v"). Must match X.Y.Z.'
         required: true
+        default: '0.1.0'
+        type: string
   push:
     tags:
       - 'v*'
@@ -189,7 +191,10 @@ jobs:
           Write-Host "https://github.com/${{ env.RELEASES_REPO }}/releases/tag/$tag"
 
       - name: Upload bundle artifact (CI debugging)
-        if: always()
+        # Only run if the bundle step completed and produced a zip — guards
+        # against earlier failures (e.g. invalid version input) where these
+        # outputs were never set, which would error with "Input required: path".
+        if: always() && steps.bundle.outputs.zip_path != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.bundle.outputs.bundle_name }}
