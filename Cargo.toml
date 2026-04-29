@@ -50,6 +50,11 @@ core-foundation = "0.10"
 core-graphics = "0.24"
 objc = "0.2"
 block = "0.1"
+# AuthorizationServices FFI (used by setup/word_addin_setup.rs to elevate
+# privileges for cert install — replaces the osascript+sudo flow). The
+# native dialog shows "Spell" instead of "osascript" as the requesting app.
+security-framework-sys = "2"
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"

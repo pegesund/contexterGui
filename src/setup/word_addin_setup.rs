@@ -251,20 +251,14 @@ pub fn generate_certs_if_missing() -> Result<()> {
 /// and other native apps trust localhost HTTPS from Spell.
 ///
 /// **Admin password required.** Office add-ins on macOS use WKWebView, which
-/// only honors trust anchors in the admin (system) domain — login-keychain
-/// trust is not enough. Verified empirically: with the cert in login keychain,
-/// clicking the Spell add-in in Word's Insert menu shows
-///   "Add-in Error: The content is blocked because it isn't signed by a valid
-///    security certificate."
-/// With the cert in System.keychain it loads correctly.
+/// only honors trust anchors in the admin (system) domain. School deployments
+/// where pupils don't have admin can pre-install the cert via MDM (see
+/// docs/SCHOOL_DEPLOYMENT.md).
 ///
-/// We use `osascript ... with administrator privileges` because that's the
-/// only stable cross-version macOS API for triggering a graphical password
-/// dialog from a sandboxed/regular user process. The dialog title says
-/// "osascript" rather than "Spell" — minor cosmetic issue. A future v1.1
-/// will migrate to the AuthorizationServices framework for a fully native
-/// dialog. School deployments where pupils don't have admin can pre-install
-/// the cert via MDM (see docs/SCHOOL_DEPLOYMENT.md).
+/// Uses macOS's AuthorizationServices framework directly. The native password
+/// dialog shows "Spell" as the requesting app (NOT "osascript") with our
+/// custom prompt text. Replaces the previous osascript+sudo flow which had
+/// a "first attempt fails, retry succeeds" quirk and looked unprofessional.
 pub fn install_ca_trust() -> Result<()> {
     let ca_pem = ca_cert_path()?;
     if !ca_pem.exists() {
@@ -274,35 +268,182 @@ pub fn install_ca_trust() -> Result<()> {
         ));
     }
 
-    // -d            → admin domain (System.keychain). REQUIRED for Office add-in trust.
-    // -r trustRoot  → treat as trust anchor for all policies
-    // -k <kc>       → target keychain (System.keychain — needs admin)
-    //
-    // The osascript wrapper is the standard way to elevate from a sandboxed
-    // GUI app. Keep the inner command simple; quoting via with-administrator
-    // is finicky.
-    let script = format!(
-        "do shell script \"security add-trusted-cert -d -r trustRoot -k '/Library/Keychains/System.keychain' '{}'\" with administrator privileges with prompt \"Spell needs your password to install a security certificate so Microsoft Word can trust the local connection.\"",
-        ca_pem.display()
-    );
+    let ca_pem_str = ca_pem
+        .to_str()
+        .ok_or_else(|| anyhow!("CA cert path contains invalid UTF-8"))?;
 
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .context("invoke osascript")?;
+    // /usr/bin/security add-trusted-cert -d -r trustRoot \
+    //   -k /Library/Keychains/System.keychain <ca_pem>
+    // -d            → admin domain (System.keychain) — REQUIRED for Office add-ins
+    // -r trustRoot  → trust anchor for all policies
+    auth::run_with_admin(
+        "/usr/bin/security",
+        &[
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+            ca_pem_str,
+        ],
+        "Spell needs to install a security certificate so Microsoft Word can trust the local connection.",
+    )
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // osascript exit -128 = user clicked Cancel on the password dialog
-        if stderr.contains("-128") || stderr.contains("User canceled") {
-            return Err(anyhow!("Du avbrøt passordvinduet."));
+/// Tiny FFI wrapper around macOS's AuthorizationServices framework.
+///
+/// `osascript ... with administrator privileges` shows a dialog titled
+/// "osascript" and triggers MDM "suspicious script execution" alerts in school
+/// environments. The proper API for a GUI app to elevate is
+/// AuthorizationCreate + AuthorizationCopyRights (shows "Spell" with our app
+/// icon and a custom prompt) + AuthorizationExecuteWithPrivileges (runs the
+/// command as root).
+///
+/// AuthorizationExecuteWithPrivileges is technically deprecated since 10.7
+/// but Apple's official replacement (SMJobBless / SMAppService) requires
+/// shipping a separate privileged helper tool. For a one-off cert install at
+/// first launch, the deprecated API is the pragmatic choice — it still works
+/// in macOS 26 and is what mkcert, Tunnelblick, Hyper-V Mac, and many other
+/// tools use today.
+mod auth {
+    use anyhow::{anyhow, Result};
+    use security_framework_sys::authorization as sf;
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::raw::c_char;
+
+    pub fn run_with_admin(cmd: &str, args: &[&str], prompt: &str) -> Result<()> {
+        unsafe {
+            // 1. AuthorizationCreate — get an empty authorization ref.
+            let mut auth: sf::AuthorizationRef = std::ptr::null_mut();
+            let st = sf::AuthorizationCreate(
+                std::ptr::null(),
+                std::ptr::null(),
+                sf::kAuthorizationFlagDefaults,
+                &mut auth,
+            );
+            if st != 0 {
+                return Err(anyhow!("AuthorizationCreate failed: {}", st));
+            }
+            // RAII free
+            struct AuthGuard(sf::AuthorizationRef);
+            impl Drop for AuthGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        sf::AuthorizationFree(self.0, sf::kAuthorizationFlagDefaults);
+                    }
+                }
+            }
+            let _guard = AuthGuard(auth);
+
+            // 2. Build the AuthorizationItem requesting "system.privilege.admin"
+            //    with our custom prompt text shown in the dialog.
+            let right_name = CString::new("system.privilege.admin").unwrap();
+            let mut right_item = sf::AuthorizationItem {
+                name: right_name.as_ptr(),
+                valueLength: 0,
+                value: std::ptr::null_mut(),
+                flags: 0,
+            };
+            let mut rights = sf::AuthorizationRights {
+                count: 1,
+                items: &mut right_item,
+            };
+
+            let prompt_name = CString::new("prompt").unwrap();
+            let prompt_value = CString::new(prompt).unwrap();
+            let mut env_item = sf::AuthorizationItem {
+                name: prompt_name.as_ptr(),
+                valueLength: prompt.len(),
+                value: prompt_value.as_ptr() as *mut _,
+                flags: 0,
+            };
+            let env = sf::AuthorizationRights {
+                count: 1,
+                items: &mut env_item,
+            };
+
+            // 3. AuthorizationCopyRights — shows the password dialog.
+            let st = sf::AuthorizationCopyRights(
+                auth,
+                &rights,
+                &env,
+                sf::kAuthorizationFlagDefaults
+                    | sf::kAuthorizationFlagInteractionAllowed
+                    | sf::kAuthorizationFlagPreAuthorize
+                    | sf::kAuthorizationFlagExtendRights,
+                std::ptr::null_mut(),
+            );
+            if st != 0 {
+                // -60006 = errAuthorizationCanceled (user clicked Cancel)
+                // -60005 = errAuthorizationDenied (wrong password too many times)
+                if st == -60006 {
+                    return Err(anyhow!("Du avbrøt passordvinduet."));
+                }
+                return Err(anyhow!("Autorisasjonen ble avvist (kode {}).", st));
+            }
+
+            // 4. AuthorizationExecuteWithPrivileges — runs `cmd args...` as root.
+            let cmd_c = CString::new(cmd).unwrap();
+            let arg_cs: Vec<CString> = args.iter().map(|a| CString::new(*a).unwrap()).collect();
+            let mut arg_ptrs: Vec<*const c_char> = arg_cs.iter().map(|c| c.as_ptr()).collect();
+            arg_ptrs.push(std::ptr::null()); // NULL-terminated
+
+            let mut pipe: *mut libc::FILE = std::ptr::null_mut();
+            let st = AuthorizationExecuteWithPrivileges(
+                auth,
+                cmd_c.as_ptr(),
+                sf::kAuthorizationFlagDefaults,
+                arg_ptrs.as_mut_ptr() as *mut *mut c_char,
+                &mut pipe,
+            );
+            if st != 0 {
+                return Err(anyhow!(
+                    "AuthorizationExecuteWithPrivileges failed: {} (the command did not run)",
+                    st
+                ));
+            }
+
+            // 5. Read the pipe to wait for the subprocess to finish + capture
+            //    its stderr/stdout for diagnostics.
+            let fd = libc::fileno(pipe);
+            let mut stderr_out = String::new();
+            if fd >= 0 {
+                // Wrap the FILE* fd in a BufReader. We do NOT close the fd via
+                // Rust's File drop because that would also fclose the FILE*.
+                // After reading to EOF we explicitly fclose below.
+                use std::os::unix::io::FromRawFd;
+                let mut f = std::fs::File::from_raw_fd(libc::dup(fd));
+                let _ = f.read_to_string(&mut stderr_out);
+            }
+            libc::fclose(pipe);
+
+            // No way to get the child's exit code from
+            // AuthorizationExecuteWithPrivileges. If `security` failed, it
+            // typically prints to stderr — surface that.
+            if !stderr_out.trim().is_empty()
+                && (stderr_out.contains("error")
+                    || stderr_out.contains("denied")
+                    || stderr_out.contains("failed"))
+            {
+                return Err(anyhow!("{}", stderr_out.trim()));
+            }
         }
-        return Err(anyhow!(
-            "Kunne ikke installere sertifikatet: {}",
-            stderr.trim()
-        ));
+        Ok(())
     }
-    Ok(())
+
+    // security-framework-sys 2.x doesn't re-export this deprecated function.
+    // Declare it ourselves — Apple has kept the ABI stable for 15+ years.
+    unsafe extern "C" {
+        fn AuthorizationExecuteWithPrivileges(
+            authorization: sf::AuthorizationRef,
+            pathToTool: *const c_char,
+            options: sf::AuthorizationFlags,
+            arguments: *mut *mut c_char,
+            communicationsPipe: *mut *mut libc::FILE,
+        ) -> i32;
+    }
 }
 
 // ── Manifest install ─────────────────────────────────────────────────────────
