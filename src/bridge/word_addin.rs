@@ -150,6 +150,18 @@ impl WordAddinBridge {
                 // Cache static files
                 let html = std::fs::read_to_string(static_dir.join("taskpane.html")).unwrap_or_default();
                 let js = std::fs::read_to_string(static_dir.join("taskpane.js")).unwrap_or_default();
+                // Pre-load PNG icons (referenced by manifest.xml's IconUrl /
+                // HighResolutionIconUrl). Word fetches these once on add-in
+                // registration; pre-loading avoids a disk read per request.
+                let icon_32: Arc<Vec<u8>> = Arc::new(
+                    std::fs::read(static_dir.join("icon-32.png")).unwrap_or_default()
+                );
+                let icon_64: Arc<Vec<u8>> = Arc::new(
+                    std::fs::read(static_dir.join("icon-64.png")).unwrap_or_default()
+                );
+                let icon_80: Arc<Vec<u8>> = Arc::new(
+                    std::fs::read(static_dir.join("icon-80.png")).unwrap_or_default()
+                );
 
                 for stream in listener.incoming() {
                     if let Ok(tcp_stream) = stream {
@@ -167,6 +179,9 @@ impl WordAddinBridge {
                         let tls_cfg = tls_config.clone();
                         let html = html.clone();
                         let js = js.clone();
+                        let i32 = Arc::clone(&icon_32);
+                        let i64 = Arc::clone(&icon_64);
+                        let i80 = Arc::clone(&icon_80);
                         std::thread::spawn(move || {
                             if let Some(ref cfg) = tls_cfg {
                                 let acceptor = rustls::ServerConnection::new(Arc::clone(cfg));
@@ -174,7 +189,7 @@ impl WordAddinBridge {
                                     Ok(conn) => {
                                         let mut tls_stream = rustls::StreamOwned::new(conn, tcp_stream);
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js);
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js, &i32, &i64, &i80);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -182,7 +197,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js, &i32, &i64, &i80);
                             }
                         });
                     }
@@ -475,6 +490,9 @@ fn handle_request_rw<S: Read + Write>(
     errors_json: &Arc<Mutex<String>>,
     static_html: &str,
     static_js: &str,
+    icon_32: &[u8],
+    icon_64: &[u8],
+    icon_80: &[u8],
 ) {
     // Read headers byte by byte until we find \r\n\r\n
     let mut header_buf = Vec::with_capacity(4096);
@@ -785,11 +803,33 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
+        // Word add-in icons (referenced by manifest.xml's IconUrl /
+        // HighResolutionIconUrl). Word fetches these to display the add-in's
+        // icon in the My Add-ins list and ribbon button.
+        ("GET", "/icon-32.png") => serve_png(stream, &cors, icon_32),
+        ("GET", "/icon-64.png") => serve_png(stream, &cors, icon_64),
+        ("GET", "/icon-80.png") => serve_png(stream, &cors, icon_80),
+
         _ => {
             let response = format!("HTTP/1.1 404 Not Found\r\n{}\r\n", cors);
             let _ = stream.write_all(response.as_bytes());
         }
     }
+}
+
+/// Serve a PNG byte buffer over the HTTP stream with the appropriate headers.
+fn serve_png<S: Write>(stream: &mut S, cors: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        let response = format!("HTTP/1.1 404 Not Found\r\n{}\r\n", cors);
+        let _ = stream.write_all(response.as_bytes());
+        return;
+    }
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n{}Content-Type: image/png\r\nCache-Control: public, max-age=86400\r\nContent-Length: {}\r\n\r\n",
+        cors, bytes.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(bytes);
 }
 
 /// Load TLS cert+key from PEM files and build a rustls ServerConfig.

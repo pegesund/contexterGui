@@ -209,7 +209,8 @@ cp "$PROJECT_DIR/fonts/OpenSans-Regular.ttf" "$RESOURCES/"
 # private key in a public installer would let anyone who downloads the .dmg
 # MITM every Spell user's localhost traffic.
 mkdir -p "$RESOURCES/word-addin"
-for f in manifest.xml taskpane.html taskpane.js commands.html commands.js; do
+for f in manifest.xml taskpane.html taskpane.js commands.html commands.js \
+         icon-32.png icon-64.png icon-80.png; do
     if [ -f "$PROJECT_DIR/word-addin/$f" ]; then
         cp "$PROJECT_DIR/word-addin/$f" "$RESOURCES/word-addin/"
     fi

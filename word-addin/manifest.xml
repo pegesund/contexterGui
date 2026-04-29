@@ -14,6 +14,9 @@
   <DefaultLocale>nb-NO</DefaultLocale>
   <DisplayName DefaultValue="Spell" />
   <Description DefaultValue="Norsk stavekontroll og grammatikksjekk for dysleksi" />
+  <IconUrl DefaultValue="https://localhost:3000/icon-32.png" />
+  <HighResolutionIconUrl DefaultValue="https://localhost:3000/icon-80.png" />
+  <SupportUrl DefaultValue="https://cognio.no/spell/support" />
   <Hosts>
     <Host Name="Document" />
   </Hosts>
