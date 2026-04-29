@@ -90,10 +90,18 @@ impl MacPlatform {
                 let mut prev_fg_pid: u32 = 0;
                 loop {
                     if let Some(app) = query_foreground_app() {
-                        let is_our_app = app.exe_name == "acatts-rust"
-                            || app.exe_name == "norsktale"
-                            || app.title == "NorskTale";
                         let pid = app.pid;
+                        // Pid match is authoritative; the string fallbacks cover
+                        // dev-mode binary names ("acatts-rust") and packaged builds
+                        // ("Spell" via CFBundleExecutable). Without the pid check,
+                        // walking AX into our own process triggers an accesskit-macos
+                        // panic in is_selector_allowed → SIGABRT.
+                        let is_our_app = pid == std::process::id()
+                            || app.exe_name == "acatts-rust"
+                            || app.exe_name == "spell"
+                            || app.exe_name == "norsktale"
+                            || app.title == "NorskTale"
+                            || app.title == "Spell";
                         if !is_our_app {
                             if let Ok(mut lock) = ext_clone.lock() {
                                 *lock = app.clone();
