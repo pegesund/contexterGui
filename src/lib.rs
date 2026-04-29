@@ -3,3 +3,4 @@
 pub mod spelling_scorer;
 pub mod user_dict;
 pub mod compound_walker;
+pub mod downloader;

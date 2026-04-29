@@ -52,6 +52,19 @@ pub trait TextBridge {
         self.find_and_replace_in_context(find, replace, context)
     }
 
+    /// Replace a word within a specific paragraph (identified by paragraph_id).
+    /// Much faster than body-wide search because it scopes to one paragraph.
+    /// Default: falls back to find_and_replace_in_context_at.
+    fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, paragraph_id: &str, context: &str, char_offset: usize) -> bool {
+        let _ = paragraph_id;
+        self.find_and_replace_in_context_at(find, replace, context, char_offset)
+    }
+
+    /// Place the caret at the end of the last occurrence of `word` in the given
+    /// paragraph. Used after a fix, once Word has focus, to move the cursor
+    /// where the user can continue typing.
+    fn place_cursor_at_end_of_word(&self, _word: &str, _paragraph_id: &str) -> bool { false }
+
     /// Read a larger text window for context (e.g. 5000 chars before cursor).
     /// Used for sentence embeddings / topic extraction.
     fn read_document_context(&self) -> Option<String> { None }
@@ -149,9 +162,8 @@ pub mod word_addin;
 
 pub mod browser;
 
-// Future:
-// #[cfg(target_os = "macos")]
-// pub mod accessibility_mac;
+#[cfg(target_os = "macos")]
+pub mod ax_mac;
 
 /// Create platform-specific bridges (excluding Browser, which is added separately).
 pub fn create_bridges(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
@@ -175,6 +187,11 @@ pub fn create_bridges(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
         let addin_bridge = word_addin::WordAddinBridge::new();
         crate::log!("Word Add-in bridge started (HTTP port {})", 52525);
         bridges.push(Box::new(addin_bridge));
+
+        // Accessibility fallback for Teams, Safari, Chrome inputs, TextEdit, etc.
+        // Consumed only for AppKind::Other or when the Browser bridge has no data
+        // (see BridgeManager::read_context).
+        bridges.push(Box::new(ax_mac::AxMacBridge::new()));
     }
 
     bridges

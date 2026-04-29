@@ -70,7 +70,7 @@ fn main() {
         ("Vi skal reise til Bergern.", "bergern", "bergen"),
         ("Katten sitterr på stolen.", "sitterr", "sitter"),
         ("Han spiller fotballl.", "fotballl", "fotball"),
-        ("Jeg skal skrierl.", "skrierl", "skrive|skrives"),
+        ("Jeg skal skrierl en bok.", "skrierl", "skrive|skrives"),
         ("Barna fikk boller og bbrus.", "bbrus", "brus"),
         ("Barna fikk gåtterier.", "gåtterier", "godterier|godteri"),
         // First-char wrong + grammar inflection: sjøkken → kjøkkenet
@@ -98,6 +98,7 @@ fn main() {
             misspelled,
             sentence,
             &language::BokmalLanguage,
+            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 
@@ -177,7 +178,7 @@ fn main() {
     ];
 
     for (word, expected_split) in &split_tests {
-        let result = acatts_rust::spelling_scorer::try_split_function_word(word, &analyzer);
+        let result = acatts_rust::spelling_scorer::try_split_function_word(word, &analyzer, &language::BokmalLanguage);
         let ok = match (expected_split, &result) {
             (Some(exp), Some(got)) => got == exp,
             (None, None) => true,

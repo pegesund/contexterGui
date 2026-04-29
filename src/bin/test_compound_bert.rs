@@ -95,7 +95,7 @@ fn main() {
 
     // Debug: check "innsjøefisk" decomposition in walker
     {
-        let r = compound_fuzzy_walk(&fst, "innsjefisk", Some(&wordfreq), Some(&word_check), Some(&noun_check));
+        let r = compound_fuzzy_walk(&fst, "innsjefisk", &language::BokmalLanguage, Some(&wordfreq), Some(&word_check), Some(&noun_check));
         println!("  === innsjefisk: results containing 'efisk' ===");
         for x in r.iter().filter(|x| x.compound_word.contains("efisk")).take(5) {
             let parts: Vec<String> = x.parts.iter()
@@ -182,7 +182,7 @@ fn main() {
         let t_walk = Instant::now();
         let results = compound_fuzzy_walk(
             &fst, &misspelled.to_lowercase(),
-            Some(&wordfreq), Some(&word_check), Some(&noun_check),
+            &language::BokmalLanguage, Some(&wordfreq), Some(&word_check), Some(&noun_check),
         );
         let walk_ms = t_walk.elapsed().as_secs_f64() * 1000.0;
         total_walker_ms += walk_ms;

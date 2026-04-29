@@ -22,6 +22,8 @@ var documentId = (Office.context && Office.context.document && Office.context.do
 
 // Paragraph tracking: paragraphId -> hash of full paragraph text
 var paragraphMap = {};
+var initialScanDone = false; // set true after first successful /changed POST
+var totalSent = 0;
 
 Office.onReady(function (info) {
     statusEl = document.getElementById("status");
@@ -256,7 +258,6 @@ function scheduleRescan() {
     }, 1000);
 }
 
-var totalSent = 0;
 function sendChangedParagraphs(changed) {
     totalSent += changed.length;
     fetch(BRIDGE_URL + "/changed", {
@@ -269,8 +270,28 @@ function sendChangedParagraphs(changed) {
         })
     }).then(function() {
         setStatus("Sendt " + totalSent + " avsnitt", "ok");
+        initialScanDone = true;
+        // Tag this document so the taskpane auto-opens next time.
+        // Once tagged, Word remembers it — the user never has to manually
+        // activate the add-in for this document again.
+        try {
+            Office.context.document.settings.set(
+                "Office.AutoShowTaskpaneWithDocument", true
+            );
+            Office.context.document.settings.saveAsync();
+        } catch(e) { /* ignore if not supported */ }
     }).catch(function (err) {
-        setStatus("Feil: " + (err.message || err), "err");
+        setStatus("Venter på NorskTale...", "err");
+        // App not running yet — retry initial scan after 2s.
+        // This handles the case where the add-in loads before the desktop
+        // app starts (common when Word remembers the taskpane from a previous
+        // session). The retry keeps going until the app accepts the POST.
+        if (!initialScanDone) {
+            setTimeout(function() {
+                setStatus("Prøver skanning på nytt...", "ok");
+                initialScan();
+            }, 2000);
+        }
     });
 }
 
@@ -414,6 +435,8 @@ function pollReplies() {
                 }
             } else if (data.action === "underline" && data.word) {
                 doUnderline(data.word, data.paragraphId, data.color || "red");
+            } else if (data.action === "cursorEnd" && data.word && data.paragraphId) {
+                doCursorAtEndOfWord(data.word, data.paragraphId);
             } else if (data.action === "clearParagraphUnderlines" && data.paragraphId) {
                 doClearParagraphUnderlines(data.paragraphId);
             } else if (data.action === "clearUnderline" && data.word) {
@@ -439,34 +462,46 @@ function pollReplies() {
 }
 
 function doReplace(expected, replacement, paragraphId) {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
-        if (paragraphId) {
-            var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
-            var results = para.search(expected, { matchCase: false });
+    var t0 = Date.now();
+    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({msg: "REPLACE START: '" + expected + "' → '" + replacement + "' para=" + (paragraphId ? paragraphId.substring(0,10) : "none")})
+    }).catch(function(){});
+    enqueueWordRun(function () {
+        var t1 = Date.now();
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "REPLACE enqueue→run delay: " + (t1 - t0) + "ms"})
+        }).catch(function(){});
+        return Word.run(function (ctx) {
+            var scope;
+            if (paragraphId) {
+                scope = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+            } else {
+                scope = ctx.document.body;
+            }
+            var results = scope.search(expected, { matchCase: false });
             results.load("items");
             return ctx.sync().then(function () {
+                var t2 = Date.now();
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "REPLACE search sync: " + (t2 - t1) + "ms, found=" + results.items.length})
+                }).catch(function(){});
                 if (results.items.length > 0) {
-                    results.items[0].insertText(replacement, "Replace");
+                    var newRange = results.items[0].insertText(replacement, "Replace");
+                    // Collapse selection to the end of the replacement so the cursor
+                    // lands after the new word (ready for the user to keep typing).
+                    newRange.select("End");
                     return ctx.sync().then(function () {
-                        // Trigger rescan so changed paragraph is detected
-                        rescanAll();
+                        var t3 = Date.now();
+                        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                            body: JSON.stringify({msg: "REPLACE insert sync: " + (t3 - t2) + "ms (total=" + (t3 - t0) + "ms)"})
+                        }).catch(function(){});
+                        // onParagraphChanged will fire automatically and send POST /changed.
+                        // No need to call rescanAll() which queues more Word.run operations.
                     });
                 }
             });
-        } else {
-            var results = ctx.document.body.search(expected, { matchCase: false });
-            results.load("items");
-            return ctx.sync().then(function () {
-                if (results.items.length > 0) {
-                    results.items[0].insertText(replacement, "Replace");
-                    return ctx.sync().then(function () {
-                        // Trigger rescan so changed paragraph is detected
-                        rescanAll();
-                    });
-                }
-            });
-        }
-    }).catch(function () {}); });
+        }).catch(function () {});
+    });
 }
 
 function doSelectWord(word, paragraphId) {
@@ -567,6 +602,37 @@ function doClearParagraphUnderlines(paragraphId) {
             return ctx.sync();
         });
     }).catch(function () {});
+}
+
+function doCursorAtEndOfWord(word, paragraphId) {
+    // Called after a fix when Word has focus. Find the last occurrence of `word`
+    // inside the given paragraph and select the END of that range. The caret
+    // lands just after the word, ready for typing.
+    enqueueWordRun(function () { return Word.run(function (ctx) {
+        var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
+        var results = para.search(word, { matchCase: false });
+        results.load("items");
+        return ctx.sync().then(function () {
+            if (results.items.length === 0) {
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "CURSOR_END MISS: '" + word + "' not found in para=" + paragraphId.substring(0,10)})
+                }).catch(function(){});
+                return ctx.sync();
+            }
+            // Take the LAST match in the paragraph (in case the word appears
+            // more than once; we want the rightmost — usually the one just fixed).
+            var lastMatch = results.items[results.items.length - 1];
+            lastMatch.select("End");
+            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({msg: "CURSOR_END OK: '" + word + "' selected at end, matches=" + results.items.length})
+            }).catch(function(){});
+            return ctx.sync();
+        });
+    }).catch(function (e) {
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "CURSOR_END ERROR: " + e})
+        }).catch(function(){});
+    }); });
 }
 
 function doClearUnderline(word, paragraphId) {

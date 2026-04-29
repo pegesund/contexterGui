@@ -1,0 +1,16 @@
+[
+  {"sentence": "I want to go some where.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: somewhere is one word, not two"},
+  {"sentence": "He went to the super market.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: supermarket is one word, not two"},
+  {"sentence": "She is my girl friend.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: girlfriend is one word, not two"},
+  {"sentence": "We need a tooth brush.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: toothbrush is one word, not two"},
+  {"sentence": "He plays basket ball.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: basketball is one word, not two"},
+  {"sentence": "She works in a book store.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: bookstore is one word, not two"},
+  {"sentence": "I need a rain coat.", "is_correct": false, "error_type": "compound_split", "explanation": "Error: raincoat is one word, not two"},
+  {"sentence": "I want to go somewhere.", "is_correct": true, "error_type": "none", "explanation": "Correct: somewhere is one word"},
+  {"sentence": "He went to the supermarket.", "is_correct": true, "error_type": "none", "explanation": "Correct: supermarket is one word"},
+  {"sentence": "She is my girlfriend.", "is_correct": true, "error_type": "none", "explanation": "Correct: girlfriend is one word"},
+  {"sentence": "We need a toothbrush.", "is_correct": true, "error_type": "none", "explanation": "Correct: toothbrush is one word"},
+  {"sentence": "He plays basketball.", "is_correct": true, "error_type": "none", "explanation": "Correct: basketball is one word"},
+  {"sentence": "She works in a bookstore.", "is_correct": true, "error_type": "none", "explanation": "Correct: bookstore is one word"},
+  {"sentence": "I need a raincoat.", "is_correct": true, "error_type": "none", "explanation": "Correct: raincoat is one word"}
+]

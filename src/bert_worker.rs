@@ -171,6 +171,7 @@ fn worker_loop(
     grammar_sender: Option<mpsc::Sender<crate::grammar_actor::ActorMessage>>,
 ) {
     use std::ops::Deref;
+    let mask_tok = model.mask_token_str();
     while let Ok(req) = rx.recv() {
         // Drain stale completion requests: if newer CompleteWord is queued, skip to it.
         // Never skip non-completion requests (SpellingScore, MlmForward).
@@ -270,7 +271,7 @@ fn worker_loop(
                 // For right column: extract context before <mask> from masked_text
                 // "Om våren liker jeg <mask> best." → "Om våren liker jeg"
                 // This puts BERT's <mask> at the CURRENT WORD, not at end of sentence
-                let right_context = masked_text.split("<mask>").next()
+                let right_context = masked_text.split(&mask_tok).next()
                     .unwrap_or(&context).trim_end().to_string();
                 if cancel.load(Ordering::Acquire) { continue; }
                 {
@@ -371,7 +372,7 @@ fn worker_loop(
                     let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
                     // Use full-mask approach only when there's right context (mid-sentence).
                     // End-of-sentence: fall back to complete_word (normal completer).
-                    let has_right_context = masked_text.split("<mask>").nth(1)
+                    let has_right_context = masked_text.split(&mask_tok).nth(1)
                         .map_or(false, |after| after.trim().trim_matches('.').trim().len() > 0);
                     let right = if has_right_context {
                         right_from_mask(&mut model, &masked_text, &left_words, true)
@@ -481,13 +482,13 @@ fn mlm_forward_impl(model: &mut Model, masked_text: &str, top_k: usize) -> Vec<(
 
 /// Full sentence scoring: mask each word, sum BERT's prediction logits.
 /// More accurate than boundary scoring but ~200ms per sentence.
-fn sentence_score(model: &mut Model, sentence: &str) -> f32 {
+fn sentence_score(model: &mut Model, sentence: &str, mask_token: &str) -> f32 {
     let words: Vec<&str> = sentence.split_whitespace().collect();
     if words.is_empty() { return f32::NEG_INFINITY; }
     let mut total: f32 = 0.0;
     for i in 0..words.len() {
         let masked: String = words.iter().enumerate()
-            .map(|(j, w)| if j == i { "<mask>" } else { *w })
+            .map(|(j, w)| if j == i { mask_token } else { *w })
             .collect::<Vec<_>>().join(" ");
         if let Ok((logits, _)) = model.single_forward(&masked) {
             let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());

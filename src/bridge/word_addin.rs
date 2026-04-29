@@ -65,6 +65,10 @@ impl WordAddinBridge {
         let reset_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let current_doc_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
         let pending_doc_switch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // On first /reply poll after app start, push {"action":"rescan"} so the
+        // add-in re-sends all paragraphs. Handles the case where the add-in was
+        // already loaded (and ran initialScan) before the Rust app started.
+        let rescan_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let errors_json: Arc<Mutex<String>> = Arc::new(Mutex::new("[]".to_string()));
 
         let ctx_clone = Arc::clone(&cached_context);
@@ -75,6 +79,7 @@ impl WordAddinBridge {
         let errors_clone = Arc::clone(&errors_json);
         let doc_name_clone = Arc::clone(&current_doc_name);
         let pending_switch_clone = Arc::clone(&pending_doc_switch);
+        let rescan_sent_clone = Arc::clone(&rescan_sent);
 
         std::thread::Builder::new()
             .name("word-addin-https".into())
@@ -84,15 +89,15 @@ impl WordAddinBridge {
                 let cert_path = addin_dir.join("fullchain.pem");
                 let key_path = addin_dir.join("key.pem");
 
-                // Build native-tls acceptor (uses macOS SecureTransport)
-                let tls_acceptor = if PORT == 3000 {
-                    load_native_tls(&cert_path, &key_path)
+                // Build rustls config (pure Rust TLS — no macOS Keychain prompts)
+                let tls_config = if PORT == 3000 {
+                    load_rustls(&cert_path, &key_path)
                 } else {
                     None
                 };
 
-                if tls_acceptor.is_some() {
-                    eprintln!("Word Add-in HTTPS bridge (native-tls) listening on port {}", PORT);
+                if tls_config.is_some() {
+                    eprintln!("Word Add-in HTTPS bridge (rustls) listening on port {}", PORT);
                 } else {
                     eprintln!("Word Add-in HTTP bridge (no TLS certs) on port {}", PORT);
                 }
@@ -109,8 +114,6 @@ impl WordAddinBridge {
                 let html = std::fs::read_to_string(addin_dir.join("taskpane.html")).unwrap_or_default();
                 let js = std::fs::read_to_string(addin_dir.join("taskpane.js")).unwrap_or_default();
 
-                let tls_acceptor = tls_acceptor.map(Arc::new);
-
                 for stream in listener.incoming() {
                     if let Ok(tcp_stream) = stream {
                         let peer = tcp_stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
@@ -122,16 +125,19 @@ impl WordAddinBridge {
                         let reset = Arc::clone(&reset_clone);
                         let doc_name = Arc::clone(&doc_name_clone);
                         let pending_switch = Arc::clone(&pending_switch_clone);
+                        let rescan_flag = Arc::clone(&rescan_sent_clone);
                         let errors = Arc::clone(&errors_clone);
-                        let tls = tls_acceptor.clone();
+                        let tls_cfg = tls_config.clone();
                         let html = html.clone();
                         let js = js.clone();
                         std::thread::spawn(move || {
-                            if let Some(ref acceptor) = tls {
-                                match acceptor.accept(tcp_stream) {
-                                    Ok(mut tls_stream) => {
+                            if let Some(ref cfg) = tls_cfg {
+                                let acceptor = rustls::ServerConnection::new(Arc::clone(cfg));
+                                match acceptor {
+                                    Ok(conn) => {
+                                        let mut tls_stream = rustls::StreamOwned::new(conn, tcp_stream);
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &errors, &html, &js);
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -139,7 +145,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &errors, &html, &js);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &html, &js);
                             }
                         });
                     }
@@ -279,6 +285,37 @@ impl TextBridge for WordAddinBridge {
         true
     }
 
+    fn find_and_replace_in_paragraph(
+        &self,
+        find: &str,
+        replace: &str,
+        paragraph_id: &str,
+        _context: &str,
+        char_offset: usize,
+    ) -> bool {
+        // Send paragraphId so the add-in's doReplace scopes the search to one
+        // paragraph instead of scanning document.body — much faster.
+        let json = format!(
+            r#"{{"action":"replace","expected":"{}","text":"{}","paragraphId":"{}","offset":{}}}"#,
+            escape_json(find),
+            escape_json(replace),
+            escape_json(paragraph_id),
+            char_offset
+        );
+        self.push_reply(json);
+        true
+    }
+
+    fn place_cursor_at_end_of_word(&self, word: &str, paragraph_id: &str) -> bool {
+        let json = format!(
+            r#"{{"action":"cursorEnd","word":"{}","paragraphId":"{}"}}"#,
+            escape_json(word),
+            escape_json(paragraph_id)
+        );
+        self.push_reply(json);
+        true
+    }
+
     fn read_full_document(&self) -> Option<String> {
         // The add-in sends before+after text (up to 2000 chars each).
         // Combine them as approximate full doc.
@@ -397,6 +434,7 @@ fn handle_request_rw<S: Read + Write>(
     reset_requested: &Arc<std::sync::atomic::AtomicBool>,
     current_doc_name: &Arc<Mutex<String>>,
     pending_doc_switch: &Arc<std::sync::atomic::AtomicBool>,
+    rescan_sent: &Arc<std::sync::atomic::AtomicBool>,
     errors_json: &Arc<Mutex<String>>,
     static_html: &str,
     static_js: &str,
@@ -527,6 +565,16 @@ fn handle_request_rw<S: Read + Write>(
             } else {
                 String::new()
             };
+            // On first /reply poll after app start, ask the add-in to rescan.
+            // This handles: app restarted while Word + add-in were already running.
+            if !rescan_sent.load(std::sync::atomic::Ordering::Relaxed) && !req_doc.is_empty() {
+                rescan_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut q) = reply_queue.lock() {
+                    let entry = q.entry(req_doc.clone()).or_insert_with(Vec::new);
+                    entry.push(r#"{"action":"rescan"}"#.to_string());
+                    log_to_file(&format!("AUTO-RESCAN queued for doc='{}'", req_doc));
+                }
+            }
             let json = if let Ok(mut q) = reply_queue.lock() {
                 let keys: Vec<String> = q.keys().cloned().collect();
                 if let Some(doc_queue) = q.get_mut(&req_doc) {
@@ -606,28 +654,24 @@ fn handle_request_rw<S: Read + Write>(
 
         ("POST", "/reset") => {
             let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
-            // Accept reset from: the active document, the first doc to connect,
-            // OR any document immediately after a doc-switch was detected on /context.
-            let switch_pending = pending_doc_switch.load(std::sync::atomic::Ordering::Relaxed);
-            let is_active_reset = if let Ok(current) = current_doc_name.lock() {
-                current.is_empty() || *current == doc_name || switch_pending
-            } else {
-                false
-            };
-            if is_active_reset {
-                pending_doc_switch.store(false, std::sync::atomic::Ordering::Relaxed);
-                reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
-                if !doc_name.is_empty() {
-                    if let Ok(mut current) = current_doc_name.lock() {
+            // Always accept /reset — it means "new session, take over".
+            // This handles: add-in reload, app restart while Word is open,
+            // document switch, or any other case where the add-in needs a
+            // fresh start. The old active doc (if any) is replaced.
+            pending_doc_switch.store(false, std::sync::atomic::Ordering::Relaxed);
+            reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            if !doc_name.is_empty() {
+                if let Ok(mut current) = current_doc_name.lock() {
+                    if *current != doc_name {
+                        log_to_file(&format!("RESET accepted: doc='{}' (was '{}')", doc_name, current));
+                    } else {
                         log_to_file(&format!("RESET accepted: doc='{}'", doc_name));
-                        *current = doc_name;
                     }
+                    *current = doc_name;
                 }
-                if let Ok(mut q) = reply_queue.lock() {
-                    q.clear();
-                }
-            } else {
-                log_to_file(&format!("RESET rejected: doc='{}' (not active)", doc_name));
+            }
+            if let Ok(mut q) = reply_queue.lock() {
+                q.clear();
             }
             eprintln!("HTTP /reset: clearing all state");
             let response = format!(
@@ -683,6 +727,27 @@ fn handle_request_rw<S: Read + Write>(
             let _ = stream.write_all(response.as_bytes());
         }
 
+        // Event-based activation: commands.html + commands.js for OnDocumentOpened
+        ("GET", path) if path.starts_with("/commands.html") => {
+            let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
+            let content = std::fs::read_to_string(addin_dir.join("commands.html")).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: text/html; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
+                cors, content.len(), content
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("GET", path) if path.starts_with("/commands.js") => {
+            let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
+            let content = std::fs::read_to_string(addin_dir.join("commands.js")).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
+                cors, content.len(), content
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
         _ => {
             let response = format!("HTTP/1.1 404 Not Found\r\n{}\r\n", cors);
             let _ = stream.write_all(response.as_bytes());
@@ -690,22 +755,39 @@ fn handle_request_rw<S: Read + Write>(
     }
 }
 
-/// Load TLS identity from PEM cert+key files, build a native-tls acceptor.
-/// native-tls uses macOS SecureTransport — same TLS backend as Python's ssl module.
-fn load_native_tls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<native_tls::TlsAcceptor> {
+/// Load TLS cert+key from PEM files and build a rustls ServerConfig.
+/// rustls is pure Rust — no macOS Keychain involvement, no password prompts.
+fn load_rustls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Option<Arc<rustls::ServerConfig>> {
+    // Install ring as the crypto provider (must happen before any rustls use)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cert_pem = std::fs::read(cert_path).ok()?;
     let key_pem = std::fs::read(key_path).ok()?;
 
-    // native-tls on macOS needs PKCS#12 format — convert PEM cert+key to PKCS#12
-    let identity = native_tls::Identity::from_pkcs8(&cert_pem, &key_pem)
-        .map_err(|e| eprintln!("native-tls Identity error: {}", e))
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &cert_pem[..])
+            .filter_map(|r| r.ok())
+            .collect();
+    if certs.is_empty() {
+        eprintln!("rustls: no certificates found in {}", cert_path.display());
+        return None;
+    }
+
+    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        .ok()
+        .flatten()
+        .or_else(|| {
+            eprintln!("rustls: no private key found in {}", key_path.display());
+            None
+        })?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| eprintln!("rustls ServerConfig error: {}", e))
         .ok()?;
 
-    let acceptor = native_tls::TlsAcceptor::new(identity)
-        .map_err(|e| eprintln!("native-tls Acceptor error: {}", e))
-        .ok()?;
-
-    Some(acceptor)
+    Some(Arc::new(config))
 }
 
 /// Clean Word special characters from text.

@@ -149,6 +149,8 @@ fn main() {
             &empty_doc,
             misspelled,
             sentence,
+            &language::NynorskLanguage,
+            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

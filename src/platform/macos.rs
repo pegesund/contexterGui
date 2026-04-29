@@ -4,6 +4,18 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// Log each distinct caret-trace message at most once per 3s.
+fn trace_caret(msg: &str) {
+    static LAST: std::sync::OnceLock<Mutex<(String, Instant)>> = std::sync::OnceLock::new();
+    let slot = LAST.get_or_init(|| Mutex::new((String::new(), Instant::now() - Duration::from_secs(60))));
+    let mut g = slot.lock().unwrap();
+    if g.0 != msg || g.1.elapsed() > Duration::from_secs(3) {
+        crate::log!("{}", msg);
+        g.0 = msg.to_string();
+        g.1 = Instant::now();
+    }
+}
+
 /// macOS platform services.
 ///
 /// Foreground app detection runs on a background thread to avoid
@@ -58,24 +70,45 @@ impl MacPlatform {
         std::thread::Builder::new()
             .name("fg-poller".into())
             .spawn(move || {
+                // Track the previous foreground pid so we can detect the
+                // "focus returned to Word" transition. Word drops its AX state
+                // when it loses focus (browser/other app takes over); without
+                // this, returning to Word leaves AXFocusedUIElement stuck at
+                // -25211 because we only enabled once per pid.
+                let mut prev_fg_pid: u32 = 0;
                 loop {
                     if let Some(app) = query_foreground_app() {
                         let is_our_app = app.exe_name == "acatts-rust"
                             || app.exe_name == "norsktale"
                             || app.title == "NorskTale";
+                        let pid = app.pid;
                         if !is_our_app {
                             if let Ok(mut lock) = ext_clone.lock() {
                                 *lock = app.clone();
                             }
-                            // Read selected text while external app still has focus
-                            let sel = read_selected_text_for_app(app.pid, &app.exe_name);
+                            let sel = read_selected_text_for_app(pid, &app.exe_name);
                             if let Ok(mut lock) = sel_clone.lock() {
                                 *lock = sel;
+                            }
+                            // Re-enable accessibility on every transition INTO
+                            // an app known to gate AX behind enhanced UI (Word,
+                            // Teams, and other Office / Electron apps that copy
+                            // Office's pattern). Mirrors VoiceOver's activation
+                            // behaviour. Idempotent when AX is already up.
+                            let needs_ax_poke = matches!(
+                                app.exe_name.as_str(),
+                                "microsoft word" | "microsoft teams" | "msteams"
+                                    | "microsoft excel" | "microsoft powerpoint"
+                                    | "microsoft outlook"
+                            );
+                            if needs_ax_poke && pid != prev_fg_pid {
+                                let _ = enable_ax_for_app(pid);
                             }
                         }
                         if let Ok(mut lock) = fg_clone.lock() {
                             *lock = (app, Instant::now());
                         }
+                        prev_fg_pid = pid;
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -146,6 +179,10 @@ impl PlatformServices for MacPlatform {
         get_word_before_cursor_ax()
     }
 
+    fn caret_offset_below(&self) -> f32 { -18.0 }
+    fn caret_offset_right(&self) -> f32 { -38.0 }
+    fn caret_is_physical_pixels(&self) -> bool { false }
+
     fn copy_to_clipboard(&self, text: &str) {
         let _ = Command::new("pbcopy")
             .stdin(std::process::Stdio::piped())
@@ -168,25 +205,34 @@ impl PlatformServices for MacPlatform {
         use core_foundation::base::{CFRelease, TCFType};
         use core_foundation::string::CFString;
 
+        // Target the last external app directly by PID — queries its focused
+        // element regardless of which window is globally focused now. System-wide
+        // AX returns -25211 when our AlwaysOnTop window is the focused element.
+        let ext_pid = self.last_external_fg.lock().map(|l| l.pid).unwrap_or(0);
         unsafe {
-            // Get the system-wide accessibility element
-            let sys = AXUIElementCreateSystemWide();
+            let root = if ext_pid > 0 {
+                AXUIElementCreateApplication(ext_pid as i32)
+            } else {
+                AXUIElementCreateSystemWide()
+            };
             let key = CFString::new("AXFocusedUIElement");
             let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyAttributeValue(sys, key.as_concrete_TypeRef(), &mut focused);
-            CFRelease(sys as _);
-            if err != 0 || focused.is_null() { return None; }
+            let err = AXUIElementCopyAttributeValue(root, key.as_concrete_TypeRef(), &mut focused);
+            CFRelease(root as _);
+            if err != 0 || focused.is_null() {
+                trace_caret(&format!("caret pid={} step=focus err={} null={}", ext_pid, err, focused.is_null()));
+                return None;
+            }
 
-            // Get AXSelectedTextRange
             let range_key = CFString::new("AXSelectedTextRange");
             let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
             let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
             if err != 0 || range_val.is_null() {
+                trace_caret(&format!("caret pid={} step=selrange err={} null={}", ext_pid, err, range_val.is_null()));
                 CFRelease(focused);
                 return None;
             }
 
-            // Get AXBoundsForRange for the selection — gives us screen coordinates
             let bounds_key = CFString::new("AXBoundsForRange");
             let mut bounds_val: core_foundation::base::CFTypeRef = std::ptr::null();
             let err = AXUIElementCopyParameterizedAttributeValue(
@@ -198,9 +244,11 @@ impl PlatformServices for MacPlatform {
             CFRelease(range_val);
             CFRelease(focused);
 
-            if err != 0 || bounds_val.is_null() { return None; }
+            if err != 0 || bounds_val.is_null() {
+                trace_caret(&format!("caret pid={} step=bounds err={} null={}", ext_pid, err, bounds_val.is_null()));
+                return None;
+            }
 
-            // bounds_val is an AXValue containing a CGRect
             let mut rect = core_graphics::geometry::CGRect::new(
                 &core_graphics::geometry::CGPoint::new(0.0, 0.0),
                 &core_graphics::geometry::CGSize::new(0.0, 0.0),
@@ -214,9 +262,17 @@ impl PlatformServices for MacPlatform {
 
             if !ok { return None; }
 
-            // rect.origin is top-left of the selection in screen coords
-            // Return bottom of selection (where we want the window)
-            Some((rect.origin.x as i32, (rect.origin.y + rect.size.height) as i32))
+            let x = rect.origin.x as i32;
+            let y = (rect.origin.y + rect.size.height) as i32;
+
+            // Word on Mac returns (0, screen_height) when it can't determine
+            // real bounds (focus transitions, layout shifts). Real caret
+            // positions always have x > 50 (document margins).
+            if x < 50 { return None;
+            }
+
+            crate::log!("caret OK: x={} y={}", x, y);
+            Some((x, y))
         }
     }
 
@@ -259,6 +315,28 @@ fn run_applescript(script: &str) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+/// Enable Word's accessibility by setting AXEnhancedUserInterface=true.
+/// Word (and older Office apps) disable AX by default for performance.
+/// Returns true if the attribute was successfully set.
+fn enable_ax_for_app(pid: u32) -> bool {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let app = AXUIElementCreateApplication(pid as i32);
+        if app.is_null() { return false; }
+        let val = CFBoolean::true_value();
+        let key1 = CFString::new("AXEnhancedUserInterface");
+        let err1 = AXUIElementSetAttributeValue(app, key1.as_concrete_TypeRef(), val.as_CFTypeRef());
+        let key2 = CFString::new("AXManualAccessibility");
+        let err2 = AXUIElementSetAttributeValue(app, key2.as_concrete_TypeRef(), val.as_CFTypeRef());
+        CFRelease(app as _);
+        err1 == 0 || err2 == 0
     }
 }
 
@@ -761,11 +839,23 @@ fn start_key_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>, spa
             fn CGEventGetFlags(e:*const std::ffi::c_void)->u64;
             static kCFRunLoopCommonModes: *const std::ffi::c_void;
         }
-        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>,sp:Arc<AtomicBool>}
-        let ctx=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed,sp:space})) as *mut std::ffi::c_void;
+        unsafe extern "C" {
+            fn CGEventTapEnable(tap: *const std::ffi::c_void, enable: bool);
+        }
+        // Store tap pointer in context so callback can re-enable it
+        struct Ctx{i:Arc<AtomicBool>,p:Arc<AtomicBool>,sp:Arc<AtomicBool>,tap:std::sync::atomic::AtomicPtr<std::ffi::c_void>}
+        let ctx2=Box::into_raw(Box::new(Ctx{i:intercept,p:pressed,sp:space,tap:std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())}));
         extern "C" fn cb(_:*const std::ffi::c_void,et:u32,ev:*const std::ffi::c_void,ui:*mut std::ffi::c_void)->*const std::ffi::c_void{
             unsafe{
                 let c=&*(ui as*const Ctx);
+                // Re-enable tap if macOS disabled it due to timeout
+                if et == 0xFFFFFFFE {
+                    let tap = c.tap.load(Ordering::Relaxed);
+                    if !tap.is_null() {
+                        CGEventTapEnable(tap as _, true);
+                    }
+                    return ev;
+                }
                 if et!=10{return ev;}
                 let keycode = CGEventGetIntegerValueField(ev,9);
                 let flags = CGEventGetFlags(ev);
@@ -786,8 +876,11 @@ fn start_key_event_tap(intercept: Arc<AtomicBool>, pressed: Arc<AtomicBool>, spa
                 ev
             }
         }
-        let tap=CGEventTapCreate(0,0,0,1<<10,cb,ctx);
+        let ctx_ptr = ctx2 as *mut std::ffi::c_void;
+        let tap=CGEventTapCreate(0,0,0,1<<10,cb,ctx_ptr);
         if tap.is_null(){return;}
+        // Store tap pointer so callback can re-enable
+        (*ctx2).tap.store(tap as *mut _, Ordering::Relaxed);
         let src=CFMachPortCreateRunLoopSource(std::ptr::null(),tap,0);
         CFRunLoopAddSource(CFRunLoopGetCurrent(),src,kCFRunLoopCommonModes);
         CFRunLoopRun();

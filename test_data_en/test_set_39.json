@@ -1,0 +1,12 @@
+[
+  {"sentence": "I like coffee, accept on Sundays.", "is_correct": false, "error_type": "accept_except_confusion", "explanation": "Error: accept should be except (meaning 'other than')"},
+  {"sentence": "Everyone came accept him.", "is_correct": false, "error_type": "accept_except_confusion", "explanation": "Error: accept should be except"},
+  {"sentence": "I work every day accept Friday.", "is_correct": false, "error_type": "accept_except_confusion", "explanation": "Error: accept should be except"},
+  {"sentence": "I like coffee, except on Sundays.", "is_correct": true, "error_type": "none", "explanation": "Correct: except meaning 'other than'"},
+  {"sentence": "Everyone came except him.", "is_correct": true, "error_type": "none", "explanation": "Correct: except meaning 'other than'"},
+  {"sentence": "I work every day except Friday.", "is_correct": true, "error_type": "none", "explanation": "Correct: except meaning 'other than'"},
+  {"sentence": "Please accept my apology.", "is_correct": true, "error_type": "none", "explanation": "Correct: accept as verb meaning 'receive'"},
+  {"sentence": "She accepted the invitation.", "is_correct": true, "error_type": "none", "explanation": "Correct: accept as verb"},
+  {"sentence": "They accepted the offer.", "is_correct": true, "error_type": "none", "explanation": "Correct: accept as verb"},
+  {"sentence": "He accepted the gift.", "is_correct": true, "error_type": "none", "explanation": "Correct: accept as verb"}
+]

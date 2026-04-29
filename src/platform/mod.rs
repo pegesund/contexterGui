@@ -89,6 +89,16 @@ pub trait PlatformServices: Send + Sync {
     fn take_space_press(&self) -> bool { false }
     fn get_word_before_cursor(&self) -> Option<String> { None }
 
+    /// Vertical offset in logical pixels between the caret and the app window.
+    fn caret_offset_below(&self) -> f32 { 189.0 }
+
+    /// Horizontal offset in logical pixels from the caret to the app window.
+    fn caret_offset_right(&self) -> f32 { 0.0 }
+
+    /// Whether caret_screen_position returns physical pixels (true on Windows)
+    /// or logical points (false on macOS). Controls whether DPI scaling is applied.
+    fn caret_is_physical_pixels(&self) -> bool { true }
+
     /// Initialize TTS engine (platform-specific).
     fn init_tts(&self, lang: &dyn language::LanguageVoice);
 

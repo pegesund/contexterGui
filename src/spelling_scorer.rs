@@ -101,6 +101,7 @@ pub fn generate_spelling_candidates(
     word: &str,
     _sentence_ctx: &str,
     lang: &dyn language::LanguageSpelling,
+    is_compound: Option<&dyn Fn(&str) -> bool>,
 ) -> Vec<(String, f32)> {
     let word_lower = word.to_lowercase();
     let word_trigrams = trigrams(&word_lower);
@@ -192,21 +193,15 @@ pub fn generate_spelling_candidates(
 
     // Source 9: Long word truncation (>= 10 chars)
     if word_lower.len() >= 10 {
-        let is_known_or_compound = |w: &str| -> bool {
+        let is_known = |w: &str| -> bool {
             if analyzer.has_word(w) { return true; }
-            for j in 3..w.len().saturating_sub(2) {
-                if !w.is_char_boundary(j) { continue; }
-                let left = &w[..j];
-                let right = &w[j..];
-                if right.len() >= 3 && analyzer.has_word(left) && analyzer.has_word(right) { return true; }
-                if right.starts_with('s') && right.len() > 3 && analyzer.has_word(left) && analyzer.has_word(&right[1..]) { return true; }
-            }
+            if let Some(check) = &is_compound { return check(w); }
             false
         };
         for strip in 1..=2usize {
             if word_lower.is_char_boundary(strip) {
                 let trimmed = &word_lower[strip..];
-                if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
+                if trimmed.len() >= 5 && is_known(trimmed) && seen.insert(trimmed.to_string()) {
                     edit_distances.insert(trimmed.to_string(), strip as u32);
                     candidates.push(trimmed.to_string());
                 }
@@ -214,7 +209,7 @@ pub fn generate_spelling_candidates(
             let end = word_lower.len() - strip;
             if word_lower.is_char_boundary(end) {
                 let trimmed = &word_lower[..end];
-                if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
+                if trimmed.len() >= 5 && is_known(trimmed) && seen.insert(trimmed.to_string()) {
                     edit_distances.insert(trimmed.to_string(), strip as u32);
                     candidates.push(trimmed.to_string());
                 }
@@ -225,7 +220,7 @@ pub fn generate_spelling_candidates(
     // Source 10: First-character swap
     if word_lower.len() >= 3 {
         let rest = &word_lower[word_first.len_utf8()..];
-        for c in "abcdefghijklmnopqrstuvwxyzæøå".chars() {
+        for c in lang.first_char_alphabet().chars() {
             if c == word_first { continue; }
             let candidate = format!("{}{}", c, rest);
             if analyzer.has_word(&candidate) && seen.insert(candidate.clone()) {
@@ -262,28 +257,13 @@ pub fn generate_spelling_candidates(
     }
 
     // Source 12: Phonetic substitutions for dyslexic users
-    // Norwegian-specific sound confusions where UTF-8 byte distance exceeds char distance
+    // Language-specific sound confusions from the LanguageSpelling trait
     {
-        const PHONETIC_SUBS: &[(&str, &str)] = &[
-            // Vowel confusions (å,ø,æ are 2-byte UTF-8 → extra byte edit cost in FST)
-            ("å", "o"), ("o", "å"),
-            ("ø", "e"), ("e", "ø"),
-            ("æ", "a"), ("a", "æ"),
-            ("æ", "e"),
-            ("y", "i"), ("i", "y"),
-            // Silent consonant patterns
-            ("dt", "tt"), ("tt", "dt"),
-            ("ld", "ll"), ("ll", "ld"),
-            ("nd", "nn"), ("nn", "nd"),
-            // Silent initial consonant
-            ("gj", "j"), ("j", "gj"),
-            ("hj", "j"), ("j", "hj"),
-            ("hv", "v"), ("v", "hv"),
-        ];
+        let phonetic_subs = lang.phonetic_substitutions();
 
         // Single substitution pass
         let mut phonetic_candidates: Vec<String> = Vec::new();
-        for &(from, to) in PHONETIC_SUBS {
+        for &(from, to) in phonetic_subs {
             let mut pos = 0;
             while let Some(idx) = word_lower[pos..].find(from) {
                 let abs_idx = pos + idx;
@@ -301,7 +281,7 @@ pub fn generate_spelling_candidates(
         // Catches "gåtterier" → "gotterier" (å→o) → "godterier" (tt→dt)
         let chain_candidates = phonetic_candidates.clone();
         for base in &chain_candidates {
-            for &(from, to) in PHONETIC_SUBS {
+            for &(from, to) in phonetic_subs {
                 let mut pos = 0;
                 while let Some(idx) = base[pos..].find(from) {
                     let abs_idx = pos + idx;
@@ -372,12 +352,13 @@ pub fn sentence_score(model: &mut Model, sentence: &str, target: &str) -> f32 {
     if words.is_empty() { return f32::NEG_INFINITY; }
     let target_lower = target.to_lowercase();
     let mut total: f32 = 0.0;
+    let mask_str = model.mask_token_str();
     let mut weight_sum: f32 = 0.0;
     for i in 0..words.len() {
         let word_clean = words[i].trim_matches(|c: char| c.is_ascii_punctuation());
         if word_clean.is_empty() { continue; }
         let masked: String = words.iter().enumerate()
-            .map(|(j, w)| if j == i { "<mask>" } else { *w })
+            .map(|(j, w)| if j == i { mask_str.as_str() } else { *w })
             .collect::<Vec<_>>().join(" ");
         if let Ok((logits, _)) = model.single_forward(&masked) {
             if let Ok(enc) = model.tokenizer.encode(format!(" {}", word_clean.to_lowercase()), false) {
@@ -481,7 +462,9 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
         None => return f32::NEG_INFINITY,
     };
 
-    let mask_id = model.tokenizer.token_to_id("<mask>").unwrap_or(4);
+    let mask_id = model.tokenizer.token_to_id("<mask>")
+        .or_else(|| model.tokenizer.token_to_id("[MASK]"))
+        .unwrap_or(4);
     let mut total: f32 = 0.0;
     let mut scored: usize = 0;
     for k in 0..cand_ids.len() {
