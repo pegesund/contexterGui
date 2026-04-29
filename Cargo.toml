@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.33"
+# accesskit feature deliberately disabled: on macOS 26.x, accesskit-macos
+# panics during the second window's display cycle (TouchBar observation
+# invalidate → NSException → SIGABRT) when transitioning from the language
+# picker to the main window. Spell's users don't navigate the UI with a
+# screen reader (they use TTS for content, not navigation), so the loss
+# of VoiceOver integration is acceptable for v1.
+# To re-enable later (after upstream fix): default-features = true
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.33"
 anyhow = "1"
 redb = "2"
