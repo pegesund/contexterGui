@@ -1,9 +1,27 @@
 {
   "manifest_version": 3,
-  "name": "NorskTale",
-  "version": "1.2",
-  "description": "Norwegian spelling and grammar checking — works with Google Docs, textareas, and contenteditable",
+  "name": "Spell",
+  "version": "0.1.0",
+  "description": "Norsk staving og grammatikksjekk for nettleseren — virker i Google Dokumenter, tekstfelt og redigerbart innhold.",
+  "author": "Cognio AS",
+  "homepage_url": "https://cognio.no/spell",
+  "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging", "alarms"],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Spell",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -20,6 +38,5 @@
   ],
   "background": {
     "service_worker": "background.js"
-  },
-  "icons": {}
+  }
 }

@@ -4,6 +4,18 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// When running inside a Spell.app bundle, return the absolute path to a dylib
+/// at `Contents/Frameworks/<name>`. Returns `None` outside a bundle (dev runs).
+fn bundled_framework(name: &str) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let path = macos_dir.parent()?.join("Frameworks").join(name);
+    path.exists().then(|| path.to_string_lossy().into_owned())
+}
+
 /// Log each distinct caret-trace message at most once per 3s.
 fn trace_caret(msg: &str) {
     static LAST: std::sync::OnceLock<Mutex<(String, Instant)>> = std::sync::OnceLock::new();
@@ -277,15 +289,23 @@ impl PlatformServices for MacPlatform {
     }
 
     fn ort_dylib_candidates(&self) -> Vec<String> {
-        vec![
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/lib/libonnxruntime.dylib").to_string(),
-            "/usr/local/lib/libonnxruntime.dylib".to_string(),
-            "/opt/homebrew/lib/libonnxruntime.dylib".to_string(),
-        ]
+        let mut v = Vec::new();
+        if let Some(bundled) = bundled_framework("libonnxruntime.dylib") {
+            v.push(bundled);
+        }
+        v.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/lib/libonnxruntime.dylib").to_string());
+        v.push("/usr/local/lib/libonnxruntime.dylib".to_string());
+        v.push("/opt/homebrew/lib/libonnxruntime.dylib".to_string());
+        v
     }
 
     fn swipl_path(&self) -> &str {
-        "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib"
+        static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            bundled_framework("libswipl.dylib")
+                .unwrap_or_else(|| "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib".to_string())
+        })
+        .as_str()
     }
 
     fn init_tts(&self, lang: &dyn language::LanguageVoice) {

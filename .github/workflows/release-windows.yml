@@ -1,0 +1,197 @@
+name: Release (Windows)
+
+# Builds the Windows Spell.exe bundle and uploads it to pegesund/spell_binaries
+# as a release asset under tag v<VERSION>.
+#
+# Mac builds run locally via scripts/release-mac.sh (Xcode + Apple Developer ID
+# cannot run in CI without burning notarization-API-key secrets).
+#
+# Trigger options:
+#   1. Push a version tag:  git tag v0.1.0 && git push origin v0.1.0
+#   2. Manual dispatch:     Actions → Release (Windows) → Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.1.0)'
+        required: true
+  push:
+    tags:
+      - 'v*'
+
+env:
+  RELEASES_REPO: pegesund/spell_binaries
+  ONNX_VERSION: '1.24.4'
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            echo "ERROR: no version provided and not a tag push" && exit 1
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: version must be semver like 0.1.0 (got: $VERSION)" && exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"   >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: spell-win-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install SWI-Prolog
+        shell: pwsh
+        run: |
+          choco install swi-prolog -y --no-progress --version=9.2.7
+          # Verify install layout (chocolatey installs to C:\Program Files\swipl\)
+          if (-not (Test-Path "C:\Program Files\swipl\bin\libswipl.dll")) {
+              Write-Error "SWI-Prolog install missing libswipl.dll"
+              exit 1
+          }
+          & "C:\Program Files\swipl\bin\swipl.exe" --version
+
+      - name: Download ONNX Runtime
+        shell: pwsh
+        run: |
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ONNX_VERSION }}/onnxruntime-win-x64-${{ env.ONNX_VERSION }}.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile onnxruntime.zip -MaximumRedirection 5
+          Expand-Archive -Path onnxruntime.zip -DestinationPath C:\onnxruntime
+          if (-not (Test-Path "C:\onnxruntime\onnxruntime-win-x64-${{ env.ONNX_VERSION }}\lib\onnxruntime.dll")) {
+              Write-Error "ONNX Runtime extraction failed"
+              exit 1
+          }
+
+      - name: Cargo build (release)
+        shell: pwsh
+        run: |
+          cargo build --release --bin acatts-rust --target x86_64-pc-windows-msvc
+
+      - name: Assemble Spell-windows-x64 bundle
+        id: bundle
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+          $bundleName = "Spell-windows-x64-$version"
+          $bundleDir = "dist\$bundleName"
+
+          # Layout (mirrors Mac .app for code-path consistency):
+          #   Spell.exe
+          #   Frameworks/  ← libswipl.dll, libgmp-10.dll, onnxruntime.dll
+          #   Resources/
+          #     swipl/     ← SWI-Prolog home (ABI, boot, library/, etc.)
+          #     word-addin/
+          #     fonts (OpenSans)
+          New-Item -Force -ItemType Directory -Path "$bundleDir\Frameworks" | Out-Null
+          New-Item -Force -ItemType Directory -Path "$bundleDir\Resources\swipl" | Out-Null
+          New-Item -Force -ItemType Directory -Path "$bundleDir\Resources\word-addin" | Out-Null
+
+          # Binary
+          Copy-Item "target\x86_64-pc-windows-msvc\release\acatts-rust.exe" "$bundleDir\Spell.exe"
+
+          # SWI-Prolog DLLs into Frameworks/
+          $swiplBin = "C:\Program Files\swipl\bin"
+          Copy-Item "$swiplBin\libswipl.dll" "$bundleDir\Frameworks\"
+          # libgmp on chocolatey may be named libgmp-10.dll or similar
+          Get-ChildItem "$swiplBin\libgmp*.dll" | ForEach-Object {
+              Copy-Item $_.FullName "$bundleDir\Frameworks\"
+          }
+          # Other runtime deps SWI-Prolog ships
+          foreach ($dep in @("libwinpthread*.dll", "libgcc_s*.dll", "libstdc++*.dll")) {
+              Get-ChildItem "$swiplBin\$dep" -ErrorAction SilentlyContinue | ForEach-Object {
+                  Copy-Item $_.FullName "$bundleDir\Frameworks\"
+              }
+          }
+
+          # SWI-Prolog home: copy ABI, boot, boot.prc, library, app, customize, swipl.home
+          # Skip bin/ (handled above), doc/, demo/, include/ (saves space)
+          $swiplHome = "C:\Program Files\swipl"
+          foreach ($item in @("ABI", "LICENSE", "README.md", "boot", "boot.prc", "library", "app", "customize", "swipl.home")) {
+              if (Test-Path "$swiplHome\$item") {
+                  Copy-Item -Recurse "$swiplHome\$item" "$bundleDir\Resources\swipl\"
+              }
+          }
+
+          # ONNX Runtime
+          Copy-Item "C:\onnxruntime\onnxruntime-win-x64-${{ env.ONNX_VERSION }}\lib\onnxruntime.dll" "$bundleDir\Frameworks\"
+
+          # Fonts
+          Copy-Item "fonts\OpenSans-Regular.ttf" "$bundleDir\Resources\"
+
+          # Word add-in static files (key.pem deliberately NOT bundled — see SECURITY note in build-mac.sh)
+          foreach ($f in @("manifest.xml", "taskpane.html", "taskpane.js", "commands.html", "commands.js", "fullchain.pem")) {
+              if (Test-Path "word-addin\$f") {
+                  Copy-Item "word-addin\$f" "$bundleDir\Resources\word-addin\"
+              }
+          }
+
+          # Show bundle size
+          $size = (Get-ChildItem $bundleDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host ("Bundle size: {0:N1} MB" -f $size)
+
+          # Zip
+          $zipPath = "dist\$bundleName.zip"
+          Compress-Archive -Path "$bundleDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
+          $zipSize = (Get-Item $zipPath).Length / 1MB
+          Write-Host ("Zip size: {0:N1} MB" -f $zipSize)
+
+          echo "zip_path=$zipPath"   >> $env:GITHUB_OUTPUT
+          echo "bundle_name=$bundleName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload to spell_binaries release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $version = "${{ steps.ver.outputs.version }}"
+          $zip = "${{ steps.bundle.outputs.zip_path }}"
+
+          # Create release if it doesn't exist (Mac script may have already created it).
+          gh release view $tag --repo ${{ env.RELEASES_REPO }} 2>$null
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "Creating new release $tag"
+              gh release create $tag `
+                  --repo ${{ env.RELEASES_REPO }} `
+                  --title "Spell $version" `
+                  --notes "Auto-generated by release-windows.yml. Mac DMG uploaded separately by release-mac.sh."
+          } else {
+              Write-Host "Release $tag already exists — uploading asset to it."
+          }
+
+          gh release upload $tag $zip --repo ${{ env.RELEASES_REPO }} --clobber
+          Write-Host "https://github.com/${{ env.RELEASES_REPO }}/releases/tag/$tag"
+
+      - name: Upload bundle artifact (CI debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.bundle.outputs.bundle_name }}
+          path: ${{ steps.bundle.outputs.zip_path }}
+          retention-days: 7

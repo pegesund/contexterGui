@@ -1,6 +1,18 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::sync::{Arc, Mutex};
 
+/// When running from a packaged Spell-windows-x64 zip extraction, return the
+/// absolute path to a DLL bundled at `<Spell.exe>/Frameworks/<name>`. Returns
+/// `None` otherwise. The Frameworks/Resources layout mirrors the Mac .app
+/// bundle so nostos-cognio's swipl-home lookup (`<dylib>/../Resources/swipl`)
+/// resolves to `Resources/swipl/` on both platforms.
+fn bundled_dll(name: &str) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let path = exe_dir.join("Frameworks").join(name);
+    path.exists().then(|| path.to_string_lossy().into_owned())
+}
+
 pub struct WindowsPlatform {
     /// Cached selected text — polled via UIA while external app has focus
     cached_selected_text: Arc<Mutex<Option<String>>>,
@@ -222,14 +234,22 @@ impl PlatformServices for WindowsPlatform {
     }
 
     fn ort_dylib_candidates(&self) -> Vec<String> {
-        vec![
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll").to_string(),
-            "C:\\Windows\\System32\\onnxruntime.dll".to_string(),
-        ]
+        let mut v = Vec::new();
+        if let Some(bundled) = bundled_dll("onnxruntime.dll") {
+            v.push(bundled);
+        }
+        v.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll").to_string());
+        v.push("C:\\Windows\\System32\\onnxruntime.dll".to_string());
+        v
     }
 
     fn swipl_path(&self) -> &str {
-        "C:/Program Files/swipl/bin/libswipl.dll"
+        static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            bundled_dll("libswipl.dll")
+                .unwrap_or_else(|| "C:/Program Files/swipl/bin/libswipl.dll".to_string())
+        })
+        .as_str()
     }
 
     fn read_selected_text(&self) -> Option<String> {
