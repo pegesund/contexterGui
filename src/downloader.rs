@@ -172,16 +172,16 @@ fn is_cached(item: &DownloadItem) -> bool {
         .unwrap_or(false)
 }
 
-/// Local data directory: ~/Library/Application Support/NorskTale/data/
+/// Local data directory: ~/Library/Application Support/Spell/data/
 pub fn data_dir() -> PathBuf {
     let dir = if cfg!(target_os = "macos") {
         dirs::home_dir()
-            .map(|h| h.join("Library/Application Support/NorskTale/data"))
-            .unwrap_or_else(|| PathBuf::from("/tmp/norsktale/data"))
+            .map(|h| h.join("Library/Application Support/Spell/data"))
+            .unwrap_or_else(|| PathBuf::from("/tmp/spell/data"))
     } else {
         dirs::config_dir()
-            .map(|c| c.join("NorskTale/data"))
-            .unwrap_or_else(|| PathBuf::from("norsktale/data"))
+            .map(|c| c.join("Spell/data"))
+            .unwrap_or_else(|| PathBuf::from("spell/data"))
     };
     let _ = std::fs::create_dir_all(&dir);
     dir

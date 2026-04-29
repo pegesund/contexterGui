@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn main() {
-    println!("=== NorskTale Windows Integration Test ===\n");
+    println!("=== Spell Windows Integration Test ===\n");
 
     // Wait for the app's HTTP endpoint to be ready
     println!("Waiting for app HTTP endpoint...");

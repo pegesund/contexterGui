@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
-// Persistent user settings (saved to ~/Library/Application Support/NorskTale/)
+// Persistent user settings (saved to ~/Library/Application Support/Spell/)
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -65,11 +65,11 @@ impl Default for UserSettings {
 fn settings_path() -> PathBuf {
     let dir = if cfg!(target_os = "macos") {
         dirs::home_dir()
-            .map(|h| h.join("Library/Application Support/NorskTale"))
+            .map(|h| h.join("Library/Application Support/Spell"))
             .unwrap_or_else(|| PathBuf::from("/tmp"))
     } else {
         dirs::config_dir()
-            .map(|c| c.join("NorskTale"))
+            .map(|c| c.join("Spell"))
             .unwrap_or_else(|| PathBuf::from("."))
     };
     let _ = std::fs::create_dir_all(&dir);
@@ -422,7 +422,7 @@ impl BridgeManager {
         // This prevents Word COM from being read on the very first frame before
         // foreground detection has a chance to set the flag.
         let browser_file_exists = {
-            let path = std::env::temp_dir().join("norsktale-browser.json");
+            let path = std::env::temp_dir().join("spell-browser.json");
             std::fs::metadata(&path).ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.elapsed().ok())
@@ -1559,7 +1559,7 @@ impl ContextApp {
             writing_errors: Vec::new(),
             ignored_words: std::collections::HashSet::new(),
             user_dict: {
-                let dir = dirs::home_dir().unwrap_or_default().join(".norsktale");
+                let dir = dirs::home_dir().unwrap_or_default().join(".spell");
                 let _ = std::fs::create_dir_all(&dir);
                 match user_dict::UserDict::open(dir.join("user_words.db")) {
                     Ok(ud) => {
@@ -5474,7 +5474,7 @@ impl eframe::App for ContextApp {
                     // Save the foreground HWND only when we got useful context
                     // (prevents saving Slack/terminal HWND when just switching windows)
                     if fg.handle != 0 {
-                        let our_title = "NorskTale";
+                        let our_title = "Spell";
                         if !fg.title.contains(our_title)
                             && !fg.title.starts_with("Forslag")
                             && !fg.title.starts_with("Regelinfo")
@@ -8641,7 +8641,7 @@ fn run_language_picker() -> Option<String> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 340.0])
             .with_decorations(true)
-            .with_title("NorskTale — Velg språk"),
+            .with_title("Spell — Velg språk"),
         ..Default::default()
     };
 
@@ -8719,7 +8719,7 @@ fn run_language_picker() -> Option<String> {
 
     let chosen_clone = Arc::clone(&chosen);
     let _ = eframe::run_native(
-        "NorskTale — Velg språk",
+        "Spell — Velg språk",
         options,
         Box::new(move |_cc| {
             Ok(Box::new(PickerApp { chosen: chosen_clone }) as Box<dyn eframe::App>)
@@ -8746,12 +8746,12 @@ fn run_download_window(lang_code: &str) {
 
     let (win_title, heading_text) = if lang_code == "nn" {
         (
-            format!("NorskTale — Lastar ned {}", lang_name),
+            format!("Spell — Lastar ned {}", lang_name),
             format!("Lastar ned {}...", lang_name),
         )
     } else {
         (
-            format!("NorskTale — Laster ned {}", lang_name),
+            format!("Spell — Laster ned {}", lang_name),
             format!("Laster ned {}...", lang_name),
         )
     };
@@ -9156,7 +9156,7 @@ fn main() -> eframe::Result {
                     rgba[idx + 2] = 80;
                     rgba[idx + 3] = 255;
                 } else if in_body {
-                    // Blue pen body (NorskTale blue)
+                    // Blue pen body (Spell blue)
                     rgba[idx] = 0;
                     rgba[idx + 1] = 70;
                     rgba[idx + 2] = 160;
@@ -9173,7 +9173,7 @@ fn main() -> eframe::Result {
             .with_inner_size([420.0, 250.0])
             .with_always_on_top()
             .with_decorations(false)
-            .with_title("NorskTale")
+            .with_title("Spell")
             .with_close_button(false)  // prevent Alt+F4 and system close
             .with_icon(std::sync::Arc::new(pen_icon)),
         ..Default::default()
@@ -9181,7 +9181,7 @@ fn main() -> eframe::Result {
 
     let language_for_app = std::sync::Arc::clone(&selected_language);
     eframe::run_native(
-        "NorskTale",
+        "Spell",
         options,
         Box::new({
             let emoji_font = setup_platform.emoji_font_path().map(|s| s.to_owned());

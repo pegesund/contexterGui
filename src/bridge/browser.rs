@@ -16,11 +16,11 @@ fn log_browser(msg: &str) {
 }
 
 fn data_path() -> PathBuf {
-    std::env::temp_dir().join("norsktale-browser.json")
+    std::env::temp_dir().join("spell-browser.json")
 }
 
 fn reply_path() -> PathBuf {
-    std::env::temp_dir().join("norsktale-browser-reply.json")
+    std::env::temp_dir().join("spell-browser-reply.json")
 }
 
 pub struct BrowserBridge {

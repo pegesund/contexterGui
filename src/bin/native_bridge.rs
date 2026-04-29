@@ -1,4 +1,4 @@
-/// NorskTale Native Messaging Host
+/// Spell Native Messaging Host
 ///
 /// Chrome/Edge launches this binary and communicates via stdin/stdout
 /// using length-prefixed JSON messages.
@@ -13,15 +13,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn data_path() -> PathBuf {
-    std::env::temp_dir().join("norsktale-browser.json")
+    std::env::temp_dir().join("spell-browser.json")
 }
 
 fn reply_path() -> PathBuf {
-    std::env::temp_dir().join("norsktale-browser-reply.json")
+    std::env::temp_dir().join("spell-browser-reply.json")
 }
 
 fn log_path() -> PathBuf {
-    std::env::temp_dir().join("norsktale-native-bridge.log")
+    std::env::temp_dir().join("spell-native-bridge.log")
 }
 
 fn log(msg: &str) {
