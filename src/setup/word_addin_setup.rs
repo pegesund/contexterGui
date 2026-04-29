@@ -138,34 +138,69 @@ pub fn is_manifest_installed() -> bool {
 
 // ── Cert generation ──────────────────────────────────────────────────────────
 
-/// Generate the per-user CA + leaf cert if any of the four files is missing.
-/// Idempotent: re-running with all four present is a no-op.
+/// Generate the per-user CA + leaf cert. Always regenerates the LEAF on every
+/// call (cheap, ~50ms) so we never ship a near-expired cert. The CA is only
+/// generated once — its trust is what's installed in System.keychain, so
+/// regenerating it would break Word until the user re-runs the wizard.
+///
+/// **Critical**: Apple's TLS policy requires SSL leaf certs to have a validity
+/// period of 398 days or fewer (issued ≥ 2020-09-01). WKWebView (used by
+/// Office add-ins) silently rejects longer-validity certs as
+/// "isn't signed by a valid security certificate" even when the chain is
+/// trusted. curl + openssl don't enforce this so the cert appears fine
+/// in shell tests but fails inside Word. We use 397 days to stay under the
+/// limit. The leaf is regenerated on every wizard run / app start to avoid
+/// the cert silently expiring after a year of use.
 pub fn generate_certs_if_missing() -> Result<()> {
     let ca_pem = ca_cert_path()?;
     let ca_key = ca_key_path()?;
     let leaf_pem = leaf_cert_path()?;
     let leaf_key = leaf_key_path()?;
-    if ca_pem.exists() && ca_key.exists() && leaf_pem.exists() && leaf_key.exists() {
-        return Ok(());
+
+    // CA — generate ONCE per machine. Re-using the same key preserves the
+    // System.keychain trust install. We rebuild the CA's Certificate struct
+    // in-memory each call (using the persisted key) so we can re-sign the
+    // leaf — the CA *file* on disk is left alone (don't want to invalidate
+    // the trust anchor that's already in System.keychain).
+    fn build_ca_params() -> CertificateParams {
+        let mut p = CertificateParams::default();
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.distinguished_name
+            .push(DnType::CommonName, CA_COMMON_NAME);
+        p.distinguished_name
+            .push(DnType::OrganizationName, "Cognio AS");
+        // CA validity isn't restricted by Apple's leaf-cert policy. 10 years
+        // is fine and matches mkcert's default.
+        p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        p.not_after = rcgen::date_time_ymd(2034, 1, 1);
+        p
     }
 
-    // CA — self-signed root, 10 years.
-    let ca_keypair = KeyPair::generate().context("generate CA key")?;
-    let mut ca_params = CertificateParams::default();
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params
-        .distinguished_name
-        .push(DnType::CommonName, CA_COMMON_NAME);
-    ca_params
-        .distinguished_name
-        .push(DnType::OrganizationName, "Cognio AS");
-    ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-    ca_params.not_after = rcgen::date_time_ymd(2034, 1, 1);
-    let ca_cert = ca_params
-        .self_signed(&ca_keypair)
-        .context("self-sign CA")?;
+    let (ca_cert, ca_keypair) = if ca_pem.exists() && ca_key.exists() {
+        let ca_key_pem = fs::read_to_string(&ca_key).context("read CA key")?;
+        let ca_kp = KeyPair::from_pem(&ca_key_pem).context("parse CA key")?;
+        // Re-sign with the same params + key. Subject DN + public key match
+        // the CA cert in System.keychain → leaf signed with this validates
+        // against that trust anchor.
+        let ca = build_ca_params()
+            .self_signed(&ca_kp)
+            .context("re-sign CA from existing key")?;
+        (ca, ca_kp)
+    } else {
+        let ca_kp = KeyPair::generate().context("generate CA key")?;
+        let ca = build_ca_params()
+            .self_signed(&ca_kp)
+            .context("self-sign CA")?;
+        fs::write(&ca_pem, ca.pem())?;
+        fs::write(&ca_key, ca_kp.serialize_pem())?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ca_key, fs::Permissions::from_mode(0o600))?;
+        (ca, ca_kp)
+    };
 
-    // Leaf — signed by our CA, valid for localhost + 127.0.0.1, 5 years.
+    // LEAF — always regenerate. Apple's max validity is 398 days; we use 397
+    // to stay safely under it. Regenerated on every call so the cert never
+    // gets close to expiring during normal use.
     let leaf_keypair = KeyPair::generate().context("generate leaf key")?;
     let mut leaf_params =
         CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
@@ -179,21 +214,26 @@ pub fn generate_certs_if_missing() -> Result<()> {
     leaf_params
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ServerAuth);
-    leaf_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-    leaf_params.not_after = rcgen::date_time_ymd(2029, 1, 1);
+    // Use chrono (already in deps) to compute current + 397 days, then convert
+    // to rcgen's date format. Avoids adding a separate `time` dep.
+    {
+        use chrono::{Datelike, Duration as ChronoDuration, Utc};
+        let now = Utc::now();
+        let later = now + ChronoDuration::days(397);
+        leaf_params.not_before = rcgen::date_time_ymd(
+            now.year(), now.month() as u8, now.day() as u8,
+        );
+        leaf_params.not_after = rcgen::date_time_ymd(
+            later.year(), later.month() as u8, later.day() as u8,
+        );
+    }
     let leaf = leaf_params
         .signed_by(&leaf_keypair, &ca_cert, &ca_keypair)
         .context("sign leaf with CA")?;
 
-    fs::write(&ca_pem, ca_cert.pem())?;
-    fs::write(&ca_key, ca_keypair.serialize_pem())?;
     fs::write(&leaf_pem, leaf.pem())?;
     fs::write(&leaf_key, leaf_keypair.serialize_pem())?;
-
-    // Lock down private keys (POSIX chmod 600). System.keychain doesn't need
-    // access to them — the rust HTTPS server reads them in-process.
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&ca_key, fs::Permissions::from_mode(0o600))?;
     fs::set_permissions(&leaf_key, fs::Permissions::from_mode(0o600))?;
 
     Ok(())
