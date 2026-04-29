@@ -25,6 +25,7 @@ on:
 env:
   RELEASES_REPO: pegesund/spell_binaries
   ONNX_VERSION: '1.24.4'
+  SWIPL_VERSION: '9.2.9'
   RUST_TOOLCHAIN: stable
 
 jobs:
@@ -71,10 +72,39 @@ jobs:
       - name: Install SWI-Prolog
         shell: pwsh
         run: |
-          choco install swi-prolog -y --no-progress --version=9.2.7
-          # Verify install layout (chocolatey installs to C:\Program Files\swipl\)
+          # Chocolatey's swi-prolog package is stale (stuck on ~8.4); download
+          # the official Windows installer instead. Try the swi-prolog.org URL
+          # first, fall back to GitHub mirror if upstream is slow/down.
+          $version = "${{ env.SWIPL_VERSION }}"
+          $file = "swipl-$version-1.x64.exe"
+          $url1 = "https://www.swi-prolog.org/download/stable/bin/$file"
+          $url2 = "https://github.com/SWI-Prolog/swipl-devel/releases/download/V$version/$file"
+
+          $ok = $false
+          foreach ($url in @($url1, $url2)) {
+              Write-Host "Trying: $url"
+              try {
+                  Invoke-WebRequest -Uri $url -OutFile swipl-installer.exe -MaximumRedirection 5 -UseBasicParsing
+                  if ((Get-Item swipl-installer.exe).Length -gt 1MB) {
+                      Write-Host "Downloaded $((Get-Item swipl-installer.exe).Length) bytes"
+                      $ok = $true
+                      break
+                  }
+              } catch {
+                  Write-Host "Failed: $_"
+              }
+          }
+          if (-not $ok) { Write-Error "Could not download SWI-Prolog installer from any URL"; exit 1 }
+
+          # NSIS-based installer; /S = silent. Default install path: C:\Program Files\swipl\
+          Write-Host "Installing silently..."
+          Start-Process -FilePath swipl-installer.exe -ArgumentList "/S" -Wait -NoNewWindow
+
+          # Verify install
           if (-not (Test-Path "C:\Program Files\swipl\bin\libswipl.dll")) {
-              Write-Error "SWI-Prolog install missing libswipl.dll"
+              Write-Error "SWI-Prolog install missing libswipl.dll at C:\Program Files\swipl\bin\"
+              Write-Host "Contents of C:\Program Files\swipl\bin\:"
+              Get-ChildItem "C:\Program Files\swipl\bin\" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
               exit 1
           }
           & "C:\Program Files\swipl\bin\swipl.exe" --version
