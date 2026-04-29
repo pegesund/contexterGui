@@ -92,6 +92,13 @@ retry_codesign() {
     return 1
 }
 
+# ── Clean previous build artifacts ───────────────────────────────────────────
+# Always start fresh. We don't keep multiple DMGs around — the most recent
+# build is the only one that matters (released versions live on GitHub).
+step "Clean dist/"
+rm -rf "$DIST/releases" "$APP"
+mkdir -p "$DIST/releases"
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 step "Preflight"
 [ -f "$ICON" ] || { echo "ERROR: $ICON missing — run scripts/make-icns.sh first"; exit 1; }
@@ -291,9 +298,18 @@ if $MAKE_DMG; then
         fi
     fi
     echo "  DMG: $DMG ($(du -h "$DMG" | cut -f1))"
+
+    # The DMG is the only artifact we ship. Discard the intermediate .app
+    # so dist/ stays clean — to launch Spell, install it from the DMG into
+    # /Applications/. (Kept only when --no-dmg is passed: in that case the
+    # .app IS the explicit goal, e.g. for direct exec testing.)
+    rm -rf "$APP"
 fi
 
 step "Done"
-echo "  App: $APP ($(du -sh "$APP" | cut -f1))"
-$MAKE_DMG && echo "  DMG: $DMG"
+if $MAKE_DMG; then
+    echo "  DMG: $DMG ($(du -h "$DMG" | cut -f1))"
+else
+    echo "  App: $APP ($(du -sh "$APP" | cut -f1))"
+fi
 echo
