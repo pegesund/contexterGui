@@ -49,8 +49,9 @@ jobs:
           else
             echo "ERROR: no version provided and not a tag push" && exit 1
           fi
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: version must be semver like 0.1.0 (got: $VERSION)" && exit 1
+          # Accept proper semver: X.Y.Z plus optional -suffix (e.g. -test1, -rc.1, -alpha.2)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: version must be semver like 0.1.0 or 0.1.0-test1 (got: $VERSION)" && exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION"   >> "$GITHUB_OUTPUT"

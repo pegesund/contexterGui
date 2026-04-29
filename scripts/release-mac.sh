@@ -128,8 +128,8 @@ else
     echo "  Bumping ($BUMP) → v$VERSION"
 fi
 
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "ERROR: bad version: $VERSION (must be semver like 0.1.0)"; exit 2
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+    echo "ERROR: bad version: $VERSION (must be semver like 0.1.0 or 0.1.0-test1)"; exit 2
 fi
 
 TAG="v$VERSION"
