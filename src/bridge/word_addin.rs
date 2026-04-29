@@ -19,6 +19,19 @@ use std::path::PathBuf;
 
 const PORT: u16 = 3000;
 
+/// Locate the bundled Word add-in static-file directory.
+///   - Packaged .app:   <Spell.app>/Contents/Resources/word-addin/
+///   - Dev (cargo run): <repo>/contexterGui/word-addin/  (caller's fallback)
+fn static_word_addin_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos = exe.parent()?;
+    if macos.file_name()?.to_str()? != "MacOS" {
+        return None; // not running from a .app bundle
+    }
+    let bundled = macos.parent()?.join("Resources/word-addin");
+    bundled.exists().then_some(bundled)
+}
+
 /// A changed paragraph from the Word Add-in.
 /// Rust side splits into sentences and handles hashing.
 #[derive(Debug, Clone)]
@@ -84,10 +97,30 @@ impl WordAddinBridge {
         std::thread::Builder::new()
             .name("word-addin-https".into())
             .spawn(move || {
-                // Load TLS certs from word-addin/ directory
-                let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
-                let cert_path = addin_dir.join("fullchain.pem");
-                let key_path = addin_dir.join("key.pem");
+                // TLS certs are now generated per-user by the first-launch wizard
+                // (see src/setup/word_addin_setup.rs). They live at
+                //   ~/Library/Application Support/Spell/word-addin-certs/
+                // and are kept out of the app bundle for security (private key
+                // shipped in a public installer would let anyone MITM all users).
+                #[cfg(target_os = "macos")]
+                let (cert_path, key_path) = (
+                    crate::setup::word_addin_setup::leaf_cert_path()
+                        .unwrap_or_else(|_| PathBuf::from("/nonexistent")),
+                    crate::setup::word_addin_setup::leaf_key_path()
+                        .unwrap_or_else(|_| PathBuf::from("/nonexistent")),
+                );
+                #[cfg(not(target_os = "macos"))]
+                let (cert_path, key_path) = {
+                    // Non-macOS: certs aren't used in the same way; fall back to
+                    // the dev-time bundled paths so existing behavior is preserved.
+                    let addin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin");
+                    (addin_dir.join("fullchain.pem"), addin_dir.join("key.pem"))
+                };
+
+                // Static taskpane files are still bundled inside the .app
+                // (Resources/word-addin/) — the desktop serves them to Word.
+                let static_dir = static_word_addin_dir()
+                    .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin"));
 
                 // Build rustls config (pure Rust TLS — no macOS Keychain prompts)
                 let tls_config = if PORT == 3000 {
@@ -99,7 +132,11 @@ impl WordAddinBridge {
                 if tls_config.is_some() {
                     eprintln!("Word Add-in HTTPS bridge (rustls) listening on port {}", PORT);
                 } else {
-                    eprintln!("Word Add-in HTTP bridge (no TLS certs) on port {}", PORT);
+                    eprintln!(
+                        "Word Add-in HTTP bridge (no TLS certs at {}) on port {}",
+                        cert_path.display(),
+                        PORT
+                    );
                 }
 
                 let listener = match TcpListener::bind(format!("127.0.0.1:{}", PORT)) {
@@ -111,8 +148,8 @@ impl WordAddinBridge {
                 };
 
                 // Cache static files
-                let html = std::fs::read_to_string(addin_dir.join("taskpane.html")).unwrap_or_default();
-                let js = std::fs::read_to_string(addin_dir.join("taskpane.js")).unwrap_or_default();
+                let html = std::fs::read_to_string(static_dir.join("taskpane.html")).unwrap_or_default();
+                let js = std::fs::read_to_string(static_dir.join("taskpane.js")).unwrap_or_default();
 
                 for stream in listener.incoming() {
                     if let Ok(tcp_stream) = stream {

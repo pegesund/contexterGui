@@ -9,6 +9,7 @@ mod latext_no;
 mod math_ocr;
 mod ocr;
 mod platform;
+mod setup;
 mod stt;
 mod tts;
 pub mod user_dict;

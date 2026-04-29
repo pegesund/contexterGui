@@ -27,6 +27,10 @@ mtag = { package = "mtag-rs", path = "../../rustSpell/mtag-rs" }
 language = { package = "language-rs", path = "../../rustSpell/language-rs" }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
+# Generate localhost CA + leaf cert per-user at first launch (Word add-in setup
+# wizard). The CA is added to the system keychain via the `security` CLI so
+# Word trusts the localhost HTTPS cert. See src/setup/word_addin_setup.rs.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 native-tls = "0.2"
 cpal = "0.15"
 rubato = "0.14"
