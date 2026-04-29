@@ -58,6 +58,32 @@ jobs:
           echo "tag=v$VERSION"   >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
+      - name: Checkout sibling source repos (private)
+        # contexterGui's Cargo.toml has path deps to sibling repos:
+        #   ../../rustSpell/{mtag-rs, language-rs}
+        #   ../../contexter-repo/nostos-cognio
+        # On the runner, contexterGui sits at D:\a\contexterGui\contexterGui\,
+        # so the deps resolve to D:\a\rustSpell\... and D:\a\contexter-repo\...
+        # Clone both there. RELEASES_REPO_TOKEN must have `repo` scope (not just
+        # public_repo) since these source repos are private.
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          if (-not $env:GH_TOKEN) {
+              Write-Error "RELEASES_REPO_TOKEN is empty — cannot clone private source repos"
+              exit 1
+          }
+          $base = Split-Path -Parent (Split-Path -Parent $env:GITHUB_WORKSPACE)
+          # $base = D:\a
+          Write-Host "Cloning sibling repos under $base"
+          git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/rustSpell.git" "$base\rustSpell"
+          # GitHub repo is named 'contexter'; locally it's 'contexter-repo'. Cargo.toml
+          # uses the local name, so clone INTO contexter-repo.
+          git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/contexter.git" "$base\contexter-repo"
+          Write-Host "Sibling layout:"
+          Get-ChildItem $base | ForEach-Object { Write-Host "  $($_.Name)" }
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
