@@ -8743,8 +8743,8 @@ fn run_word_addin_wizard() -> bool {
                             Phase::Initial => {
                                 ui.label(egui::RichText::new(
                                     "Spell kan rette stavefeil direkte i Microsoft Word.\n\n\
-                                     For å aktivere installerer Spell et sikkerhetssertifikat \
-                                     i nøkkelringen din og legger til Spell som tillegg i Word.")
+                                     For å aktivere må Spell installere et sikkerhetssertifikat \
+                                     som Word stoler på. Du blir bedt om passordet ditt én gang.")
                                     .size(14.5).color(egui::Color32::from_rgb(80, 80, 80)));
                                 ui.add_space(28.0);
                                 ui.horizontal(|ui| {
@@ -8787,7 +8787,8 @@ fn run_word_addin_wizard() -> bool {
                                 ui.label(egui::RichText::new("Installerer …").size(15.0));
                                 ui.add_space(8.0);
                                 ui.label(egui::RichText::new(
-                                    "Dette tar bare et øyeblikk.")
+                                    "Hvis du ser et passordvindu, skriv inn passordet ditt for \
+                                     å fortsette.")
                                     .size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
                             }
                             Phase::Done => {
