@@ -219,7 +219,9 @@ jobs:
           # vpk is the Velopack CLI; matches what ConcentrateDotNet uses for its
           # Windows installer + auto-update infrastructure.
           dotnet tool install -g vpk
-          vpk --version
+          # vpk has no global --version flag; use --help to confirm it runs.
+          # The first line of --help shows "Velopack vX.Y.Z" so we surface that.
+          vpk --help | Select-Object -First 3
 
       - name: Velopack pack (Setup.exe + delta updates)
         id: vpk
