@@ -1096,6 +1096,12 @@ struct ContextApp {
     /// Window title of the last foreground Word window, used to detect
     /// document switches (Document1 → Document2) and clear stale errors.
     prev_word_title: String,
+    /// Pid of the last foreground EXTERNAL app (i.e. not our own Spell
+    /// window). Used to detect cross-app switches so the BERT completion
+    /// popup clears its stale prefix matches when the user moves between
+    /// apps. 0 = uninitialised. Updated only for non-OurApp foregrounds so
+    /// briefly clicking on Spell's own window doesn't reset the tracker.
+    prev_fg_pid: u32,
     /// True when the foreground app is a browser this frame. Set at the
     /// top of every update() so grammar/BERT pollers can gate on it.
     suppress_errors: bool,
@@ -1641,6 +1647,7 @@ impl ContextApp {
             startup_total: 1, // completer only
             prev_fg_was_browser: false,
             prev_word_title: String::new(),
+            prev_fg_pid: 0,
             suppress_errors: false,
         }
     }
@@ -4871,6 +4878,25 @@ impl eframe::App for ContextApp {
             let kind = self.platform.classify_app(&fg);
             let now_browser = kind == platform::AppKind::Browser;
             let now_word = kind == platform::AppKind::Word;
+            let now_our_app = kind == platform::AppKind::OurApp;
+
+            // Cross-app switch: clear stale context whenever the user moves
+            // between two different external apps. Without this the BERT
+            // completion popup keeps showing the previous app's prefix matches
+            // (e.g. "ar*" completions from VS Code still visible after switching
+            // to Word and typing "yo"). Skip when transitioning TO our own
+            // window so brief clicks on Spell don't blow away the active state.
+            if !now_our_app
+                && self.prev_fg_pid != 0
+                && fg.pid != self.prev_fg_pid
+            {
+                log!(
+                    "App switch: pid {} → {} (kind={:?}) — clearing stale context",
+                    self.prev_fg_pid, fg.pid, kind
+                );
+                self.clear_for_app_switch();
+                ctx.request_repaint();
+            }
 
             if now_browser && !self.suppress_errors {
                 log!("Browser foreground — clearing stale errors");
@@ -4886,6 +4912,13 @@ impl eframe::App for ContextApp {
                     ctx.request_repaint();
                 }
                 self.prev_word_title = title;
+            }
+
+            // Only track external apps; clicking on Spell itself shouldn't
+            // mark Spell as the "previous" app — otherwise the next external
+            // switch wouldn't be detected (Spell.pid would equal Spell.pid).
+            if !now_our_app {
+                self.prev_fg_pid = fg.pid;
             }
 
             self.suppress_errors = now_browser;
