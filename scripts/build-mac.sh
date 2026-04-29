@@ -249,17 +249,30 @@ if $MAKE_DMG; then
     DMG="$DIST/releases/Spell-osx-${ARCH}-${VERSION}.dmg"
     rm -f "$DMG"
     [ -d "/Volumes/$APP_NAME" ] && hdiutil detach "/Volumes/$APP_NAME" -force 2>/dev/null || true
-    create-dmg \
-        --volname "$APP_NAME" \
-        --window-pos 200 120 \
-        --window-size 540 360 \
-        --icon-size 100 \
-        --icon "${APP_NAME}.app" 140 180 \
-        --app-drop-link 400 180 \
-        --hide-extension "${APP_NAME}.app" \
-        --no-internet-enable \
-        "$DMG" \
-        "$APP" || true
+
+    # The DMG window is 600x400 logical pixels. Background image is 1200x800
+    # pre-set to 144 DPI so macOS treats it as 2x retina (sharp on HiDPI).
+    BG_SRC="$PROJECT_DIR/assets/dmg_background.png"
+    DMG_OPTS=(
+        --volname "$APP_NAME"
+        --window-pos 200 120
+        --window-size 600 400
+        --icon-size 128
+        --icon "${APP_NAME}.app" 140 200
+        --app-drop-link 460 200
+        --hide-extension "${APP_NAME}.app"
+        --no-internet-enable
+    )
+    if [ -f "$BG_SRC" ]; then
+        BG_READY="$DIST/releases/dmg_bg_ready.png"
+        cp "$BG_SRC" "$BG_READY"
+        sips -s dpiWidth 144 -s dpiHeight 144 "$BG_READY" >/dev/null 2>&1
+        DMG_OPTS=("${DMG_OPTS[@]}" --background "$BG_READY")
+    else
+        echo "  WARNING: $BG_SRC missing — DMG will have no background"
+    fi
+    create-dmg "${DMG_OPTS[@]}" "$DMG" "$APP" || true
+    [ -f "$BG_READY" ] && rm -f "$BG_READY" || true
     [ -f "$DMG" ] || { echo "ERROR: create-dmg failed"; exit 1; }
 
     if $SIGN; then
