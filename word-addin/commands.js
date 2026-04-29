@@ -1,4 +1,4 @@
-/* NorskTale event-based activation handler.
+/* Spell event-based activation handler.
  *
  * Runs automatically when a Word document opens (OnDocumentOpened).
  * Scans all paragraphs and POSTs them to the Rust desktop app so

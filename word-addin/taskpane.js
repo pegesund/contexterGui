@@ -1,4 +1,4 @@
-/* NorskTale Word Add-in bridge.
+/* Spell Word Add-in bridge.
  *
  * ⚠️ DO NOT send full document text. NEVER hash full document.
  * Send changed PARAGRAPHS only. Rust side handles sentence splitting + hashing.
@@ -79,7 +79,7 @@ function initialScan() {
     paragraphMap = {};
 
     enqueueWordRun(function () { return Word.run(function (ctx) {
-        // Disable Word's built-in proofing — NorskTale handles spelling/grammar
+        // Disable Word's built-in proofing — Spell handles spelling/grammar
         try {
             var bodyRange = ctx.document.body.getRange();
             bodyRange.hasNoProofing = true;
@@ -281,7 +281,7 @@ function sendChangedParagraphs(changed) {
             Office.context.document.settings.saveAsync();
         } catch(e) { /* ignore if not supported */ }
     }).catch(function (err) {
-        setStatus("Venter på NorskTale...", "err");
+        setStatus("Venter på Spell...", "err");
         // App not running yet — retry initial scan after 2s.
         // This handles the case where the add-in loads before the desktop
         // app starts (common when Word remembers the taskpane from a previous
@@ -372,7 +372,7 @@ function doSelectionRead() {
                     initialScan();
                 }
             }).catch(function () {
-                setStatus("Kan ikke nå NorskTale-app", "err");
+                setStatus("Kan ikke nå Spell-app", "err");
             });
         });
     }).catch(function () {});

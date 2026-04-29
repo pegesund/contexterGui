@@ -8714,7 +8714,7 @@ fn run_word_addin_wizard() -> bool {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 380.0])
+            .with_inner_size([520.0, 480.0])
             .with_decorations(true)
             .with_title("Spell — Word-integrasjon"),
         ..Default::default()
@@ -8792,16 +8792,25 @@ fn run_word_addin_wizard() -> bool {
                                     .size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
                             }
                             Phase::Done => {
-                                ui.label(egui::RichText::new("✓").size(56.0)
+                                ui.label(egui::RichText::new("OK").size(28.0).strong()
                                     .color(egui::Color32::from_rgb(40, 160, 80)));
                                 ui.add_space(8.0);
                                 ui.label(egui::RichText::new("Ferdig!").size(20.0).strong());
-                                ui.add_space(10.0);
+                                ui.add_space(12.0);
                                 ui.label(egui::RichText::new(
-                                    "Start Microsoft Word på nytt for å se Spell under \
-                                     Sett inn → Mine tillegg.")
-                                    .size(14.0).color(egui::Color32::from_rgb(80, 80, 80)));
-                                ui.add_space(22.0);
+                                    "Slik bruker du Spell i Word:")
+                                    .size(14.0).strong()
+                                    .color(egui::Color32::from_rgb(60, 60, 60)));
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new(
+                                    "1. Start Microsoft Word på nytt.\n\
+                                     2. Klikk på Sett inn (Insert) i menylinjen.\n\
+                                     3. Klikk Mine tillegg (My Add-ins).\n\
+                                     4. Klikk Spell. Et panel åpnes på høyre side.\n\
+                                     5. Du må holde dette panelet åpent for at Spell \
+                                        skal følge med på det du skriver i Word.")
+                                    .size(13.5).color(egui::Color32::from_rgb(80, 80, 80)));
+                                ui.add_space(20.0);
                                 if ui.add_sized([120.0, 36.0],
                                     egui::Button::new(egui::RichText::new("Lukk").size(15.0)),
                                 ).clicked() {
