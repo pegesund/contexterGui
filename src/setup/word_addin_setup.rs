@@ -100,7 +100,29 @@ pub fn check_status() -> SetupStatus {
     }
 }
 
+/// Path to the user's login keychain on modern macOS.
+fn login_keychain_path() -> Option<PathBuf> {
+    Some(
+        dirs::home_dir()?
+            .join("Library/Keychains/login.keychain-db"),
+    )
+}
+
 pub fn is_ca_trusted() -> bool {
+    // Check user's login keychain first (where this version installs the
+    // cert). Fall back to System.keychain so Macs that were set up with the
+    // older sudo-based wizard still report Ready.
+    if let Some(user_kc) = login_keychain_path() {
+        let in_user = Command::new("security")
+            .args(["find-certificate", "-c", CA_COMMON_NAME])
+            .arg(&user_kc)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if in_user {
+            return true;
+        }
+    }
     Command::new("security")
         .args([
             "find-certificate",
@@ -184,9 +206,19 @@ pub fn generate_certs_if_missing() -> Result<()> {
 
 // ── System trust install ─────────────────────────────────────────────────────
 
-/// Add the per-user CA to `/Library/Keychains/System.keychain` so Word
-/// (and Safari, etc.) trust the localhost cert. Triggers a graphical
-/// sudo password prompt via `osascript` — does NOT use Terminal.
+/// Add the per-user CA to the user's login keychain so Word, Safari, and other
+/// native apps trust localhost HTTPS from Spell.
+///
+/// **No admin password required** — the login keychain is unlocked while the
+/// user is logged in, and writing to it doesn't escalate privileges. macOS's
+/// TLS validation consults both System.keychain and login.keychain-db by
+/// default, so a user-domain trust is sufficient for Word.
+///
+/// This deliberately avoids `osascript ... with administrator privileges`:
+/// (a) the dialog title says "osascript" which spooks users and flags
+/// MDM "suspicious script execution" rules in school deployments, (b) school-
+/// managed Macs typically deny pupils the admin password, blocking the
+/// wizard entirely.
 pub fn install_ca_trust() -> Result<()> {
     let ca_pem = ca_cert_path()?;
     if !ca_pem.exists() {
@@ -195,26 +227,26 @@ pub fn install_ca_trust() -> Result<()> {
             ca_pem.display()
         ));
     }
+    let user_kc = login_keychain_path()
+        .ok_or_else(|| anyhow!("can't locate user login keychain"))?;
 
-    // The osascript "do shell script ... with administrator privileges" pattern
-    // shows a native macOS password dialog with our friendly prompt text.
-    let script = format!(
-        "do shell script \"security add-trusted-cert -d -r trustRoot -k \\\"/Library/Keychains/System.keychain\\\" \\\"{}\\\"\" with administrator privileges with prompt \"Spell needs your password to install a security certificate so Microsoft Word can connect to it.\"",
-        ca_pem.display()
-    );
-
-    let output = Command::new("osascript")
-        .args(["-e", &script])
+    // -r trustRoot   → treat as a trust anchor (validates SSL from anything signed by it)
+    // -k <keychain>  → install in user's keychain (no sudo)
+    // (no -d flag    → user domain, NOT admin/system domain)
+    let output = Command::new("security")
+        .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
+        .arg(&user_kc)
+        .arg(&ca_pem)
         .output()
-        .context("invoke osascript")?;
+        .context("invoke security add-trusted-cert")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // User cancelling the password dialog produces "execution error: -128"
-        if stderr.contains("-128") {
-            return Err(anyhow!("user canceled the password prompt"));
-        }
-        return Err(anyhow!("security add-trusted-cert failed: {}", stderr));
+        return Err(anyhow!(
+            "security add-trusted-cert failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
     }
     Ok(())
 }
