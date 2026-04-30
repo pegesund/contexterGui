@@ -9360,8 +9360,16 @@ fn main() -> eframe::Result {
     // Show if Word is installed AND we haven't completed/dismissed the wizard
     // yet. Idempotent: if a school IT admin already deployed cert + manifest
     // via MDM/M365, check_status() returns Ready and the wizard skips.
+    //
+    // Always refresh the wef manifest from the bundled one before/regardless of
+    // the wizard. Users who installed Spell via the wizard months ago end up
+    // with a stale manifest in Word's wef folder — the wizard's "manifest
+    // exists" check considers that Ready and skips, so manifest updates
+    // (e.g. adding the IconUrl in v0.1.0-test14) never reach Word until this
+    // refresh runs. Cheap (small file copy, only happens if mtime/size differ).
     #[cfg(target_os = "macos")]
     {
+        crate::setup::word_addin_setup::refresh_manifest_if_stale();
         if !saved.word_addin_wizard_dismissed {
             let dismissed_now = run_word_addin_wizard();
             if dismissed_now {

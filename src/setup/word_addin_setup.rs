@@ -467,6 +467,54 @@ pub fn install_manifest() -> Result<()> {
     Ok(())
 }
 
+/// Idempotent "make the wef manifest match the bundled one" called on every
+/// Spell.app startup (regardless of wizard state). Without this, users who ran
+/// the wizard on an OLDER Spell.app version end up with a stale manifest in
+/// Word's wef folder forever — even after upgrading. The wizard considers
+/// "manifest exists" as Ready and skips, so pre-existing manifests never get
+/// updated.
+///
+/// Compares mtimes (cheap) — if bundled is newer or sizes differ, copies. No-op
+/// otherwise. Failures are logged but never block app startup.
+pub fn refresh_manifest_if_stale() {
+    let Ok(bundled) = bundled_manifest_path() else { return };
+    let Some(wef) = word_wef_dir() else { return };
+    let target = wef.join(MANIFEST_FILENAME);
+
+    // Only refresh if the user has the add-in installed (file exists). Don't
+    // create it here — that's the wizard's job (it gates on user consent).
+    if !target.exists() {
+        return;
+    }
+    if !bundled.exists() {
+        return;
+    }
+
+    let bundled_meta = match fs::metadata(&bundled) { Ok(m) => m, Err(_) => return };
+    let target_meta = match fs::metadata(&target) { Ok(m) => m, Err(_) => return };
+    let bundled_size = bundled_meta.len();
+    let target_size = target_meta.len();
+    let bundled_mtime = bundled_meta.modified().ok();
+    let target_mtime = target_meta.modified().ok();
+
+    let should_refresh = bundled_size != target_size
+        || match (bundled_mtime, target_mtime) {
+            (Some(b), Some(t)) => b > t,
+            _ => false,
+        };
+
+    if should_refresh {
+        if let Err(e) = fs::copy(&bundled, &target) {
+            eprintln!("refresh_manifest_if_stale: copy failed: {}", e);
+        } else {
+            eprintln!(
+                "refresh_manifest_if_stale: updated wef manifest ({} bytes → {} bytes)",
+                target_size, bundled_size
+            );
+        }
+    }
+}
+
 pub fn uninstall_manifest() -> Result<()> {
     if let Some(wef) = word_wef_dir() {
         let target = wef.join(MANIFEST_FILENAME);
