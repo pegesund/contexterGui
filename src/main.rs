@@ -48,7 +48,18 @@ struct UserSettings {
     /// false from the Settings menu to surface the wizard again.
     #[serde(default)]
     word_addin_wizard_dismissed: bool,
+    /// Show the next-word / autocomplete suggestions panel (bulb 💡 toggle).
+    /// Independent of `show_grammar` — both can be on at the same time so the
+    /// user sees suggestions and grammar errors together. Default true.
+    #[serde(default = "default_true")]
+    show_completions: bool,
+    /// Show the grammar / spelling errors panel (pencil ✏ toggle). Independent
+    /// of `show_completions`. Default true.
+    #[serde(default = "default_true")]
+    show_grammar: bool,
 }
+
+fn default_true() -> bool { true }
 
 fn default_language() -> String { "nb".into() }
 fn default_hover_zoom() -> bool { true }
@@ -65,6 +76,8 @@ impl Default for UserSettings {
             hover_zoom: true,
             theme: 0,
             word_addin_wizard_dismissed: false,
+            show_completions: true,
+            show_grammar: true,
         }
     }
 }
@@ -966,6 +979,12 @@ struct ContextApp {
     // Tab navigation
     selected_tab: usize, // 0=Innhold, 1=Grammatikk, 2=Innstillinger, 3=Debug
     show_debug_tab: bool,
+    /// Independent panel toggles (replaces tab-radio for bulb/pencil). Both
+    /// default true so users see suggestions + grammar errors together;
+    /// either can be turned off via the bulb / pencil icons in the toolbar.
+    /// Persisted to settings.json.
+    show_completions: bool,
+    show_grammar: bool,
     /// Error index to scroll to when cursor clicks on an underlined word
     focused_error_idx: Option<usize>,
     focused_error_set_time: Instant,
@@ -1572,6 +1591,8 @@ impl ContextApp {
             load_errors,
             selected_tab: 0,
             show_debug_tab,
+            show_completions: saved_settings.show_completions,
+            show_grammar: saved_settings.show_grammar,
             focused_error_idx: None,
             focused_error_set_time: Instant::now() - Duration::from_secs(10),
             focused_error_scroll_done: false,
@@ -5641,9 +5662,15 @@ impl eframe::App for ContextApp {
                                 log!("Click hit: word='{}' → error idx={} '{}' rule={}",
                                     cursor_word, idx, trunc(&e.explanation, 40), e.rule_name);
                             }
-                            // Switch to Grammatikk tab when clicking a grammar error
-                            if matches!(e.category, ErrorCategory::Grammar) {
-                                self.selected_tab = 1;
+                            // Make sure the grammar panel is visible so the
+                            // user can see the error they clicked on. (No
+                            // longer need to set selected_tab; bulb/pencil
+                            // are independent panels.)
+                            if matches!(e.category, ErrorCategory::Grammar) && !self.show_grammar {
+                                self.show_grammar = true;
+                                let mut s = load_settings();
+                                s.show_grammar = true;
+                                save_settings(&s);
                             }
                             if self.focused_error_idx != Some(idx) {
                                 self.focused_error_scroll_done = false;
@@ -6097,31 +6124,37 @@ impl eframe::App for ContextApp {
         let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
 
-        let win_w = s * if self.selected_tab == 0 {
-            320.0
-        } else {
-            420.0
-        };
-        let content_rows = if self.selected_tab == 0 {
-            // Completions tab: rows = max of left/right completion lists
+        // Width: 420 if grammar panel is on (its cards are wider than the
+        // 2-col completions list); 320 if only suggestions are showing.
+        let win_w = s * if self.show_grammar { 420.0 } else { 320.0 };
+
+        // Sum the rows needed by each visible panel.
+        let mut content_rows = 0.0_f32;
+        if self.show_completions {
             let left = self.completions.len();
             let right = self.open_completions.len();
-            left.max(right).max(1) as f32
-        } else if self.selected_tab == 1 {
-            // Grammar tab: each error card ≈ 7 rows (separator + buttons/word +
-            // alternatives stacked vertically). Spelling errors can have up to 5
-            // alternatives below the best suggestion, so we budget 7 rows per card.
+            content_rows += left.max(right).max(1) as f32;
+        }
+        if self.show_grammar {
+            // Each error card ≈ 7 rows (separator + buttons/word + up to 5
+            // alternatives stacked vertically).
             let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
-            (errors as f32 * 7.0).max(3.0)
-        } else {
-            10.0
-        };
+            content_rows += (errors as f32 * 7.0).max(3.0);
+        }
+        if !self.show_completions && !self.show_grammar {
+            // Both panels off — keep a small placeholder so the toolbar still
+            // renders without an awkwardly tall empty body.
+            content_rows = 1.0;
+        }
+        // When both panels are on, account for the inter-panel separator
+        // (~1 row of vertical space).
+        if self.show_completions && self.show_grammar {
+            content_rows += 1.0;
+        }
         // Base overhead: toolbar (~22) + toolbar panel margins (16) + central panel
         // top margin (8) + separator/scrollbar padding (~10) = ~60px.
-        // Each content row is ~20px. Cap at 500px * s — content beyond scrolls.
-        // Suggestions tab (completions, tab 0) gets 10px extra height so the full
-        // suggestions list stays visible. Base overhead is 60 for other tabs, 70 here.
-        let base_h = if self.selected_tab == 0 { 70.0 } else { 60.0 };
+        // Suggestions panel gets 10 px extra so the full list stays visible.
+        let base_h = if self.show_completions { 70.0 } else { 60.0 };
         // Minimum height so the window doesn't shrink+grow on every keystroke
         // (distracting while typing). Content beyond the minimum still grows
         // up to the cap, but the empty → filled jump is eliminated.
@@ -6273,32 +6306,42 @@ impl eframe::App for ContextApp {
                 let active = egui::Color32::from_rgb(0, 70, 160);
                 let inactive = egui::Color32::from_rgb(100, 100, 100);
 
-                // --- Left side: 💡 ●✏ | 🎤 ▶ ---
+                // --- Left side: 💡 ✏ | 🎤 ▶ ---
+                // Bulb and pencil are independent toggles. Both can be on at
+                // the same time so the user sees suggestions and grammar
+                // errors simultaneously. Click to toggle off; click again to
+                // turn back on. State persists in settings.json.
 
-                // 💡 Forslag (suggestions tab)
-                let innhold_color = if self.selected_tab == 0 { active } else { inactive };
+                // 💡 Forslag — toggle word/next-word suggestions panel
+                let bulb_color = if self.show_completions { active } else { inactive };
                 if ax_icon(ui,
-                    egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(innhold_color),
+                    egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(bulb_color),
                     self.language.ui_suggestions(),
                 ).clicked() {
-                    self.selected_tab = 0;
+                    self.show_completions = !self.show_completions;
+                    let mut s = load_settings();
+                    s.show_completions = self.show_completions;
+                    save_settings(&s);
                 }
 
-                // ✏ Grammatikk — pen colored red when errors exist, green otherwise
-                let pen_color = if self.selected_tab == 1 {
-                    // Selected tab: emphasize red/green with full saturation
-                    if has_grammar { egui::Color32::from_rgb(220, 50, 50) }
-                    else { egui::Color32::from_rgb(0, 160, 60) }
+                // ✏ Grammatikk — toggle grammar/spelling errors panel.
+                // Color: red when errors+enabled, green when clean+enabled,
+                // grey when disabled.
+                let pen_color = if !self.show_grammar {
+                    inactive
+                } else if has_grammar {
+                    egui::Color32::from_rgb(220, 50, 50)
                 } else {
-                    // Unselected: dimmer red/green
-                    if has_grammar { egui::Color32::from_rgb(180, 70, 70) }
-                    else { egui::Color32::from_rgb(70, 140, 90) }
+                    egui::Color32::from_rgb(0, 160, 60)
                 };
                 if ax_icon(ui,
                     egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color),
                     self.language.ui_grammar(),
                 ).clicked() {
-                    self.selected_tab = 1;
+                    self.show_grammar = !self.show_grammar;
+                    let mut s = load_settings();
+                    s.show_grammar = self.show_grammar;
+                    save_settings(&s);
                 }
 
                 ui.add_space(8.0 * s);
@@ -6448,8 +6491,8 @@ impl eframe::App for ContextApp {
                 }
 
 
-                // --- Error count + AI fix button (on Grammatikk tab) ---
-                if self.selected_tab == 1 {
+                // --- Error count + AI fix button (only when grammar panel visible) ---
+                if self.show_grammar {
                     let err_count = self.writing_errors.iter()
                         .filter(|e| !e.ignored && e.rule_name != "llm_correction")
                         .count();
@@ -6570,8 +6613,14 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // === Tab: Innhold (0) ===
-            if self.selected_tab == 0 {
+            // === Panel: Grammar (rendered first when both shown so errors —
+            // the more critical signal — appear at the top of the popup) ===
+            // Original tab-1 block lives below; we just early-flag it via a
+            // local. Both panels are independent now: bulb toggles
+            // show_completions, pencil toggles show_grammar.
+
+            // === Panel: Suggestions (was Tab 0 — 💡 bulb) ===
+            if self.show_completions {
                 // Tab key selection
                 let has_sugg = !self.completions.is_empty() || !self.open_completions.is_empty();
                 if has_sugg && !self.selection_mode { self.platform.set_tab_intercept(true); }
@@ -6724,8 +6773,17 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // === Tab: Grammatikk (1) ===
-            if self.selected_tab == 1 {
+            // === Panel: Grammar (was Tab 1 — ✏ pencil) ===
+            // Renders when show_grammar is on. Visible alongside the
+            // suggestions panel above when both toggles are enabled.
+            if self.show_grammar {
+                // Visual separator when both panels are visible so the user
+                // can tell where one ends and the other begins.
+                if self.show_completions {
+                    ui.add_space(4.0 * s);
+                    ui.separator();
+                    ui.add_space(2.0 * s);
+                }
                 // Show scanning indicator while grammar queue is draining
                 if self.grammar_scanning && self.grammar_queue_total > 0 {
                     let done = self.grammar_queue_total - self.grammar_queue.len();
