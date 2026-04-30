@@ -137,6 +137,103 @@ impl TextBridge for AxMacBridge {
     fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, _p: &str, _c: &str, _o: usize) -> bool {
         self.backspace_paste(find, replace)
     }
+
+    /// Read the paragraph containing the AX cursor. Used by main.rs's
+    /// incremental scan to feed full-paragraph text into the grammar/spell
+    /// pipeline. Without this, AX-bridge apps (Notes, TextEdit, Pages, etc.)
+    /// only get next-word predictions but never see spelling/grammar errors,
+    /// because the scan code path checks `is_com_bridge` and gates the call
+    /// on `read_paragraph_at` returning Some(...).
+    ///
+    /// Paragraph boundary is `\n` (NSText convention on macOS). The
+    /// `paragraph_id` we return is the paragraph's start offset in the doc,
+    /// stringified — not stable across edits, but the de-dup logic in main.rs
+    /// only needs it to match within a single scan pass.
+    fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> {
+        let pid = self.target_pid.load(Ordering::Relaxed) as i32;
+        if pid <= 0 { return None; }
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            let mut focused: CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyAttributeValue(
+                app,
+                CFString::new("AXFocusedUIElement").as_concrete_TypeRef(),
+                &mut focused,
+            );
+            CFRelease(app as _);
+            if err != 0 || focused.is_null() { return None; }
+            let elem = focused as AXUIElementRef;
+
+            // Full element text via AXValue. Skip non-string AXValues (sliders
+            // etc.) — they have no meaningful paragraphs.
+            let mut value_ref: CFTypeRef = std::ptr::null();
+            let v_err = AXUIElementCopyAttributeValue(
+                elem,
+                CFString::new("AXValue").as_concrete_TypeRef(),
+                &mut value_ref,
+            );
+            if v_err != 0 || value_ref.is_null() {
+                CFRelease(focused);
+                return None;
+            }
+            let type_id = core_foundation::base::CFGetTypeID(value_ref);
+            if type_id != core_foundation::string::CFString::type_id() {
+                CFRelease(value_ref);
+                CFRelease(focused);
+                return None;
+            }
+            let full_text = CFString::wrap_under_create_rule(value_ref as _).to_string();
+
+            // Cursor position via AXSelectedTextRange. If unavailable, treat
+            // cursor as end-of-text (chat/compose inputs).
+            let mut range_val: CFTypeRef = std::ptr::null();
+            let r_err = AXUIElementCopyAttributeValue(
+                elem,
+                CFString::new("AXSelectedTextRange").as_concrete_TypeRef(),
+                &mut range_val,
+            );
+            let cursor: usize = if r_err == 0 && !range_val.is_null() {
+                let mut sel = core_foundation::base::CFRange { location: 0, length: 0 };
+                let ok = AXValueGetValue(
+                    range_val as AXValueRef,
+                    kAXValueTypeCFRange,
+                    &mut sel as *mut _ as _,
+                );
+                CFRelease(range_val);
+                if ok { sel.location.max(0) as usize } else { full_text.chars().count() }
+            } else {
+                full_text.chars().count()
+            };
+            CFRelease(focused);
+
+            // AX cursor offset is in CHARACTERS but Rust string slicing is in
+            // BYTES. Walk char indices to convert.
+            let cursor_byte = full_text
+                .char_indices()
+                .nth(cursor)
+                .map(|(b, _)| b)
+                .unwrap_or(full_text.len());
+
+            // Find paragraph bounds: nearest '\n' before and after cursor.
+            let para_start = full_text[..cursor_byte]
+                .rfind('\n')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let para_end = full_text[cursor_byte..]
+                .find('\n')
+                .map(|p| cursor_byte + p)
+                .unwrap_or(full_text.len());
+
+            let para_text = full_text[para_start..para_end].to_string();
+            if para_text.trim().is_empty() {
+                return None;
+            }
+            // paragraph_id = byte-start offset, stringified. Stable enough for
+            // the dup-detection logic within a scan pass.
+            let para_id = format!("ax:{}", para_start);
+            Some((para_id, para_text, para_start))
+        }
+    }
 }
 
 impl AxMacBridge {
@@ -247,7 +344,13 @@ unsafe fn try_read_via_text_range(elem: AXUIElementRef) -> Option<CursorContext>
     // wraps, variable-width fonts, and emoji — not worth the complexity.
     let caret_pos = read_caret_bounds(elem, sel)
         .or_else(|| unsafe { element_frame_bottom_left(elem) });
-    Some(build_context(&RawCursorText { before, after }, caret_pos))
+    let mut ctx = build_context(&RawCursorText { before, after }, caret_pos);
+    // Expose the cursor's character offset so main.rs's incremental scan
+    // gates open and read_paragraph_at gets called for AX-bridge apps.
+    // Without this, Notes/TextEdit/Pages etc. never get spell/grammar
+    // checked even though we now have a working read_paragraph_at impl.
+    ctx.cursor_doc_offset = Some(cursor.max(0) as usize);
+    Some(ctx)
 }
 
 /// Get caret screen position via `AXBoundsForRange` on a zero-length range
@@ -476,8 +579,12 @@ unsafe fn try_read_via_value(elem: AXUIElementRef) -> Option<CursorContext> {
     }
     let s = CFString::wrap_under_create_rule(value as _).to_string();
     if s.trim().is_empty() { return None; }
-    Some(build_context(
+    let cursor_chars = s.chars().count();
+    let mut ctx = build_context(
         &RawCursorText { before: s, after: String::new() },
         None,
-    ))
+    );
+    // Path-2 assumes cursor at end of text.
+    ctx.cursor_doc_offset = Some(cursor_chars);
+    Some(ctx)
 }

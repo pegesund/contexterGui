@@ -5569,9 +5569,17 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
-                // Incremental paragraph scan: read only the paragraph at cursor (not full doc)
+                // Incremental paragraph scan: read only the paragraph at cursor (not full doc).
+                // Skip when the ACTIVE bridge is Word Add-in — that bridge pushes
+                // paragraph events directly, so polling here would duplicate work.
+                // The previous check used `bridges.iter().any(...)` which was always
+                // true on macOS (Word Add-in HTTP server is always registered even
+                // when the user is in TextEdit / Notes), so the AX-bridge grammar
+                // scan never ran. Use active_bridge_name() so the AX path opens up
+                // for non-Word apps.
+                let active_name = self.manager.active_bridge_name();
                 let is_com_bridge = !self.manager.last_user_was_browser
-                    && !self.manager.bridges.iter().any(|b| b.name() == "Word Add-in");
+                    && active_name != "Word Add-in";
                 if is_com_bridge {
                     if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
                         if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
