@@ -4910,6 +4910,12 @@ impl eframe::App for ContextApp {
                 // writing_errors, spelling_queue, paragraph hashes are preserved.
                 self.context = Default::default();
                 self.manager.clear_context();
+                // Drop stale caret coords. If the new app exposes AX caret
+                // (Word, browsers), the next poll repopulates within ~200ms.
+                // Apps that don't expose caret (Notes, Terminal, code editors)
+                // leave this None — popup stays where the user last placed it
+                // instead of teleporting to the previous app's caret.
+                self.last_caret_pos = None;
                 ctx.request_repaint();
             }
 
