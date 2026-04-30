@@ -23,6 +23,11 @@ use rcgen::{
 
 const CA_COMMON_NAME: &str = "Spell Word Add-in Local CA";
 const MANIFEST_FILENAME: &str = "Spell-manifest.xml";
+/// Permanent add-in identifier from word-addin/manifest.xml. Used to detect any
+/// existing Spell manifest in Word's wef folder regardless of filename — so old
+/// copies installed by previous Spell versions, manual sideloads, or scripts
+/// get cleaned up on every startup.
+const MANIFEST_ID: &str = "BB178B0E-8DC7-42EA-91D5-02B69311F1A8";
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -467,59 +472,106 @@ pub fn install_manifest() -> Result<()> {
     Ok(())
 }
 
-/// Idempotent "make the wef manifest match the bundled one" called on every
-/// Spell.app startup (regardless of wizard state). Without this, users who ran
-/// the wizard on an OLDER Spell.app version end up with a stale manifest in
-/// Word's wef folder forever — even after upgrading. The wizard considers
-/// "manifest exists" as Ready and skips, so pre-existing manifests never get
-/// updated.
+/// Idempotent sweep called on every Spell startup. Guarantees Word's wef folder
+/// holds exactly one Spell manifest, named `Spell-manifest.xml`, with byte-for-
+/// byte the same content as the bundled copy. Specifically:
 ///
-/// Compares mtimes (cheap) — if bundled is newer or sizes differ, copies. No-op
-/// otherwise. Failures are logged but never block app startup.
+/// 1. Scan every `.xml` in the wef folder. Any file whose `<Id>` matches our
+///    permanent GUID is "ours" — regardless of filename. This catches legacy
+///    copies left by manual sideloads, prior installer versions, or scripts
+///    that used a different filename (`manifest.xml`, `spell.xml`, etc).
+/// 2. Delete every "ours" file at a non-canonical path (the legacy ones).
+/// 3. If the canonical file is missing OR its bytes don't match the bundled
+///    manifest, copy bundled → canonical. This covers fresh installs after
+///    the wizard ran on an older bundle, and DMG/Velopack upgrades shipping
+///    a new manifest version.
+///
+/// Gated on prior wizard consent: if no Spell manifest exists *anywhere* in
+/// the wef folder we don't create one — the wizard owns the first-time
+/// install (it also handles the cert trust prompt). After the wizard has
+/// run once, all future updates are automatic.
+///
+/// Failures are logged but never block app startup.
 pub fn refresh_manifest_if_stale() {
     let Ok(bundled) = bundled_manifest_path() else { return };
     let Some(wef) = word_wef_dir() else { return };
-    let target = wef.join(MANIFEST_FILENAME);
+    if !bundled.exists() { return; }
+    if !wef.exists() { return; }
 
-    // Only refresh if the user has the add-in installed (file exists). Don't
-    // create it here — that's the wizard's job (it gates on user consent).
-    if !target.exists() {
+    let canonical = wef.join(MANIFEST_FILENAME);
+    let mut found_ours_at: Vec<PathBuf> = Vec::new();
+
+    // Scan wef/ for any XML containing our GUID.
+    let entries = match fs::read_dir(&wef) { Ok(e) => e, Err(_) => return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("xml") {
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(contents) if contents.contains(MANIFEST_ID) => {
+                found_ours_at.push(path);
+            }
+            _ => {}
+        }
+    }
+
+    // Gate: if no Spell manifest at all, the wizard hasn't run yet. Bail.
+    if found_ours_at.is_empty() {
         return;
     }
-    if !bundled.exists() {
-        return;
+
+    // Delete every legacy copy (any path that isn't our canonical filename).
+    for path in &found_ours_at {
+        if path != &canonical {
+            match fs::remove_file(path) {
+                Ok(_) => eprintln!(
+                    "word-addin: removed legacy manifest at {}",
+                    path.display()
+                ),
+                Err(e) => eprintln!(
+                    "word-addin: failed to remove legacy manifest {}: {}",
+                    path.display(), e
+                ),
+            }
+        }
     }
 
-    let bundled_meta = match fs::metadata(&bundled) { Ok(m) => m, Err(_) => return };
-    let target_meta = match fs::metadata(&target) { Ok(m) => m, Err(_) => return };
-    let bundled_size = bundled_meta.len();
-    let target_size = target_meta.len();
-    let bundled_mtime = bundled_meta.modified().ok();
-    let target_mtime = target_meta.modified().ok();
-
-    let should_refresh = bundled_size != target_size
-        || match (bundled_mtime, target_mtime) {
-            (Some(b), Some(t)) => b > t,
-            _ => false,
-        };
-
-    if should_refresh {
-        if let Err(e) = fs::copy(&bundled, &target) {
-            eprintln!("refresh_manifest_if_stale: copy failed: {}", e);
-        } else {
-            eprintln!(
-                "refresh_manifest_if_stale: updated wef manifest ({} bytes → {} bytes)",
-                target_size, bundled_size
-            );
+    // Refresh canonical if missing or bytes differ from bundled.
+    let needs_copy = match (fs::read(&canonical), fs::read(&bundled)) {
+        (Ok(c), Ok(b)) => c != b,
+        (Err(_), Ok(_)) => true, // canonical missing (legacy was at different name)
+        _ => false,
+    };
+    if needs_copy {
+        match fs::copy(&bundled, &canonical) {
+            Ok(_) => eprintln!(
+                "word-addin: refreshed canonical manifest at {}",
+                canonical.display()
+            ),
+            Err(e) => eprintln!(
+                "word-addin: failed to refresh canonical manifest: {}",
+                e
+            ),
         }
     }
 }
 
 pub fn uninstall_manifest() -> Result<()> {
-    if let Some(wef) = word_wef_dir() {
-        let target = wef.join(MANIFEST_FILENAME);
-        if target.exists() {
-            fs::remove_file(&target).context("remove manifest")?;
+    let Some(wef) = word_wef_dir() else { return Ok(()) };
+    if !wef.exists() { return Ok(()); }
+    // Remove every XML in the wef folder whose <Id> matches our GUID, so we
+    // catch legacy copies under non-canonical filenames too.
+    let entries = fs::read_dir(&wef).context("read wef")?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("xml") {
+            continue;
+        }
+        if let Ok(contents) = fs::read_to_string(&path) {
+            if contents.contains(MANIFEST_ID) {
+                let _ = fs::remove_file(&path);
+            }
         }
     }
     Ok(())
