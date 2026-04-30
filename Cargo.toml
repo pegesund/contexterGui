@@ -21,6 +21,7 @@ tokenizers = "0.20"
 ndarray = "0.16"
 libloading = "0.8"
 nostos-cognio = { path = "../../contexter-repo/nostos-cognio" }
+norsk-g2p = { path = "../../norwegian_piper" }
 regex = "1"
 image = "0.25"
 mtag = { package = "mtag-rs", path = "../../rustSpell/mtag-rs" }
@@ -63,6 +64,8 @@ features = [
     "Win32_System_Variant",
     "Win32_System_Ole",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_Media_Speech",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
     # Win32_UI_Input_KeyboardAndMouse is required for INPUT, SendInput,

@@ -350,8 +350,7 @@ impl PlatformServices for MacPlatform {
     }
 
     fn init_tts(&self, lang: &dyn language::LanguageVoice) {
-        // macOS TTS uses `say` command — no init needed, always available
-        crate::tts::init_tts("", "", lang);
+        crate::tts::init_tts(lang);
     }
 
     fn read_selected_text(&self) -> Option<String> {

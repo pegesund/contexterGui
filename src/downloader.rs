@@ -257,6 +257,129 @@ pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
     items
 }
 
+/// Piper TTS files for a language. Returns the model files plus, for English,
+/// the espeak-ng binary + data files listed in the per-platform manifest.
+///
+/// Performs a synchronous HTTP fetch of the espeak manifest when `lang_code`
+/// is `"en"` — call from a context that can block briefly (~100 ms).
+pub fn piper_files(lang_code: &str) -> Vec<DownloadItem> {
+    let base = data_dir().join("piper");
+    let mut items = Vec::new();
+
+    match lang_code {
+        "nb" | "nn" => {
+            let dir = base.join("nb-NO");
+            for (key, fname, label) in &[
+                ("epoch_649_v5.onnx", "epoch_649_v5.onnx", "Norsk Piper-modell"),
+                ("epoch_649_v5.onnx.json", "epoch_649_v5.onnx.json", "Modellkonfig"),
+                ("lexicon.fst", "lexicon.fst", "Ordbok-FST"),
+                ("lexicon_values.bin", "lexicon_values.bin", "Ordbok-verdier"),
+                ("lexicon_phonemes.txt", "lexicon_phonemes.txt", "Fonemtabell"),
+                ("pronunciation_overrides.tsv", "pronunciation_overrides.tsv", "Uttaleregler"),
+            ] {
+                items.push(DownloadItem {
+                    s3_key: format!("models/piper/nb-NO/{}", key),
+                    local_path: dir.join(fname),
+                    label: (*label).into(),
+                });
+            }
+        }
+        "en" => {
+            for voice in &[
+                "en_US-lessac-medium",
+                "en_US-amy-medium",
+                "en_GB-alba-medium",
+                "en_GB-northern_english_male-medium",
+            ] {
+                let dir = base.join(voice);
+                items.push(DownloadItem {
+                    s3_key: format!("models/piper/{}/{}.onnx", voice, voice),
+                    local_path: dir.join(format!("{}.onnx", voice)),
+                    label: format!("English: {}", voice),
+                });
+                items.push(DownloadItem {
+                    s3_key: format!("models/piper/{}/{}.onnx.json", voice, voice),
+                    local_path: dir.join(format!("{}.onnx.json", voice)),
+                    label: format!("Config: {}", voice),
+                });
+            }
+            items.extend(piper_espeak_items());
+        }
+        _ => {}
+    }
+
+    items
+}
+
+/// Fetch the per-platform espeak-ng manifest and turn each listed file into
+/// a `DownloadItem` rooted at `<piper>/bin/`. Synchronous — keep callers off
+/// the UI thread.
+fn piper_espeak_items() -> Vec<DownloadItem> {
+    let bin_root = data_dir().join("piper").join("bin");
+    let platform = if cfg!(target_os = "windows") {
+        "win"
+    } else if cfg!(target_os = "macos") {
+        "mac"
+    } else {
+        return Vec::new();
+    };
+
+    let manifest_url = presign_url(&format!("bin/{}/manifest.txt", platform), 3600);
+    let manifest = match ureq::get(&manifest_url).call() {
+        Ok(r) => r.into_string().unwrap_or_default(),
+        Err(e) => {
+            eprintln!("Could not fetch espeak manifest for {}: {}", platform, e);
+            return Vec::new();
+        }
+    };
+
+    let mut items = Vec::new();
+    for line in manifest.lines() {
+        let rel = line.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let label = if rel == "espeak-ng" || rel == "espeak-ng.exe" {
+            "espeak-ng".to_string()
+        } else if rel.ends_with(".dll") || rel.ends_with(".dylib") {
+            "espeak-ng library".to_string()
+        } else {
+            "espeak-ng data".to_string()
+        };
+        items.push(DownloadItem {
+            s3_key: format!("bin/{}/{}", platform, rel),
+            local_path: bin_root.join(rel),
+            label,
+        });
+    }
+    items
+}
+
+/// True if every Piper file for the language exists locally. For English this
+/// also checks that the espeak-ng binary is present (but does not re-fetch the
+/// manifest).
+pub fn piper_cached(lang_code: &str) -> bool {
+    let base = data_dir().join("piper");
+    match lang_code {
+        "nb" | "nn" => {
+            let dir = base.join("nb-NO");
+            ["epoch_649_v5.onnx", "lexicon.fst", "lexicon_values.bin"]
+                .iter()
+                .all(|f| dir.join(f).exists())
+        }
+        "en" => {
+            let lessac = base.join("en_US-lessac-medium").join("en_US-lessac-medium.onnx");
+            let espeak = base.join("bin").join(if cfg!(target_os = "windows") {
+                "espeak-ng.exe"
+            } else {
+                "espeak-ng"
+            });
+            lessac.exists() && espeak.exists()
+        }
+        _ => true,
+    }
+}
+
 /// Whisper STT model files for a language.
 pub fn whisper_files(lang_code: &str, mode: u8) -> Vec<DownloadItem> {
     let base = data_dir();

@@ -8183,15 +8183,43 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(lang_for_settings.ui_voice()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             let current = tts::current_voice();
-                            for voice in &voice_list {
-                                let is_selected = voice.name == current;
-                                if ui.selectable_label(
-                                    is_selected,
-                                    egui::RichText::new(&voice.name).size(body),
-                                ).clicked() {
-                                    selected_voice = Some(voice.name.clone());
+                            let piper_root = tts::piper_data_root();
+                            let (piper_voices, system_voices): (Vec<_>, Vec<_>) =
+                                voice_list.iter().partition(|v| v.name.starts_with("piper:"));
+
+                            if !piper_voices.is_empty() {
+                                ui.label(egui::RichText::new("Piper").size(13.0).color(off_color));
+                                for voice in &piper_voices {
+                                    let ready = tts::piper_engine::voice_assets_exist(&piper_root, &voice.name);
+                                    let is_selected = voice.name == current;
+                                    let mut label = voice.name.clone();
+                                    if !ready {
+                                        label.push_str("  — ikke lastet ned");
+                                    }
+                                    let resp = ui.selectable_label(
+                                        is_selected,
+                                        egui::RichText::new(&label).size(body),
+                                    );
+                                    if resp.clicked() && ready {
+                                        selected_voice = Some(voice.name.clone());
+                                    }
+                                }
+                                ui.add_space(6.0);
+                            }
+
+                            if !system_voices.is_empty() {
+                                ui.label(egui::RichText::new("System").size(13.0).color(off_color));
+                                for voice in &system_voices {
+                                    let is_selected = voice.name == current;
+                                    if ui.selectable_label(
+                                        is_selected,
+                                        egui::RichText::new(&voice.name).size(body),
+                                    ).clicked() {
+                                        selected_voice = Some(voice.name.clone());
+                                    }
                                 }
                             }
+
                             if voice_list.is_empty() {
                                 ui.label(egui::RichText::new(lang_for_settings.ui_no_voices_found()).size(body).color(off_color));
                             }
@@ -9087,7 +9115,10 @@ fn run_language_picker() -> Option<String> {
 // ── Download window: shown when language data is missing ──
 
 fn run_download_window(lang_code: &str) {
-    let items = downloader::language_files(lang_code);
+    let mut items = downloader::language_files(lang_code);
+    // Append Piper TTS files (model + FST + espeak-ng for English).
+    // For "en" this performs a synchronous manifest fetch (~100 ms).
+    items.extend(downloader::piper_files(lang_code));
     let progress = downloader::download_missing(items);
 
     // If nothing to download, return immediately
@@ -9434,6 +9465,13 @@ fn main() -> eframe::Result {
         eprintln!("Downloading language data for '{}'...", picked);
         run_download_window(&picked);
         picked
+    } else if !downloader::piper_cached(&lang_code) {
+        // Language data is cached but Piper TTS assets aren't. Run the same
+        // download window to fetch them. The window short-circuits if
+        // everything is already present.
+        eprintln!("Downloading Piper TTS assets for '{}'...", lang_code);
+        run_download_window(&lang_code);
+        lang_code
     } else {
         lang_code
     };
@@ -9491,7 +9529,15 @@ fn main() -> eframe::Result {
     // Initialize TTS engine (platform-specific)
     setup_platform.init_tts(&*selected_language);
     if !saved.voice.is_empty() {
-        tts::set_voice(&saved.voice);
+        let v = saved.voice.trim();
+        // Acapela legacy voice ids: hardcoded "Kari22k_NV" or any voice ending
+        // in "_NV" / containing "22k_". Drop them and keep the engine's default.
+        let is_legacy_acapela = v == "Kari22k_NV" || v.contains("22k_") || v.ends_with("_NV");
+        if is_legacy_acapela {
+            log!("Dropping stale Acapela voice setting '{}', using engine default", v);
+        } else {
+            tts::set_voice(v);
+        }
     }
 
     fn make_pen_icon(size: u32) -> egui::IconData {
