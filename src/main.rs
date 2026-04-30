@@ -6131,28 +6131,10 @@ impl eframe::App for ContextApp {
                 } else {
                     (x as f32, y as f32)
                 };
-                // If the cursor is on a misspelled word, macOS auto-shows its
-                // native spell-check popup directly below the word — and our
-                // window-follows-caret logic places the Spell completion window
-                // in the same area, causing the two popups to overlap.
-                //
-                // When that happens, position our window ABOVE the caret with
-                // a generous gap so the macOS popup has clear space below the
-                // word. The user can still see Spell's BERT next-word
-                // completions without them visually fighting the spell-check
-                // suggestions.
-                let cursor_word_lower = self.context.word.trim().to_lowercase();
-                let on_misspelled = !cursor_word_lower.is_empty()
-                    && self.writing_errors.iter().any(|e| {
-                        !e.ignored && e.word.trim().to_lowercase() == cursor_word_lower
-                    });
-
+                // Push the window 5 cm below the caret so it doesn't cover the line
+                // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
                 let caret_offset = self.platform.caret_offset_below();
-                let pos_y = if on_misspelled {
-                    // Above the caret, 30 px gap. Falls back to "below" if no room above.
-                    let above = ly - win_h - 30.0;
-                    if above < 0.0 { ly + caret_offset + 200.0 } else { above }
-                } else if (ly + caret_offset + win_h) > screen_h {
+                let pos_y = if (ly + caret_offset + win_h) > screen_h {
                     // Not enough room below — flip above the caret with a 30 px gap.
                     ly - win_h - 30.0
                 } else {
