@@ -173,6 +173,34 @@ impl PlatformServices for MacPlatform {
         AppKind::Other
     }
 
+    fn is_writing_app(&self, app: &ForegroundApp) -> bool {
+        // Always-on for our own window so popup interactions don't get hidden.
+        if app.pid == std::process::id() {
+            return true;
+        }
+        // exe_name is already lowercased by the foreground-app poller. Match on
+        // executable names rather than bundle IDs so we don't need to query
+        // NSRunningApplication for every check.
+        let name = app.exe_name.as_str();
+        let ignore = matches!(
+            name,
+            // Terminals
+            "terminal" | "iterm2" | "iterm" | "warp" | "alacritty" | "kitty" | "tabby"
+            | "hyper" | "wezterm"
+            // Code editors / IDEs
+            | "code" | "code - insiders" | "cursor" | "windsurf" | "zed"
+            | "xcode" | "android studio"
+            // JetBrains family
+            | "intellij idea" | "intellij idea ce" | "pycharm" | "pycharm ce"
+            | "webstorm" | "phpstorm" | "rubymine" | "clion" | "goland"
+            | "datagrip" | "rider" | "appcode" | "fleet"
+            // Other dev/system tools where Spell isn't useful
+            | "sublime text" | "atom" | "nova" | "bbedit"
+            | "system preferences" | "system settings" | "finder" | "activity monitor"
+        );
+        !ignore
+    }
+
     fn screen_size(&self) -> (f32, f32) {
         self.screen
     }
@@ -199,7 +227,12 @@ impl PlatformServices for MacPlatform {
         get_word_before_cursor_ax()
     }
 
-    fn caret_offset_below(&self) -> f32 { -18.0 }
+    // Push popup ~100 logical px below the caret bottom (combined with the
+    // +49 adjustment in the caret poller, total ~80 px below the typing line).
+    // Smaller values let the popup overlap the line being typed in narrow
+    // writing surfaces like Notes / Pages sidebar — Word's wider doc area is
+    // more forgiving but Notes users complained the popup covered their text.
+    fn caret_offset_below(&self) -> f32 { 30.0 }
     fn caret_offset_right(&self) -> f32 { -38.0 }
     fn caret_is_physical_pixels(&self) -> bool { false }
 

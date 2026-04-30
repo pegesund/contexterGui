@@ -55,6 +55,12 @@ pub trait PlatformServices: Send + Sync {
     /// Classify a foreground app into a known category.
     fn classify_app(&self, app: &ForegroundApp) -> AppKind;
 
+    /// True iff this app is one Spell can plausibly help with (writing prose).
+    /// False for code editors, terminals, system utilities — apps where Spell's
+    /// popup would only get in the user's way. Default true: when in doubt,
+    /// stay active.
+    fn is_writing_app(&self, _app: &ForegroundApp) -> bool { true }
+
     /// PID of our own process.
     fn our_pid(&self) -> u32 {
         std::process::id()

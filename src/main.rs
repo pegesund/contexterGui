@@ -1105,6 +1105,12 @@ struct ContextApp {
     /// True when the foreground app is a browser this frame. Set at the
     /// top of every update() so grammar/BERT pollers can gate on it.
     suppress_errors: bool,
+    /// Last frame's writing-app state. None = uninitialised; Some(true) means
+    /// the previous foreground app was one Spell can help with (Word, Notes,
+    /// browser, ...); Some(false) means it was a code editor / terminal /
+    /// system utility. Used to emit Minimized(true)/Minimized(false) only on
+    /// the transition rather than every frame.
+    prev_was_writing_app: Option<bool>,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -1649,6 +1655,7 @@ impl ContextApp {
             prev_word_title: String::new(),
             prev_fg_pid: 0,
             suppress_errors: false,
+            prev_was_writing_app: None,
         }
     }
 
@@ -4943,6 +4950,33 @@ impl eframe::App for ContextApp {
             }
 
             self.suppress_errors = now_browser;
+
+            // Auto-minimise when the foreground is a code editor / terminal /
+            // system utility — Spell isn't useful there and the popup just
+            // covers the user's text. Restore on transition back to a writing
+            // app. Skip when our own window is foreground (clicks on Spell
+            // would otherwise toggle minimised state). Emit the viewport
+            // command only on the boundary so we don't fight the user if they
+            // manually un-minimise.
+            if !now_our_app {
+                let is_writing = self.platform.is_writing_app(&fg);
+                if self.prev_was_writing_app != Some(is_writing) {
+                    if !is_writing {
+                        log!(
+                            "Foreground '{}' is non-writing — minimising Spell",
+                            fg.exe_name
+                        );
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    } else if self.prev_was_writing_app == Some(false) {
+                        log!(
+                            "Foreground '{}' is a writing app — restoring Spell",
+                            fg.exe_name
+                        );
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    }
+                    self.prev_was_writing_app = Some(is_writing);
+                }
+            }
         }
 
         // In selection mode: handle keys at the top, set skip_processing flag
