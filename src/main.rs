@@ -8089,17 +8089,15 @@ impl eframe::App for ContextApp {
                         do_close = true;
                     }
 
-                    // Match the panel chrome to the theme so the dark-mode
-                    // settings window doesn't end up with white BG + dark
-                    // visuals (separators / scroll bars would vanish).
-                    let (panel_bg, label_color) = if main_is_dark {
-                        (
-                            egui::Color32::from_rgb(31, 32, 48),
-                            egui::Color32::from_rgb(228, 225, 212),
-                        )
-                    } else {
-                        (egui::Color32::WHITE, egui::Color32::from_rgb(50, 50, 50))
-                    };
+                    // Settings panel follows the active theme — bg + text from
+                    // the same Theme struct the main popup uses, so cream
+                    // theme → cream settings, sea-blue → sea-blue, etc. Dark
+                    // mode also needs Visuals::dark() (set above) so default
+                    // egui chrome (separators, scrollbars) doesn't blend
+                    // into the bg.
+                    let settings_theme = theme_for(theme_prev);
+                    let panel_bg = settings_theme.bg;
+                    let label_color = settings_theme.text;
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(panel_bg).inner_margin(24.0))
                         .show(vp_ctx, |ui| {
