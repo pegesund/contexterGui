@@ -8065,6 +8065,13 @@ impl eframe::App for ContextApp {
             let current_lang_code = self.language.code().to_string();
             let lang_for_settings = self.language.clone();
 
+            // Capture the active theme so the settings viewport can match it.
+            // Both viewports share the same egui::Context, so calling
+            // set_visuals here would clobber the visuals the main popup
+            // already set this frame and corrupt its text rendering until
+            // settings closes (only visible in dark theme since other themes
+            // already use Visuals::light() in the main popup).
+            let main_is_dark = self.theme == 3;
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings_window"),
                 egui::ViewportBuilder::default()
@@ -8072,18 +8079,32 @@ impl eframe::App for ContextApp {
                     .with_inner_size([500.0, 600.0])
                     .with_decorations(true),
                 |vp_ctx, _class| {
-                    vp_ctx.set_visuals(egui::Visuals::light());
+                    vp_ctx.set_visuals(if main_is_dark {
+                        egui::Visuals::dark()
+                    } else {
+                        egui::Visuals::light()
+                    });
 
                     if vp_ctx.input(|i| i.viewport().close_requested()) {
                         do_close = true;
                     }
 
+                    // Match the panel chrome to the theme so the dark-mode
+                    // settings window doesn't end up with white BG + dark
+                    // visuals (separators / scroll bars would vanish).
+                    let (panel_bg, label_color) = if main_is_dark {
+                        (
+                            egui::Color32::from_rgb(31, 32, 48),
+                            egui::Color32::from_rgb(228, 225, 212),
+                        )
+                    } else {
+                        (egui::Color32::WHITE, egui::Color32::from_rgb(50, 50, 50))
+                    };
                     egui::CentralPanel::default()
-                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
+                        .frame(egui::Frame::new().fill(panel_bg).inner_margin(24.0))
                         .show(vp_ctx, |ui| {
                             let heading = 22.0_f32 * s;
                             let body = 18.0_f32 * s;
-                            let label_color = egui::Color32::from_rgb(50, 50, 50);
                             let active_color = egui::Color32::from_rgb(0, 100, 180);
                             let on_color = egui::Color32::from_rgb(0, 130, 60);
                             let off_color = egui::Color32::from_rgb(140, 140, 140);
