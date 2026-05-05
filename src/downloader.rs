@@ -47,6 +47,26 @@ pub struct DownloadItem {
 
 // ── S3 presigned URL generation (AWS Signature V4) ──
 
+/// AWS Sig v4 URI-path encoding: encode every byte except A-Za-z0-9-_.~ and
+/// `/`. Without this, S3 keys containing `!`, `(`, `)`, spaces, etc. produce
+/// presigned URLs that S3 rejects with 403 because S3 percent-encodes the
+/// path before recomputing the signature on its side. Discovered after the
+/// espeak-ng manifest tried to download files like
+/// `bin/mac/espeak-ng-data/voices/!v/adam` and failed at the first `!`.
+fn aws_uri_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric()
+            || b == b'-' || b == b'_' || b == b'.' || b == b'~' || b == b'/'
+        {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
 fn presign_url(key: &str, expires_secs: u64) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -56,7 +76,7 @@ fn presign_url(key: &str, expires_secs: u64) -> String {
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
 
     let host = S3_ENDPOINT.trim_start_matches("https://");
-    let canonical_uri = format!("/{}/{}", S3_BUCKET, key);
+    let canonical_uri = aws_uri_encode_path(&format!("/{}/{}", S3_BUCKET, key));
     let scope = format!("{}/{}/s3/aws4_request", date_stamp, S3_REGION);
 
     let credential = format!("{}/{}", S3_ACCESS_KEY, scope);
@@ -105,6 +125,21 @@ fn presign_url(key: &str, expires_secs: u64) -> String {
 }
 
 // ── Download logic ──
+
+/// Append a download-failure line to `<data_dir>/download_errors.log`. We need
+/// our own logger because the lib crate can't reach the binary's `log!` macro,
+/// and stderr from a packaged .app goes to nowhere the user can find.
+fn log_download_error(idx: usize, total: usize, key: &str, err: &str) {
+    let log_path = data_dir().join("download_errors.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let _ = writeln!(f, "{} [{}/{}] {} — {}", ts, idx, total, key, err);
+    }
+}
 
 /// Download a single file from S3 to a local path, reporting progress.
 fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) -> Result<(), String> {
@@ -444,6 +479,11 @@ pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
         .spawn(move || {
             for (i, item) in needed.iter().enumerate() {
                 if let Err(e) = download_one(item, &prog, i) {
+                    // Persist to a side log so we can post-mortem failed
+                    // downloads in packaged builds (eprintln stderr from a
+                    // .app bundle goes nowhere visible). The log file lives
+                    // alongside the data dir so it's easy to grep.
+                    log_download_error(i + 1, needed.len(), &item.s3_key, &e);
                     eprintln!("Download failed: {} — {}", item.s3_key, e);
                     if let Ok(mut p) = prog.lock() {
                         p[i].error = Some(e);
