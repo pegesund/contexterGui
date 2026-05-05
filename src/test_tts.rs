@@ -15,13 +15,15 @@
 
 use std::path::PathBuf;
 
+use acatts_rust::downloader;
 use norsk_g2p::synthesis::{EnglishVoice, NorwegianVoice};
 
+/// Mirrors `crate::tts::piper_data_root()` in the GUI binary so the smoke test
+/// reads from the same location the app downloads into. The previous
+/// `dirs::data_dir().join("NorskTale").join("piper")` path was a leftover from
+/// the old branding and pointed at a directory the app never writes to.
 fn piper_data_root() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("NorskTale")
-        .join("piper")
+    downloader::data_dir().join("piper")
 }
 
 #[cfg(target_os = "windows")]

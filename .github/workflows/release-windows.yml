@@ -62,10 +62,12 @@ jobs:
         # contexterGui's Cargo.toml has path deps to sibling repos:
         #   ../../rustSpell/{mtag-rs, language-rs}
         #   ../../contexter-repo/nostos-cognio
+        #   ../../norwegian_piper            (Piper TTS G2P + ONNX inference)
         # On the runner, contexterGui sits at D:\a\contexterGui\contexterGui\,
-        # so the deps resolve to D:\a\rustSpell\... and D:\a\contexter-repo\...
-        # Clone both there. RELEASES_REPO_TOKEN must have `repo` scope (not just
-        # public_repo) since these source repos are private.
+        # so the deps resolve to D:\a\rustSpell\..., D:\a\contexter-repo\...,
+        # D:\a\norwegian_piper\... — clone all three there.
+        # RELEASES_REPO_TOKEN must have `repo` scope (not just public_repo)
+        # since these source repos are private.
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
@@ -81,6 +83,7 @@ jobs:
           # GitHub repo is named 'contexter'; locally it's 'contexter-repo'. Cargo.toml
           # uses the local name, so clone INTO contexter-repo.
           git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/contexter.git" "$base\contexter-repo"
+          git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/norwegian_piper.git" "$base\norwegian_piper"
           Write-Host "Sibling layout:"
           Get-ChildItem $base | ForEach-Object { Write-Host "  $($_.Name)" }
 

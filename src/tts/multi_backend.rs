@@ -77,7 +77,13 @@ impl TtsEngine for MultiBackendTtsEngine {
         // Keep both backends in sync so routing stays consistent on the next speak().
         self.piper.set_voice(name);
         self.system.set_voice(name);
-        // Switching voice should silence any in-flight utterance from the previous backend.
-        let _ = self.active();
+        // Switching voice should silence any in-flight utterance from the
+        // previous backend. The previous `let _ = self.active();` was a no-op
+        // (just discarded the &dyn TtsEngine reference) so a Piper utterance
+        // would keep playing after switching to a system voice and vice
+        // versa. Stop both — the still-active backend has nothing to say
+        // until the next speak() call.
+        self.piper.stop();
+        self.system.stop();
     }
 }
