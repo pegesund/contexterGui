@@ -238,7 +238,13 @@ else
 fi
 
 # ── 7. Notarize ──────────────────────────────────────────────────────────────
-if $NOTARIZE; then
+# Skipped when we're going to vpk-pack (MAKE_DMG=true): vpk replaces the .app
+# entirely with a Velopack-managed bundle, so notarizing this version of the
+# .app is wasted work — vpk's own --notaryProfile handles it for the
+# replacement, and step 8 notarizes the final DMG. Total release-path
+# notarizations: 2 (vpk + DMG), matching Concentrate. Keeping notarization
+# only for the --no-dmg path where this .app IS the artifact users get.
+if $NOTARIZE && ! $MAKE_DMG; then
     step "Notarize Spell.app"
     SUBMIT_ZIP="$(mktemp -d)/Spell.zip"
     ditto -c -k --keepParent "$APP" "$SUBMIT_ZIP"
@@ -252,6 +258,8 @@ if $NOTARIZE; then
         echo "  WARNING: notarization failed — Gatekeeper may block this build"
     fi
     rm -f "$SUBMIT_ZIP"
+elif $NOTARIZE && $MAKE_DMG; then
+    echo "  Skipping standalone-app notarization (deferred to vpk + DMG steps)"
 else
     echo "  Skipping notarization (--no-notarize)"
 fi
