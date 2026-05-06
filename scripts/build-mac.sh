@@ -301,16 +301,24 @@ rm -rf "$DIST/__MACOSX"
 [ -d "$APP" ] || { echo "ERROR: Velopack .app not at expected path $APP"; exit 1; }
 echo "  Substituted Velopack-managed .app into $APP"
 
-# Drop artifacts we don't ship: the Setup.pkg (we distribute via DMG),
-# the Portable.zip (auto-update reads .nupkg, not the .zip), and the
-# duplicate releases.osx-arm64.json (RELEASES-osx-arm64 is the canonical
-# one Velopack downloads). assets.osx-arm64.json must stay — vpk's
-# upload command reads it. Patch it to drop the Installer entry so a
-# later `vpk upload github` won't try to re-upload the deleted .pkg.
-# Mirrors ConcentrateDotNet/build.sh:973-980.
+# Drop artifacts we don't ship: the Setup.pkg (we distribute via DMG)
+# and the Portable.zip (auto-update reads .nupkg, not the .zip).
+#
+# DO NOT delete releases.osx-${ARCH}.json — that's exactly the file the
+# Rust velopack GithubSource downloads from GitHub Releases when
+# checking for updates (`releases.{channel}.json` per
+# velopack/sources/mod.rs::get_git_release_feed). Without it the check
+# returns RemoteIsEmpty even though the .nupkg + RELEASES-osx-arm64 are
+# present. RELEASES-osx-arm64 alone is for legacy compatibility; the
+# JSON is the authoritative manifest.
+#
+# assets.osx-${ARCH}.json stays — vpk's `upload` command reads it (and
+# we don't actually use that command, but keeping it here is harmless
+# and matches Concentrate's layout). Patch it to drop the Installer
+# entry so a future `vpk upload github` wouldn't try to re-upload the
+# deleted .pkg. Mirrors ConcentrateDotNet/build.sh:973-980.
 rm -f "$VELO_OUT/${APP_NAME}-osx-${ARCH}-Setup.pkg" \
-      "$VELO_OUT/${APP_NAME}-osx-${ARCH}-Portable.zip" \
-      "$VELO_OUT/releases.osx-${ARCH}.json"
+      "$VELO_OUT/${APP_NAME}-osx-${ARCH}-Portable.zip"
 python3 -c "
 import json, glob, sys
 for f in glob.glob(sys.argv[1] + '/assets.*.json'):

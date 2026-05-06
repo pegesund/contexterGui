@@ -38,6 +38,11 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 # releases. Pinned to the explicit pre-release tag because crates.io publishes
 # velopack only as `0.0.X-g<sha>` and `0.0` won't pick those up.
 velopack = "=0.0.1589-ga2c5a97"
+# log: brought in transitively by velopack (it uses log::info!/warn!/error!).
+# We declare it explicitly so we can install a forwarder that routes those
+# entries into our LOG_FILE — without an installed logger every velopack
+# diagnostic is silently dropped, leaving us blind when auto-update fails.
+log = "0.4"
 native-tls = "0.2"
 cpal = "0.15"
 rubato = "0.14"

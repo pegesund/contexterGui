@@ -40,6 +40,7 @@ dependencies = [
  "language-rs",
  "libc",
  "libloading 0.8.9",
+ "log",
  "mtag-rs",
  "native-tls",
  "ndarray 0.16.1",

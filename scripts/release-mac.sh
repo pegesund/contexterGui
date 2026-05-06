@@ -217,10 +217,16 @@ if $DO_UPLOAD; then
     VELO_OUT="$PROJECT_DIR/dist/releases/velopack"
     if [ -d "$VELO_OUT" ]; then
         echo "=== Upload Velopack auto-update artifacts ==="
-        # *.nupkg, RELEASES-osx-*, assets.osx-*.json — every file Velopack
-        # needs to find at the GitHub Release tag for in-place updates.
+        # The Rust velopack GithubSource downloads `releases.{channel}.json`
+        # when checking for updates (see
+        # velopack/sources/mod.rs::get_git_release_feed) — that file MUST be
+        # in the upload set or `check_for_updates` returns RemoteIsEmpty even
+        # with the .nupkg + RELEASES-osx-arm64 present. Earlier 0.1.x
+        # releases shipped without it; that's the bug behind the user-
+        # reported "I'm on 0.1.3 and 0.1.4 is live but no update banner".
         for f in "$VELO_OUT"/*.nupkg \
                  "$VELO_OUT"/RELEASES-osx-* \
+                 "$VELO_OUT"/releases.osx-*.json \
                  "$VELO_OUT"/assets.osx-*.json; do
             [ -f "$f" ] || continue
             echo "  uploading $(basename "$f")"

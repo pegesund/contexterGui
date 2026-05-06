@@ -76,11 +76,23 @@ impl UpdateService {
     /// a no-op and `status()` reports `NotInstalled` — caller can construct
     /// unconditionally and the UI hides itself based on `status()`.
     pub fn new() -> Self {
+        crate::log!("UpdateService::new() — repo={}", RELEASES_REPO_URL);
         let source = GithubSource::new(RELEASES_REPO_URL, None, false);
         // None options → defaults; None locator → auto-locate which fails
         // (returns Err) when this exe isn't sitting inside a Velopack-managed
         // app bundle. We treat that as the "NotInstalled" sentinel.
-        let manager = UpdateManager::new(source, None, None).ok();
+        let manager_result = UpdateManager::new(source, None, None);
+        match &manager_result {
+            Ok(m) => crate::log!(
+                "UpdateService: Velopack manager OK — current_version={}",
+                m.get_current_version_as_string()
+            ),
+            Err(e) => crate::log!(
+                "UpdateService: Velopack manager init FAILED — app likely not Velopack-installed. err={}",
+                e
+            ),
+        }
+        let manager = manager_result.ok();
         let current_version = manager.as_ref().map(|m| m.get_current_version_as_string());
 
         let initial = if manager.is_some() {
@@ -113,8 +125,10 @@ impl UpdateService {
     /// No-op when not Velopack-installed.
     pub fn start_polling(&self) {
         if self.inner.manager.is_none() {
+            crate::log!("UpdateService::start_polling — skip (no Velopack manager)");
             return;
         }
+        crate::log!("UpdateService::start_polling — spawning poll thread (interval=6h)");
         let inner = Arc::clone(&self.inner);
         std::thread::Builder::new()
             .name("update-poller".into())
@@ -143,18 +157,37 @@ impl UpdateService {
 
     fn run_check(inner: &Arc<Inner>) {
         let Some(manager) = inner.manager.as_ref() else { return };
+        crate::log!(
+            "UpdateService::run_check — current={}",
+            manager.get_current_version_as_string()
+        );
         Self::set_status(inner, Status::Checking);
         match manager.check_for_updates() {
             Ok(UpdateCheck::UpdateAvailable(info)) => {
                 let version = info.TargetFullRelease.Version.clone();
+                crate::log!(
+                    "UpdateService::run_check — UpdateAvailable target={} file={}",
+                    version, info.TargetFullRelease.FileName
+                );
                 *inner.pending.lock().unwrap() = Some(info);
                 Self::set_status(inner, Status::Available { version });
             }
-            Ok(UpdateCheck::NoUpdateAvailable) | Ok(UpdateCheck::RemoteIsEmpty) => {
+            Ok(UpdateCheck::NoUpdateAvailable) => {
+                crate::log!("UpdateService::run_check — NoUpdateAvailable (already on latest)");
+                *inner.pending.lock().unwrap() = None;
+                Self::set_status(inner, Status::UpToDate);
+            }
+            Ok(UpdateCheck::RemoteIsEmpty) => {
+                crate::log!(
+                    "UpdateService::run_check — RemoteIsEmpty (no releases on the channel \
+                     velopack expected — usually means the RELEASES file is missing or the \
+                     channel name doesn't match the .nupkg's <channel> tag)"
+                );
                 *inner.pending.lock().unwrap() = None;
                 Self::set_status(inner, Status::UpToDate);
             }
             Err(e) => {
+                crate::log!("UpdateService::run_check — ERROR: {}", e);
                 Self::set_status(
                     inner,
                     Status::Error { message: format!("{}", e) },

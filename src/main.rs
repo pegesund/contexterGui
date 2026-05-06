@@ -58,6 +58,12 @@ struct UserSettings {
     /// of `show_completions`. Default true.
     #[serde(default = "default_true")]
     show_grammar: bool,
+    /// Last update version we showed the one-time toast for. Empty string =
+    /// never shown. Bumped to the new version when the user dismisses the
+    /// toast (or when it auto-fades) so it doesn't reappear on every launch
+    /// for a release that's already been seen.
+    #[serde(default)]
+    last_notified_update_version: String,
 }
 
 fn default_true() -> bool { true }
@@ -79,6 +85,7 @@ impl Default for UserSettings {
             word_addin_wizard_dismissed: false,
             show_completions: true,
             show_grammar: true,
+            last_notified_update_version: String::new(),
         }
     }
 }
@@ -1135,6 +1142,17 @@ struct ContextApp {
     /// background thread; UI reads `update_service.status()` to decide
     /// whether to render the update banner / version label in Settings.
     update_service: std::sync::Arc<crate::updates::UpdateService>,
+    /// Last update version we already noted in this process. Mirrors
+    /// `UserSettings::last_notified_update_version` but kept on the app
+    /// to avoid re-reading settings.json every frame. None initially —
+    /// loaded from settings on first frame (so the `Default` works).
+    last_notified_update_version: String,
+    /// `Some(version, deadline)` when an update toast is on screen. Toast
+    /// auto-dismisses at `deadline`. Cleared on click. Drives the
+    /// once-per-version notification — if we already toasted for this
+    /// version (recorded in `last_notified_update_version`), don't show
+    /// it again until a *newer* version appears.
+    update_toast: Option<(String, Instant)>,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -1689,6 +1707,8 @@ impl ContextApp {
                 svc.start_polling();
                 svc
             },
+            last_notified_update_version: saved_settings.last_notified_update_version.clone(),
+            update_toast: None,
         }
     }
 
@@ -6246,6 +6266,26 @@ impl eframe::App for ContextApp {
         // NEVER use request_repaint() (no delay) — causes tight loop with COM calls.
         ctx.request_repaint_after(Duration::from_millis(200));
 
+        // Trigger the one-time update toast when a NEW version (one we
+        // haven't toasted for yet) becomes Available. Show it for 8s,
+        // then auto-dismiss and persist the version so it stays quiet
+        // on subsequent launches. The user always has the gear-icon
+        // dot + the Settings banner as fallback discovery paths.
+        if let crate::updates::Status::Available { version } = self.update_service.status() {
+            if version != self.last_notified_update_version && self.update_toast.is_none() {
+                self.update_toast = Some((
+                    version.clone(),
+                    Instant::now() + Duration::from_secs(8),
+                ));
+                // Persist immediately so a crash or quick close still
+                // advances past this version. Cheap (single small JSON file).
+                self.last_notified_update_version = version.clone();
+                let mut s = load_settings();
+                s.last_notified_update_version = version;
+                save_settings(&s);
+            }
+        }
+
         // Style
         // Clear the default background so transparency works
         // Determine tab indicators
@@ -6564,12 +6604,39 @@ impl eframe::App for ContextApp {
                     self.follow_cursor = !self.follow_cursor;
                 }
 
-                // ⚙ Settings
+                // ⚙ Settings — with a red badge dot on the top-right corner
+                // when an update is available. Click takes the user into the
+                // Settings window where the existing "Last ned og start på
+                // nytt" banner sits. Slack-style — no modal, no startup
+                // popup, just a persistent visual cue.
                 let settings_color = if self.show_settings_window { active } else { inactive };
-                if ax_icon(ui,
+                let update_available = matches!(
+                    self.update_service.status(),
+                    crate::updates::Status::Available { .. }
+                );
+                let gear_resp = ax_icon(
+                    ui,
                     egui::RichText::new("\u{2699}").size(16.0 * s).color(settings_color),
                     self.language.ui_settings(),
-                ).clicked() {
+                );
+                if update_available {
+                    // Paint a small filled circle in the gear icon's
+                    // top-right quadrant. Radius scales with the icon font
+                    // (4 px at 1× scale), and we place it just inside the
+                    // icon's bounding rect so it visually attaches.
+                    let r = gear_resp.rect;
+                    let dot_radius = 4.0 * s;
+                    let dot_center = egui::pos2(
+                        r.right() - dot_radius * 0.5,
+                        r.top() + dot_radius * 0.5,
+                    );
+                    ui.painter().circle_filled(
+                        dot_center,
+                        dot_radius,
+                        egui::Color32::from_rgb(220, 50, 50),
+                    );
+                }
+                if gear_resp.clicked() {
                     self.show_settings_window = !self.show_settings_window;
                 }
 
@@ -6612,6 +6679,57 @@ impl eframe::App for ContextApp {
                 }
             }
         });
+
+        // Update toast — anchored at the bottom of the main popup. Renders
+        // ABOVE the central panel so it visually sits at the bottom edge
+        // of the popup. Auto-dismisses at the deadline; click clears it
+        // immediately and opens Settings where the full update banner
+        // (with the "Last ned og start på nytt" button) lives.
+        if let Some((toast_version, deadline)) = self.update_toast.clone() {
+            if Instant::now() >= deadline {
+                self.update_toast = None;
+            } else {
+                egui::TopBottomPanel::bottom("update_toast")
+                    .frame(
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(0, 100, 180))
+                            .inner_margin(egui::Margin::symmetric(10, 6)),
+                    )
+                    .show(ctx, |ui| {
+                        let resp = ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Ny versjon {} tilgjengelig — klikk ⚙ for å oppdatere",
+                                    toast_version
+                                ))
+                                .size(11.0 * s)
+                                .color(egui::Color32::WHITE),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let close = ui.add(egui::Label::new(
+                                        egui::RichText::new("✕")
+                                            .size(11.0 * s)
+                                            .color(egui::Color32::from_rgb(220, 220, 230)),
+                                    ).sense(egui::Sense::click()));
+                                    if close.clicked() {
+                                        self.update_toast = None;
+                                    }
+                                },
+                            );
+                        });
+                        if resp.response.interact(egui::Sense::click()).clicked() {
+                            self.update_toast = None;
+                            self.show_settings_window = true;
+                        }
+                    });
+                // Force a quick repaint so the deadline-based dismiss
+                // happens promptly rather than waiting for the next
+                // 200 ms tick.
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+        }
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // === Whisper transcription result — shown in separate centered window ===
@@ -9367,6 +9485,13 @@ fn run_download_window(lang_code: &str) {
 }
 
 fn main() -> eframe::Result {
+    // Install the log-crate forwarder so velopack's internal logging
+    // (and any other dep that uses log::*) flows into our LOG_FILE.
+    // Without this every velopack diagnostic during an update check is
+    // silently dropped, which is exactly what was hiding the real cause
+    // of the "auto-update doesn't see new release" bug we hit on 0.1.3.
+    logging::install_log_forwarder();
+
     // VelopackApp must run BEFORE anything else — during an in-place update,
     // the bootstrapper invokes our binary with special args (--veloapp-*),
     // does its work, and exits the process. Touching the platform layer or
