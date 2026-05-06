@@ -32,6 +32,12 @@ rustls-pemfile = "2"
 # wizard). The CA is added to the system keychain via the `security` CLI so
 # Word trusts the localhost HTTPS cert. See src/setup/word_addin_setup.rs.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+# Velopack: cross-platform auto-update framework. VelopackApp::build().run()
+# at the top of main() lets the bootstrapper swap the binary mid-launch during
+# an update; UpdateManager + GithubSource poll pegesund/spell_binaries for new
+# releases. Pinned to the explicit pre-release tag because crates.io publishes
+# velopack only as `0.0.X-g<sha>` and `0.0` won't pick those up.
+velopack = "=0.0.1589-ga2c5a97"
 native-tls = "0.2"
 cpal = "0.15"
 rubato = "0.14"

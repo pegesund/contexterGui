@@ -256,6 +256,72 @@ else
     echo "  Skipping notarization (--no-notarize)"
 fi
 
+# ── 7.5 Velopack pack (auto-update artifacts) ────────────────────────────────
+# Runs after the .app is fully signed + notarized. vpk pack:
+#   - takes our existing .app as input (preserves Frameworks/, Resources/, etc)
+#   - injects the `UpdateMac` bootstrapper into Contents/MacOS/
+#   - emits a .nupkg + RELEASES manifest to dist/releases/velopack/
+#   - emits a Portable.zip whose .app IS the Velopack-managed bundle we
+#     then use as the source for create-dmg below — so the DMG users
+#     install from website/drive ALSO gets the Velopack hooks. Without
+#     this, first-install users would forever stay outside auto-update.
+#
+# Mirrors ConcentrateDotNet/build.sh's vpk-pack-then-DMG-from-output flow.
+# Only runs when we're building a DMG (the release path); --no-dmg dev
+# builds skip this step and ship the unsigned-by-vpk .app directly.
+if $MAKE_DMG; then
+VELO_OUT="$DIST/releases/velopack"
+mkdir -p "$VELO_OUT"
+step "Velopack pack ($ARCH)"
+
+VPK_ARGS=(
+    --packId "$APP_NAME"
+    --packVersion "$VERSION"
+    --packDir "$APP"
+    --mainExe "$APP_NAME"
+    --channel "osx-${ARCH}"
+    --outputDir "$VELO_OUT"
+)
+if $SIGN; then
+    VPK_ARGS+=(--signAppIdentity "$SIGNING_IDENTITY" --signEntitlements "$ENTITLEMENTS")
+fi
+if $NOTARIZE; then
+    VPK_ARGS+=(--notaryProfile "$NOTARY_PROFILE")
+fi
+vpk pack "${VPK_ARGS[@]}"
+
+# Replace our hand-built .app with the Velopack-managed one extracted
+# from the Portable.zip. The Velopack version has UpdateMac + sq.version
+# inside Contents/MacOS/ — required for in-place auto-updates to work.
+PORTABLE_ZIP="$VELO_OUT/${APP_NAME}-osx-${ARCH}-Portable.zip"
+[ -f "$PORTABLE_ZIP" ] || { echo "ERROR: vpk pack didn't produce $PORTABLE_ZIP"; exit 1; }
+rm -rf "$APP"
+unzip -q "$PORTABLE_ZIP" -d "$DIST"
+rm -rf "$DIST/__MACOSX"
+[ -d "$APP" ] || { echo "ERROR: Velopack .app not at expected path $APP"; exit 1; }
+echo "  Substituted Velopack-managed .app into $APP"
+
+# Drop artifacts we don't ship: the Setup.pkg (we distribute via DMG),
+# the Portable.zip (auto-update reads .nupkg, not the .zip), and the
+# duplicate releases.osx-arm64.json (RELEASES-osx-arm64 is the canonical
+# one Velopack downloads). assets.osx-arm64.json must stay — vpk's
+# upload command reads it. Patch it to drop the Installer entry so a
+# later `vpk upload github` won't try to re-upload the deleted .pkg.
+# Mirrors ConcentrateDotNet/build.sh:973-980.
+rm -f "$VELO_OUT/${APP_NAME}-osx-${ARCH}-Setup.pkg" \
+      "$VELO_OUT/${APP_NAME}-osx-${ARCH}-Portable.zip" \
+      "$VELO_OUT/releases.osx-${ARCH}.json"
+python3 -c "
+import json, glob, sys
+for f in glob.glob(sys.argv[1] + '/assets.*.json'):
+    with open(f) as fh: data = json.load(fh)
+    data = [a for a in data if a.get('Type') != 'Installer']
+    with open(f, 'w') as fh: json.dump(data, fh)
+    print(f'  Patched {f} (dropped Installer entry)')
+" "$VELO_OUT"
+echo "  Velopack artifacts: $(ls "$VELO_OUT")"
+fi  # end MAKE_DMG gate around vpk pack
+
 # ── 8. Build DMG ─────────────────────────────────────────────────────────────
 if $MAKE_DMG; then
     step "Build DMG"

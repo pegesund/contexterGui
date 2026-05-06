@@ -208,6 +208,27 @@ if $DO_UPLOAD; then
 
     echo "=== Upload Mac DMG ==="
     gh release upload "$TAG" "$DMG" --repo "$RELEASES_REPO" --clobber
+
+    # Velopack auto-update artifacts produced by build-mac.sh's vpk pack
+    # step. Uploading them is what makes installed apps see the new release
+    # — the Rust UpdateManager polls the repo for these files. Uploads are
+    # best-effort: if the directory doesn't exist (e.g. an old build before
+    # vpk integration), skip silently rather than failing the whole release.
+    VELO_OUT="$PROJECT_DIR/dist/releases/velopack"
+    if [ -d "$VELO_OUT" ]; then
+        echo "=== Upload Velopack auto-update artifacts ==="
+        # *.nupkg, RELEASES-osx-*, assets.osx-*.json — every file Velopack
+        # needs to find at the GitHub Release tag for in-place updates.
+        for f in "$VELO_OUT"/*.nupkg \
+                 "$VELO_OUT"/RELEASES-osx-* \
+                 "$VELO_OUT"/assets.osx-*.json; do
+            [ -f "$f" ] || continue
+            echo "  uploading $(basename "$f")"
+            gh release upload "$TAG" "$f" --repo "$RELEASES_REPO" --clobber
+        done
+    else
+        echo "  (no $VELO_OUT — skipping Velopack uploads; rebuild with current build-mac.sh)"
+    fi
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

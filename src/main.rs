@@ -16,6 +16,7 @@ pub mod user_dict;
 pub mod spelling_scorer;
 pub mod llm_actor;
 pub mod compound_walker;
+pub mod updates;
 
 use bridge::{CursorContext, TextBridge};
 use std::collections::HashMap;
@@ -1130,6 +1131,10 @@ struct ContextApp {
     /// system utility. Used to emit Minimized(true)/Minimized(false) only on
     /// the transition rather than every frame.
     prev_was_writing_app: Option<bool>,
+    /// Velopack auto-update service. Polls pegesund/spell_binaries on a
+    /// background thread; UI reads `update_service.status()` to decide
+    /// whether to render the update banner / version label in Settings.
+    update_service: std::sync::Arc<crate::updates::UpdateService>,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -1677,6 +1682,13 @@ impl ContextApp {
             prev_fg_pid: 0,
             suppress_errors: false,
             prev_was_writing_app: None,
+            update_service: {
+                let svc = std::sync::Arc::new(crate::updates::UpdateService::new());
+                // Kick off background polling immediately. No-op when not
+                // Velopack-installed (dev runs, plain DMG) — see updates.rs.
+                svc.start_polling();
+                svc
+            },
         }
     }
 
@@ -8390,6 +8402,84 @@ impl eframe::App for ContextApp {
                             ui.add_space(12.0);
                             ui.label(egui::RichText::new(format!("Bro: {}", bridge_name))
                                 .size(14.0 * s).color(off_color));
+
+                            // ── Version + auto-update banner ───────────────
+                            // The displayed version prefers Velopack's
+                            // current_version (the *installed* version Velopack
+                            // tracks); falls back to CARGO_PKG_VERSION for
+                            // dev runs / non-Velopack DMGs.
+                            ui.add_space(6.0);
+                            let version_str = self.update_service
+                                .current_version()
+                                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+                            ui.label(
+                                egui::RichText::new(format!("Spell {} — Cognio AS", version_str))
+                                    .size(14.0 * s)
+                                    .color(off_color),
+                            );
+
+                            // Banner (only when there's something to surface).
+                            // Status::NotInstalled is the only state we hide
+                            // entirely — everything else is informative.
+                            match self.update_service.status() {
+                                crate::updates::Status::NotInstalled
+                                | crate::updates::Status::Idle => {}
+                                crate::updates::Status::Checking => {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(egui::RichText::new("Sjekker etter oppdatering …")
+                                            .size(13.0 * s).color(off_color));
+                                    });
+                                }
+                                crate::updates::Status::UpToDate => {
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new("Du har siste versjon.")
+                                        .size(13.0 * s).color(on_color));
+                                }
+                                crate::updates::Status::Available { version } => {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("Ny versjon tilgjengelig: {}", version))
+                                                .size(14.0 * s).strong().color(active_color),
+                                        );
+                                        if ui.button(
+                                            egui::RichText::new("Last ned og start på nytt")
+                                                .size(13.0 * s),
+                                        ).clicked() {
+                                            self.update_service.download_and_restart();
+                                        }
+                                    });
+                                }
+                                crate::updates::Status::Downloading => {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(egui::RichText::new("Laster ned oppdatering …")
+                                            .size(13.0 * s).color(off_color));
+                                    });
+                                }
+                                crate::updates::Status::Ready => {
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new("Oppdatering klar — appen starter på nytt …")
+                                        .size(13.0 * s).color(on_color));
+                                }
+                                crate::updates::Status::Error { message } => {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Kunne ikke sjekke etter oppdatering.")
+                                                .size(13.0 * s).color(off_color),
+                                        ).on_hover_text(message);
+                                        if ui.button(
+                                            egui::RichText::new("Prøv igjen").size(12.0 * s),
+                                        ).clicked() {
+                                            self.update_service.check_now();
+                                        }
+                                    });
+                                }
+                            }
                             }); // end ScrollArea
                         });
                 },
@@ -9277,6 +9367,13 @@ fn run_download_window(lang_code: &str) {
 }
 
 fn main() -> eframe::Result {
+    // VelopackApp must run BEFORE anything else — during an in-place update,
+    // the bootstrapper invokes our binary with special args (--veloapp-*),
+    // does its work, and exits the process. Touching the platform layer or
+    // any I/O before this point would race the bootstrapper. Mirrors what
+    // ConcentrateDotNet does at the top of Program.cs.
+    velopack::VelopackApp::build().run();
+
     let setup_platform = platform::create_platform();
 
     // Clear stale underlines from previous session (saved in document formatting)
