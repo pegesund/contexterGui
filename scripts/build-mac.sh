@@ -83,12 +83,52 @@ bundle_dylib() {
 }
 
 retry_codesign() {
-    local max=3 attempt=1
+    local max=3 delay=15 attempt=1
     while [ $attempt -le $max ]; do
         if codesign "$@"; then return 0; fi
+        [ $attempt -lt $max ] && echo "  codesign failed (attempt $attempt/$max), retrying in ${delay}s..." && sleep $delay && delay=$((delay * 2))
         attempt=$((attempt + 1))
-        [ $attempt -le $max ] && sleep $((10 * attempt))
     done
+    echo "  ERROR: codesign failed after $max attempts (timestamp server may be unavailable)"
+    return 1
+}
+
+# Generic retry wrapper for any command. Mirrors Concentrate's retry_cmd
+# (build.sh:90). Used for vpk pack — its internal `notarytool submit` step
+# is the most fragile part of the release because it depends on Apple's
+# notarization service being reachable + responsive. A 30s connect timeout
+# from Apple is common; one retry usually clears it.
+# Usage: retry_cmd "Label" cmd [args...]
+retry_cmd() {
+    local label="$1"; shift
+    local max=3 delay=30 attempt=1
+    while [ $attempt -le $max ]; do
+        echo "  $label (attempt $attempt/$max)..."
+        if "$@"; then return 0; fi
+        [ $attempt -lt $max ] && echo "  Failed — retrying in ${delay}s..." && sleep $delay && delay=$((delay * 2))
+        attempt=$((attempt + 1))
+    done
+    echo "  ERROR: $label failed after $max attempts"
+    return 1
+}
+
+# Retry wrapper for `xcrun notarytool submit`. Apple's notarization API
+# regularly returns HTTPClientError.connectTimeout — a single failed attempt
+# shouldn't kill a release. Mirrors Concentrate's retry_notarize
+# (distribute.sh:40).
+# Usage: retry_notarize <path-to-zip-or-dmg>
+retry_notarize() {
+    local target="$1"
+    local max=3 delay=30 attempt=1
+    while [ $attempt -le $max ]; do
+        echo "  Notarizing $(basename "$target") (attempt $attempt/$max)..."
+        if xcrun notarytool submit "$target" --keychain-profile "$NOTARY_PROFILE" --wait; then
+            return 0
+        fi
+        [ $attempt -lt $max ] && echo "  Retrying in ${delay}s..." && sleep $delay && delay=$((delay * 2))
+        attempt=$((attempt + 1))
+    done
+    echo "  ERROR: notarization failed after $max attempts"
     return 1
 }
 
@@ -248,8 +288,7 @@ if $NOTARIZE && ! $MAKE_DMG; then
     step "Notarize Spell.app"
     SUBMIT_ZIP="$(mktemp -d)/Spell.zip"
     ditto -c -k --keepParent "$APP" "$SUBMIT_ZIP"
-    if xcrun notarytool submit "$SUBMIT_ZIP" \
-        --keychain-profile "$NOTARY_PROFILE" --wait; then
+    if retry_notarize "$SUBMIT_ZIP"; then
         echo "  Stapling…"
         xcrun stapler staple "$APP"
         echo "  Verifying staple…"
@@ -296,7 +335,7 @@ fi
 if $NOTARIZE; then
     VPK_ARGS+=(--notaryProfile "$NOTARY_PROFILE")
 fi
-vpk pack "${VPK_ARGS[@]}"
+retry_cmd "Velopack pack ($ARCH)" vpk pack "${VPK_ARGS[@]}"
 
 # Replace our hand-built .app with the Velopack-managed one extracted
 # from the Portable.zip. The Velopack version has UpdateMac + sq.version
@@ -377,9 +416,7 @@ if $MAKE_DMG; then
     fi
 
     if $NOTARIZE; then
-        echo "  Notarizing DMG…"
-        if xcrun notarytool submit "$DMG" \
-            --keychain-profile "$NOTARY_PROFILE" --wait; then
+        if retry_notarize "$DMG"; then
             xcrun stapler staple "$DMG"
             echo "  DMG notarized & stapled"
         else
