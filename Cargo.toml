@@ -95,6 +95,13 @@ features = [
     "Storage_Streams",
 ]
 
+# winresource compiles a Win32 resource that embeds assets/Spell.ico into
+# acatts-rust.exe so Explorer + the taskbar show the Spell icon instead of
+# the generic blank-document icon. Maintained fork of the unmaintained
+# `winres` crate. Only used on Windows builds (build.rs gates on cfg).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [[bin]]
 name = "native_bridge"
 path = "src/bin/native_bridge.rs"
