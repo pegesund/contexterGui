@@ -117,8 +117,7 @@ impl AccessibilityBridge {
     /// 3. If focused element is wrong (terminal, etc.), re-read from saved element
     fn get_raw_text(&self) -> Option<RawCursorText> {
         unsafe {
-            let uia: IUIAutomation =
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let uia = crate::platform::windows::cached_uia()?;
             let our_pid = std::process::id();
 
             // Step 0: If foreground app changed, clear saved element so we discover
@@ -197,8 +196,7 @@ impl AccessibilityBridge {
 
     fn read_context_via_uia(&self) -> Option<String> {
         unsafe {
-            let uia: IUIAutomation =
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let uia = crate::platform::windows::cached_uia()?;
             let focused = uia.GetFocusedElement().ok()?;
 
             if let Ok(pattern2) =
@@ -225,9 +223,9 @@ impl AccessibilityBridge {
     /// Replace word at cursor — try UIA TextPattern2, fall back to keyboard
     fn replace_word_impl(&self, replace_text: &str) -> bool {
         unsafe {
-            let uia: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-                Ok(u) => u,
-                Err(_) => {
+            let uia = match crate::platform::windows::cached_uia() {
+                Some(u) => u,
+                None => {
                     select_word_keyboard();
                     send_string(replace_text);
                     return true;
@@ -310,8 +308,7 @@ impl AccessibilityBridge {
     /// Get a TextPattern2 from any reachable element — tries focused, then HWND fallback
     fn get_text_pattern(&self) -> Option<IUIAutomationTextPattern2> {
         unsafe {
-            let uia: IUIAutomation =
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let uia = crate::platform::windows::cached_uia()?;
 
             // Try focused element first
             if let Ok(focused) = uia.GetFocusedElement() {

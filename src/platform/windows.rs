@@ -51,12 +51,37 @@ impl WindowsPlatform {
     }
 }
 
+/// Per-thread cached `IUIAutomation`. Recreating the in-proc COM server on
+/// every poll (5 Hz on `sel-poller`, 10 Hz on the egui repaint thread that
+/// drives `accessibility_win.rs`) was the dominant cause of "Spell makes
+/// my whole PC sluggish after a while" reports. Each `CoCreateInstance` of
+/// `CUIAutomation` forces UIA to spin up provider proxies in EVERY target
+/// process Spell queries (Word, Chrome, Edge, ...). Those proxies don't
+/// drop instantly and accumulate handles in *target* apps — invisible in
+/// Spell.exe's Task Manager memory column but lethal to system
+/// responsiveness. UIA is a free-threaded interface; one cached instance
+/// per thread is the documented Microsoft pattern.
+pub fn cached_uia() -> Option<windows::Win32::UI::Accessibility::IUIAutomation> {
+    use std::cell::RefCell;
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
+    thread_local! {
+        static UIA: RefCell<Option<IUIAutomation>> = const { RefCell::new(None) };
+    }
+    UIA.with(|cell| {
+        if cell.borrow().is_none() {
+            let new = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok();
+            *cell.borrow_mut() = new;
+        }
+        cell.borrow().clone()
+    })
+}
+
 /// Poll selected text from the focused UIA element using TextPattern.GetSelection.
 /// Works for Word, Notepad, Chrome, and any UIA-compliant app.
 /// Returns None if no text is selected or our app has focus.
 fn poll_uia_selected_text() -> Option<String> {
     unsafe {
-        use windows::Win32::System::Com::*;
         use windows::Win32::UI::Accessibility::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
         use windows::core::Interface;
@@ -69,8 +94,7 @@ fn poll_uia_selected_text() -> Option<String> {
             return None;
         }
 
-        let uia: IUIAutomation =
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let uia = cached_uia()?;
         let focused = uia.GetFocusedElement().ok()?;
 
         // Try TextPattern (works for most apps)
@@ -124,7 +148,7 @@ impl PlatformServices for WindowsPlatform {
             } {
                 let mut exe_buf = [0u16; 260];
                 let mut exe_len = exe_buf.len() as u32;
-                if unsafe {
+                let result = if unsafe {
                     QueryFullProcessImageNameW(
                         handle,
                         PROCESS_NAME_FORMAT(0),
@@ -138,7 +162,18 @@ impl PlatformServices for WindowsPlatform {
                     full.rsplit('\\').next().unwrap_or("").to_lowercase()
                 } else {
                     String::new()
-                }
+                };
+                // CRITICAL: the `windows` crate's HANDLE has NO Drop impl —
+                // OpenProcess returns a kernel handle that must be closed
+                // explicitly. Without this CloseHandle, every call to
+                // foreground_app() (~10 Hz from egui's repaint loop) leaks
+                // one kernel handle. After ~30 minutes of use the handle
+                // table gets congested and the whole desktop slows down,
+                // even though Spell.exe's memory footprint looks normal.
+                // Add the "Handles" column under Task Manager > Details to
+                // see this climb monotonically while Spell runs.
+                let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
+                result
             } else {
                 String::new()
             }
