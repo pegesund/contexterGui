@@ -1,3 +1,10 @@
+// Suppress the console window on Windows release builds. Without this attr,
+// every launch of Spell.exe pops a black cmd window because Rust links GUI
+// binaries as console subsystem by default. Mac/Linux are unaffected.
+// `not(debug_assertions)` keeps the console attached in dev builds so panic
+// messages and eprintln go somewhere visible while developing.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 #[macro_use]
 pub mod logging;
 
