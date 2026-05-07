@@ -94,6 +94,14 @@ jobs:
 
       - name: Cache Cargo registry + target
         uses: Swatinem/rust-cache@v2
+        # Don't fail the release when the post-step tries to save a cache key
+        # that already exists. GitHub's cache backend returns 409 Conflict on
+        # duplicate keys — Swatinem's post-action surfaces that as a step
+        # failure, which marks the whole release red even though every build
+        # artifact (Setup.exe, .nupkg, RELEASES) shipped fine. v0.1.6 hit this
+        # because its commit only changed scripts/build-mac.sh — Cargo.lock
+        # didn't change, so the cache key matched v0.1.5's already-saved entry.
+        continue-on-error: true
         with:
           workspaces: ". -> target"
           key: spell-win-${{ hashFiles('**/Cargo.lock') }}
