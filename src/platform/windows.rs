@@ -252,6 +252,16 @@ impl PlatformServices for WindowsPlatform {
         .as_str()
     }
 
+    // Windows AX bridge already nudges the caret by +4 px in
+    // bridge/accessibility_win.rs::get_caret_pos (`gui.rcCaret.bottom + 4`).
+    // The default 189 px in the trait was tuned for Word's task pane and put
+    // the popup ~190 px below the line — far enough that it dropped well
+    // below the user's typing area on narrow editors. Mac sits at 30 (net
+    // ~80 px below caret bottom after the +49 platform adjustment); match
+    // that net distance here so the popup sticks close to the line you're
+    // writing on without overlapping it.
+    fn caret_offset_below(&self) -> f32 { 30.0 }
+
     fn read_selected_text(&self) -> Option<String> {
         if let Ok(lock) = self.cached_selected_text.lock() {
             lock.clone()
