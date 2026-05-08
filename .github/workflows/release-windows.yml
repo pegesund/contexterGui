@@ -79,11 +79,45 @@ jobs:
           $base = Split-Path -Parent (Split-Path -Parent $env:GITHUB_WORKSPACE)
           # $base = D:\a
           Write-Host "Cloning sibling repos under $base"
-          git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/rustSpell.git" "$base\rustSpell"
+
+          # Skip Git LFS smudge during clone. Two of the sibling repos
+          # have LFS-tracked assets that the Spell binary build does NOT
+          # touch:
+          #   - contexter/training-data/minilm-onnx/*   (training data,
+          #     not embedded at compile time)
+          #   - norwegian_piper/data/de_DE-thorsten-medium.onnx  (German
+          #     voice; Spell ships only Norwegian + English voices and
+          #     they're downloaded at runtime from Cognio's S3, not
+          #     bundled by the build)
+          # Without this, every CI run consumes LFS bandwidth from
+          # pegesund's account budget. v0.1.12's release run failed
+          # with "This repository exceeded its LFS budget" and the
+          # checkout aborted at training-data/minilm-onnx/.gitattributes
+          # (which is itself an LFS pointer — chicken-and-egg). Setting
+          # GIT_LFS_SKIP_SMUDGE makes git install pointer files in
+          # place of the content; cargo build never reads those paths
+          # so the bundle is unchanged.
+          $env:GIT_LFS_SKIP_SMUDGE = "1"
+
+          # Helper: clone-and-fail-loudly. The earlier version chained
+          # three clones with no exit-code checks, so a single LFS
+          # error would print noise but the step still continued —
+          # we only noticed because $LASTEXITCODE happened to be 1
+          # at the very end. Make each failure explicit instead.
+          function Clone-Sibling($url, $dest) {
+              git clone --depth 1 $url $dest
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Failed to clone $url into $dest (exit $LASTEXITCODE)"
+                  exit 1
+              }
+          }
+
+          Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/rustSpell.git" "$base\rustSpell"
           # GitHub repo is named 'contexter'; locally it's 'contexter-repo'. Cargo.toml
           # uses the local name, so clone INTO contexter-repo.
-          git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/contexter.git" "$base\contexter-repo"
-          git clone --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/norwegian_piper.git" "$base\norwegian_piper"
+          Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/contexter.git" "$base\contexter-repo"
+          Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/norwegian_piper.git" "$base\norwegian_piper"
+
           Write-Host "Sibling layout:"
           Get-ChildItem $base | ForEach-Object { Write-Host "  $($_.Name)" }
 
