@@ -1,5 +1,34 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Milliseconds since the user's last keyboard or mouse input, system-wide.
+///
+/// Used to gate the high-frequency UIA / COM polling that otherwise runs
+/// at 5–10 Hz forever. When the user leaves their laptop idle for an
+/// hour, those polls amount to tens of thousands of cross-process round
+/// trips into whatever app is foreground (typically Word) — UIA provider
+/// state accumulates in the target process and the whole desktop slows
+/// down. Pausing the polls when there's been no input for a while keeps
+/// the system fresh.
+///
+/// `GetLastInputInfo` is itself a cheap kernel call (~µs) that doesn't
+/// allocate handles, so calling it on every poll iteration is free.
+pub fn idle_millis() -> u32 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    unsafe {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if GetLastInputInfo(&mut info).as_bool() {
+            GetTickCount().saturating_sub(info.dwTime)
+        } else {
+            0
+        }
+    }
+}
 
 /// When running from a packaged Spell-windows-x64 zip extraction, return the
 /// absolute path to a DLL bundled at `<Spell.exe>/Frameworks/<name>`. Returns
@@ -16,6 +45,15 @@ fn bundled_dll(name: &str) -> Option<String> {
 pub struct WindowsPlatform {
     /// Cached selected text — polled via UIA while external app has focus
     cached_selected_text: Arc<Mutex<Option<String>>>,
+    /// Memoized result of `foreground_app()` valid for ~150ms. The egui
+    /// repaint loop calls foreground_app on every frame (5–10 Hz);
+    /// without this cache each frame did GetForegroundWindow +
+    /// OpenProcess + QueryFullProcessImageNameW + CloseHandle. Even
+    /// with proper CloseHandle (added in dbe90b3) that's millions of
+    /// kernel-handle alloc/free cycles per hour, plus full process-
+    /// image-path queries — wasted work because the foreground app
+    /// rarely changes within 150ms.
+    cached_fg: Mutex<Option<(Instant, ForegroundApp)>>,
 }
 
 impl WindowsPlatform {
@@ -24,7 +62,18 @@ impl WindowsPlatform {
         let sel_clone = Arc::clone(&cached_selected_text);
 
         // Background thread polls selected text via UIA every 200ms
-        // (same pattern as Mac's fg-poller)
+        // (same pattern as Mac's fg-poller).
+        //
+        // Idle gate: when the user hasn't touched the keyboard or mouse
+        // for >10s, skip the UIA call entirely. UIA's GetFocusedElement
+        // and TextPattern.GetSelection are cross-process round-trips
+        // that accumulate provider-side bookkeeping in the target app;
+        // leaving them firing 5×/sec for hours while the user is away
+        // was the dominant cause of "Spell makes my whole PC slow after
+        // an hour idle" reports. Resumes polling on the very next tick
+        // after activity, so there's no perceptible latency for the
+        // user — the worst case is a 200ms staleness on the selected
+        // text the moment they return.
         std::thread::Builder::new()
             .name("sel-poller".into())
             .spawn(move || {
@@ -34,20 +83,24 @@ impl WindowsPlatform {
                     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
                 }
                 loop {
-                    // Only poll when an external app has focus (not our window)
-                    let sel = poll_uia_selected_text();
-                    if let Ok(mut lock) = sel_clone.lock() {
-                        if sel.is_some() {
-                            *lock = sel;
+                    if idle_millis() < 10_000 {
+                        let sel = poll_uia_selected_text();
+                        if let Ok(mut lock) = sel_clone.lock() {
+                            if sel.is_some() {
+                                *lock = sel;
+                            }
+                            // Keep last known selection when our app gets focus
                         }
-                        // Keep last known selection when our app gets focus
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::thread::sleep(Duration::from_millis(200));
                 }
             })
             .expect("Failed to spawn selection poller");
 
-        Self { cached_selected_text }
+        Self {
+            cached_selected_text,
+            cached_fg: Mutex::new(None),
+        }
     }
 }
 
@@ -134,6 +187,21 @@ impl PlatformServices for WindowsPlatform {
             PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
+        // Hot path: serve from cache if the last query was <150ms ago.
+        // egui repaints at 5–10 Hz so the cache hits ~95% of the time
+        // without harming app-switch latency (one frame ≈ 100ms feels
+        // instant). Saves an OpenProcess + QueryFullProcessImageName +
+        // CloseHandle round-trip per cached frame; over the course of
+        // an idle hour that's tens of thousands of kernel-handle
+        // alloc/free cycles eliminated.
+        if let Ok(cache) = self.cached_fg.lock() {
+            if let Some((when, ref app)) = *cache {
+                if when.elapsed() < Duration::from_millis(150) {
+                    return app.clone();
+                }
+            }
+        }
+
         let fg = unsafe { GetForegroundWindow() };
         let mut pid = 0u32;
         unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)); }
@@ -181,12 +249,17 @@ impl PlatformServices for WindowsPlatform {
             String::new()
         };
 
-        ForegroundApp {
+        let result = ForegroundApp {
             handle: fg.0 as isize,
             pid,
             title,
             exe_name: exe,
+        };
+        // Memoize for ~150ms — see cache check at top of fn.
+        if let Ok(mut cache) = self.cached_fg.lock() {
+            *cache = Some((Instant::now(), result.clone()));
         }
+        result
     }
 
     fn classify_app(&self, app: &ForegroundApp) -> AppKind {

@@ -482,6 +482,30 @@ impl BridgeManager {
     }
 
     fn read_context(&mut self) -> Option<CursorContext> {
+        // Idle gate (Windows): when the user hasn't moved the mouse or
+        // touched the keyboard for >10s, there's nothing new to read.
+        // Skip the per-frame bridge poll so we stop hammering target
+        // apps with cross-process COM (Word) / UIA (Notepad/Sticky/...)
+        // reads. Each read is a context switch + provider work in the
+        // target process; firing at the egui repaint cadence (5–10 Hz)
+        // for hours is what made user PCs slow down.
+        //
+        // Wake-up is instant: any keypress or mouse move resets
+        // GetLastInputInfo's clock to ~0, so the very next frame after
+        // activity polls normally. The trade-off is at most 100–200ms
+        // of staleness on cursor context the moment they come back —
+        // imperceptible compared to typing latency anyway.
+        //
+        // macOS doesn't need this: AX is in-process and ARC-managed,
+        // so its polling cost is amortised by the kernel and doesn't
+        // accumulate cross-process bookkeeping.
+        #[cfg(target_os = "windows")]
+        {
+            if crate::platform::windows::idle_millis() > 10_000 {
+                return self.last_context.clone();
+            }
+        }
+
         if self.last_check.elapsed() > Duration::from_secs(5) {
             self.last_check = Instant::now();
             let has_word = self.bridges.iter().any(|b| b.name().contains("Word"));
