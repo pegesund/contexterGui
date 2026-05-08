@@ -287,6 +287,30 @@ jobs:
               }
           }
 
+          # Verify the runtime bootstrap file is present. The Rust loader
+          # uses boot.prc as its marker for "this is a valid SWI home"
+          # (nostos-cognio swipl_checker.rs); without it SWI panics at
+          # PL_initialise with "Could not find system resources" and the
+          # grammar actor dies, leaving every document showing
+          # "No errors found" for end users. Fail the build before we
+          # ship a release that crashes at startup.
+          $swiplRequired = @("boot.prc", "library", "boot")
+          $swiplMissing = @()
+          foreach ($item in $swiplRequired) {
+              if (-not (Test-Path "$bundleDir\Resources\swipl\$item")) {
+                  $swiplMissing += $item
+              }
+          }
+          if ($swiplMissing.Count -gt 0) {
+              Write-Host "Files actually in Resources\swipl\:"
+              Get-ChildItem "$bundleDir\Resources\swipl" | ForEach-Object {
+                  Write-Host "  $($_.Name)"
+              }
+              Write-Error "Missing required SWI-Prolog home files in Resources\swipl\: $($swiplMissing -join ', ')"
+              exit 1
+          }
+          Write-Host "SWI-Prolog home verified: boot.prc + library/ + boot/ all present"
+
           # ONNX Runtime
           Copy-Item "C:\onnxruntime\onnxruntime-win-x64-${{ env.ONNX_VERSION }}\lib\onnxruntime.dll" "$bundleDir\Frameworks\"
 
