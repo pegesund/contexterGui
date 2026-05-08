@@ -216,15 +216,48 @@ jobs:
               Copy-Item $_.FullName "$bundleDir\Frameworks\"
           }
 
+          # SWI 9.2.9's Windows installer ships libgmp + libgcc_s_seh +
+          # libwinpthread but NOT libstdc++-6.dll, even though libswipl is
+          # built with g++ and links against it. Fall back to other MinGW-w64
+          # toolchains that exist on the runner. Order matters — the first
+          # one found wins. Git for Windows is the most reliable source
+          # (always preinstalled by GitHub Actions); MSYS2 + chocolatey
+          # mingw are listed in case the runner image changes. As a last
+          # resort, scan the filesystem (bounded to C:\, ~5s on a fresh
+          # runner) so future image churn doesn't silently break us.
           $requiredDeps = @("libswipl.dll", "libgmp-10.dll",
                             "libwinpthread-1.dll", "libgcc_s_seh-1.dll",
                             "libstdc++-6.dll")
+          $fallbackDirs = @(
+              "C:\Program Files\Git\mingw64\bin",
+              "C:\msys64\mingw64\bin",
+              "C:\msys64\ucrt64\bin",
+              "C:\mingw64\bin",
+              "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
+          )
           foreach ($dep in $requiredDeps) {
-              if (-not (Test-Path "$bundleDir\Frameworks\$dep")) {
-                  $msys2Path = "C:\msys64\mingw64\bin\$dep"
-                  if (Test-Path $msys2Path) {
-                      Write-Host "  $dep not in swipl\bin — sourcing from MSYS2: $msys2Path"
-                      Copy-Item $msys2Path "$bundleDir\Frameworks\"
+              if (Test-Path "$bundleDir\Frameworks\$dep") { continue }
+
+              $sourced = $false
+              foreach ($dir in $fallbackDirs) {
+                  $candidate = Join-Path $dir $dep
+                  if (Test-Path $candidate) {
+                      Write-Host "  $dep not in swipl\bin — sourcing from $dir"
+                      Copy-Item $candidate "$bundleDir\Frameworks\"
+                      $sourced = $true
+                      break
+                  }
+              }
+
+              if (-not $sourced) {
+                  Write-Host "  $dep not in any known fallback dir — scanning C:\..."
+                  $hit = Get-ChildItem -Path "C:\" -Filter $dep -Recurse `
+                      -ErrorAction SilentlyContinue -Force |
+                      Where-Object { $_.FullName -notlike "*\Windows\WinSxS\*" } |
+                      Select-Object -First 1 -ExpandProperty FullName
+                  if ($hit) {
+                      Write-Host "  Found via filesystem scan: $hit"
+                      Copy-Item $hit "$bundleDir\Frameworks\"
                   }
               }
           }
