@@ -89,6 +89,12 @@ features = [
     "Win32_System_Threading",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
+    # Win32_System_SystemInformation provides GetTickCount, used by
+    # platform/windows.rs::idle_millis() to compute time-since-last-input.
+    # The function is paired with GetLastInputInfo (in
+    # Win32_UI_Input_KeyboardAndMouse) to gate the high-frequency UIA/COM
+    # polling when the user is idle.
+    "Win32_System_SystemInformation",
     "Media_Ocr",
     "Graphics_Imaging",
     "Globalization",
