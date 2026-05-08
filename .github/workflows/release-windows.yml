@@ -185,17 +185,65 @@ jobs:
           # Binary
           Copy-Item "target\x86_64-pc-windows-msvc\release\acatts-rust.exe" "$bundleDir\Spell.exe"
 
-          # SWI-Prolog DLLs into Frameworks/
+          # SWI-Prolog DLLs into Frameworks/.
+          # libswipl.dll's MinGW-w64 dep chain is: libgmp-10, libwinpthread-1,
+          # libgcc_s_seh-1, libstdc++-6. The previous code globbed each name
+          # with -ErrorAction SilentlyContinue, which silently skipped any
+          # that didn't match — and at least one v0.1.x release shipped
+          # without libstdc++-6.dll. End-user symptom: app launches fine but
+          # every document shows "No errors found" because the grammar actor
+          # panics at startup with Windows err 126 (ERROR_MOD_NOT_FOUND) when
+          # LoadLibraryExW can't resolve the missing dep. Auto-update can't
+          # rescue the user — they need a fresh installer.
+          #
+          # Two-part fix:
+          #   1. Copy ALL .dll from swipl\bin (eliminates name-glob guesswork,
+          #      ~30MB heavier — acceptable to never ship a broken bundle).
+          #   2. Fall back to MSYS2's mingw64 bin for any missing required
+          #      dep. github-hosted windows-latest runners have MSYS2
+          #      preinstalled at C:\msys64\mingw64\bin\ — same MinGW-w64
+          #      toolchain that built libswipl, so the runtime DLLs are
+          #      ABI-compatible.
+          #   3. Verify all 5 required deps are in Frameworks\ before vpk
+          #      pack runs. Fail loudly if any are missing — never ship a
+          #      bundle that will crash at startup.
           $swiplBin = "C:\Program Files\swipl\bin"
-          Copy-Item "$swiplBin\libswipl.dll" "$bundleDir\Frameworks\"
-          Get-ChildItem "$swiplBin\libgmp*.dll" | ForEach-Object {
+          Write-Host "SWI-Prolog bin DLLs:"
+          Get-ChildItem "$swiplBin\*.dll" | ForEach-Object {
+              Write-Host ("  {0,-40} {1:N0}" -f $_.Name, $_.Length)
+          }
+          Get-ChildItem "$swiplBin\*.dll" | ForEach-Object {
               Copy-Item $_.FullName "$bundleDir\Frameworks\"
           }
-          foreach ($dep in @("libwinpthread*.dll", "libgcc_s*.dll", "libstdc++*.dll")) {
-              Get-ChildItem "$swiplBin\$dep" -ErrorAction SilentlyContinue | ForEach-Object {
-                  Copy-Item $_.FullName "$bundleDir\Frameworks\"
+
+          $requiredDeps = @("libswipl.dll", "libgmp-10.dll",
+                            "libwinpthread-1.dll", "libgcc_s_seh-1.dll",
+                            "libstdc++-6.dll")
+          foreach ($dep in $requiredDeps) {
+              if (-not (Test-Path "$bundleDir\Frameworks\$dep")) {
+                  $msys2Path = "C:\msys64\mingw64\bin\$dep"
+                  if (Test-Path $msys2Path) {
+                      Write-Host "  $dep not in swipl\bin — sourcing from MSYS2: $msys2Path"
+                      Copy-Item $msys2Path "$bundleDir\Frameworks\"
+                  }
               }
           }
+
+          $missing = @()
+          foreach ($dep in $requiredDeps) {
+              if (-not (Test-Path "$bundleDir\Frameworks\$dep")) {
+                  $missing += $dep
+              }
+          }
+          if ($missing.Count -gt 0) {
+              Write-Host "Files actually in Frameworks\:"
+              Get-ChildItem "$bundleDir\Frameworks\*.dll" | ForEach-Object {
+                  Write-Host "  $($_.Name)"
+              }
+              Write-Error "Missing required SWI-Prolog deps in Frameworks\: $($missing -join ', ')"
+              exit 1
+          }
+          Write-Host "All $($requiredDeps.Count) required SWI-Prolog deps verified in Frameworks\"
 
           # SWI-Prolog home: copy ABI, boot, boot.prc, library, app, customize, swipl.home
           # Skip bin/ (handled above), doc/, demo/, include/ (saves space)
