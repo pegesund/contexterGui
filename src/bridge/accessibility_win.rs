@@ -220,8 +220,35 @@ impl AccessibilityBridge {
         }
     }
 
+    /// Restore the target app's HWND to the foreground before doing any UIA
+    /// or keyboard-injection work. Without this, when the user clicks a
+    /// suggestion in Spell's window, focus shifts TO Spell, and either
+    /// `GetFocusedElement()` returns Spell's own UI (so TextPattern2 ops
+    /// run on Spell instead of the user's text field) or the keyboard
+    /// fallback types into Spell. End-user symptom in Notepad/Sticky Notes:
+    /// click a suggestion → nothing happens in the target app. Word COM
+    /// is unaffected because COM doesn't depend on focus.
+    ///
+    /// SetForegroundWindow only succeeds if the calling thread has the
+    /// input focus; we just got it from the user's click, so it works.
+    /// The 80ms sleep gives Windows time to actually transfer focus
+    /// before subsequent UIA reads — empirically necessary on Win11.
+    fn restore_target_foreground(&self) {
+        let target = self.target_hwnd.get();
+        if target == 0 { return; }
+        unsafe {
+            let hwnd = HWND(target as *mut _);
+            let _ = SetForegroundWindow(hwnd);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+
     /// Replace word at cursor — try UIA TextPattern2, fall back to keyboard
     fn replace_word_impl(&self, replace_text: &str) -> bool {
+        // The user clicked a suggestion in our window, so we just stole
+        // focus from the target app. Hand it back before reading the
+        // focused element or sending keystrokes.
+        self.restore_target_foreground();
         unsafe {
             let uia = match crate::platform::windows::cached_uia() {
                 Some(u) => u,
@@ -364,6 +391,11 @@ impl AccessibilityBridge {
         bridge_log(&format!("=== find_replace_via_uia ==="));
         bridge_log(&format!("FIND: '{}'", find));
         bridge_log(&format!("REPLACE: '{}'", replace));
+        // Same rationale as replace_word_impl: hand focus back to the
+        // target app before searching/replacing — get_text_pattern() falls
+        // back to GetFocusedElement, which would return our window after
+        // the user clicked a grammar fix suggestion.
+        self.restore_target_foreground();
         unsafe {
             let pattern = match self.get_text_pattern() {
                 Some(p) => p,

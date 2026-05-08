@@ -550,12 +550,18 @@ impl BridgeManager {
             return self.last_context.clone();
         }
 
-        // Only activate for supported programs: Word, Edge, Chrome, Notepad.
-        // On macOS also handle AppKind::Other via the AX fallback bridge
-        // (Teams, generic Electron/Cocoa/web text fields).
+        // Activate for: Word, browsers (Edge/Chrome/Firefox/...), Notepad, and
+        // — on both macOS and Windows — any other foreground app via the
+        // platform AX bridge. Earlier the Windows path bailed for AppKind::Other,
+        // so apps like Sticky Notes / WordPad / WhatsApp got no cursor tracking
+        // and no completions even though their text fields are UIA-readable.
+        // The AX bridge already handles "anything UIA exposes" via
+        // GetFocusedElement → TextPattern2 → cached fallback, so let it try.
         let is_notepad = app_kind == platform::AppKind::Notepad;
-        let is_supported = word_is_foreground || is_browser || is_notepad
-            || cfg!(target_os = "macos");
+        let is_other = app_kind == platform::AppKind::Other;
+        let use_ax_bridge = is_notepad
+            || (cfg!(any(target_os = "macos", target_os = "windows")) && is_other);
+        let is_supported = word_is_foreground || is_browser || use_ax_bridge;
         if !is_supported {
             return self.last_context.clone();
         }
@@ -612,8 +618,12 @@ impl BridgeManager {
             return self.last_context.clone();
         }
 
-        // --- NOTEPAD: uses Accessibility bridge ---
-        if is_notepad {
+        // --- WINDOWS AX BRIDGE: Notepad + any other UIA-accessible app ---
+        // Covers Notepad, Sticky Notes, WordPad, Mail, search bars, generic
+        // Win32 + UWP text fields. The bridge tries TextPattern2 (with caret),
+        // then TextPattern v1 (Edge textareas), then ValuePattern as fallback.
+        #[cfg(target_os = "windows")]
+        if is_notepad || is_other {
             self.last_user_was_browser = false;
             for bridge in self.bridges.iter() {
                 if bridge.name() == "Accessibility" {
@@ -625,7 +635,8 @@ impl BridgeManager {
                     if let Some(ctx) = bridge.read_context() {
                         if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                             if self.active_idx != i {
-                                log!("Bridge switch: {} → Accessibility", self.bridges[self.active_idx].name());
+                                log!("Bridge switch: {} → Accessibility (kind={:?})",
+                                    self.bridges[self.active_idx].name(), app_kind);
                                 self.bridge_switched = true;
                             }
                             self.active_idx = i;
@@ -5608,17 +5619,22 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
-                // Incremental paragraph scan: read only the paragraph at cursor (not full doc).
-                // Skip when the ACTIVE bridge is Word Add-in — that bridge pushes
-                // paragraph events directly, so polling here would duplicate work.
-                // The previous check used `bridges.iter().any(...)` which was always
-                // true on macOS (Word Add-in HTTP server is always registered even
-                // when the user is in TextEdit / Notes), so the AX-bridge grammar
-                // scan never ran. Use active_bridge_name() so the AX path opens up
-                // for non-Word apps.
+                // Incremental paragraph scan: only the Word COM bridge pushes
+                // paragraph-shaped events with stable IDs (ParaID via COM) and
+                // implements read_paragraph_at. Word Add-in pushes its own events
+                // server-side. Other bridges (Accessibility, Browser) need the
+                // full-document scan path instead.
+                //
+                // The earlier "is_com_bridge = active_name != Word Add-in" check
+                // matched the Accessibility bridge too, so it tried to do a COM
+                // paragraph scan on Notepad / Sticky Notes / etc. — which always
+                // failed silently because read_paragraph_at returns None for AX
+                // and update_grammar_errors() (gated on the same flag below) was
+                // skipped. Net effect: zero spell/grammar checking outside Word.
+                // Tighten to active_name == "Word COM" so only the genuine COM
+                // path uses incremental paragraph scanning.
                 let active_name = self.manager.active_bridge_name();
-                let is_com_bridge = !self.manager.last_user_was_browser
-                    && active_name != "Word Add-in";
+                let is_com_bridge = active_name == "Word COM";
                 if is_com_bridge {
                     if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
                         if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
@@ -5626,6 +5642,15 @@ impl eframe::App for ContextApp {
                         }
                     }
                 } else if self.manager.last_user_was_browser {
+                    if let Some(doc) = self.manager.read_full_document() {
+                        self.try_update_doc_text(doc);
+                    }
+                } else {
+                    // Accessibility / non-COM bridges: copy the bridge's cached
+                    // full-document text into last_doc_text so the full-doc
+                    // scanner (update_grammar_errors() below) has something to
+                    // chew on. Without this, last_doc_text stays empty and
+                    // grammar checking is silent for every non-Word app.
                     if let Some(doc) = self.manager.read_full_document() {
                         self.try_update_doc_text(doc);
                     }
@@ -5741,9 +5766,17 @@ impl eframe::App for ContextApp {
             }
 
             // Scan for errors — COM bridge uses incremental paragraph scan (above),
-            // other bridges use full doc scan
-            let is_com = !self.manager.last_user_was_browser
-                && !self.manager.bridges.iter().any(|b| b.name() == "Word Add-in");
+            // other bridges use full doc scan via update_grammar_errors().
+            //
+            // The previous check tested for the absence of a "Word Add-in"
+            // bridge in the registered list, which on Windows always
+            // returned true because the Add-in bridge is macOS-only. Result:
+            // is_com == true for every Windows session, so update_grammar_errors()
+            // never ran and the AX bridge produced no errors. Match the
+            // is_com_bridge check above — only the actual Word COM bridge
+            // uses the incremental path; everything else takes the full-doc
+            // scan.
+            let is_com = self.manager.active_bridge_name() == "Word COM";
             let errors_before = self.writing_errors.len();
             if !is_com {
                 self.update_grammar_errors();
