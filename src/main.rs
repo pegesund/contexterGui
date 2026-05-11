@@ -6224,45 +6224,55 @@ impl eframe::App for ContextApp {
         }
         let s = self.ui_scale;
 
-        // Window sizing. Simple formula: toolbar + rows * row_height.
-        let has_content = !self.grammar_errors.is_empty() || !self.completions.is_empty() || !(&self.open_completions).is_empty();
+        // Window sizing. Content-driven: panels only consume space when they
+        // have something to render. Earlier the math reserved a fixed chunk
+        // for each enabled panel whether or not it had content — so a freshly
+        // launched Spell with `show_completions=true` and `show_grammar=true`
+        // showed a tall empty window with no suggestions and no errors.
+        // Petter's feedback: "by default it should show toolbar with no
+        // extra windows; show suggestions only while writing; show errors
+        // only when there are mistakes." So:
+        //   - bulb panel renders only when there are completions
+        //   - pencil panel renders only when there are non-ignored errors
+        //   - window shrinks to ~toolbar height when neither has content
+        // The bulb/pencil icons in the toolbar remain manual mute toggles
+        // for users who want to suppress a panel even when it has content.
+        let has_completions = !self.completions.is_empty() || !self.open_completions.is_empty();
+        let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
+        let bulb_visible = self.show_completions && has_completions;
+        let pencil_visible = self.show_grammar && has_active_errors;
+
+        let has_content = bulb_visible || pencil_visible || !self.grammar_errors.is_empty();
         let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
 
-        // Width: 420 if grammar panel is on (its cards are wider than the
-        // 2-col completions list); 320 if only suggestions are showing.
-        let win_w = s * if self.show_grammar { 420.0 } else { 320.0 };
+        // Width: wider when the pencil panel is showing (its rows have an
+        // action-button cluster that needs the room). Otherwise compact.
+        let win_w = s * if pencil_visible { 420.0 } else { 320.0 };
 
-        // Sum the rows needed by each visible panel.
         let mut content_rows = 0.0_f32;
-        if self.show_completions {
+        if bulb_visible {
             let left = self.completions.len();
             let right = self.open_completions.len();
-            content_rows += left.max(right).max(1) as f32;
+            content_rows += left.max(right) as f32;
         }
-        if self.show_grammar {
-            // Each error card ≈ 7 rows (separator + buttons/word + up to 5
-            // alternatives stacked vertically).
+        if pencil_visible {
+            // Each error card ≈ 6 rows now that the alternatives column is
+            // gone (was 7 with the right-column stack).
             let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
-            content_rows += (errors as f32 * 7.0).max(3.0);
+            content_rows += (errors as f32 * 6.0).max(3.0);
         }
-        if !self.show_completions && !self.show_grammar {
-            // Both panels off — keep a small placeholder so the toolbar still
-            // renders without an awkwardly tall empty body.
-            content_rows = 1.0;
-        }
-        // When both panels are on, account for the inter-panel separator
-        // (~1 row of vertical space).
-        if self.show_completions && self.show_grammar {
+        // Inter-panel separator only if BOTH panels are actually showing.
+        if bulb_visible && pencil_visible {
             content_rows += 1.0;
         }
-        // Base overhead: toolbar (~22) + toolbar panel margins (16) + central panel
-        // top margin (8) + separator/scrollbar padding (~10) = ~60px.
-        // Suggestions panel gets 10 px extra so the full list stays visible.
-        let base_h = if self.show_completions { 70.0 } else { 60.0 };
-        // Minimum height so the window doesn't shrink+grow on every keystroke
-        // (distracting while typing). Content beyond the minimum still grows
-        // up to the cap, but the empty → filled jump is eliminated.
-        let min_h = 240.0;
+        // Base overhead: toolbar (~22) + toolbar panel margins (16) + central
+        // panel top margin (8) + scrollbar/separator padding (~10) ≈ 60px.
+        // Bulb panel gets 10 px extra so the full list stays visible.
+        let base_h = if bulb_visible { 70.0 } else { 60.0 };
+        // Minimum height drops when nothing is visible — collapse to toolbar.
+        // When a panel IS visible we keep a floor so the window doesn't
+        // jitter on every keystroke as completions appear/disappear.
+        let min_h = if bulb_visible || pencil_visible { 240.0 } else { 90.0 };
         let win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, 335.0 * s);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
@@ -6822,8 +6832,12 @@ impl eframe::App for ContextApp {
             // show_completions, pencil toggles show_grammar.
 
             // === Panel: Suggestions (was Tab 0 — 💡 bulb) ===
+            // Renders only when there are completions to show, so an idle
+            // popup is just the toolbar (no empty space below). Tab-intercept
+            // wiring still needs the surrounding `if self.show_completions`
+            // so we keep claiming/releasing Tab when the user manually
+            // disabled the bulb panel via the toolbar toggle.
             if self.show_completions {
-                // Tab key selection
                 let has_sugg = !self.completions.is_empty() || !self.open_completions.is_empty();
                 if has_sugg && !self.selection_mode { self.platform.set_tab_intercept(true); }
                 else if !has_sugg { self.platform.set_tab_intercept(false); self.selection_mode = false; }
@@ -6976,12 +6990,21 @@ impl eframe::App for ContextApp {
             }
 
             // === Panel: Grammar (was Tab 1 — ✏ pencil) ===
-            // Renders when show_grammar is on. Visible alongside the
-            // suggestions panel above when both toggles are enabled.
-            if self.show_grammar {
-                // Visual separator when both panels are visible so the user
-                // can tell where one ends and the other begins.
-                if self.show_completions {
+            // Renders when show_grammar is on AND there's actually
+            // something to display: an active error, the scanning
+            // spinner, or the AI-correction spinner. The "Ingen feil
+            // funnet" green placeholder used to render whenever the
+            // panel was enabled-but-empty; Petter's feedback was that
+            // the popup should collapse to the toolbar in that state
+            // (the toolbar's pencil icon stays green to signal clean,
+            // which is enough).
+            let has_active_errors_render = self.writing_errors.iter().any(|e| !e.ignored);
+            let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
+            if self.show_grammar && (has_active_errors_render || show_scanning || self.llm_waiting) {
+                // Visual separator when the bulb panel is rendering above.
+                let bulb_rendering = self.show_completions
+                    && (!self.completions.is_empty() || !self.open_completions.is_empty());
+                if bulb_rendering {
                     ui.add_space(4.0 * s);
                     ui.separator();
                     ui.add_space(2.0 * s);
@@ -7023,11 +7046,12 @@ impl eframe::App for ContextApp {
                 });
 
                 if active_errors.is_empty() {
-                    ui.label(
-                        egui::RichText::new(self.language.ui_no_errors())
-                            .size(12.0 * s)
-                            .color(egui::Color32::from_rgb(0, 140, 60)),
-                    );
+                    // No-op when there are no errors. The outer gate already
+                    // ensures we only enter this block when there's an error,
+                    // scan-in-progress, or AI-correction-in-progress, so we
+                    // don't render the green "Ingen feil funnet" placeholder
+                    // anymore. Scanning / AI-spinner cases above have already
+                    // rendered their own indicator.
                 } else {
                     // AI spinner shown inline when waiting
                     if self.llm_waiting {
@@ -7230,81 +7254,44 @@ impl eframe::App for ContextApp {
                                         }
                                     });
                                 });
-                                // Two columns: best suggestion (left) + alternatives (right)
-                                // Each word has a 🔊 icon and is clickable to apply as fix
-                                if !error.suggestion.is_empty() || !error.top_candidates.is_empty() {
+                                // Best suggestion only — no alternatives column.
+                                //
+                                // The right-column "top_candidates" alternatives used to render
+                                // here (e.g. "spoler, poler, søpler, eller" alongside the
+                                // primary correction "epler"). Petter pointed out this looked
+                                // like a duplicated next-word-suggestions panel inside every
+                                // error row — visually competing with the bulb panel above and
+                                // adding noise to what should be a focused "you wrote X, did
+                                // you mean Y?" prompt. The "Vis mer" rule-info window still
+                                // surfaces extra candidates when the user explicitly asks for
+                                // them via the ? button.
+                                if !error.suggestion.is_empty() {
                                     let best = error.suggestion.clone();
-                                    let candidates_cloned: Vec<String> = error.top_candidates.iter()
-                                        .filter(|c| c.to_lowercase() != best.to_lowercase())
-                                        .cloned()
-                                        .collect();
-                                    // Top-align so alternatives line up with best pick
-                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                                        // Left: 🔊 best pick
-                                        if !best.is_empty() {
-                                            if ui.add(egui::Label::new(
-                                                egui::RichText::new("🔊").size(9.0 * s)
-                                                    .color(theme.ok)
-                                            ).sense(egui::Sense::click())).clicked() {
-                                                tts::speak_word(&best);
-                                            }
-                                            let best_for_hover = best.clone();
-                                            let best_resp = ui.add(egui::Label::new(
-                                                egui::RichText::new(&best)
-                                                    .size(13.0 * s)
-                                                    .strong()
-                                                    .color(theme.ok)
-                                            ).sense(egui::Sense::click()));
-                                            let best_resp = if hover_zoom {
-                                                best_resp.on_hover_ui(|ui| {
-                                                    ui.set_max_width(600.0);
-                                                    ui.label(egui::RichText::new(letter_spaced(&best_for_hover))
-                                                        .size(28.0)
-                                                        .strong()
-                                                        .color(theme.ok));
-                                                })
-                                            } else { best_resp };
-                                            if best_resp.clicked() {
-                                                clicked_candidate = Some((idx, best.clone()));
-                                            }
+                                    ui.horizontal(|ui| {
+                                        if ui.add(egui::Label::new(
+                                            egui::RichText::new("🔊").size(9.0 * s)
+                                                .color(theme.ok)
+                                        ).sense(egui::Sense::click())).clicked() {
+                                            tts::speak_word(&best);
                                         }
-                                        // Right: 🔊 alternatives stacked vertically (same font
-                                        // size as best pick). Wider gap, and pull the vertical
-                                        // block up a full row so its first row aligns above
-                                        // the best pick.
-                                        if !candidates_cloned.is_empty() {
-                                            ui.add_space(56.0 * s);
-                                            ui.vertical(|ui| {
-                                                ui.spacing_mut().item_spacing.y = 1.0 * s;
-                                                ui.add_space(-20.0 * s);
-                                                for cand in &candidates_cloned {
-                                                    ui.horizontal(|ui| {
-                                                        if ui.add(egui::Label::new(
-                                                            egui::RichText::new("🔊").size(9.0 * s)
-                                                                .color(theme.info)
-                                                        ).sense(egui::Sense::click())).clicked() {
-                                                            tts::speak_word(cand);
-                                                        }
-                                                        let cand_for_hover = cand.clone();
-                                                        let cand_resp = ui.add(egui::Label::new(
-                                                            egui::RichText::new(cand)
-                                                                .size(13.0 * s)
-                                                                .color(theme.info)
-                                                        ).sense(egui::Sense::click()));
-                                                        let cand_resp = if hover_zoom {
-                                                            cand_resp.on_hover_ui(|ui| {
-                                                                ui.set_max_width(600.0);
-                                                                ui.label(egui::RichText::new(letter_spaced(&cand_for_hover))
-                                                                    .size(28.0)
-                                                                    .color(theme.info));
-                                                            })
-                                                        } else { cand_resp };
-                                                        if cand_resp.clicked() {
-                                                            clicked_candidate = Some((idx, cand.clone()));
-                                                        }
-                                                    });
-                                                }
-                                            });
+                                        let best_for_hover = best.clone();
+                                        let best_resp = ui.add(egui::Label::new(
+                                            egui::RichText::new(&best)
+                                                .size(13.0 * s)
+                                                .strong()
+                                                .color(theme.ok)
+                                        ).sense(egui::Sense::click()));
+                                        let best_resp = if hover_zoom {
+                                            best_resp.on_hover_ui(|ui| {
+                                                ui.set_max_width(600.0);
+                                                ui.label(egui::RichText::new(letter_spaced(&best_for_hover))
+                                                    .size(28.0)
+                                                    .strong()
+                                                    .color(theme.ok));
+                                            })
+                                        } else { best_resp };
+                                        if best_resp.clicked() {
+                                            clicked_candidate = Some((idx, best.clone()));
                                         }
                                     });
                                 }
