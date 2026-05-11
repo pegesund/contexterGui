@@ -141,22 +141,95 @@ fn log_download_error(idx: usize, total: usize, key: &str, err: &str) {
     }
 }
 
+/// Classify a ureq::Error into a short tag and a long description.
+/// Helps users (and us) tell apart "network is down" from "the server
+/// returned 403" from "TLS handshake failed" — without these tags the
+/// download_errors.log was just an opaque string.
+///
+/// Takes the error by value so we can consume the wrapped Response on
+/// the Status variant to surface S3's error XML body. The body is the
+/// difference between "we know it was 403 but no idea why" and
+/// "SignatureDoesNotMatch — clock skew / wrong key / etc."
+fn classify_ureq_err(e: ureq::Error) -> (&'static str, String) {
+    match e {
+        ureq::Error::Status(code, resp) => {
+            let url = resp.get_url().to_string();
+            // S3 error responses are XML payloads <1KB. Read up to 8KB
+            // to be safe and stop. into_string() consumes the response.
+            let body = resp.into_string().unwrap_or_default();
+            let tag = match code {
+                400 => "HTTP_400_BAD_REQUEST",
+                401 => "HTTP_401_UNAUTHORIZED",
+                403 => "HTTP_403_FORBIDDEN_OR_SIG_INVALID",
+                404 => "HTTP_404_KEY_NOT_FOUND",
+                408 => "HTTP_408_TIMEOUT",
+                429 => "HTTP_429_RATE_LIMITED",
+                500..=599 => "HTTP_5XX_SERVER_ERROR",
+                _ => "HTTP_OTHER",
+            };
+            (tag, format!("status={} url={} body_first_500={}",
+                code, url, body.chars().take(500).collect::<String>()))
+        }
+        ureq::Error::Transport(t) => {
+            // ureq's Transport variants tell us a lot: DNS, Connect, Tls, Io...
+            let kind = format!("{:?}", t.kind());
+            let tag = match t.kind() {
+                ureq::ErrorKind::Dns => "NET_DNS_FAILED",
+                ureq::ErrorKind::ConnectionFailed => "NET_CONNECT_REFUSED",
+                ureq::ErrorKind::TooManyRedirects => "NET_TOO_MANY_REDIRECTS",
+                ureq::ErrorKind::BadStatus => "NET_BAD_STATUS",
+                ureq::ErrorKind::BadHeader => "NET_BAD_HEADER",
+                ureq::ErrorKind::Io => "NET_IO_ERROR",
+                ureq::ErrorKind::InvalidUrl => "URL_INVALID",
+                ureq::ErrorKind::UnknownScheme => "URL_BAD_SCHEME",
+                ureq::ErrorKind::ProxyConnect => "NET_PROXY_CONNECT_FAILED",
+                ureq::ErrorKind::ProxyUnauthorized => "NET_PROXY_AUTH_REQUIRED",
+                _ => "NET_OTHER",
+            };
+            (tag, format!("transport_kind={} msg={}", kind, t))
+        }
+    }
+}
+
 /// Download a single file from S3 to a local path, reporting progress.
 fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) -> Result<(), String> {
+    use std::io::Read;
+    let start = std::time::Instant::now();
+
     // Create parent directories
     if let Some(parent) = item.local_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("LOCAL_MKDIR_FAILED parent={} msg={}",
+                parent.display(), e))?;
     }
 
     let url = presign_url(&item.s3_key, 3600);
+    // Strip the signature query string before logging URLs — the key
+    // is what we want to see in support logs, not the signature.
+    let safe_url = url.splitn(2, '?').next().unwrap_or(&url).to_string();
 
-    let resp = ureq::get(&url)
-        .call()
-        .map_err(|e| format!("HTTP: {}", e))?;
+    // Use a builder with explicit timeouts so a stalled connection
+    // fails fast with a clear error instead of hanging the entire
+    // language-pack flow.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(120))
+        .build();
+    let resp = match agent.get(&url).call() {
+        Ok(r) => r,
+        Err(e) => {
+            let (tag, detail) = classify_ureq_err(e);
+            return Err(format!("{} url={} elapsed_ms={} {}",
+                tag, safe_url, start.elapsed().as_millis(), detail));
+        }
+    };
 
+    let status = resp.status();
     let total: u64 = resp.header("Content-Length")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let server = resp.header("Server").unwrap_or("").to_string();
+    let date_hdr = resp.header("Date").unwrap_or("").to_string();
 
     // Update total in progress
     if let Ok(mut p) = progress.lock() {
@@ -166,15 +239,27 @@ fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) ->
     let mut reader = resp.into_reader();
     let tmp_path = item.local_path.with_extension("download");
     let mut file = std::fs::File::create(&tmp_path)
-        .map_err(|e| format!("create: {}", e))?;
+        .map_err(|e| format!("LOCAL_CREATE_FAILED path={} msg={}",
+            tmp_path.display(), e))?;
 
     let mut buf = [0u8; 65536];
     let mut downloaded: u64 = 0;
 
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("read: {}", e))?;
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                return Err(format!(
+                    "NET_READ_FAILED url={} status={} got={}/{} server={} date={} elapsed_ms={} msg={}",
+                    safe_url, status, downloaded, total, server, date_hdr,
+                    start.elapsed().as_millis(), e));
+            }
+        };
         if n == 0 { break; }
-        file.write_all(&buf[..n]).map_err(|e| format!("write: {}", e))?;
+        if let Err(e) = file.write_all(&buf[..n]) {
+            return Err(format!("LOCAL_WRITE_FAILED path={} got={} msg={}",
+                tmp_path.display(), downloaded, e));
+        }
         downloaded += n as u64;
 
         if let Ok(mut p) = progress.lock() {
@@ -184,7 +269,8 @@ fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) ->
 
     // Atomic rename
     std::fs::rename(&tmp_path, &item.local_path)
-        .map_err(|e| format!("rename: {}", e))?;
+        .map_err(|e| format!("LOCAL_RENAME_FAILED from={} to={} msg={}",
+            tmp_path.display(), item.local_path.display(), e))?;
 
     if let Ok(mut p) = progress.lock() {
         p[index].done = true;
@@ -453,6 +539,61 @@ pub fn whisper_files(lang_code: &str, mode: u8) -> Vec<DownloadItem> {
 /// Download all items that aren't already cached.
 /// Returns a SharedProgress that the UI can poll.
 /// Spawns a background thread; returns immediately.
+/// Capture one-time environment context to the head of download_errors.log:
+/// OS, system clock, S3 reachability via a HEAD probe. Lets us correlate a
+/// later batch of "[1..13] Spelling/Tokenizer/... LOCAL/NET error" lines
+/// against the machine state at the moment downloads started. Particularly
+/// useful for diagnosing the personal-machine-only failures users report
+/// (clock skew, AV TLS interception, DNS blocks) — the failing pattern is
+/// often consistent across all 13 items but the root cause is in the
+/// environment, not the per-item logic.
+fn log_download_session_start(total_items: usize) {
+    let log_path = data_dir().join("download_errors.log");
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    else { return };
+    let now = chrono::Utc::now();
+    let _ = writeln!(f, "");
+    let _ = writeln!(f, "═══ session {} ═══", now.format("%Y-%m-%dT%H:%M:%SZ"));
+    let _ = writeln!(f, "  items_queued: {}", total_items);
+    let _ = writeln!(f, "  os: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let _ = writeln!(f, "  exe: {}", std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".into()));
+    // Local clock check vs S3's Date header. If they're > 10 min apart,
+    // AWS Sig V4 will reject every presigned URL with 403. Many "all
+    // 13 items failed instantly" cases are just a wrong system clock.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build();
+    let probe_url = format!("{}/", S3_ENDPOINT);
+    let head_start = std::time::Instant::now();
+    match agent.request("HEAD", &probe_url).call() {
+        Ok(r) => {
+            let server_date = r.header("Date").unwrap_or("<missing>").to_string();
+            let server_hdr = r.header("Server").unwrap_or("").to_string();
+            let _ = writeln!(f, "  probe_head: status={} elapsed_ms={} server='{}'",
+                r.status(), head_start.elapsed().as_millis(), server_hdr);
+            let _ = writeln!(f, "  local_utc:  {}", now.format("%a, %d %b %Y %H:%M:%S GMT"));
+            let _ = writeln!(f, "  server_utc: {}", server_date);
+            if let Ok(server_t) = chrono::DateTime::parse_from_rfc2822(&server_date) {
+                let skew = (now - server_t.with_timezone(&chrono::Utc)).num_seconds();
+                let _ = writeln!(f, "  clock_skew_seconds: {}{}", skew,
+                    if skew.abs() > 600 { "  ⚠ > 10 MIN — Sig V4 WILL reject" } else { "" });
+            }
+        }
+        Err(e) => {
+            let (tag, detail) = classify_ureq_err(e);
+            let _ = writeln!(f, "  probe_head: FAILED {} elapsed_ms={} {}",
+                tag, head_start.elapsed().as_millis(), detail);
+        }
+    }
+    let _ = writeln!(f, "─── per-item results ───");
+}
+
 pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
     // Filter to only items not yet cached
     let needed: Vec<DownloadItem> = items.into_iter()
@@ -472,6 +613,10 @@ pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
     if needed.is_empty() {
         return progress;
     }
+
+    // Capture environment snapshot once per session — useful for
+    // correlating a wave of failures against clock/DNS/TLS state.
+    log_download_session_start(needed.len());
 
     let prog = Arc::clone(&progress);
     std::thread::Builder::new()
