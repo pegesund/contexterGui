@@ -9015,8 +9015,6 @@ impl eframe::App for ContextApp {
                     .with_always_on_top()
                     .with_decorations(true),
                 |vp_ctx, _class| {
-                    vp_ctx.set_visuals(egui::Visuals::light());
-
                     if vp_ctx.input(|i| i.viewport().close_requested()) {
                         do_dismiss = true;
                     }
@@ -9024,6 +9022,20 @@ impl eframe::App for ContextApp {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(16.0))
                         .show(vp_ctx, |ui| {
+                            let prompt_button = |ui: &mut egui::Ui, text: &str| {
+                                ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(text)
+                                            .size(13.0 * s)
+                                            .color(egui::Color32::from_rgb(45, 45, 45)),
+                                    )
+                                    .fill(egui::Color32::from_rgb(232, 232, 232))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgb(210, 210, 210),
+                                    )),
+                                )
+                            };
                             ui.label(
                                 egui::RichText::new(lang_for_ocr.ui_text_found_in_screenshot())
                                     .size(14.0 * s)
@@ -9031,16 +9043,16 @@ impl eframe::App for ContextApp {
                             );
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_read_text()).size(13.0 * s)).clicked() {
+                                if prompt_button(ui, lang_for_ocr.ui_read_text()).clicked() {
                                     do_read = true;
                                 }
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_copy_text()).size(13.0 * s)).clicked() {
+                                if prompt_button(ui, lang_for_ocr.ui_copy_text()).clicked() {
                                     do_copy = true;
                                 }
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_math()).size(13.0 * s)).clicked() {
+                                if prompt_button(ui, lang_for_ocr.ui_math()).clicked() {
                                     do_math = true;
                                 }
-                                if ui.button(egui::RichText::new(lang_for_ocr.ui_cancel()).size(13.0 * s)).clicked() {
+                                if prompt_button(ui, lang_for_ocr.ui_cancel()).clicked() {
                                     do_dismiss = true;
                                 }
                             });

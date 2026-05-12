@@ -28,6 +28,18 @@ fn trace_caret(msg: &str) {
     }
 }
 
+fn allow_ax_reenable(pid: u32) -> bool {
+    static LAST: std::sync::OnceLock<Mutex<(u32, Instant)>> = std::sync::OnceLock::new();
+    let slot = LAST.get_or_init(|| Mutex::new((0, Instant::now() - Duration::from_secs(60))));
+    let mut g = slot.lock().unwrap();
+    if g.0 != pid || g.1.elapsed() > Duration::from_millis(750) {
+        *g = (pid, Instant::now());
+        true
+    } else {
+        false
+    }
+}
+
 /// macOS platform services.
 ///
 /// Foreground app detection runs on a background thread to avoid
@@ -261,71 +273,105 @@ impl PlatformServices for MacPlatform {
         // Target the last external app directly by PID — queries its focused
         // element regardless of which window is globally focused now. System-wide
         // AX returns -25211 when our AlwaysOnTop window is the focused element.
-        let ext_pid = self.last_external_fg.lock().map(|l| l.pid).unwrap_or(0);
+        let ext_app = self.last_external_fg.lock().map(|l| l.clone()).unwrap_or_default();
+        let ext_pid = ext_app.pid;
         unsafe {
-            let root = if ext_pid > 0 {
-                AXUIElementCreateApplication(ext_pid as i32)
-            } else {
-                AXUIElementCreateSystemWide()
-            };
-            let key = CFString::new("AXFocusedUIElement");
-            let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyAttributeValue(root, key.as_concrete_TypeRef(), &mut focused);
-            CFRelease(root as _);
-            if err != 0 || focused.is_null() {
-                trace_caret(&format!("caret pid={} step=focus err={} null={}", ext_pid, err, focused.is_null()));
-                return None;
-            }
+            let read_once = || -> Result<(i32, i32), String> {
+                let root = if ext_pid > 0 {
+                    AXUIElementCreateApplication(ext_pid as i32)
+                } else {
+                    AXUIElementCreateSystemWide()
+                };
+                let key = CFString::new("AXFocusedUIElement");
+                let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
+                let err = AXUIElementCopyAttributeValue(root, key.as_concrete_TypeRef(), &mut focused);
+                CFRelease(root as _);
+                if err != 0 || focused.is_null() {
+                    return Err(format!("step=focus err={} null={}", err, focused.is_null()));
+                }
 
-            let range_key = CFString::new("AXSelectedTextRange");
-            let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
-            if err != 0 || range_val.is_null() {
-                trace_caret(&format!("caret pid={} step=selrange err={} null={}", ext_pid, err, range_val.is_null()));
+                let range_key = CFString::new("AXSelectedTextRange");
+                let mut range_val: core_foundation::base::CFTypeRef = std::ptr::null();
+                let err = AXUIElementCopyAttributeValue(focused as AXUIElementRef, range_key.as_concrete_TypeRef(), &mut range_val);
+                if err != 0 || range_val.is_null() {
+                    CFRelease(focused);
+                    return Err(format!("step=selrange err={} null={}", err, range_val.is_null()));
+                }
+
+                let bounds_key = CFString::new("AXBoundsForRange");
+                let mut bounds_val: core_foundation::base::CFTypeRef = std::ptr::null();
+                let err = AXUIElementCopyParameterizedAttributeValue(
+                    focused as AXUIElementRef,
+                    bounds_key.as_concrete_TypeRef(),
+                    range_val,
+                    &mut bounds_val,
+                );
+                CFRelease(range_val);
                 CFRelease(focused);
-                return None;
+
+                if err != 0 || bounds_val.is_null() {
+                    return Err(format!("step=bounds err={} null={}", err, bounds_val.is_null()));
+                }
+
+                let mut rect = core_graphics::geometry::CGRect::new(
+                    &core_graphics::geometry::CGPoint::new(0.0, 0.0),
+                    &core_graphics::geometry::CGSize::new(0.0, 0.0),
+                );
+                let ok = AXValueGetValue(
+                    bounds_val as AXValueRef,
+                    kAXValueTypeCGRect,
+                    &mut rect as *mut _ as *mut std::ffi::c_void,
+                );
+                CFRelease(bounds_val);
+
+                if !ok {
+                    return Err("step=decode ok=false".to_string());
+                }
+
+                let x = rect.origin.x as i32;
+                let y = (rect.origin.y + rect.size.height) as i32;
+
+                // Word on Mac returns (0, screen_height) when it can't determine
+                // real bounds (focus transitions, layout shifts). Real caret
+                // positions always have x > 50 (document margins).
+                if x < 50 {
+                    return Err(format!("step=garbage x={} y={}", x, y));
+                }
+
+                Ok((x, y))
+            };
+
+            match read_once() {
+                Ok((x, y)) => {
+                    crate::log!("caret OK: x={} y={}", x, y);
+                    Some((x, y))
+                }
+                Err(first_err) => {
+                    trace_caret(&format!("caret pid={} {}", ext_pid, first_err));
+                    let is_word = ext_app.exe_name == "microsoft word"
+                        || ext_app.exe_name.contains("word");
+                    if ext_pid == 0 || !is_word || !allow_ax_reenable(ext_pid) {
+                        return None;
+                    }
+
+                    let enabled = enable_ax_for_app(ext_pid);
+                    trace_caret(&format!(
+                        "caret pid={} re-enable AX={} after {}",
+                        ext_pid, enabled, first_err
+                    ));
+                    std::thread::sleep(Duration::from_millis(25));
+                    match read_once() {
+                        Ok((x, y)) => {
+                            crate::log!("caret OK after AX retry: x={} y={}", x, y);
+                            Some((x, y))
+                        }
+                        Err(retry_err) => {
+                            trace_caret(&format!("caret pid={} retry {}", ext_pid, retry_err));
+                            None
+                        }
+                    }
+                }
             }
-
-            let bounds_key = CFString::new("AXBoundsForRange");
-            let mut bounds_val: core_foundation::base::CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyParameterizedAttributeValue(
-                focused as AXUIElementRef,
-                bounds_key.as_concrete_TypeRef(),
-                range_val,
-                &mut bounds_val,
-            );
-            CFRelease(range_val);
-            CFRelease(focused);
-
-            if err != 0 || bounds_val.is_null() {
-                trace_caret(&format!("caret pid={} step=bounds err={} null={}", ext_pid, err, bounds_val.is_null()));
-                return None;
-            }
-
-            let mut rect = core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(0.0, 0.0),
-                &core_graphics::geometry::CGSize::new(0.0, 0.0),
-            );
-            let ok = AXValueGetValue(
-                bounds_val as AXValueRef,
-                kAXValueTypeCGRect,
-                &mut rect as *mut _ as *mut std::ffi::c_void,
-            );
-            CFRelease(bounds_val);
-
-            if !ok { return None; }
-
-            let x = rect.origin.x as i32;
-            let y = (rect.origin.y + rect.size.height) as i32;
-
-            // Word on Mac returns (0, screen_height) when it can't determine
-            // real bounds (focus transitions, layout shifts). Real caret
-            // positions always have x > 50 (document margins).
-            if x < 50 { return None;
-            }
-
-            crate::log!("caret OK: x={} y={}", x, y);
-            Some((x, y))
         }
     }
 
