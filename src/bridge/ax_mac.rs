@@ -43,6 +43,13 @@ fn role_accepts_value_context(role: &str) -> bool {
     matches!(role, "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox" | "AXEditableText")
 }
 
+fn role_accepts_range_context(role: &str) -> bool {
+    matches!(
+        role,
+        "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox" | "AXEditableText" | "AXWebArea"
+    )
+}
+
 unsafe fn selected_cursor(elem: AXUIElementRef, fallback: usize) -> usize {
     let mut range_val: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(
@@ -64,6 +71,9 @@ unsafe fn selected_cursor(elem: AXUIElementRef, fallback: usize) -> usize {
 }
 
 unsafe fn text_from_range(elem: AXUIElementRef) -> Option<(String, usize)> {
+    if !role_accepts_range_context(&role_of(elem)) {
+        return None;
+    }
     let cursor = selected_cursor(elem, usize::MAX);
     if cursor == usize::MAX {
         return None;
@@ -124,10 +134,13 @@ unsafe fn text_from_element(elem: AXUIElementRef) -> Option<(String, usize)> {
 }
 
 unsafe fn read_context_from_element(elem: AXUIElementRef) -> Option<(&'static str, CursorContext)> {
-    if let Some(ctx) = try_read_via_text_range(elem) {
-        return Some(("range", ctx));
+    let role = role_of(elem);
+    if role_accepts_range_context(&role) {
+        if let Some(ctx) = try_read_via_text_range(elem) {
+            return Some(("range", ctx));
+        }
     }
-    if role_accepts_value_context(&role_of(elem)) {
+    if role_accepts_value_context(&role) {
         if let Some(ctx) = try_read_via_value(elem) {
             return Some(("value", ctx));
         }
@@ -194,9 +207,29 @@ unsafe fn find_context_in_app_window(app: AXUIElementRef) -> Option<(String, &'s
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return None; }
-    let found = find_readable_context(window_ref as AXUIElementRef, 0, 6);
+    let found = find_readable_context(window_ref as AXUIElementRef, 0, 26);
     CFRelease(window_ref);
     found
+}
+
+unsafe fn find_context_in_app_windows(app: AXUIElementRef) -> Option<(String, &'static str, CursorContext)> {
+    let mut windows: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXWindows").as_concrete_TypeRef(),
+        &mut windows,
+    );
+    if err != 0 || windows.is_null() { return None; }
+    let count = core_foundation::array::CFArrayGetCount(windows as _);
+    for i in 0..count {
+        let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
+        if let Some(found) = find_readable_context(window, 0, 26) {
+            CFRelease(windows);
+            return Some(found);
+        }
+    }
+    CFRelease(windows);
+    None
 }
 
 unsafe fn paragraph_from_element(elem: AXUIElementRef) -> Option<(String, String, usize)> {
@@ -277,9 +310,29 @@ unsafe fn find_paragraph_in_app_window(app: AXUIElementRef) -> Option<(String, S
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return None; }
-    let found = find_readable_paragraph(window_ref as AXUIElementRef, 0, 6);
+    let found = find_readable_paragraph(window_ref as AXUIElementRef, 0, 26);
     CFRelease(window_ref);
     found
+}
+
+unsafe fn find_paragraph_in_app_windows(app: AXUIElementRef) -> Option<(String, String, usize)> {
+    let mut windows: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXWindows").as_concrete_TypeRef(),
+        &mut windows,
+    );
+    if err != 0 || windows.is_null() { return None; }
+    let count = core_foundation::array::CFArrayGetCount(windows as _);
+    for i in 0..count {
+        let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
+        if let Some(found) = find_readable_paragraph(window, 0, 26) {
+            CFRelease(windows);
+            return Some(found);
+        }
+    }
+    CFRelease(windows);
+    None
 }
 
 unsafe fn find_text_in_attr_element(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, usize)> {
@@ -340,9 +393,29 @@ unsafe fn find_text_in_app_window(app: AXUIElementRef) -> Option<(String, usize)
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return None; }
-    let found = find_readable_text(window_ref as AXUIElementRef, 0, 6);
+    let found = find_readable_text(window_ref as AXUIElementRef, 0, 26);
     CFRelease(window_ref);
     found
+}
+
+unsafe fn find_text_in_app_windows(app: AXUIElementRef) -> Option<(String, usize)> {
+    let mut windows: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXWindows").as_concrete_TypeRef(),
+        &mut windows,
+    );
+    if err != 0 || windows.is_null() { return None; }
+    let count = core_foundation::array::CFArrayGetCount(windows as _);
+    for i in 0..count {
+        let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
+        if let Some(found) = find_readable_text(window, 0, 26) {
+            CFRelease(windows);
+            return Some(found);
+        }
+    }
+    CFRelease(windows);
+    None
 }
 
 pub struct AxMacBridge {
@@ -408,6 +481,13 @@ impl TextBridge for AxMacBridge {
             if ctx.is_none() {
                 if let Some((found_role, found_via, found_ctx)) = find_context_in_app_window(app) {
                     role = format!("window>{}", found_role);
+                    via = found_via;
+                    ctx = Some(found_ctx);
+                }
+            }
+            if ctx.is_none() {
+                if let Some((found_role, found_via, found_ctx)) = find_context_in_app_windows(app) {
+                    role = format!("windows>{}", found_role);
                     via = found_via;
                     ctx = Some(found_ctx);
                 }
@@ -479,6 +559,9 @@ impl TextBridge for AxMacBridge {
             if text.is_none() {
                 text = find_text_in_app_window(app).map(|(t, _)| t);
             }
+            if text.is_none() {
+                text = find_text_in_app_windows(app).map(|(t, _)| t);
+            }
             CFRelease(app as _);
             text
         }
@@ -518,6 +601,9 @@ impl TextBridge for AxMacBridge {
             }
             if paragraph.is_none() {
                 paragraph = find_paragraph_in_app_window(app);
+            }
+            if paragraph.is_none() {
+                paragraph = find_paragraph_in_app_windows(app);
             }
             CFRelease(app as _);
             paragraph
