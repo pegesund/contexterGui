@@ -39,6 +39,205 @@ unsafe fn role_of(elem: AXUIElementRef) -> String {
     s
 }
 
+fn role_accepts_value_context(role: &str) -> bool {
+    matches!(role, "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox" | "AXEditableText")
+}
+
+unsafe fn read_context_from_element(elem: AXUIElementRef) -> Option<(&'static str, CursorContext)> {
+    if let Some(ctx) = try_read_via_text_range(elem) {
+        return Some(("range", ctx));
+    }
+    if role_accepts_value_context(&role_of(elem)) {
+        if let Some(ctx) = try_read_via_value(elem) {
+            return Some(("value", ctx));
+        }
+    }
+    None
+}
+
+unsafe fn find_context_in_attr_element(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, &'static str, CursorContext)> {
+    let mut child_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut child_ref,
+    );
+    if err != 0 || child_ref.is_null() { return None; }
+    let child = child_ref as AXUIElementRef;
+    let result = if child == elem {
+        None
+    } else {
+        find_readable_context(child, depth + 1, max_depth)
+    };
+    CFRelease(child_ref);
+    result
+}
+
+unsafe fn find_context_in_attr_array(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, &'static str, CursorContext)> {
+    let mut children: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut children,
+    );
+    if err != 0 || children.is_null() { return None; }
+    let count = core_foundation::array::CFArrayGetCount(children as _);
+    for i in 0..count {
+        let child = core_foundation::array::CFArrayGetValueAtIndex(children as _, i) as AXUIElementRef;
+        if child == elem { continue; }
+        if let Some(found) = find_readable_context(child, depth + 1, max_depth) {
+            CFRelease(children);
+            return Some(found);
+        }
+    }
+    CFRelease(children);
+    None
+}
+
+unsafe fn find_readable_context(elem: AXUIElementRef, depth: usize, max_depth: usize) -> Option<(String, &'static str, CursorContext)> {
+    let role = role_of(elem);
+    if let Some((via, ctx)) = read_context_from_element(elem) {
+        return Some((role, via, ctx));
+    }
+    if depth >= max_depth { return None; }
+    find_context_in_attr_element(elem, "AXFocusedUIElement", depth, max_depth)
+        .or_else(|| find_context_in_attr_array(elem, "AXSelectedChildren", depth, max_depth))
+        .or_else(|| find_context_in_attr_array(elem, "AXVisibleChildren", depth, max_depth))
+        .or_else(|| find_context_in_attr_array(elem, "AXChildren", depth, max_depth))
+}
+
+unsafe fn find_context_in_app_window(app: AXUIElementRef) -> Option<(String, &'static str, CursorContext)> {
+    let mut window_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXFocusedWindow").as_concrete_TypeRef(),
+        &mut window_ref,
+    );
+    if err != 0 || window_ref.is_null() { return None; }
+    let found = find_readable_context(window_ref as AXUIElementRef, 0, 6);
+    CFRelease(window_ref);
+    found
+}
+
+unsafe fn paragraph_from_element(elem: AXUIElementRef) -> Option<(String, String, usize)> {
+    if !role_accepts_value_context(&role_of(elem)) {
+        return None;
+    }
+
+    let mut value_ref: CFTypeRef = std::ptr::null();
+    let v_err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new("AXValue").as_concrete_TypeRef(),
+        &mut value_ref,
+    );
+    if v_err != 0 || value_ref.is_null() { return None; }
+    let type_id = core_foundation::base::CFGetTypeID(value_ref);
+    if type_id != core_foundation::string::CFString::type_id() {
+        CFRelease(value_ref);
+        return None;
+    }
+    let full_text = CFString::wrap_under_create_rule(value_ref as _).to_string();
+
+    let mut range_val: CFTypeRef = std::ptr::null();
+    let r_err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new("AXSelectedTextRange").as_concrete_TypeRef(),
+        &mut range_val,
+    );
+    let cursor: usize = if r_err == 0 && !range_val.is_null() {
+        let mut sel = core_foundation::base::CFRange { location: 0, length: 0 };
+        let ok = AXValueGetValue(
+            range_val as AXValueRef,
+            kAXValueTypeCFRange,
+            &mut sel as *mut _ as _,
+        );
+        CFRelease(range_val);
+        if ok { sel.location.max(0) as usize } else { full_text.chars().count() }
+    } else {
+        full_text.chars().count()
+    };
+
+    let cursor_byte = full_text
+        .char_indices()
+        .nth(cursor)
+        .map(|(b, _)| b)
+        .unwrap_or(full_text.len());
+    let para_start = full_text[..cursor_byte]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let para_end = full_text[cursor_byte..]
+        .find('\n')
+        .map(|p| cursor_byte + p)
+        .unwrap_or(full_text.len());
+    let para_text = full_text[para_start..para_end].to_string();
+    if para_text.trim().is_empty() { return None; }
+    Some((format!("ax:{}", para_start), para_text, para_start))
+}
+
+unsafe fn find_paragraph_in_attr_element(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, String, usize)> {
+    let mut child_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut child_ref,
+    );
+    if err != 0 || child_ref.is_null() { return None; }
+    let child = child_ref as AXUIElementRef;
+    let result = if child == elem {
+        None
+    } else {
+        find_readable_paragraph(child, depth + 1, max_depth)
+    };
+    CFRelease(child_ref);
+    result
+}
+
+unsafe fn find_paragraph_in_attr_array(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, String, usize)> {
+    let mut children: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut children,
+    );
+    if err != 0 || children.is_null() { return None; }
+    let count = core_foundation::array::CFArrayGetCount(children as _);
+    for i in 0..count {
+        let child = core_foundation::array::CFArrayGetValueAtIndex(children as _, i) as AXUIElementRef;
+        if child == elem { continue; }
+        if let Some(found) = find_readable_paragraph(child, depth + 1, max_depth) {
+            CFRelease(children);
+            return Some(found);
+        }
+    }
+    CFRelease(children);
+    None
+}
+
+unsafe fn find_readable_paragraph(elem: AXUIElementRef, depth: usize, max_depth: usize) -> Option<(String, String, usize)> {
+    if let Some(paragraph) = paragraph_from_element(elem) {
+        return Some(paragraph);
+    }
+    if depth >= max_depth { return None; }
+    find_paragraph_in_attr_element(elem, "AXFocusedUIElement", depth, max_depth)
+        .or_else(|| find_paragraph_in_attr_array(elem, "AXSelectedChildren", depth, max_depth))
+        .or_else(|| find_paragraph_in_attr_array(elem, "AXVisibleChildren", depth, max_depth))
+        .or_else(|| find_paragraph_in_attr_array(elem, "AXChildren", depth, max_depth))
+}
+
+unsafe fn find_paragraph_in_app_window(app: AXUIElementRef) -> Option<(String, String, usize)> {
+    let mut window_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXFocusedWindow").as_concrete_TypeRef(),
+        &mut window_ref,
+    );
+    if err != 0 || window_ref.is_null() { return None; }
+    let found = find_readable_paragraph(window_ref as AXUIElementRef, 0, 6);
+    CFRelease(window_ref);
+    found
+}
+
 pub struct AxMacBridge {
     /// Target process PID stored via `set_fg_hwnd`. On macOS we reuse the
     /// hwnd plumbing to pass the foreground app's PID.
@@ -77,23 +276,38 @@ impl TextBridge for AxMacBridge {
                 CFString::new("AXFocusedUIElement").as_concrete_TypeRef(),
                 &mut focused,
             );
-            CFRelease(app as _);
-            if err != 0 || focused.is_null() {
+            let mut role = "?".to_string();
+            let mut via = "none";
+            let mut ctx: Option<CursorContext> = None;
+
+            if err == 0 && !focused.is_null() {
+                let elem = focused as AXUIElementRef;
+                let focused_role = role_of(elem);
+                role = focused_role.clone();
+                if let Some((found_role, found_via, found_ctx)) = find_readable_context(elem, 0, 6) {
+                    role = if found_role == focused_role {
+                        focused_role
+                    } else {
+                        format!("{}>{}", focused_role, found_role)
+                    };
+                    via = found_via;
+                    ctx = Some(found_ctx);
+                }
+                CFRelease(focused);
+            } else {
                 trace_once(&format!("ax_mac pid={} no focused (err={})", pid, err));
-                return None;
             }
-            let elem = focused as AXUIElementRef;
-            let role = role_of(elem);
-            let via_range = try_read_via_text_range(elem);
-            let via_value = if via_range.is_none() { try_read_via_value(elem) } else { None };
-            let via = match (&via_range, &via_value) {
-                (Some(_), _) => "range",
-                (None, Some(_)) => "value",
-                _ => "none",
-            };
-            CFRelease(focused);
+
+            if ctx.is_none() {
+                if let Some((found_role, found_via, found_ctx)) = find_context_in_app_window(app) {
+                    role = format!("window>{}", found_role);
+                    via = found_via;
+                    ctx = Some(found_ctx);
+                }
+            }
+
+            CFRelease(app as _);
             trace_once(&format!("ax_mac pid={} role={} via={}", pid, role, via));
-            let ctx = via_range.or(via_value);
             if let Some(c) = &ctx {
                 if let Ok(mut w) = self.last_word.lock() {
                     *w = c.word.clone();
@@ -160,78 +374,17 @@ impl TextBridge for AxMacBridge {
                 CFString::new("AXFocusedUIElement").as_concrete_TypeRef(),
                 &mut focused,
             );
+
+            let mut paragraph = None;
+            if err == 0 && !focused.is_null() {
+                paragraph = find_readable_paragraph(focused as AXUIElementRef, 0, 6);
+                CFRelease(focused);
+            }
+            if paragraph.is_none() {
+                paragraph = find_paragraph_in_app_window(app);
+            }
             CFRelease(app as _);
-            if err != 0 || focused.is_null() { return None; }
-            let elem = focused as AXUIElementRef;
-
-            // Full element text via AXValue. Skip non-string AXValues (sliders
-            // etc.) — they have no meaningful paragraphs.
-            let mut value_ref: CFTypeRef = std::ptr::null();
-            let v_err = AXUIElementCopyAttributeValue(
-                elem,
-                CFString::new("AXValue").as_concrete_TypeRef(),
-                &mut value_ref,
-            );
-            if v_err != 0 || value_ref.is_null() {
-                CFRelease(focused);
-                return None;
-            }
-            let type_id = core_foundation::base::CFGetTypeID(value_ref);
-            if type_id != core_foundation::string::CFString::type_id() {
-                CFRelease(value_ref);
-                CFRelease(focused);
-                return None;
-            }
-            let full_text = CFString::wrap_under_create_rule(value_ref as _).to_string();
-
-            // Cursor position via AXSelectedTextRange. If unavailable, treat
-            // cursor as end-of-text (chat/compose inputs).
-            let mut range_val: CFTypeRef = std::ptr::null();
-            let r_err = AXUIElementCopyAttributeValue(
-                elem,
-                CFString::new("AXSelectedTextRange").as_concrete_TypeRef(),
-                &mut range_val,
-            );
-            let cursor: usize = if r_err == 0 && !range_val.is_null() {
-                let mut sel = core_foundation::base::CFRange { location: 0, length: 0 };
-                let ok = AXValueGetValue(
-                    range_val as AXValueRef,
-                    kAXValueTypeCFRange,
-                    &mut sel as *mut _ as _,
-                );
-                CFRelease(range_val);
-                if ok { sel.location.max(0) as usize } else { full_text.chars().count() }
-            } else {
-                full_text.chars().count()
-            };
-            CFRelease(focused);
-
-            // AX cursor offset is in CHARACTERS but Rust string slicing is in
-            // BYTES. Walk char indices to convert.
-            let cursor_byte = full_text
-                .char_indices()
-                .nth(cursor)
-                .map(|(b, _)| b)
-                .unwrap_or(full_text.len());
-
-            // Find paragraph bounds: nearest '\n' before and after cursor.
-            let para_start = full_text[..cursor_byte]
-                .rfind('\n')
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            let para_end = full_text[cursor_byte..]
-                .find('\n')
-                .map(|p| cursor_byte + p)
-                .unwrap_or(full_text.len());
-
-            let para_text = full_text[para_start..para_end].to_string();
-            if para_text.trim().is_empty() {
-                return None;
-            }
-            // paragraph_id = byte-start offset, stringified. Stable enough for
-            // the dup-detection logic within a scan pass.
-            let para_id = format!("ax:{}", para_start);
-            Some((para_id, para_text, para_start))
+            paragraph
         }
     }
 }

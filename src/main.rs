@@ -549,10 +549,13 @@ impl BridgeManager {
         }
 
         // Word Add-in bridge is data-driven (HTTP POST), not foreground-driven.
-        // Check it first — but ONLY when Word is actually foreground (or our own
-        // window is). If the user has switched to a browser or other app, skip
-        // the Add-in cache so the correct bridge can win immediately.
-        if !is_browser {
+        // Check it first only while Word owns the active writing context. If
+        // Slack/Notes/etc. is foreground, the cached add-in text is stale and
+        // must not beat the AX bridge.
+        let active_is_word = self.bridges.get(self.active_idx)
+            .map(|b| b.name().contains("Word"))
+            .unwrap_or(false);
+        if word_is_foreground || (our_window_focused && active_is_word && !is_browser) {
             for (i, bridge) in self.bridges.iter().enumerate() {
                 if bridge.name() == "Word Add-in" {
                     if let Some(ctx) = bridge.read_context() {
@@ -1528,11 +1531,23 @@ impl ContextApp {
         self.grammar_queue_total = 0;
         self.processed_sentence_hashes.clear();
         self.last_doc_hash = 0;
+        self.last_doc_text.clear();
+        self.last_doc_approx_len = 0;
+        self.last_known_cursor_offset = None;
+        self.paragraph_texts.clear();
+        self.completions.clear();
+        self.open_completions.clear();
+        self.last_completed_prefix.clear();
+        self.last_dispatched_sentence.clear();
+        self.grammar_scanning = false;
         // Clear paragraph tracking so in-flight grammar actor results are
         // treated as stale and discarded (the guard checks this map).
         self.paragraph_sentence_hashes.clear();
         self.grammar_inflight.clear();
         self.manager.clear_context();
+        self.last_poll = Instant::now()
+            .checked_sub(self.poll_interval)
+            .unwrap_or_else(Instant::now);
     }
 
     fn new(
@@ -5810,13 +5825,22 @@ impl eframe::App for ContextApp {
                 // explicit allowlist below restores Mac while keeping the
                 // Windows tightening.
                 let active_name = self.manager.active_bridge_name();
-                let is_com_bridge = active_name == "Word COM"
-                    || active_name == "Accessibility (macOS)";
+                let is_ax_mac_bridge = active_name == "Accessibility (macOS)";
+                let is_com_bridge = active_name == "Word COM" || is_ax_mac_bridge;
                 if is_com_bridge {
-                    if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
-                        if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
-                            self.process_com_changed_paragraph(para_id, text, start);
-                        }
+                    let paragraph = if is_ax_mac_bridge {
+                        self.manager.read_paragraph_at(
+                            new_ctx.cursor_doc_offset
+                                .or(self.last_known_cursor_offset)
+                                .unwrap_or(0),
+                        )
+                    } else if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
+                        self.manager.read_paragraph_at(off)
+                    } else {
+                        None
+                    };
+                    if let Some((para_id, text, start)) = paragraph {
+                        self.process_com_changed_paragraph(para_id, text, start);
                     }
                 } else if self.manager.last_user_was_browser {
                     if let Some(doc) = self.manager.read_full_document() {
