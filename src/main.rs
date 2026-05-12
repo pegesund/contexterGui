@@ -4068,31 +4068,38 @@ impl ContextApp {
     /// Errors without a primary suggestion (rare — usually grammar
     /// errors that need <DELETE>, or LLM-only items) are skipped.
     fn dispatch_local_fix_all(&mut self) {
+        // Mirror the single-fix click path exactly (search at line ~7453
+        // where pending_fix = Some((word, suggestion, ...))). The
+        // bridge's find_and_replace works on `word` (= the full
+        // original sentence for grammar errors, the misspelled token
+        // for spelling errors, the unpunctuated run for sentence-
+        // boundary errors). Using `error_word` would substitute the
+        // trigger token but try to insert the full corrected sentence
+        // — pure garbage. The suggestion field is already a fully-
+        // resolved replacement (no pipe-separated alternatives at this
+        // point; the | splitting happens upstream when the WritingError
+        // is constructed).
+        let mut seen: std::collections::HashSet<(String, usize, String)> =
+            std::collections::HashSet::new();
         let mut count = 0;
         for e in &self.writing_errors {
             if e.ignored { continue; }
             if e.suggestion.is_empty() { continue; }
             if e.suggestion == "<DELETE>" { continue; }      // needs special remove flow
             if e.rule_name == "llm_correction" { continue; } // LLM owns these
-            // Spelling errors: `word` is the misspelled token.
-            // Grammar errors: `word` is the full sentence, `error_word`
-            // is the trigger token; the replacement is the corrected
-            // sentence stored in `suggestion`. For both we hand the
-            // bridge (find, replace) and let it search-and-substitute
-            // within the paragraph.
-            let find = if !e.error_word.is_empty() {
-                e.error_word.clone()
-            } else {
-                e.word.clone()
-            };
-            // For grammar errors, `suggestion` may contain pipe-
-            // separated alternatives ("til|tilbake|..."); take the
-            // first one as the primary fix.
-            let first_alt = e.suggestion.split('|').next().unwrap_or(&e.suggestion).to_string();
-            if first_alt.is_empty() { continue; }
+            // Skip duplicates: grammar errors with multiple suggestions
+            // for the SAME sentence land in writing_errors as separate
+            // entries that share (word, doc_offset, paragraph_id). The
+            // first fix removes them all (the existing pending_fix
+            // post-processing retains errors whose word+offset don't
+            // match), so queueing additional copies just produces
+            // wasted find_and_replace calls that look for text that's
+            // already gone.
+            let key = (e.word.to_lowercase(), e.doc_offset, e.paragraph_id.clone());
+            if !seen.insert(key) { continue; }
             self.fix_queue.push_back((
-                find,
-                first_alt,
+                e.word.clone(),
+                e.suggestion.clone(),
                 e.sentence_context.clone(),
                 e.doc_offset,
                 e.paragraph_id.clone(),
@@ -5454,14 +5461,21 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // OCR: poll clipboard for new screenshots
+        // OCR: poll clipboard for new screenshots.
+        //
+        // We DON'T send a Focus viewport command to the main window when a
+        // new screenshot is detected. The OCR-prompt popup that renders
+        // below uses show_viewport_immediate with with_always_on_top(),
+        // which is enough to bring the prompt to the user's attention.
+        // The previous code also issued `ctx.send_viewport_cmd(Focus)` on
+        // the MAIN viewport right before the inner OCR viewport was
+        // built — that forced the main window into a relayout while the
+        // immediate viewport was initializing, and on macOS the
+        // resulting state interleaving corrupted the main popup's text
+        // layout (labels wrapped at single-character widths until the
+        // OCR prompt was closed). Just polling is enough.
         if let Some(ocr) = &mut self.ocr {
-            let was_pending = ocr.has_pending_image();
             ocr.poll();
-            // Grab focus when a new screenshot is detected
-            if !was_pending && ocr.has_pending_image() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
         }
 
         // OCR: check if background OCR finished
