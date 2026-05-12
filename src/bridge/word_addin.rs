@@ -381,6 +381,31 @@ impl TextBridge for WordAddinBridge {
         None
     }
 
+    fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> {
+        if let Ok(lock) = self.cached_context.lock() {
+            if let Some((ctx, ts)) = lock.as_ref() {
+                if ts.elapsed() < Duration::from_secs(5) && !ctx.sentence.trim().is_empty() {
+                    let para_id = if ctx.paragraph_id.is_empty() {
+                        "word:addin".to_string()
+                    } else {
+                        ctx.paragraph_id.clone()
+                    };
+                    let cursor = ctx.cursor_doc_offset.unwrap_or(0);
+                    let word_pos = if ctx.word.is_empty() {
+                        ctx.sentence.len()
+                    } else {
+                        ctx.sentence.find(&ctx.word).unwrap_or(ctx.sentence.len())
+                    };
+                    let chars_before_cursor = ctx.sentence[..word_pos].chars().count()
+                        + ctx.word.chars().count();
+                    let start = cursor.saturating_sub(chars_before_cursor);
+                    return Some((para_id, ctx.sentence.clone(), start));
+                }
+            }
+        }
+        None
+    }
+
     fn mark_error_underline(&self, char_start: usize, char_end: usize, _color: super::ErrorUnderlineColor) -> bool {
         let json = format!(
             r#"{{"action":"underline","start":{},"end":{}}}"#,

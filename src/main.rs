@@ -736,6 +736,16 @@ impl BridgeManager {
         self.last_user_was_browser = false;
     }
 
+    fn request_word_rescan(&self) {
+        for bridge in &self.bridges {
+            if bridge.name() == "Word Add-in" {
+                log!("Word Add-in: queued focus rescan");
+                bridge.push_reply_urgent(r#"{"action":"rescan"}"#);
+                break;
+            }
+        }
+    }
+
     #[allow(dead_code)]
     fn replace_word(&self, new_text: &str) -> bool {
         let bridge_name = self.effective_bridge().map(|b| b.name()).unwrap_or("none");
@@ -1539,6 +1549,12 @@ impl ContextApp {
         self.open_completions.clear();
         self.last_completed_prefix.clear();
         self.last_dispatched_sentence.clear();
+        self.dispatched_key.clear();
+        self.cached_forward = None;
+        self.cached_right_column = None;
+        self.cached_mtag_supplement = None;
+        self.selected_completion = None;
+        self.doc_word_counts.clear();
         self.grammar_scanning = false;
         // Clear paragraph tracking so in-flight grammar actor results are
         // treated as stale and discarded (the guard checks this map).
@@ -5146,6 +5162,10 @@ impl eframe::App for ContextApp {
                 );
                 self.clear_for_app_switch();
                 self.last_caret_pos = None;
+                if now_word {
+                    self.manager.request_word_rescan();
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                }
                 ctx.request_repaint();
             }
 
@@ -5160,6 +5180,8 @@ impl eframe::App for ContextApp {
                 if !self.prev_word_title.is_empty() && title != self.prev_word_title {
                     log!("Word doc switch: '{}' → '{}' — clearing", self.prev_word_title, title);
                     self.clear_for_app_switch();
+                    self.manager.request_word_rescan();
+                    ctx.request_repaint_after(Duration::from_millis(250));
                     ctx.request_repaint();
                 }
                 self.prev_word_title = title;
@@ -5826,9 +5848,12 @@ impl eframe::App for ContextApp {
                 // Windows tightening.
                 let active_name = self.manager.active_bridge_name();
                 let is_ax_mac_bridge = active_name == "Accessibility (macOS)";
-                let is_com_bridge = active_name == "Word COM" || is_ax_mac_bridge;
+                let is_word_addin_bridge = active_name == "Word Add-in";
+                let is_com_bridge = active_name == "Word COM"
+                    || is_ax_mac_bridge
+                    || is_word_addin_bridge;
                 if is_com_bridge {
-                    let paragraph = if is_ax_mac_bridge {
+                    let paragraph = if is_ax_mac_bridge || is_word_addin_bridge {
                         self.manager.read_paragraph_at(
                             new_ctx.cursor_doc_offset
                                 .or(self.last_known_cursor_offset)
@@ -5978,7 +6003,8 @@ impl eframe::App for ContextApp {
             // original symptom on Windows Notepad before d257b6a).
             let active_name_for_com = self.manager.active_bridge_name();
             let is_com = active_name_for_com == "Word COM"
-                || active_name_for_com == "Accessibility (macOS)";
+                || active_name_for_com == "Accessibility (macOS)"
+                || active_name_for_com == "Word Add-in";
             let errors_before = self.writing_errors.len();
             if !is_com {
                 self.update_grammar_errors();
