@@ -2190,24 +2190,40 @@ impl ContextApp {
         }
 
         // Only keep the LAST Completion response — discard older ones
-        let mut last_completion: Option<(String, Vec<Completion>, Vec<Completion>)> = None;
+        let mut last_completion: Option<(
+            String,
+            Vec<Completion>,
+            Vec<Completion>,
+            bert_worker::CompletionStage,
+            bert_worker::CompletionTimings,
+        )> = None;
         let mut other_responses = Vec::new();
         for resp in responses {
             match resp {
-                bert_worker::BertResponse::Completion { id: _, cache_key, left, right } => {
-                    last_completion = Some((cache_key, left, right)); // overwrite — keep latest
+                bert_worker::BertResponse::Completion { id: _, cache_key, left, right, stage, timings } => {
+                    last_completion = Some((cache_key, left, right, stage, timings)); // overwrite — keep latest
                 }
                 other => other_responses.push(other),
             }
         }
         // Process the one completion result
-        if let Some((cache_key, left, right)) = last_completion {
+        if let Some((cache_key, left, right, stage, timings)) = last_completion {
             {
-                    log!("BERT completion received: {} left [{}] | {} right [{}] (round-trip: {}ms)",
+                    let stage_label = match stage {
+                        bert_worker::CompletionStage::Preview => "preview",
+                        bert_worker::CompletionStage::Final => "final",
+                    };
+                    log!("BERT completion {} received: {} left [{}] | {} right [{}] (round-trip: {}ms; worker left={}ms right={}ms dict={}ms grammar={}ms total={}ms)",
+                        stage_label,
                         left.len(), left.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
                         right.len(), right.iter().take(10).map(|c| format!("{}({:.1})", c.word, c.score)).collect::<Vec<_>>().join(", "),
-                        self.last_completion_dispatch.elapsed().as_millis());
-                    // Completions arrive already dictionary + grammar filtered from worker thread
+                        self.last_completion_dispatch.elapsed().as_millis(),
+                        timings.left_ms,
+                        timings.right_ms,
+                        timings.dict_ms,
+                        timings.grammar_ms,
+                        timings.total_ms);
+                    // Preview completions are dictionary-filtered; final completions also pass grammar filtering.
                     // Apply document-frequency and user-dict boosting, then re-sort
                     {
                         self.rebuild_doc_word_counts();
@@ -2226,13 +2242,15 @@ impl ContextApp {
                         left_boosted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
                         self.completions = left_boosted.into_iter().take(5).collect();
 
-                        let mut right_boosted: Vec<_> = right;
-                        for c in &mut right_boosted {
-                            c.score *= compute_boost(&c.word, &self.doc_word_counts,
-                                self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
+                        if stage == bert_worker::CompletionStage::Final {
+                            let mut right_boosted: Vec<_> = right;
+                            for c in &mut right_boosted {
+                                c.score *= compute_boost(&c.word, &self.doc_word_counts,
+                                    self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
+                            }
+                            right_boosted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                            self.open_completions = right_boosted.into_iter().take(5).collect();
                         }
-                        right_boosted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                        self.open_completions = right_boosted.into_iter().take(5).collect();
 
                         // Inject document words and user dict words matching the prefix
                         let prefix = extract_prefix(&self.context.word).to_lowercase();

@@ -79,12 +79,29 @@ pub enum BertRequest {
 }
 
 /// Responses from the BERT worker thread
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionStage {
+    Preview,
+    Final,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompletionTimings {
+    pub left_ms: u128,
+    pub right_ms: u128,
+    pub dict_ms: u128,
+    pub grammar_ms: u128,
+    pub total_ms: u128,
+}
+
 pub enum BertResponse {
     Completion {
         id: RequestId,
         cache_key: String,
         left: Vec<Completion>,
         right: Vec<Completion>,
+        stage: CompletionStage,
+        timings: CompletionTimings,
     },
 
     /// Spelling scores — scored_candidates sorted best-first
@@ -233,7 +250,14 @@ fn worker_loop(
                 let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
                 let right = build_right(&model, &logits, wordfreq.as_deref(), &nearby_words, &left_words, baselines.as_deref(), analyzer.as_deref());
 
-                let _ = tx.send(BertResponse::Completion { id, cache_key, left, right });
+                let _ = tx.send(BertResponse::Completion {
+                    id,
+                    cache_key,
+                    left,
+                    right,
+                    stage: CompletionStage::Final,
+                    timings: CompletionTimings::default(),
+                });
                 repaint_ctx.request_repaint();
             }
 
@@ -268,6 +292,7 @@ fn worker_loop(
             }
 
             BertRequest::CompleteWord { id, context, prefix, capitalize: _cap, top_n, max_steps, cache_key, masked_text, cancel, sentence } => {
+                let total_start = std::time::Instant::now();
                 // For right column: extract context before <mask> from masked_text
                 // "Om våren liker jeg <mask> best." → "Om våren liker jeg"
                 // This puts BERT's <mask> at the CURRENT WORD, not at end of sentence
@@ -339,8 +364,9 @@ fn worker_loop(
                         .collect()
                 };
 
-                let (left_raw, right_raw) = if prefix.is_empty() {
+                let (left_raw, right_raw, left_ms, right_ms) = if prefix.is_empty() {
                     // Empty prefix: use complete_word with empty prefix for next-word prediction
+                    let right_start = std::time::Instant::now();
                     let right = match complete_word(
                         &mut model, &context, "", pi,
                         baselines.as_deref(), wordfreq_shared.as_deref(),
@@ -350,8 +376,9 @@ fn worker_loop(
                         Ok(r) => r,
                         Err(_) => vec![],
                     };
-                    (vec![], right)
+                    (vec![], right, 0, right_start.elapsed().as_millis())
                 } else {
+                    let left_start = std::time::Instant::now();
                     let left = match complete_word(
                         &mut model, &context, &prefix, pi,
                         baselines.as_deref(), wordfreq_shared.as_deref(),
@@ -361,6 +388,7 @@ fn worker_loop(
                         Ok(l) => l,
                         Err(_) => vec![],
                     };
+                    let left_ms = left_start.elapsed().as_millis();
                     {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
@@ -369,11 +397,47 @@ fn worker_loop(
                                 prefix, top_n, max_steps, left.len(), t_cw.elapsed());
                         }
                     }
+                    let preview_left: Vec<Completion> = if let Some(ref a) = analyzer {
+                        left.iter()
+                            .filter(|c| a.has_word(&c.word.to_lowercase()))
+                            .take(5)
+                            .cloned()
+                            .collect()
+                    } else {
+                        left.iter().take(5).cloned().collect()
+                    };
+                    if !preview_left.is_empty() && !cancel.load(Ordering::Acquire) {
+                        let preview_total = total_start.elapsed().as_millis();
+                        {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                                .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                let _ = writeln!(f, "CompleteWord preview: prefix='{}' left={} left_ms={} total_ms={}",
+                                    prefix, preview_left.len(), left_ms, preview_total);
+                            }
+                        }
+                        let _ = tx.send(BertResponse::Completion {
+                            id,
+                            cache_key: cache_key.clone(),
+                            left: preview_left,
+                            right: vec![],
+                            stage: CompletionStage::Preview,
+                            timings: CompletionTimings {
+                                left_ms,
+                                right_ms: 0,
+                                dict_ms: 0,
+                                grammar_ms: 0,
+                                total_ms: preview_total,
+                            },
+                        });
+                        repaint_ctx.request_repaint();
+                    }
                     let left_words: HashSet<String> = left.iter().map(|c| c.word.to_lowercase()).collect();
                     // Use full-mask approach only when there's right context (mid-sentence).
                     // End-of-sentence: fall back to complete_word (normal completer).
                     let has_right_context = masked_text.split(&mask_tok).nth(1)
                         .map_or(false, |after| after.trim().trim_matches('.').trim().len() > 0);
+                    let right_start = std::time::Instant::now();
                     let right = if has_right_context {
                         right_from_mask(&mut model, &masked_text, &left_words, true)
                     } else {
@@ -387,6 +451,7 @@ fn worker_loop(
                             Err(_) => vec![],
                         }
                     };
+                    let right_ms = right_start.elapsed().as_millis();
                     {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
@@ -395,12 +460,13 @@ fn worker_loop(
                                 right.len(), t_cw.elapsed());
                         }
                     }
-                    (left, right)
+                    (left, right, left_ms, right_ms)
                 };
 
                 match Ok::<_, anyhow::Error>((left_raw, right_raw)) {
                     Ok((left, right)) => {
                         // Dictionary filter
+                        let dict_start = std::time::Instant::now();
                         let (left_dict, right_dict) = if let Some(ref a) = analyzer {
                             let lf: Vec<Completion> = left.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).collect();
                             let rf: Vec<Completion> = right.into_iter().filter(|c| a.has_word(&c.word.to_lowercase())).collect();
@@ -408,8 +474,10 @@ fn worker_loop(
                         } else {
                             (left, right)
                         };
+                        let dict_ms = dict_start.elapsed().as_millis();
 
                         // Grammar filter — but skip if already cancelled (user typed more)
+                        let grammar_start = std::time::Instant::now();
                         let (left_filtered, right_filtered) = if !cancel.load(Ordering::Acquire) {
                             if let Some(ref gs) = grammar_sender {
                                 let filter_batch = |candidates: Vec<Completion>, ctx: &str| -> Vec<Completion> {
@@ -437,16 +505,46 @@ fn worker_loop(
                             // Cancelled — skip grammar filter, will be discarded anyway
                             (vec![], vec![])
                         };
+                        let grammar_ms = grammar_start.elapsed().as_millis();
+                        let total_ms = total_start.elapsed().as_millis();
+                        {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                                .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                let _ = writeln!(f, "CompleteWord final: prefix='{}' left={} right={} left_ms={} right_ms={} dict_ms={} grammar_ms={} total_ms={}",
+                                    prefix, left_filtered.len(), right_filtered.len(), left_ms, right_ms, dict_ms, grammar_ms, total_ms);
+                            }
+                        }
 
                         // Skip sending if cancelled (newer request arrived)
                         if !cancel.load(Ordering::Acquire) {
-                            let _ = tx.send(BertResponse::Completion { id, cache_key, left: left_filtered, right: right_filtered });
+                            let _ = tx.send(BertResponse::Completion {
+                                id,
+                                cache_key,
+                                left: left_filtered,
+                                right: right_filtered,
+                                stage: CompletionStage::Final,
+                                timings: CompletionTimings {
+                                    left_ms,
+                                    right_ms,
+                                    dict_ms,
+                                    grammar_ms,
+                                    total_ms,
+                                },
+                            });
                         }
                         repaint_ctx.request_repaint();
                     }
                     Err(e) => {
                         eprintln!("complete_word error: {}", e);
-                        let _ = tx.send(BertResponse::Completion { id, cache_key, left: vec![], right: vec![] });
+                        let _ = tx.send(BertResponse::Completion {
+                            id,
+                            cache_key,
+                            left: vec![],
+                            right: vec![],
+                            stage: CompletionStage::Final,
+                            timings: CompletionTimings::default(),
+                        });
                         repaint_ctx.request_repaint();
                     }
                 }
