@@ -1094,6 +1094,12 @@ struct ContextApp {
     /// Recently fixed words — don't re-detect these as errors (cleared when fresh text arrives from extension)
     /// Deferred find-and-replace (word, replacement, optional sentence context, doc char offset) — executed next frame
     pending_fix: Option<(String, String, String, usize, String)>, // (find, replace, sentence_context, doc_offset, paragraph_id)
+    /// Queue of additional find-and-replace ops waiting to run after
+    /// `pending_fix` clears. Populated by `dispatch_local_fix_all`
+    /// (the ✨ button) so each error gets applied one-frame-at-a-time
+    /// through the existing single-fix pipeline — same offset-adjustment
+    /// + underline-cleanup logic, no special bulk path needed.
+    fix_queue: std::collections::VecDeque<(String, String, String, usize, String)>,
     /// After a successful fix, wait for Word to regain focus before sending the
     /// cursor-placement command. (replacement_word, paragraph_id, target_pid,
     /// started_at). Each frame we check the OS foreground app; when it matches
@@ -1700,6 +1706,7 @@ impl ContextApp {
             llm_waiting: false,
             llm_waiting_since: Instant::now(),
             pending_fix: None,
+            fix_queue: std::collections::VecDeque::new(),
             pending_cursor_place: None,
             paragraphs_need_underline_resync: std::collections::HashSet::new(),
             pending_consonant_checks: Vec::new(),
@@ -3044,14 +3051,49 @@ impl ContextApp {
         let para_texts_lower: std::collections::HashMap<&str, String> = self.paragraph_texts.iter()
             .map(|(k, v)| (k.as_str(), v.to_lowercase()))
             .collect();
-        // Build doc text only from known paragraphs
-        let doc_text = if !para_texts_lower.is_empty() {
+        // Effective document text — joined paragraphs, or the cached
+        // last_doc_text fallback when the bridge doesn't push paragraph
+        // events (browser/AX paths).
+        let doc_text: String = if !para_texts_lower.is_empty() {
             para_texts_lower.values().cloned().collect::<Vec<_>>().join(" ")
         } else if !self.last_doc_text.is_empty() {
             self.last_doc_text.to_lowercase()
         } else {
-            return;
+            String::new()
         };
+
+        // Document is effectively empty — typical trigger is Cmd+A then
+        // Backspace, or switching to a fresh document. Three cases lead
+        // here and the older code only handled the third:
+        //   1. paragraph_texts has entries but all values are empty
+        //      (Word Add-in POSTs text="" for the cleared paragraph)
+        //   2. paragraph_texts is empty but last_doc_text is empty
+        //   3. both are completely empty (older `return` branch)
+        // In all three the tracked errors point at text that no longer
+        // exists, so clear them + their underlines, plus drop any
+        // in-flight grammar/BERT work that would re-add stale entries.
+        if doc_text.trim().is_empty() {
+            for e in &mut self.writing_errors {
+                if e.underlined {
+                    if !e.paragraph_id.is_empty() {
+                        self.manager.clear_underline_word(&e.word, &e.paragraph_id);
+                    }
+                    if e.word_doc_start < e.word_doc_end {
+                        self.manager.clear_error_underline(e.word_doc_start, e.word_doc_end);
+                    }
+                }
+            }
+            if !self.writing_errors.is_empty() {
+                log!("Doc emptied — clearing {} stale errors", self.writing_errors.len());
+            }
+            self.writing_errors.clear();
+            self.grammar_queue.clear();
+            self.spelling_queue.clear();
+            self.pending_spelling_bert.clear();
+            self.pending_grammar_bert.clear();
+            self.pending_consonant_bert.clear();
+            return;
+        }
         // Clear underlines for errors that will be removed
         for e in &mut self.writing_errors {
             let should_remove = if e.ignored {
@@ -4007,6 +4049,61 @@ impl ContextApp {
     }
 
     /// Send all current error sentences to LLM for AI correction (button-triggered).
+    /// Apply each active error's primary suggestion to the document
+    /// via the existing single-fix pipeline. The ✨ button used to call
+    /// `dispatch_llm_fix_all`, which silently returned when no LLM
+    /// endpoint was configured — so on installs without an AI backend
+    /// (default on Mac), clicking did literally nothing. This version
+    /// runs locally with the suggestions Spell has already computed,
+    /// so it works regardless of LLM availability.
+    ///
+    /// Approach: enqueue every active error's (find, replace, context,
+    /// offset, paragraph_id) tuple onto `fix_queue`. The main update
+    /// loop pops one item per frame into `pending_fix`, which is
+    /// processed by the existing fix machinery (same code path as
+    /// clicking a single error). That code adjusts `doc_offset` of
+    /// remaining errors after each replacement, so applying N fixes
+    /// sequentially is safe.
+    ///
+    /// Errors without a primary suggestion (rare — usually grammar
+    /// errors that need <DELETE>, or LLM-only items) are skipped.
+    fn dispatch_local_fix_all(&mut self) {
+        let mut count = 0;
+        for e in &self.writing_errors {
+            if e.ignored { continue; }
+            if e.suggestion.is_empty() { continue; }
+            if e.suggestion == "<DELETE>" { continue; }      // needs special remove flow
+            if e.rule_name == "llm_correction" { continue; } // LLM owns these
+            // Spelling errors: `word` is the misspelled token.
+            // Grammar errors: `word` is the full sentence, `error_word`
+            // is the trigger token; the replacement is the corrected
+            // sentence stored in `suggestion`. For both we hand the
+            // bridge (find, replace) and let it search-and-substitute
+            // within the paragraph.
+            let find = if !e.error_word.is_empty() {
+                e.error_word.clone()
+            } else {
+                e.word.clone()
+            };
+            // For grammar errors, `suggestion` may contain pipe-
+            // separated alternatives ("til|tilbake|..."); take the
+            // first one as the primary fix.
+            let first_alt = e.suggestion.split('|').next().unwrap_or(&e.suggestion).to_string();
+            if first_alt.is_empty() { continue; }
+            self.fix_queue.push_back((
+                find,
+                first_alt,
+                e.sentence_context.clone(),
+                e.doc_offset,
+                e.paragraph_id.clone(),
+            ));
+            count += 1;
+        }
+        if count > 0 {
+            log!("Fix-all: queued {} local fixes", count);
+        }
+    }
+
     fn dispatch_llm_fix_all(&mut self) {
         if self.llm_actor.is_none() || self.llm_waiting { return; }
 
@@ -5194,6 +5291,17 @@ impl eframe::App for ContextApp {
                     }
                 }
                 self.pending_incomplete_sentence = None;
+            }
+        }
+
+        // Drain the bulk fix-all queue into pending_fix one item per
+        // frame so each replacement goes through the standard single-
+        // fix flow below (offset adjustment, underline cleanup, focus
+        // restore). Only pulls when pending_fix is empty so we don't
+        // overwrite an in-flight fix from a manual click.
+        if self.pending_fix.is_none() {
+            if let Some(item) = self.fix_queue.pop_front() {
+                self.pending_fix = Some(item);
             }
         }
 
@@ -6645,7 +6753,15 @@ impl eframe::App for ContextApp {
                                     .color(egui::Color32::from_rgb(0, 120, 220)),
                                 self.language.ui_ai_fix_all(),
                             ).clicked() {
-                                self.dispatch_llm_fix_all();
+                                // Apply local suggestions for every active
+                                // error via the find-and-replace queue. No
+                                // LLM dependency — works even when no AI
+                                // backend is configured (the previous
+                                // dispatch_llm_fix_all() returned silently
+                                // when llm_actor was None, so the click
+                                // looked broken to users testing without
+                                // an AI endpoint).
+                                self.dispatch_local_fix_all();
                             }
                         }
                     }
