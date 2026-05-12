@@ -40,6 +40,15 @@ fn allow_ax_reenable(pid: u32) -> bool {
     }
 }
 
+fn needs_ax_reenable(app_name: &str) -> bool {
+    matches!(
+        app_name,
+        "microsoft word" | "microsoft teams" | "msteams" | "slack"
+            | "microsoft excel" | "microsoft powerpoint"
+            | "microsoft outlook"
+    )
+}
+
 /// macOS platform services.
 ///
 /// Foreground app detection runs on a background thread to avoid
@@ -94,11 +103,10 @@ impl MacPlatform {
         std::thread::Builder::new()
             .name("fg-poller".into())
             .spawn(move || {
-                // Track the previous foreground pid so we can detect the
-                // "focus returned to Word" transition. Word drops its AX state
-                // when it loses focus (browser/other app takes over); without
-                // this, returning to Word leaves AXFocusedUIElement stuck at
-                // -25211 because we only enabled once per pid.
+                // Track the previous foreground pid so we can detect transitions
+                // into apps that gate focused-element AX behind enhanced/manual
+                // accessibility. Without this, Word/Slack can leave
+                // AXFocusedUIElement stuck at -25211/-25212 after focus changes.
                 let mut prev_fg_pid: u32 = 0;
                 loop {
                     if let Some(app) = query_foreground_app() {
@@ -123,17 +131,10 @@ impl MacPlatform {
                                 *lock = sel;
                             }
                             // Re-enable accessibility on every transition INTO
-                            // an app known to gate AX behind enhanced UI (Word,
-                            // Teams, and other Office / Electron apps that copy
-                            // Office's pattern). Mirrors VoiceOver's activation
-                            // behaviour. Idempotent when AX is already up.
-                            let needs_ax_poke = matches!(
-                                app.exe_name.as_str(),
-                                "microsoft word" | "microsoft teams" | "msteams"
-                                    | "microsoft excel" | "microsoft powerpoint"
-                                    | "microsoft outlook"
-                            );
-                            if needs_ax_poke && pid != prev_fg_pid {
+                            // an app known to gate AX behind enhanced/manual UI.
+                            // Mirrors VoiceOver's activation behaviour.
+                            // Idempotent when AX is already up.
+                            if needs_ax_reenable(app.exe_name.as_str()) && pid != prev_fg_pid {
                                 let _ = enable_ax_for_app(pid);
                             }
                         }
@@ -348,9 +349,10 @@ impl PlatformServices for MacPlatform {
                 }
                 Err(first_err) => {
                     trace_caret(&format!("caret pid={} {}", ext_pid, first_err));
-                    let is_word = ext_app.exe_name == "microsoft word"
-                        || ext_app.exe_name.contains("word");
-                    if ext_pid == 0 || !is_word || !allow_ax_reenable(ext_pid) {
+                    if ext_pid == 0
+                        || !needs_ax_reenable(ext_app.exe_name.as_str())
+                        || !allow_ax_reenable(ext_pid)
+                    {
                         return None;
                     }
 
@@ -424,8 +426,8 @@ fn run_applescript(script: &str) -> Option<String> {
     }
 }
 
-/// Enable Word's accessibility by setting AXEnhancedUserInterface=true.
-/// Word (and older Office apps) disable AX by default for performance.
+/// Enable enhanced/manual accessibility for apps that return incomplete AX
+/// focus state until assistive clients opt in.
 /// Returns true if the attribute was successfully set.
 fn enable_ax_for_app(pid: u32) -> bool {
     use accessibility_sys::*;
