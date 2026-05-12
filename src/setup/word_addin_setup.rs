@@ -69,11 +69,16 @@ pub fn is_word_installed() -> bool {
 
 /// Path inside the running .app where the manifest is bundled (built by
 /// scripts/build-mac.sh into `Contents/Resources/word-addin/manifest.xml`).
+/// In dev (cargo run) falls back to `<repo>/contexterGui/word-addin/manifest.xml`.
 fn bundled_manifest_path() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("current_exe")?;
     let macos = exe.parent().ok_or_else(|| anyhow!("no exe parent"))?;
-    let contents = macos.parent().ok_or_else(|| anyhow!("no Contents parent"))?;
-    Ok(contents.join("Resources/word-addin/manifest.xml"))
+    if macos.file_name().and_then(|s| s.to_str()) == Some("MacOS") {
+        let contents = macos.parent().ok_or_else(|| anyhow!("no Contents parent"))?;
+        Ok(contents.join("Resources/word-addin/manifest.xml"))
+    } else {
+        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("word-addin/manifest.xml"))
+    }
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
