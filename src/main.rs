@@ -5968,7 +5968,7 @@ impl eframe::App for ContextApp {
                                 s.show_grammar = true;
                                 save_settings(&s);
                             }
-                            if matches!(e.category, ErrorCategory::Grammar) {
+                            if matches!(e.category, ErrorCategory::Grammar) && self.selected_tab != 0 {
                                 self.selected_tab = 1;
                             }
                             if self.focused_error_idx != Some(idx) {

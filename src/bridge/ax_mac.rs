@@ -10,6 +10,7 @@
 use super::{CursorContext, RawCursorText, TextBridge, build_context};
 use accessibility_sys::*;
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::string::CFString;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
@@ -48,6 +49,25 @@ fn role_accepts_range_context(role: &str) -> bool {
         role,
         "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox" | "AXEditableText" | "AXWebArea"
     )
+}
+
+unsafe fn is_ax_focused(elem: AXUIElementRef) -> bool {
+    let mut focused_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new("AXFocused").as_concrete_TypeRef(),
+        &mut focused_ref,
+    );
+    if err != 0 || focused_ref.is_null() {
+        return false;
+    }
+    let focused = if core_foundation::base::CFGetTypeID(focused_ref) == CFBoolean::type_id() {
+        bool::from(CFBoolean::wrap_under_create_rule(focused_ref as _))
+    } else {
+        CFRelease(focused_ref);
+        false
+    };
+    focused
 }
 
 unsafe fn selected_cursor(elem: AXUIElementRef, fallback: usize) -> usize {
@@ -148,6 +168,80 @@ unsafe fn read_context_from_element(elem: AXUIElementRef) -> Option<(&'static st
     None
 }
 
+unsafe fn context_from_focused_element(elem: AXUIElementRef) -> Option<(String, &'static str, CursorContext)> {
+    let role = role_of(elem);
+    read_context_from_element(elem).map(|(via, ctx)| (role, via, ctx))
+}
+
+unsafe fn find_focused_in_attr_element<T>(
+    elem: AXUIElementRef,
+    attr: &str,
+    depth: usize,
+    max_depth: usize,
+    reader: unsafe fn(AXUIElementRef) -> Option<T>,
+) -> Option<T> {
+    let mut child_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut child_ref,
+    );
+    if err != 0 || child_ref.is_null() { return None; }
+    let child = child_ref as AXUIElementRef;
+    let result = if child == elem {
+        None
+    } else {
+        find_focused_value(child, depth + 1, max_depth, reader)
+    };
+    CFRelease(child_ref);
+    result
+}
+
+unsafe fn find_focused_in_attr_array<T>(
+    elem: AXUIElementRef,
+    attr: &str,
+    depth: usize,
+    max_depth: usize,
+    reader: unsafe fn(AXUIElementRef) -> Option<T>,
+) -> Option<T> {
+    let mut children: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut children,
+    );
+    if err != 0 || children.is_null() { return None; }
+    let count = core_foundation::array::CFArrayGetCount(children as _);
+    for i in 0..count {
+        let child = core_foundation::array::CFArrayGetValueAtIndex(children as _, i) as AXUIElementRef;
+        if child == elem { continue; }
+        if let Some(found) = find_focused_value(child, depth + 1, max_depth, reader) {
+            CFRelease(children);
+            return Some(found);
+        }
+    }
+    CFRelease(children);
+    None
+}
+
+unsafe fn find_focused_value<T>(
+    elem: AXUIElementRef,
+    depth: usize,
+    max_depth: usize,
+    reader: unsafe fn(AXUIElementRef) -> Option<T>,
+) -> Option<T> {
+    if is_ax_focused(elem) {
+        if let Some(value) = reader(elem) {
+            return Some(value);
+        }
+    }
+    if depth >= max_depth { return None; }
+    find_focused_in_attr_element(elem, "AXFocusedUIElement", depth, max_depth, reader)
+        .or_else(|| find_focused_in_attr_array(elem, "AXSelectedChildren", depth, max_depth, reader))
+        .or_else(|| find_focused_in_attr_array(elem, "AXVisibleChildren", depth, max_depth, reader))
+        .or_else(|| find_focused_in_attr_array(elem, "AXChildren", depth, max_depth, reader))
+}
+
 unsafe fn find_context_in_attr_element(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, &'static str, CursorContext)> {
     let mut child_ref: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(
@@ -207,7 +301,9 @@ unsafe fn find_context_in_app_window(app: AXUIElementRef) -> Option<(String, &'s
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return None; }
-    let found = find_readable_context(window_ref as AXUIElementRef, 0, 26);
+    let window = window_ref as AXUIElementRef;
+    let found = find_focused_value(window, 0, 26, context_from_focused_element)
+        .or_else(|| find_readable_context(window, 0, 26));
     CFRelease(window_ref);
     found
 }
@@ -223,7 +319,9 @@ unsafe fn find_context_in_app_windows(app: AXUIElementRef) -> Option<(String, &'
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if let Some(found) = find_readable_context(window, 0, 26) {
+        if let Some(found) = find_focused_value(window, 0, 26, context_from_focused_element)
+            .or_else(|| find_readable_context(window, 0, 26))
+        {
             CFRelease(windows);
             return Some(found);
         }
@@ -250,6 +348,10 @@ unsafe fn paragraph_from_element(elem: AXUIElementRef) -> Option<(String, String
     let para_text = full_text[para_start..para_end].to_string();
     if para_text.trim().is_empty() { return None; }
     Some((format!("ax:{}", para_start), para_text, para_start))
+}
+
+unsafe fn paragraph_from_focused_element(elem: AXUIElementRef) -> Option<(String, String, usize)> {
+    paragraph_from_element(elem)
 }
 
 unsafe fn find_paragraph_in_attr_element(elem: AXUIElementRef, attr: &str, depth: usize, max_depth: usize) -> Option<(String, String, usize)> {
@@ -310,7 +412,9 @@ unsafe fn find_paragraph_in_app_window(app: AXUIElementRef) -> Option<(String, S
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return None; }
-    let found = find_readable_paragraph(window_ref as AXUIElementRef, 0, 26);
+    let window = window_ref as AXUIElementRef;
+    let found = find_focused_value(window, 0, 26, paragraph_from_focused_element)
+        .or_else(|| find_readable_paragraph(window, 0, 26));
     CFRelease(window_ref);
     found
 }
@@ -326,7 +430,9 @@ unsafe fn find_paragraph_in_app_windows(app: AXUIElementRef) -> Option<(String, 
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if let Some(found) = find_readable_paragraph(window, 0, 26) {
+        if let Some(found) = find_focused_value(window, 0, 26, paragraph_from_focused_element)
+            .or_else(|| find_readable_paragraph(window, 0, 26))
+        {
             CFRelease(windows);
             return Some(found);
         }
@@ -393,7 +499,9 @@ unsafe fn find_text_in_app_window(app: AXUIElementRef) -> Option<(String, usize)
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return None; }
-    let found = find_readable_text(window_ref as AXUIElementRef, 0, 26);
+    let window = window_ref as AXUIElementRef;
+    let found = find_focused_value(window, 0, 26, text_from_element)
+        .or_else(|| find_readable_text(window, 0, 26));
     CFRelease(window_ref);
     found
 }
@@ -409,7 +517,9 @@ unsafe fn find_text_in_app_windows(app: AXUIElementRef) -> Option<(String, usize
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if let Some(found) = find_readable_text(window, 0, 26) {
+        if let Some(found) = find_focused_value(window, 0, 26, text_from_element)
+            .or_else(|| find_readable_text(window, 0, 26))
+        {
             CFRelease(windows);
             return Some(found);
         }
@@ -628,10 +738,10 @@ impl AxMacBridge {
 
         let target = pid as u32;
         bring_app_to_front(target);
-        send_backspaces_to(target, word_len);
-        // Give Teams a beat to process the deletes before the paste event.
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        send_cmd_v_to(target);
+        send_backspaces_to(0, word_len);
+        // Give Electron editors a beat to process the deletes before paste.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        send_cmd_v_to(0);
 
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -651,7 +761,7 @@ impl AxMacBridge {
 
         let target = pid as u32;
         bring_app_to_front(target);
-        send_cmd_v_to(target);
+        send_cmd_v_to(0);
 
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(250));
