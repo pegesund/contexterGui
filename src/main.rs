@@ -584,6 +584,7 @@ impl BridgeManager {
         // Our window is foreground — return cached context.
         // NEVER try COM calls here — causes tight loop freeze.
         if our_window_focused {
+            self.restore_last_external_target();
             return self.last_context.clone();
         }
 
@@ -748,6 +749,7 @@ impl BridgeManager {
 
     #[allow(dead_code)]
     fn replace_word(&self, new_text: &str) -> bool {
+        self.restore_last_external_target();
         let bridge_name = self.effective_bridge().map(|b| b.name()).unwrap_or("none");
         log!("replace_word('{}') via bridge '{}' (idx={})", new_text, bridge_name, self.active_idx);
         let result = self.effective_bridge().map(|b| b.replace_word(new_text)).unwrap_or(false);
@@ -763,19 +765,37 @@ impl BridgeManager {
         }
     }
 
+    fn restore_last_external_target(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.last_user_pid == 0 {
+                return;
+            }
+            for bridge in &self.bridges {
+                if bridge.name() == "Accessibility (macOS)" {
+                    bridge.set_fg_hwnd(self.last_user_pid as isize);
+                }
+            }
+        }
+    }
+
     fn find_and_replace(&self, find: &str, replace: &str) -> bool {
+        self.restore_last_external_target();
         self.effective_bridge().map(|b| b.find_and_replace(find, replace)).unwrap_or(false)
     }
 
     fn find_and_replace_in_context(&self, find: &str, replace: &str, context: &str) -> bool {
+        self.restore_last_external_target();
         self.effective_bridge().map(|b| b.find_and_replace_in_context(find, replace, context)).unwrap_or(false)
     }
 
     fn find_and_replace_in_context_at(&self, find: &str, replace: &str, context: &str, char_offset: usize) -> bool {
+        self.restore_last_external_target();
         self.effective_bridge().map(|b| b.find_and_replace_in_context_at(find, replace, context, char_offset)).unwrap_or(false)
     }
 
     fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, paragraph_id: &str, context: &str, char_offset: usize) -> bool {
+        self.restore_last_external_target();
         self.effective_bridge().map(|b| b.find_and_replace_in_paragraph(find, replace, paragraph_id, context, char_offset)).unwrap_or(false)
     }
 
@@ -6677,10 +6697,11 @@ impl eframe::App for ContextApp {
 
                 // 💡 Forslag — toggle word/next-word suggestions panel
                 let bulb_color = if self.show_completions && self.selected_tab == 0 { active } else { inactive };
-                if ax_icon(ui,
+                let bulb_resp = ax_icon(ui,
                     egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(bulb_color),
                     self.language.ui_suggestions(),
-                ).clicked() {
+                );
+                if toolbar_clicked(ui, &bulb_resp) {
                     if self.selected_tab == 0 {
                         self.show_completions = !self.show_completions;
                     } else {
@@ -6702,10 +6723,11 @@ impl eframe::App for ContextApp {
                 } else {
                     egui::Color32::from_rgb(0, 160, 60)
                 };
-                if ax_icon(ui,
+                let pen_resp = ax_icon(ui,
                     egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color),
                     self.language.ui_grammar(),
-                ).clicked() {
+                );
+                if toolbar_clicked(ui, &pen_resp) {
                     if self.selected_tab == 1 {
                         self.show_grammar = !self.show_grammar;
                     } else {
@@ -9240,6 +9262,12 @@ fn ax_icon(ui: &mut egui::Ui, icon: egui::RichText, label: &str) -> egui::Respon
     let resp = ui.add(egui::Label::new(icon).sense(egui::Sense::click()));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     resp.on_hover_text(label)
+}
+
+fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    resp.clicked()
+        || (resp.hovered()
+            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
 }
 
 /// Paint a small Norwegian flag at the given position.

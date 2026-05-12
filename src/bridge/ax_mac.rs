@@ -153,6 +153,222 @@ unsafe fn text_from_element(elem: AXUIElementRef) -> Option<(String, usize)> {
     text_from_range(elem).or_else(|| text_from_value(elem))
 }
 
+fn byte_index_for_char(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(text.len())
+}
+
+fn text_at_char_offset_matches(text: &str, find: &str, char_offset: usize) -> bool {
+    let find_chars = find.chars().count();
+    let start = byte_index_for_char(text, char_offset);
+    let end = byte_index_for_char(text, char_offset.saturating_add(find_chars));
+    text.get(start..end)
+        .map(|slice| slice.eq_ignore_ascii_case(find))
+        .unwrap_or(false)
+}
+
+fn find_char_offset(text: &str, find: &str, preferred: usize) -> Option<usize> {
+    if find.is_empty() {
+        return None;
+    }
+    if text_at_char_offset_matches(text, find, preferred) {
+        return Some(preferred);
+    }
+
+    let needle = find.to_lowercase();
+    let haystack = text.to_lowercase();
+    let mut best: Option<(usize, usize)> = None;
+    let mut search_from = 0;
+    while let Some(byte_pos) = haystack[search_from..].find(&needle) {
+        let absolute_byte = search_from + byte_pos;
+        let char_pos = text[..absolute_byte].chars().count();
+        let distance = char_pos.abs_diff(preferred);
+        if best.map_or(true, |(_, best_distance)| distance < best_distance) {
+            best = Some((char_pos, distance));
+        }
+        search_from = absolute_byte + needle.len();
+        if search_from >= haystack.len() {
+            break;
+        }
+    }
+    best.map(|(char_pos, _)| char_pos)
+}
+
+unsafe fn set_selected_range(elem: AXUIElementRef, start: usize, len: usize) -> bool {
+    let range = core_foundation::base::CFRange {
+        location: start as isize,
+        length: len as isize,
+    };
+    let ax_range = AXValueCreate(kAXValueTypeCFRange, &range as *const _ as _);
+    if ax_range.is_null() {
+        return false;
+    }
+    let err = AXUIElementSetAttributeValue(
+        elem,
+        CFString::new("AXSelectedTextRange").as_concrete_TypeRef(),
+        ax_range as CFTypeRef,
+    );
+    CFRelease(ax_range as _);
+    err == 0
+}
+
+unsafe fn set_selected_text(elem: AXUIElementRef, text: &str) -> bool {
+    let replacement = CFString::new(text);
+    let err = AXUIElementSetAttributeValue(
+        elem,
+        CFString::new("AXSelectedText").as_concrete_TypeRef(),
+        replacement.as_concrete_TypeRef() as CFTypeRef,
+    );
+    err == 0
+}
+
+fn paste_text_into_frontmost(pid: u32, text: &str) -> bool {
+    let saved_clip = pbpaste();
+    pbcopy(text);
+    bring_app_to_front(pid);
+    send_cmd_v_to(0);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        pbcopy(&saved_clip);
+    });
+    true
+}
+
+unsafe fn replace_in_text_element_at(
+    elem: AXUIElementRef,
+    pid: u32,
+    find: &str,
+    replace: &str,
+    preferred_offset: usize,
+) -> bool {
+    let Some((full_text, _)) = text_from_element(elem) else {
+        return false;
+    };
+    let Some(char_offset) = find_char_offset(&full_text, find, preferred_offset) else {
+        return false;
+    };
+    let find_len = find.chars().count();
+    if !set_selected_range(elem, char_offset, find_len) {
+        crate::log!("ax_mac direct replace: failed to select range off={} len={}", char_offset, find_len);
+        return false;
+    }
+    if set_selected_text(elem, replace) {
+        crate::log!("ax_mac direct replace: AXSelectedText off={} '{}' → '{}'", char_offset, find, replace);
+        return true;
+    }
+
+    crate::log!("ax_mac direct replace: AXSelectedText failed, falling back to paste over selection");
+    paste_text_into_frontmost(pid, replace)
+}
+
+unsafe fn replace_in_attr_element(
+    elem: AXUIElementRef,
+    attr: &str,
+    depth: usize,
+    max_depth: usize,
+    pid: u32,
+    find: &str,
+    replace: &str,
+    preferred_offset: usize,
+) -> bool {
+    let mut child_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut child_ref,
+    );
+    if err != 0 || child_ref.is_null() { return false; }
+    let child = child_ref as AXUIElementRef;
+    let result = child != elem
+        && replace_in_readable_text(child, depth + 1, max_depth, pid, find, replace, preferred_offset);
+    CFRelease(child_ref);
+    result
+}
+
+unsafe fn replace_in_attr_array(
+    elem: AXUIElementRef,
+    attr: &str,
+    depth: usize,
+    max_depth: usize,
+    pid: u32,
+    find: &str,
+    replace: &str,
+    preferred_offset: usize,
+) -> bool {
+    let mut children: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new(attr).as_concrete_TypeRef(),
+        &mut children,
+    );
+    if err != 0 || children.is_null() { return false; }
+    let count = core_foundation::array::CFArrayGetCount(children as _);
+    for i in 0..count {
+        let child = core_foundation::array::CFArrayGetValueAtIndex(children as _, i) as AXUIElementRef;
+        if child == elem { continue; }
+        if replace_in_readable_text(child, depth + 1, max_depth, pid, find, replace, preferred_offset) {
+            CFRelease(children);
+            return true;
+        }
+    }
+    CFRelease(children);
+    false
+}
+
+unsafe fn replace_in_readable_text(
+    elem: AXUIElementRef,
+    depth: usize,
+    max_depth: usize,
+    pid: u32,
+    find: &str,
+    replace: &str,
+    preferred_offset: usize,
+) -> bool {
+    if replace_in_text_element_at(elem, pid, find, replace, preferred_offset) {
+        return true;
+    }
+    if depth >= max_depth { return false; }
+    replace_in_attr_element(elem, "AXFocusedUIElement", depth, max_depth, pid, find, replace, preferred_offset)
+        || replace_in_attr_array(elem, "AXSelectedChildren", depth, max_depth, pid, find, replace, preferred_offset)
+        || replace_in_attr_array(elem, "AXVisibleChildren", depth, max_depth, pid, find, replace, preferred_offset)
+        || replace_in_attr_array(elem, "AXChildren", depth, max_depth, pid, find, replace, preferred_offset)
+}
+
+unsafe fn replace_in_app_window(app: AXUIElementRef, pid: u32, find: &str, replace: &str, preferred_offset: usize) -> bool {
+    let mut window_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXFocusedWindow").as_concrete_TypeRef(),
+        &mut window_ref,
+    );
+    if err != 0 || window_ref.is_null() { return false; }
+    let ok = replace_in_readable_text(window_ref as AXUIElementRef, 0, 26, pid, find, replace, preferred_offset);
+    CFRelease(window_ref);
+    ok
+}
+
+unsafe fn replace_in_app_windows(app: AXUIElementRef, pid: u32, find: &str, replace: &str, preferred_offset: usize) -> bool {
+    let mut windows: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXWindows").as_concrete_TypeRef(),
+        &mut windows,
+    );
+    if err != 0 || windows.is_null() { return false; }
+    let count = core_foundation::array::CFArrayGetCount(windows as _);
+    for i in 0..count {
+        let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
+        if replace_in_readable_text(window, 0, 26, pid, find, replace, preferred_offset) {
+            CFRelease(windows);
+            return true;
+        }
+    }
+    CFRelease(windows);
+    false
+}
+
 unsafe fn read_context_from_element(elem: AXUIElementRef) -> Option<(&'static str, CursorContext)> {
     let role = role_of(elem);
     if role_accepts_range_context(&role) {
@@ -642,11 +858,12 @@ impl TextBridge for AxMacBridge {
     }
 
     fn find_and_replace_in_context_at(&self, find: &str, replace: &str, _context: &str, _off: usize) -> bool {
-        self.backspace_paste(find, replace)
+        self.replace_at_offset(find, replace, _off)
+            || self.backspace_paste(find, replace)
     }
 
     fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, _p: &str, _c: &str, _o: usize) -> bool {
-        self.backspace_paste(find, replace)
+        self.replace_at_offset(find, replace, _o)
     }
 
     fn read_document_context(&self) -> Option<String> {
@@ -768,6 +985,28 @@ impl AxMacBridge {
             pbcopy(&saved_clip);
         });
         true
+    }
+
+    fn replace_at_offset(&self, find: &str, replace: &str, char_offset: usize) -> bool {
+        let pid = self.target_pid.load(Ordering::Relaxed);
+        crate::log!(
+            "ax_mac replace_at_offset: pid={} find='{}' replace='{}' off={}",
+            pid, find, replace, char_offset
+        );
+        if pid <= 0 || find.is_empty() {
+            return false;
+        }
+        let pid_u32 = pid as u32;
+        unsafe {
+            let app = AXUIElementCreateApplication(pid as i32);
+            if app.is_null() {
+                return false;
+            }
+            let ok = replace_in_app_window(app, pid_u32, find, replace, char_offset)
+                || replace_in_app_windows(app, pid_u32, find, replace, char_offset);
+            CFRelease(app as _);
+            ok
+        }
     }
 }
 
