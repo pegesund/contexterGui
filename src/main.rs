@@ -1190,9 +1190,6 @@ struct ContextApp {
     /// True when the foreground app is a browser this frame. Set at the
     /// top of every update() so grammar/BERT pollers can gate on it.
     suppress_errors: bool,
-    /// Word errors are kept while the user temporarily works in another app,
-    /// then shown again when Word becomes foreground.
-    preserved_word_errors_while_away: bool,
     /// Last frame's writing-app state. None = uninitialised; Some(true) means
     /// the previous foreground app was one Spell can help with (Word, Notes,
     /// browser, ...); Some(false) means it was a code editor / terminal /
@@ -1761,7 +1758,6 @@ impl ContextApp {
             prev_word_title: String::new(),
             prev_fg_pid: 0,
             suppress_errors: false,
-            preserved_word_errors_while_away: false,
             prev_was_writing_app: None,
             update_service: {
                 let svc = std::sync::Arc::new(crate::updates::UpdateService::new());
@@ -5118,21 +5114,10 @@ impl eframe::App for ContextApp {
             let now_word = kind == platform::AppKind::Word;
             let now_our_app = kind == platform::AppKind::OurApp;
 
-            // Cross-app switch: clear ONLY the cached cursor context (the thing
-            // that drives the BERT next-word popup) when the user moves between
-            // two different external apps. Without this the BERT completion
-            // popup keeps showing the previous app's prefix matches (e.g. "ar*"
-            // completions from VS Code still visible after switching to Word
-            // and typing "yo").
-            //
-            // CRITICAL: do NOT call clear_for_app_switch() here — that wipes
-            // writing_errors + spelling_queue + paragraph hashes etc, which
-            // breaks Spell's standalone editor when the user briefly switches
-            // away (e.g. to take a screenshot) and comes back. The clear-all
-            // is appropriate for browser-foreground and Word doc-switch where
-            // the user is genuinely starting a new document, not a brief
-            // detour. Cross-app transitions to non-document apps (screenshot
-            // tools, finders, system dialogs) don't qualify.
+            // Cross-app switch: clear the visible document state immediately.
+            // Errors and suggestions belong to the app/document that produced
+            // them; keeping them while Slack/Notes/Word focus changes makes
+            // stale syntax cards appear over the new writing surface.
             //
             // Skip when transitioning TO our own window so brief clicks on
             // Spell don't blow away the active state.
@@ -5141,47 +5126,21 @@ impl eframe::App for ContextApp {
                 && fg.pid != self.prev_fg_pid
             {
                 log!(
-                    "App switch: pid {} → {} (kind={:?}) — clearing stale BERT context only",
+                    "App switch: pid {} → {} (kind={:?}) — clearing visible app state",
                     self.prev_fg_pid, fg.pid, kind
                 );
-                // Just the BERT next-word completion context + bridge cache.
-                // writing_errors, spelling_queue, paragraph hashes are preserved.
-                self.context = Default::default();
-                self.manager.clear_context();
-                // Drop stale caret coords. If the new app exposes AX caret
-                // (Word, browsers), the next poll repopulates within ~200ms.
-                // Apps that don't expose caret (Notes, Terminal, code editors)
-                // leave this None — popup stays where the user last placed it
-                // instead of teleporting to the previous app's caret.
+                self.clear_for_app_switch();
                 self.last_caret_pos = None;
                 ctx.request_repaint();
             }
 
             if now_browser && !self.suppress_errors {
-                let has_word_state = self.writing_errors.iter().any(|e| !e.paragraph_id.is_empty())
-                    || !self.paragraph_sentence_hashes.is_empty();
-                if has_word_state {
-                    log!("Browser foreground — preserving Word errors while away");
-                    self.preserved_word_errors_while_away = true;
-                    self.context = Default::default();
-                    self.manager.clear_context();
-                    self.completions.clear();
-                    self.open_completions.clear();
-                    self.last_completed_prefix.clear();
-                    self.last_dispatched_sentence.clear();
-                    self.last_caret_pos = None;
-                } else {
-                    log!("Browser foreground — clearing stale errors");
-                    self.clear_for_app_switch();
-                }
+                log!("Browser foreground — clearing stale errors");
+                self.clear_for_app_switch();
                 ctx.request_repaint();
             }
 
             if now_word {
-                if self.preserved_word_errors_while_away {
-                    log!("Word foreground — restoring preserved Word errors");
-                    self.preserved_word_errors_while_away = false;
-                }
                 let title = fg.title.clone();
                 if !self.prev_word_title.is_empty() && title != self.prev_word_title {
                     log!("Word doc switch: '{}' → '{}' — clearing", self.prev_word_title, title);
@@ -5803,9 +5762,7 @@ impl eframe::App for ContextApp {
                     let to = std::mem::take(&mut self.manager.bridge_switch_to);
                     let from_word = from.contains("Word");
                     let to_word = to.contains("Word");
-                    let keep_word_errors = (from_word && !to_word)
-                        || (from_word && to_word)
-                        || (self.preserved_word_errors_while_away && to_word);
+                    let keep_word_errors = from_word && to_word;
                     log!("Bridge switched {} → {} — {} errors, {} spelling queue, {} pending BERT, {} grammar queue",
                         from, to, self.writing_errors.len(), self.spelling_queue.len(),
                         self.pending_spelling_bert.len(), self.grammar_queue.len());
@@ -5821,7 +5778,6 @@ impl eframe::App for ContextApp {
                     self.last_dispatched_sentence.clear();
                     self.grammar_scanning = false;
                     if keep_word_errors {
-                        self.preserved_word_errors_while_away = from_word && !to_word;
                         log!("Bridge switch kept Word error state");
                     } else {
                         self.writing_errors.clear();
@@ -5830,7 +5786,6 @@ impl eframe::App for ContextApp {
                         self.paragraph_texts.clear();
                         self.last_doc_text.clear();
                         self.last_doc_hash = 0;
-                        self.preserved_word_errors_while_away = false;
                     }
                     // Do NOT reset last_sentence_count to 0 — that causes a
                     // false "major doc change" on the very next read, which
@@ -6437,13 +6392,9 @@ impl eframe::App for ContextApp {
         // The bulb/pencil icons in the toolbar remain manual mute toggles
         // for users who want to suppress a panel even when it has content.
         let has_completions = !self.completions.is_empty() || !self.open_completions.is_empty();
-        let fg_for_panels = self.platform.foreground_app();
-        let panel_app_kind = self.platform.classify_app(&fg_for_panels);
-        let hide_preserved_word_errors = self.preserved_word_errors_while_away
-            && panel_app_kind != platform::AppKind::Word
-            && panel_app_kind != platform::AppKind::OurApp;
-        let has_active_errors = !hide_preserved_word_errors
-            && self.writing_errors.iter().any(|e| !e.ignored);
+        let fg_for_layout = self.platform.foreground_app();
+        let slack_layout = fg_for_layout.exe_name.contains("slack");
+        let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
         let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
         let pencil_visible = self.selected_tab == 1 && self.show_grammar && has_active_errors;
 
@@ -6452,7 +6403,7 @@ impl eframe::App for ContextApp {
 
         // Width: wider when the pencil panel is showing (its rows have an
         // action-button cluster that needs the room). Otherwise compact.
-        let win_w = s * if pencil_visible { 420.0 } else { 320.0 };
+        let win_w = s * if pencil_visible && !slack_layout { 420.0 } else { 320.0 };
 
         let mut content_rows = 0.0_f32;
         if bulb_visible {
@@ -6477,8 +6428,15 @@ impl eframe::App for ContextApp {
         // Minimum height drops when nothing is visible — collapse to toolbar.
         // When a panel IS visible we keep a floor so the window doesn't
         // jitter on every keystroke as completions appear/disappear.
-        let min_h = if bulb_visible || pencil_visible { 240.0 } else { 90.0 };
-        let win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, 335.0 * s);
+        let min_h = if slack_layout && (bulb_visible || pencil_visible) {
+            130.0
+        } else if bulb_visible || pencil_visible {
+            240.0
+        } else {
+            90.0
+        };
+        let max_h = if slack_layout { 190.0 } else { 335.0 };
+        let win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, max_h * s);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
@@ -6516,8 +6474,7 @@ impl eframe::App for ContextApp {
             }
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
-                let fg_for_position = self.platform.foreground_app();
-                let slack_positioning = fg_for_position.exe_name.contains("slack");
+                let slack_positioning = slack_layout;
                 // DPI scaling: Windows returns physical pixels, macOS returns logical points.
                 let (lx, ly) = if self.platform.caret_is_physical_pixels() {
                     let dpi_scale = ctx.pixels_per_point();
@@ -6532,7 +6489,7 @@ impl eframe::App for ContextApp {
                 let pos_y = if would_overflow_below {
                     // Not enough room below — flip above the caret with a 30 px gap.
                     if slack_positioning {
-                        ly - win_h - 12.0
+                        ly - win_h - (80.0 * s)
                     } else {
                         ly - win_h - 30.0
                     }
@@ -6541,8 +6498,8 @@ impl eframe::App for ContextApp {
                 };
                 let pos_y = pos_y.max(0.0).min(screen_h - win_h);
                 let pos_x = if slack_positioning && would_overflow_below {
-                    let right_side = lx + 180.0;
-                    let left_side = lx - win_w - 180.0;
+                    let right_side = lx + 260.0;
+                    let left_side = lx - win_w - 260.0;
                     if right_side + win_w <= screen_w {
                         right_side
                     } else if left_side >= 0.0 {
@@ -6587,9 +6544,8 @@ impl eframe::App for ContextApp {
         // Style
         // Clear the default background so transparency works
         // Determine tab indicators
-        let has_grammar = !hide_preserved_word_errors
-            && (!self.grammar_errors.is_empty()
-                || self.writing_errors.iter().any(|e| !e.ignored));
+        let has_grammar = !self.grammar_errors.is_empty()
+            || self.writing_errors.iter().any(|e| !e.ignored);
 
         let theme = theme_for(self.theme);
         // Flip egui's light/dark visuals so widget chrome (scrollbars, button
@@ -7243,8 +7199,7 @@ impl eframe::App for ContextApp {
             // the popup should collapse to the toolbar in that state
             // (the toolbar's pencil icon stays green to signal clean,
             // which is enough).
-            let has_active_errors_render = !hide_preserved_word_errors
-                && self.writing_errors.iter().any(|e| !e.ignored);
+            let has_active_errors_render = self.writing_errors.iter().any(|e| !e.ignored);
             let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
             if self.selected_tab == 1 && self.show_grammar && (has_active_errors_render || show_scanning || self.llm_waiting) {
                 // Visual separator when the bulb panel is rendering above.
