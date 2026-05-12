@@ -197,6 +197,16 @@ jobs:
         run: |
           cargo build --release --bin acatts-rust --target x86_64-pc-windows-msvc
 
+      - name: Cargo build download diagnostic
+        id: download_diag
+        shell: pwsh
+        run: |
+          cargo build --release --bin test_download --target x86_64-pc-windows-msvc
+          $diagDir = "dist\diagnostics"
+          New-Item -Force -ItemType Directory -Path $diagDir | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\test_download.exe" "$diagDir\SpellDownloadDiagnostic.exe"
+          echo "diag_dir=$diagDir" >> $env:GITHUB_OUTPUT
+
       - name: Assemble Spell-windows-x64 bundle dir
         id: bundle
         shell: pwsh
@@ -439,3 +449,11 @@ jobs:
           name: ${{ steps.bundle.outputs.bundle_name }}-velopack
           path: ${{ steps.vpk.outputs.output_dir }}
           retention-days: 7
+
+      - name: Upload download diagnostic artifact
+        if: always() && steps.download_diag.outputs.diag_dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spell-download-diagnostic-windows-x64
+          path: ${{ steps.download_diag.outputs.diag_dir }}\SpellDownloadDiagnostic.exe
+          retention-days: 14
