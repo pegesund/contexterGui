@@ -440,6 +440,14 @@ jobs:
               Write-Host "Uploading $($_.Name)"
               gh release upload $tag $_.FullName --repo ${{ env.RELEASES_REPO }} --clobber
           }
+
+          $diagExe = Join-Path "${{ steps.download_diag.outputs.diag_dir }}" "SpellDownloadDiagnostic.exe"
+          if (Test-Path $diagExe) {
+              Write-Host "Uploading SpellDownloadDiagnostic.exe"
+              gh release upload $tag $diagExe --repo ${{ env.RELEASES_REPO }} --clobber
+          } else {
+              Write-Host "SpellDownloadDiagnostic.exe not found at $diagExe — skipping release upload"
+          }
           Write-Host "https://github.com/${{ env.RELEASES_REPO }}/releases/tag/$tag"
 
       - name: Upload bundle artifact (CI debugging)

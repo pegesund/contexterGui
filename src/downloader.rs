@@ -571,31 +571,20 @@ fn log_download_session_start(total_items: usize) {
         .build();
     let probe_url = format!("{}/", S3_ENDPOINT);
     let head_start = std::time::Instant::now();
-    let mut log_probe_headers = |status: u16, server_date: String, server_hdr: String, note: &str| {
-        let _ = writeln!(f, "  probe_head: status={} elapsed_ms={} server='{}'{}",
-            status, head_start.elapsed().as_millis(), server_hdr, note);
-        let _ = writeln!(f, "  local_utc:  {}", now.format("%a, %d %b %Y %H:%M:%S GMT"));
-        let _ = writeln!(f, "  server_utc: {}", server_date);
-        if let Ok(server_t) = chrono::DateTime::parse_from_rfc2822(&server_date) {
-            let skew = (now - server_t.with_timezone(&chrono::Utc)).num_seconds();
-            let _ = writeln!(f, "  clock_skew_seconds: {}{}", skew,
-                if skew.abs() > 600 { "  ⚠ > 10 MIN — Sig V4 WILL reject" } else { "" });
-        }
-    };
-
     match agent.request("HEAD", &probe_url).call() {
-        Ok(r) => log_probe_headers(
-            r.status(),
-            r.header("Date").unwrap_or("<missing>").to_string(),
-            r.header("Server").unwrap_or("").to_string(),
-            "",
-        ),
-        Err(ureq::Error::Status(code, r)) => log_probe_headers(
-            code,
-            r.header("Date").unwrap_or("<missing>").to_string(),
-            r.header("Server").unwrap_or("").to_string(),
-            " (endpoint reachable; unsigned root HEAD is expected to be unauthorized)",
-        ),
+        Ok(r) => {
+            let server_date = r.header("Date").unwrap_or("<missing>").to_string();
+            let server_hdr = r.header("Server").unwrap_or("").to_string();
+            let _ = writeln!(f, "  probe_head: status={} elapsed_ms={} server='{}'",
+                r.status(), head_start.elapsed().as_millis(), server_hdr);
+            let _ = writeln!(f, "  local_utc:  {}", now.format("%a, %d %b %Y %H:%M:%S GMT"));
+            let _ = writeln!(f, "  server_utc: {}", server_date);
+            if let Ok(server_t) = chrono::DateTime::parse_from_rfc2822(&server_date) {
+                let skew = (now - server_t.with_timezone(&chrono::Utc)).num_seconds();
+                let _ = writeln!(f, "  clock_skew_seconds: {}{}", skew,
+                    if skew.abs() > 600 { "  ⚠ > 10 MIN — Sig V4 WILL reject" } else { "" });
+            }
+        }
         Err(e) => {
             let (tag, detail) = classify_ureq_err(e);
             let _ = writeln!(f, "  probe_head: FAILED {} elapsed_ms={} {}",
