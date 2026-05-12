@@ -5643,22 +5643,27 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
-                // Incremental paragraph scan: only the Word COM bridge pushes
-                // paragraph-shaped events with stable IDs (ParaID via COM) and
-                // implements read_paragraph_at. Word Add-in pushes its own events
-                // server-side. Other bridges (Accessibility, Browser) need the
-                // full-document scan path instead.
+                // Incremental paragraph scan: takes the bridges that push
+                // paragraph-shaped events with stable IDs and DO implement
+                // read_paragraph_at — currently Word COM on Windows, and the
+                // macOS AX bridge (added in a96c2e3). Word Add-in has its own
+                // event-driven flow via /changed; other bridges (Windows
+                // Accessibility, Browser) need the full-document scan path.
                 //
-                // The earlier "is_com_bridge = active_name != Word Add-in" check
-                // matched the Accessibility bridge too, so it tried to do a COM
-                // paragraph scan on Notepad / Sticky Notes / etc. — which always
-                // failed silently because read_paragraph_at returns None for AX
-                // and update_grammar_errors() (gated on the same flag below) was
-                // skipped. Net effect: zero spell/grammar checking outside Word.
-                // Tighten to active_name == "Word COM" so only the genuine COM
-                // path uses incremental paragraph scanning.
+                // d257b6a restricted this to "Word COM" only to fix a Windows
+                // regression where the Windows Accessibility bridge was being
+                // mis-routed onto the paragraph-scan path (it has no
+                // read_paragraph_at impl) and falling through to a blocked
+                // update_grammar_errors(). That fix was too broad: it caught
+                // the macOS AX bridge in the same net, so Mac users typing in
+                // TextEdit / Notes / Pages / etc. got zero error detection
+                // (paragraph path skipped; update_grammar_errors short-circuits
+                // because Word Add-in is always registered on Mac). The
+                // explicit allowlist below restores Mac while keeping the
+                // Windows tightening.
                 let active_name = self.manager.active_bridge_name();
-                let is_com_bridge = active_name == "Word COM";
+                let is_com_bridge = active_name == "Word COM"
+                    || active_name == "Accessibility (macOS)";
                 if is_com_bridge {
                     if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
                         if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
@@ -5789,18 +5794,18 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // Scan for errors — COM bridge uses incremental paragraph scan (above),
-            // other bridges use full doc scan via update_grammar_errors().
-            //
-            // The previous check tested for the absence of a "Word Add-in"
-            // bridge in the registered list, which on Windows always
-            // returned true because the Add-in bridge is macOS-only. Result:
-            // is_com == true for every Windows session, so update_grammar_errors()
-            // never ran and the AX bridge produced no errors. Match the
-            // is_com_bridge check above — only the actual Word COM bridge
-            // uses the incremental path; everything else takes the full-doc
-            // scan.
-            let is_com = self.manager.active_bridge_name() == "Word COM";
+            // Scan for errors — bridges that push paragraph events run the
+            // incremental scan above; everything else takes the full-doc
+            // path via update_grammar_errors(). Must mirror is_com_bridge
+            // exactly: if we used the paragraph path above, skip the
+            // full-doc fallback here (would double-scan); if we DIDN'T use
+            // the paragraph path, run the fallback. Mismatching the two
+            // checks is what caused the regression that left "No errors
+            // found" stuck on Mac for TextEdit/Notes users (and was the
+            // original symptom on Windows Notepad before d257b6a).
+            let active_name_for_com = self.manager.active_bridge_name();
+            let is_com = active_name_for_com == "Word COM"
+                || active_name_for_com == "Accessibility (macOS)";
             let errors_before = self.writing_errors.len();
             if !is_com {
                 self.update_grammar_errors();
