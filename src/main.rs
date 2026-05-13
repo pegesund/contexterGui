@@ -9265,9 +9265,8 @@ fn ax_icon(ui: &mut egui::Ui, icon: egui::RichText, label: &str) -> egui::Respon
 }
 
 fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response) -> bool {
-    resp.clicked()
-        || (resp.hovered()
-            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+    resp.hovered()
+        && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
 }
 
 /// Paint a small Norwegian flag at the given position.
