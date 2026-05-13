@@ -653,6 +653,31 @@ impl BridgeManager {
                     break;
                 }
             }
+            #[cfg(target_os = "macos")]
+            {
+                for bridge in self.bridges.iter() {
+                    if bridge.name() == "Accessibility (macOS)" {
+                        bridge.set_fg_hwnd(fg_pid as isize);
+                    }
+                }
+                for (i, bridge) in self.bridges.iter().enumerate() {
+                    if bridge.name() == "Accessibility (macOS)" {
+                        if let Some(ctx) = bridge.read_context() {
+                            if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                                if self.active_idx != i {
+                                    log!("Bridge switch: {} → Accessibility (macOS) for Word fallback", self.bridges[self.active_idx].name());
+                                    self.mark_bridge_switch(i);
+                                }
+                                self.active_idx = i;
+                                self.last_user_pid = fg_pid;
+                                self.last_context = Some(ctx.clone());
+                                return Some(ctx);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
             return self.last_context.clone();
         }
 
@@ -6701,7 +6726,7 @@ impl eframe::App for ContextApp {
                     egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(bulb_color),
                     self.language.ui_suggestions(),
                 );
-                if toolbar_clicked(ui, &bulb_resp) {
+                if toolbar_clicked(ui, &bulb_resp, slack_layout) {
                     if self.selected_tab == 0 {
                         self.show_completions = !self.show_completions;
                     } else {
@@ -6727,7 +6752,7 @@ impl eframe::App for ContextApp {
                     egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color),
                     self.language.ui_grammar(),
                 );
-                if toolbar_clicked(ui, &pen_resp) {
+                if toolbar_clicked(ui, &pen_resp, slack_layout) {
                     if self.selected_tab == 1 {
                         self.show_grammar = !self.show_grammar;
                     } else {
@@ -9264,9 +9289,13 @@ fn ax_icon(ui: &mut egui::Ui, icon: egui::RichText, label: &str) -> egui::Respon
     resp.on_hover_text(label)
 }
 
-fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response) -> bool {
-    resp.hovered()
-        && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
+    if use_press_event {
+        resp.hovered()
+            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+    } else {
+        resp.clicked()
+    }
 }
 
 /// Paint a small Norwegian flag at the given position.
