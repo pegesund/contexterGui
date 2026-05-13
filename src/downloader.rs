@@ -3,9 +3,11 @@
 //! Downloads language data and models from Contabo S3 (eu2.contabostorage.com).
 //! Uses presigned URLs so credentials never leave the app binary.
 
+use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ── S3 config (read-only credentials for the spell bucket) ──
 
@@ -14,6 +16,8 @@ const S3_BUCKET: &str = "spell";
 const S3_ACCESS_KEY: &str = "cd59e2c4bbbd7bd29951f126d87a096a";
 const S3_SECRET_KEY: &str = "3f28f3941d0d20aaa829ef17c50fe4e7";
 const S3_REGION: &str = "eu2";
+const S3_HOST: &str = "eu2.contabostorage.com";
+const S3_NETLOC: &str = "eu2.contabostorage.com:443";
 
 // ── Public types ──
 
@@ -75,7 +79,7 @@ fn presign_url(key: &str, expires_secs: u64) -> String {
     let date_stamp = now.format("%Y%m%d").to_string();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
 
-    let host = S3_ENDPOINT.trim_start_matches("https://");
+    let host = S3_HOST;
     let canonical_uri = aws_uri_encode_path(&format!("/{}/{}", S3_BUCKET, key));
     let scope = format!("{}/{}/s3/aws4_request", date_stamp, S3_REGION);
 
@@ -125,6 +129,152 @@ fn presign_url(key: &str, expires_secs: u64) -> String {
 }
 
 // ── Download logic ──
+
+#[derive(serde::Deserialize)]
+struct DnsJsonResponse {
+    #[serde(rename = "Status")]
+    status: u16,
+    #[serde(rename = "Answer", default)]
+    answers: Vec<DnsJsonAnswer>,
+}
+
+#[derive(serde::Deserialize)]
+struct DnsJsonAnswer {
+    #[serde(rename = "type")]
+    record_type: u16,
+    data: String,
+}
+
+struct OverrideResolver {
+    target_netloc: String,
+    addrs: Vec<SocketAddr>,
+}
+
+impl ureq::Resolver for OverrideResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+        if netloc == self.target_netloc {
+            return Ok(self.addrs.clone());
+        }
+        netloc.to_socket_addrs().map(|iter| iter.collect())
+    }
+}
+
+fn doh_lookup_a(hostname: &str) -> Result<Vec<Ipv4Addr>, String> {
+    let url = format!("https://1.1.1.1/dns-query?name={}&type=A", hostname);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build();
+    let body = agent
+        .get(&url)
+        .set("accept", "application/dns-json")
+        .call()
+        .map_err(|e| {
+            let (tag, detail) = classify_ureq_err(e);
+            format!("{} {}", tag, detail)
+        })?
+        .into_string()
+        .map_err(|e| format!("DoH body read failed: {}", e))?;
+    let parsed: DnsJsonResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("DoH JSON parse failed: {} body_first_500={}",
+            e, body.chars().take(500).collect::<String>()))?;
+    if parsed.status != 0 {
+        return Err(format!("DoH returned status={} body_first_500={}",
+            parsed.status, body.chars().take(500).collect::<String>()));
+    }
+    let ips: Vec<Ipv4Addr> = parsed.answers
+        .into_iter()
+        .filter(|answer| answer.record_type == 1)
+        .filter_map(|answer| answer.data.parse::<Ipv4Addr>().ok())
+        .collect();
+    if ips.is_empty() {
+        Err(format!("No A records in DoH response body_first_500={}",
+            body.chars().take(500).collect::<String>()))
+    } else {
+        Ok(ips)
+    }
+}
+
+fn doh_s3_addrs() -> Result<Vec<SocketAddr>, String> {
+    static CACHE: OnceLock<Mutex<Option<Vec<SocketAddr>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(addrs) = guard.clone() {
+            return Ok(addrs);
+        }
+    }
+
+    let addrs: Vec<SocketAddr> = doh_lookup_a(S3_HOST)?
+        .into_iter()
+        .map(|ip| SocketAddr::from((ip, 443u16)))
+        .collect();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(addrs.clone());
+    }
+    Ok(addrs)
+}
+
+fn build_s3_agent(override_addrs: Option<Vec<SocketAddr>>) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(120));
+    if let Some(addrs) = override_addrs {
+        builder = builder.resolver(OverrideResolver {
+            target_netloc: S3_NETLOC.to_string(),
+            addrs,
+        });
+    }
+    builder.build()
+}
+
+fn is_likely_dns_issue(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    err_msg.contains("NET_DNS_FAILED")
+        || err_msg.contains("NET_CONNECT_REFUSED")
+        || lower.contains("networkunreachable")
+        || lower.contains("network unreachable")
+        || lower.contains("connection refused")
+        || lower.contains("could not resolve")
+        || lower.contains("failed to lookup address")
+}
+
+fn should_try_doh_fallback(err_msg: &str) -> bool {
+    if is_likely_dns_issue(err_msg) {
+        return true;
+    }
+
+    match (system_s3_addrs(), doh_s3_addrs()) {
+        (Ok(system_addrs), Ok(doh_addrs)) => !dns_answers_match(&system_addrs, &doh_addrs),
+        _ => false,
+    }
+}
+
+fn format_socket_ips(addrs: &[SocketAddr]) -> String {
+    addrs.iter()
+        .map(|addr| addr.ip().to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn system_s3_addrs() -> Result<Vec<SocketAddr>, String> {
+    (S3_HOST, 443u16)
+        .to_socket_addrs()
+        .map(|iter| iter.collect())
+        .map_err(|e| e.to_string())
+}
+
+fn dns_answers_match(system_addrs: &[SocketAddr], doh_addrs: &[SocketAddr]) -> bool {
+    let system_ipv4: BTreeSet<_> = system_addrs.iter()
+        .filter(|addr| addr.is_ipv4())
+        .map(|addr| addr.ip())
+        .collect();
+    let doh_ipv4: BTreeSet<_> = doh_addrs.iter()
+        .map(|addr| addr.ip())
+        .collect();
+    !system_ipv4.is_empty() && system_ipv4 == doh_ipv4
+}
 
 /// Append a download-failure line to `<data_dir>/download_errors.log`. We need
 /// our own logger because the lib crate can't reach the binary's `log!` macro,
@@ -192,9 +342,44 @@ fn classify_ureq_err(e: ureq::Error) -> (&'static str, String) {
 }
 
 /// Download a single file from S3 to a local path, reporting progress.
-fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) -> Result<(), String> {
+fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize, total_items: usize) -> Result<(), String> {
+    match try_download_one(item, progress, index, None) {
+        Ok(()) => Ok(()),
+        Err(first_err) if should_try_doh_fallback(&first_err) => {
+            log_download_error(
+                index + 1,
+                total_items,
+                &item.s3_key,
+                &format!("standard DNS path failed ({}); trying Cloudflare DoH resolver override", first_err),
+            );
+            let addrs = doh_s3_addrs()
+                .map_err(|doh_err| format!(
+                    "DNS_FALLBACK_LOOKUP_FAILED standard_error={} doh_error={}",
+                    first_err, doh_err
+                ))?;
+            try_download_one(item, progress, index, Some(addrs))
+                .map_err(|fallback_err| format!(
+                    "DNS_FALLBACK_DOWNLOAD_FAILED standard_error={} fallback_error={}",
+                    first_err, fallback_err
+                ))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn try_download_one(
+    item: &DownloadItem,
+    progress: &SharedProgress,
+    index: usize,
+    override_addrs: Option<Vec<SocketAddr>>,
+) -> Result<(), String> {
     use std::io::Read;
     let start = std::time::Instant::now();
+
+    if let Ok(mut p) = progress.lock() {
+        p[index].downloaded = 0;
+        p[index].total = 0;
+    }
 
     // Create parent directories
     if let Some(parent) = item.local_path.parent() {
@@ -208,19 +393,16 @@ fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) ->
     // is what we want to see in support logs, not the signature.
     let safe_url = url.splitn(2, '?').next().unwrap_or(&url).to_string();
 
-    // Use a builder with explicit timeouts so a stalled connection
-    // fails fast with a clear error instead of hanging the entire
-    // language-pack flow.
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(15))
-        .timeout_read(std::time::Duration::from_secs(120))
-        .build();
+    // Use explicit timeouts so a stalled connection fails fast with a clear
+    // error instead of hanging the entire language-pack flow.
+    let using_doh_override = override_addrs.is_some();
+    let agent = build_s3_agent(override_addrs);
     let resp = match agent.get(&url).call() {
         Ok(r) => r,
         Err(e) => {
             let (tag, detail) = classify_ureq_err(e);
-            return Err(format!("{} url={} elapsed_ms={} {}",
-                tag, safe_url, start.elapsed().as_millis(), detail));
+            return Err(format!("{} url={} dns_override={} elapsed_ms={} {}",
+                tag, safe_url, using_doh_override, start.elapsed().as_millis(), detail));
         }
     };
 
@@ -277,6 +459,50 @@ fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize) ->
     }
 
     Ok(())
+}
+
+fn fetch_s3_string_with_doh_fallback(key: &str, expires_secs: u64) -> Result<String, String> {
+    let start = std::time::Instant::now();
+    let url = presign_url(key, expires_secs);
+    let safe_url = url.splitn(2, '?').next().unwrap_or(&url).to_string();
+
+    let fetch = |override_addrs: Option<Vec<SocketAddr>>| -> Result<String, String> {
+        let using_doh_override = override_addrs.is_some();
+        let agent = build_s3_agent(override_addrs);
+        let resp = match agent.get(&url).call() {
+            Ok(r) => r,
+            Err(e) => {
+                let (tag, detail) = classify_ureq_err(e);
+                return Err(format!("{} url={} dns_override={} elapsed_ms={} {}",
+                    tag, safe_url, using_doh_override, start.elapsed().as_millis(), detail));
+            }
+        };
+        resp.into_string()
+            .map_err(|e| format!("NET_BODY_READ_FAILED url={} dns_override={} elapsed_ms={} msg={}",
+                safe_url, using_doh_override, start.elapsed().as_millis(), e))
+    };
+
+    match fetch(None) {
+        Ok(body) => Ok(body),
+        Err(first_err) if should_try_doh_fallback(&first_err) => {
+            log_download_error(
+                0,
+                0,
+                key,
+                &format!("standard DNS path failed ({}); trying Cloudflare DoH resolver override", first_err),
+            );
+            let addrs = doh_s3_addrs()
+                .map_err(|doh_err| format!(
+                    "DNS_FALLBACK_LOOKUP_FAILED standard_error={} doh_error={}",
+                    first_err, doh_err
+                ))?;
+            fetch(Some(addrs)).map_err(|fallback_err| format!(
+                "DNS_FALLBACK_DOWNLOAD_FAILED standard_error={} fallback_error={}",
+                first_err, fallback_err
+            ))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Check if a local file is up to date by comparing size with S3.
@@ -445,9 +671,9 @@ fn piper_espeak_items() -> Vec<DownloadItem> {
         return Vec::new();
     };
 
-    let manifest_url = presign_url(&format!("bin/{}/manifest.txt", platform), 3600);
-    let manifest = match ureq::get(&manifest_url).call() {
-        Ok(r) => r.into_string().unwrap_or_default(),
+    let manifest_key = format!("bin/{}/manifest.txt", platform);
+    let manifest = match fetch_s3_string_with_doh_fallback(&manifest_key, 3600) {
+        Ok(body) => body,
         Err(e) => {
             eprintln!("Could not fetch espeak manifest for {}: {}", platform, e);
             return Vec::new();
@@ -591,6 +817,32 @@ fn log_download_session_start(total_items: usize) {
                 tag, head_start.elapsed().as_millis(), detail);
         }
     }
+
+    let system_dns = system_s3_addrs();
+    match &system_dns {
+        Ok(addrs) => {
+            let _ = writeln!(f, "  dns_system: {}", format_socket_ips(addrs));
+        }
+        Err(e) => {
+            let _ = writeln!(f, "  dns_system: ERR: {}", e);
+        }
+    }
+
+    let doh_dns = doh_s3_addrs();
+    match &doh_dns {
+        Ok(addrs) => {
+            let _ = writeln!(f, "  dns_doh:    {}", format_socket_ips(addrs));
+        }
+        Err(e) => {
+            let _ = writeln!(f, "  dns_doh:    ERR: {}", e);
+        }
+    }
+
+    if let (Ok(system_addrs), Ok(doh_addrs)) = (&system_dns, &doh_dns) {
+        if !dns_answers_match(system_addrs, doh_addrs) {
+            let _ = writeln!(f, "  >>> DNS MISMATCH — will try DoH fallback on S3 failure");
+        }
+    }
     let _ = writeln!(f, "─── per-item results ───");
 }
 
@@ -623,7 +875,7 @@ pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
         .name("s3-download".into())
         .spawn(move || {
             for (i, item) in needed.iter().enumerate() {
-                if let Err(e) = download_one(item, &prog, i) {
+                if let Err(e) = download_one(item, &prog, i, needed.len()) {
                     // Persist to a side log so we can post-mortem failed
                     // downloads in packaged builds (eprintln stderr from a
                     // .app bundle goes nowhere visible). The log file lives
