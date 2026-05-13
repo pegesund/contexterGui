@@ -344,7 +344,7 @@ unsafe fn replace_in_app_window(app: AXUIElementRef, pid: u32, find: &str, repla
         &mut window_ref,
     );
     if err != 0 || window_ref.is_null() { return false; }
-    let ok = replace_in_readable_text(window_ref as AXUIElementRef, 0, 26, pid, find, replace, preferred_offset);
+    let ok = replace_in_readable_text(window_ref as AXUIElementRef, 0, 8, pid, find, replace, preferred_offset);
     CFRelease(window_ref);
     ok
 }
@@ -360,7 +360,7 @@ unsafe fn replace_in_app_windows(app: AXUIElementRef, pid: u32, find: &str, repl
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if replace_in_readable_text(window, 0, 26, pid, find, replace, preferred_offset) {
+        if replace_in_readable_text(window, 0, 8, pid, find, replace, preferred_offset) {
             CFRelease(windows);
             return true;
         }
@@ -518,8 +518,8 @@ unsafe fn find_context_in_app_window(app: AXUIElementRef) -> Option<(String, &'s
     );
     if err != 0 || window_ref.is_null() { return None; }
     let window = window_ref as AXUIElementRef;
-    let found = find_focused_value(window, 0, 26, context_from_focused_element)
-        .or_else(|| find_readable_context(window, 0, 26));
+    let found = find_focused_value(window, 0, 8, context_from_focused_element)
+        .or_else(|| find_readable_context(window, 0, 8));
     CFRelease(window_ref);
     found
 }
@@ -535,8 +535,8 @@ unsafe fn find_context_in_app_windows(app: AXUIElementRef) -> Option<(String, &'
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if let Some(found) = find_focused_value(window, 0, 26, context_from_focused_element)
-            .or_else(|| find_readable_context(window, 0, 26))
+        if let Some(found) = find_focused_value(window, 0, 8, context_from_focused_element)
+            .or_else(|| find_readable_context(window, 0, 8))
         {
             CFRelease(windows);
             return Some(found);
@@ -629,8 +629,8 @@ unsafe fn find_paragraph_in_app_window(app: AXUIElementRef) -> Option<(String, S
     );
     if err != 0 || window_ref.is_null() { return None; }
     let window = window_ref as AXUIElementRef;
-    let found = find_focused_value(window, 0, 26, paragraph_from_focused_element)
-        .or_else(|| find_readable_paragraph(window, 0, 26));
+    let found = find_focused_value(window, 0, 8, paragraph_from_focused_element)
+        .or_else(|| find_readable_paragraph(window, 0, 8));
     CFRelease(window_ref);
     found
 }
@@ -646,8 +646,8 @@ unsafe fn find_paragraph_in_app_windows(app: AXUIElementRef) -> Option<(String, 
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if let Some(found) = find_focused_value(window, 0, 26, paragraph_from_focused_element)
-            .or_else(|| find_readable_paragraph(window, 0, 26))
+        if let Some(found) = find_focused_value(window, 0, 8, paragraph_from_focused_element)
+            .or_else(|| find_readable_paragraph(window, 0, 8))
         {
             CFRelease(windows);
             return Some(found);
@@ -716,8 +716,8 @@ unsafe fn find_text_in_app_window(app: AXUIElementRef) -> Option<(String, usize)
     );
     if err != 0 || window_ref.is_null() { return None; }
     let window = window_ref as AXUIElementRef;
-    let found = find_focused_value(window, 0, 26, text_from_element)
-        .or_else(|| find_readable_text(window, 0, 26));
+    let found = find_focused_value(window, 0, 8, text_from_element)
+        .or_else(|| find_readable_text(window, 0, 8));
     CFRelease(window_ref);
     found
 }
@@ -733,8 +733,8 @@ unsafe fn find_text_in_app_windows(app: AXUIElementRef) -> Option<(String, usize
     let count = core_foundation::array::CFArrayGetCount(windows as _);
     for i in 0..count {
         let window = core_foundation::array::CFArrayGetValueAtIndex(windows as _, i) as AXUIElementRef;
-        if let Some(found) = find_focused_value(window, 0, 26, text_from_element)
-            .or_else(|| find_readable_text(window, 0, 26))
+        if let Some(found) = find_focused_value(window, 0, 8, text_from_element)
+            .or_else(|| find_readable_text(window, 0, 8))
         {
             CFRelease(windows);
             return Some(found);
