@@ -83,6 +83,16 @@ word_set=$(echo "$err_word" | jq -r '[.[].word] | sort | join(",")')
 word_comp_set=$(echo "$comp_word" | completions_words)
 info "Word error words: $word_set"
 
+# --- 1b. No duplicates ---
+# Each (word, sentence) pair must appear at most once. The pencil panel
+# showing 4 cards for 2 underlines is the regression we're guarding here.
+dup_count=$(echo "$err_word" | jq '[.[] | "\(.word)|\(.sentence)"] | (length - (unique | length))')
+if [[ "$dup_count" != "0" ]]; then
+  dups=$(echo "$err_word" | jq -c '[.[] | "\(.word)|\(.sentence)"] | group_by(.) | map(select(length>1) | .[0])')
+  fail "step 1b — /errors has $dup_count duplicate entries: $dups"
+fi
+pass "step 1b — no duplicate errors in /errors"
+
 # --- 2. Safari foreground ---
 activate "Safari"
 err_safari=$(errors_dump)

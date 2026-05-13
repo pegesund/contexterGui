@@ -755,21 +755,32 @@ fn handle_request_rw<S: Read + Write>(
 
         ("POST", "/reset") => {
             let doc_name = extract_json_string(&body, "documentName").unwrap_or_default();
-            // Always accept /reset — it means "new session, take over".
-            // This handles: add-in reload, app restart while Word is open,
-            // document switch, or any other case where the add-in needs a
-            // fresh start. The old active doc (if any) is replaced.
+            // Only trigger a state-clearing reset when the document name
+            // ACTUALLY changes — same-doc /reset events fire whenever the
+            // user re-focuses Word (add-in's initialScan re-runs), and
+            // wiping writing_errors there causes the "errors disappear on
+            // return to Word" regression. For same-doc resets we still
+            // accept the POST (the add-in needs the 200 OK), but skip the
+            // reset_requested signal so main.rs keeps existing errors.
             pending_doc_switch.store(false, std::sync::atomic::Ordering::Relaxed);
-            reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut real_doc_change = doc_name.is_empty();
             if !doc_name.is_empty() {
                 if let Ok(mut current) = current_doc_name.lock() {
-                    if *current != doc_name {
-                        log_to_file(&format!("RESET accepted: doc='{}' (was '{}')", doc_name, current));
+                    if current.is_empty() {
+                        // First /reset of this session — accept and remember.
+                        real_doc_change = true;
+                        log_to_file(&format!("RESET first-time: doc='{}'", doc_name));
+                    } else if *current != doc_name {
+                        real_doc_change = true;
+                        log_to_file(&format!("RESET doc-switch: doc='{}' (was '{}')", doc_name, current));
                     } else {
-                        log_to_file(&format!("RESET accepted: doc='{}'", doc_name));
+                        log_to_file(&format!("RESET same-doc (skipped state wipe): doc='{}'", doc_name));
                     }
                     *current = doc_name;
                 }
+            }
+            if real_doc_change {
+                reset_requested.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             if let Ok(mut q) = reply_queue.lock() {
                 q.clear();

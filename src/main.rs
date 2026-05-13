@@ -5199,11 +5199,26 @@ impl eframe::App for ContextApp {
                 && self.prev_fg_pid != 0
                 && fg.pid != self.prev_fg_pid
             {
+                // Drop volatile per-app cache (next-word completions, cursor
+                // context cache) so the new app's bulb panel starts fresh.
+                // BUT keep writing_errors and paragraph_sentence_hashes —
+                // they belong to Word and the user expects to see them
+                // again on return. The dedicated browser/Word-doc-switch
+                // branches below decide if a deeper wipe is needed.
                 log!(
-                    "App switch: pid {} → {} (kind={:?}) — clearing visible app state",
+                    "App switch: pid {} → {} (kind={:?}) — clearing volatile cache only",
                     self.prev_fg_pid, fg.pid, kind
                 );
-                self.clear_for_app_switch();
+                self.context = Default::default();
+                self.completions.clear();
+                self.open_completions.clear();
+                self.last_completed_prefix.clear();
+                self.last_dispatched_sentence.clear();
+                self.dispatched_key.clear();
+                self.cached_forward = None;
+                self.cached_right_column = None;
+                self.cached_mtag_supplement = None;
+                self.selected_completion = None;
                 self.last_caret_pos = None;
                 if now_word {
                     self.manager.request_word_rescan();
@@ -5364,9 +5379,10 @@ impl eframe::App for ContextApp {
                         ErrorCategory::Grammar => "grammar",
                         ErrorCategory::SentenceBoundary => "sentence_boundary",
                     };
-                    format!(r#"{{"category":"{}","word":"{}","suggestion":"{}","rule":"{}","sentence":"{}"}}"#,
+                    format!(r#"{{"category":"{}","word":"{}","suggestion":"{}","rule":"{}","sentence":"{}","paragraph_id":"{}","doc_offset":{}}}"#,
                         cat, escape_json_str(&e.word), escape_json_str(&e.suggestion),
-                        escape_json_str(&e.rule_name), escape_json_str(&e.sentence_context))
+                        escape_json_str(&e.rule_name), escape_json_str(&e.sentence_context),
+                        escape_json_str(&e.paragraph_id), e.doc_offset)
                 })
                 .collect::<Vec<_>>()
                 .join(","));
@@ -5921,12 +5937,24 @@ impl eframe::App for ContextApp {
                 // Windows tightening.
                 let active_name = self.manager.active_bridge_name();
                 let is_ax_mac_bridge = active_name == "Accessibility (macOS)";
-                let is_word_addin_bridge = active_name == "Word Add-in";
+                let _is_word_addin_bridge = active_name == "Word Add-in";
+                // Word Add-in has its own event-driven pipeline via
+                // process_addin_changed_paragraphs (driven by /changed POSTs
+                // with uniqueLocalId paragraph IDs). Running read_paragraph_at
+                // on top would duplicate every error under an "ax:0"-style
+                // paragraph_id — exactly the "4 cards for 2 underlines"
+                // regression. So we cover "Word COM" plus AX-mac, AND we
+                // additionally skip AX-mac when the foreground is Word (the
+                // AX fallback path reads Word's text but Word Add-in is
+                // authoritative for Word documents).
+                let fg_is_word = {
+                    let fg = self.platform.foreground_app();
+                    self.platform.classify_app(&fg) == platform::AppKind::Word
+                };
                 let is_com_bridge = active_name == "Word COM"
-                    || is_ax_mac_bridge
-                    || is_word_addin_bridge;
+                    || (is_ax_mac_bridge && !fg_is_word);
                 if is_com_bridge {
-                    let paragraph = if is_ax_mac_bridge || is_word_addin_bridge {
+                    let paragraph = if is_ax_mac_bridge {
                         self.manager.read_paragraph_at(
                             new_ctx.cursor_doc_offset
                                 .or(self.last_known_cursor_offset)
@@ -6075,6 +6103,10 @@ impl eframe::App for ContextApp {
             // found" stuck on Mac for TextEdit/Notes users (and was the
             // original symptom on Windows Notepad before d257b6a).
             let active_name_for_com = self.manager.active_bridge_name();
+            // Word Add-in handled separately via process_addin_changed_paragraphs;
+            // don't also run update_grammar_errors against last_doc_text — it
+            // duplicates scanning and re-pushes errors. Mirror the is_com_bridge
+            // gating above so the two paths agree.
             let is_com = active_name_for_com == "Word COM"
                 || active_name_for_com == "Accessibility (macOS)"
                 || active_name_for_com == "Word Add-in";
