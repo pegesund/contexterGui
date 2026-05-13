@@ -5983,31 +5983,23 @@ impl eframe::App for ContextApp {
                 // additionally skip AX-mac when the foreground is Word (the
                 // AX fallback path reads Word's text but Word Add-in is
                 // authoritative for Word documents).
-                // AX-mac may briefly be active while fg is Word (Word Add-in
-                // cache stale) or Browser (cross-app transition). Only allow
-                // the AX paragraph path for AppKind::Other (Slack/Teams/
-                // Notes/TextEdit/etc.); other kinds have authoritative
-                // bridges that own paragraph_texts.
-                let fg_kind = {
+                // AX-mac never feeds the grammar pipeline. It only provides
+                // cursor-context for the 💡 bulb predictions and the
+                // backspace+paste replacement path. Letting it write
+                // paragraphs (with "ax:N" IDs) registered Slack/Terminal
+                // content as spelling errors, contaminating /errors with
+                // up to 63 stray English entries during a Slack detour.
+                let _fg_kind = {
                     let fg = self.platform.foreground_app();
                     self.platform.classify_app(&fg)
                 };
-                let is_com_bridge = active_name == "Word COM"
-                    || (is_ax_mac_bridge && fg_kind == platform::AppKind::Other);
+                let is_com_bridge = active_name == "Word COM";
+                let _ = is_ax_mac_bridge;
                 if is_com_bridge {
-                    let paragraph = if is_ax_mac_bridge {
-                        self.manager.read_paragraph_at(
-                            new_ctx.cursor_doc_offset
-                                .or(self.last_known_cursor_offset)
-                                .unwrap_or(0),
-                        )
-                    } else if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
-                        self.manager.read_paragraph_at(off)
-                    } else {
-                        None
-                    };
-                    if let Some((para_id, text, start)) = paragraph {
-                        self.process_com_changed_paragraph(para_id, text, start);
+                    if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
+                        if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
+                            self.process_com_changed_paragraph(para_id, text, start);
+                        }
                     }
                 } else if self.manager.last_user_was_browser {
                     if let Some(doc) = self.manager.read_full_document() {

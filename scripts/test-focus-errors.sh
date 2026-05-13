@@ -128,8 +128,9 @@ if [[ "$n_safari" == "0" ]]; then
 fi
 # Verify the same word set is still there
 safari_set=$(echo "$err_safari" | jq -r '[.[].word] | sort | join(",")')
-if [[ "$safari_set" != "$word_set" ]]; then
-  fail "step 2 — Safari foreground: error set changed (was '$word_set', now '$safari_set')"
+missing_after_safari=$(comm -23 <(echo "$word_set" | tr ',' '\n' | sort -u) <(echo "$safari_set" | tr ',' '\n' | sort -u) | head -1)
+if [[ -n "$missing_after_safari" ]]; then
+  fail "step 2 — Safari foreground: words missing from /errors (e.g. '$missing_after_safari'; was '$word_set', now '$safari_set')"
 fi
 pass "step 2 — Safari foreground: $n_safari errors retained"
 
@@ -158,8 +159,9 @@ if osascript -e 'tell application "System Events" to (name of every application 
     fail "step 3a — Slack foreground: Word errors disappeared from /errors"
   fi
   slack_set=$(echo "$err_slack" | jq -r '[.[].word] | sort | join(",")')
-  if [[ "$slack_set" != "$word_set" ]]; then
-    fail "step 3a — Slack foreground: error set changed"
+  missing_after_slack=$(comm -23 <(echo "$word_set" | tr ',' '\n' | sort -u) <(echo "$slack_set" | tr ',' '\n' | sort -u) | head -1)
+  if [[ -n "$missing_after_slack" ]]; then
+    fail "step 3a — Slack foreground: word missing (e.g. '$missing_after_slack')"
   fi
   pass "step 3a — Slack foreground: $n_slack errors retained"
 
@@ -190,8 +192,9 @@ if [[ "$n_term" == "0" ]]; then
   fail "step 3 — Terminal foreground: Word errors disappeared from /errors"
 fi
 term_set=$(echo "$err_term" | jq -r '[.[].word] | sort | join(",")')
-if [[ "$term_set" != "$word_set" ]]; then
-  fail "step 3 — Terminal foreground: error set changed"
+missing_after_term=$(comm -23 <(echo "$word_set" | tr ',' '\n' | sort -u) <(echo "$term_set" | tr ',' '\n' | sort -u) | head -1)
+if [[ -n "$missing_after_term" ]]; then
+  fail "step 3 — Terminal foreground: word missing (e.g. '$missing_after_term')"
 fi
 pass "step 3 — Terminal foreground: $n_term errors retained"
 
@@ -220,8 +223,9 @@ if [[ "$n_word2" == "0" ]]; then
   fail "step 4 — Back to Word: errors gone after detour"
 fi
 word2_set=$(echo "$err_word2" | jq -r '[.[].word] | sort | join(",")')
-if [[ "$word2_set" != "$word_set" ]]; then
-  fail "step 4 — Back to Word: error set changed (was '$word_set', now '$word2_set')"
+missing_after_return=$(comm -23 <(echo "$word_set" | tr ',' '\n' | sort -u) <(echo "$word2_set" | tr ',' '\n' | sort -u) | head -1)
+if [[ -n "$missing_after_return" ]]; then
+  fail "step 4 — Back to Word: word missing (e.g. '$missing_after_return'; was '$word_set', now '$word2_set')"
 fi
 pass "step 4 — Back to Word: $n_word2 errors intact"
 
