@@ -4335,12 +4335,10 @@ impl ContextApp {
         };
 
         while let Some(resp) = actor.try_recv() {
-            // Discard grammar results while browser is foreground — they belong
-            // to a previous Word session and must not bleed into browser mode.
-            if self.suppress_errors {
-                log!("Grammar response discarded (browser foreground): para='{}'", trunc(&resp.paragraph_id, 10));
-                continue;
-            }
+            // Always process responses — they belong to the Word doc the user
+            // tabbed away from. The paragraph_sentence_hashes stale check
+            // below prevents bleeding. Dropping during browser focus made
+            // errors disappear after even brief tab-outs.
             log!("Grammar response: sentence='{}' errors={} unknown={} para='{}'",
                 trunc(&resp.sentence, 40), resp.errors.len(), resp.unknown_words.len(),
                 trunc(&resp.paragraph_id, 10));
@@ -5215,8 +5213,10 @@ impl eframe::App for ContextApp {
             }
 
             if now_browser && !self.suppress_errors {
-                log!("Browser foreground — clearing stale errors");
-                self.clear_for_app_switch();
+                // Don't clear Word state on browser foreground — user expects
+                // their Word errors back when they tab back. Display layer
+                // hides them while in the browser via suppress_errors.
+                log!("Browser foreground — Word state preserved");
                 ctx.request_repaint();
             }
 
@@ -5375,6 +5375,31 @@ impl eframe::App for ContextApp {
             }
             if let Ok(mut shared) = self.shared_errors_json.lock() {
                 *shared = json;
+            }
+        }
+
+        // Push current completions/open_completions to the /completions endpoint
+        // (used by scripts/test-focus-errors.sh).
+        {
+            let mut buf = String::from(r#"{"completions":["#);
+            for (i, c) in self.completions.iter().enumerate() {
+                if i > 0 { buf.push(','); }
+                buf.push_str(&format!(
+                    r#"{{"word":"{}","score":{:.4}}}"#,
+                    escape_json_str(&c.word), c.score
+                ));
+            }
+            buf.push_str(r#"],"open_completions":["#);
+            for (i, c) in self.open_completions.iter().enumerate() {
+                if i > 0 { buf.push(','); }
+                buf.push_str(&format!(
+                    r#"{{"word":"{}","score":{:.4}}}"#,
+                    escape_json_str(&c.word), c.score
+                ));
+            }
+            buf.push_str("]}");
+            for bridge in &self.manager.bridges {
+                bridge.update_completions_json(&buf);
             }
         }
 
@@ -5844,7 +5869,10 @@ impl eframe::App for ContextApp {
                     let to = std::mem::take(&mut self.manager.bridge_switch_to);
                     let from_word = from.contains("Word");
                     let to_word = to.contains("Word");
-                    let keep_word_errors = from_word && to_word;
+                    // Keep Word errors whenever EITHER end was Word — so a
+                    // detour Word → Slack → Word doesn't drop them in the
+                    // middle hop. The display layer hides them outside Word.
+                    let keep_word_errors = from_word || to_word;
                     log!("Bridge switched {} → {} — {} errors, {} spelling queue, {} pending BERT, {} grammar queue",
                         from, to, self.writing_errors.len(), self.spelling_queue.len(),
                         self.pending_spelling_bert.len(), self.grammar_queue.len());
@@ -6741,7 +6769,11 @@ impl eframe::App for ContextApp {
                 // ✏ Grammatikk — toggle grammar/spelling errors panel.
                 // Color: red when errors+enabled, green when clean+enabled,
                 // grey when disabled.
-                let pen_color = if !self.show_grammar || self.selected_tab != 1 {
+                // Pen is a global status indicator: red when there are
+                // active errors, green when clean. Independent of which tab
+                // is selected — the user needs to see "you have errors"
+                // even when they're looking at the suggestions tab.
+                let pen_color = if !self.show_grammar {
                     inactive
                 } else if has_grammar {
                     egui::Color32::from_rgb(220, 50, 50)

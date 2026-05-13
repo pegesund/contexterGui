@@ -150,6 +150,9 @@ pub trait TextBridge {
 
     /// Update errors JSON for /errors test endpoint
     fn update_errors_json(&self, _json: &str) {}
+
+    /// Update completions JSON for /completions test endpoint
+    fn update_completions_json(&self, _json: &str) {}
 }
 
 #[cfg(target_os = "windows")]
