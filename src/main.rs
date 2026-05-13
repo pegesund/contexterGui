@@ -5201,12 +5201,8 @@ impl eframe::App for ContextApp {
             {
                 // Drop volatile per-app cache (next-word completions, cursor
                 // context cache) so the new app's bulb panel starts fresh.
-                // BUT keep writing_errors and paragraph_sentence_hashes —
-                // they belong to Word and the user expects to see them
-                // again on return. The dedicated browser/Word-doc-switch
-                // branches below decide if a deeper wipe is needed.
                 log!(
-                    "App switch: pid {} → {} (kind={:?}) — clearing volatile cache only",
+                    "App switch: pid {} → {} (kind={:?})",
                     self.prev_fg_pid, fg.pid, kind
                 );
                 self.context = Default::default();
@@ -5220,6 +5216,48 @@ impl eframe::App for ContextApp {
                 self.cached_mtag_supplement = None;
                 self.selected_completion = None;
                 self.last_caret_pos = None;
+
+                // Per-app error isolation: each writing app's errors are
+                // scoped to that app, so a switch to a *different* writing
+                // surface drops the previous app's errors and paragraph
+                // cache. Without this, paragraph_texts entries from Slack
+                // (paragraph_id "ax:N") collide with Notes' "ax:N" or
+                // accumulate alongside Word's uniqueLocalId entries, so
+                // /errors keeps growing across apps and the Tips badge
+                // shows stale counts from a previous app.
+                // Browser is intentionally exempt: the existing
+                // suppress_errors mechanism hides Word state during a
+                // Safari/Chrome detour so the user can tab back without
+                // losing it. Going FROM Browser TO a writing app still
+                // clears (we don't know if user was bouncing or moving on).
+                let leaving_browser = self.suppress_errors;
+                let entering_writing_app = !now_browser && !now_our_app
+                    && self.platform.is_writing_app(&fg);
+                if entering_writing_app && !leaving_browser {
+                    log!("Cross-app writing switch — clearing writing_errors + paragraph state");
+                    self.manager.clear_all_error_underlines();
+                    self.writing_errors.clear();
+                    self.paragraph_texts.clear();
+                    self.paragraph_sentence_hashes.clear();
+                    self.processed_sentence_hashes.clear();
+                    self.grammar_inflight.clear();
+                    self.grammar_queue.clear();
+                    self.grammar_queue_total = 0;
+                    self.grammar_scanning = false;
+                    self.spelling_queue.clear();
+                    self.pending_spelling_bert.clear();
+                    self.pending_grammar_bert.clear();
+                    self.pending_consonant_bert.clear();
+                    self.pending_consonant_checks.clear();
+                    self.last_doc_text.clear();
+                    self.last_doc_hash = 0;
+                    self.last_doc_approx_len = 0;
+                    self.last_sentence_count = 0;
+                    self.last_spell_checked_word.clear();
+                    self.last_known_cursor_offset = None;
+                    self.focused_error_idx = None;
+                }
+
                 if now_word {
                     self.manager.request_word_rescan();
                     ctx.request_repaint_after(Duration::from_millis(250));
