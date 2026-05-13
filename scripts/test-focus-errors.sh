@@ -24,8 +24,11 @@ set -uo pipefail
 PORT=3000
 ERRORS_URL="https://localhost:${PORT}/errors"
 COMPLETIONS_URL="https://localhost:${PORT}/completions"
+UI_STATE_URL="https://localhost:${PORT}/ui-state"
 
 CURL="curl -sk --max-time 5"
+
+ui_state() { $CURL "$UI_STATE_URL"; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
@@ -63,7 +66,10 @@ fi
 if ! $CURL --max-time 3 "$COMPLETIONS_URL" >/dev/null; then
   fail "Spell /completions not reachable — was the latest build deployed?"
 fi
-pass "server reachable; /errors and /completions respond"
+if ! $CURL --max-time 3 "$UI_STATE_URL" >/dev/null; then
+  fail "Spell /ui-state not reachable — was the latest build deployed?"
+fi
+pass "server reachable; /errors, /completions and /ui-state respond"
 
 # --- 1. Word foreground ---
 activate "Microsoft Word"
@@ -77,6 +83,23 @@ if [[ "$n_word" == "0" ]]; then
   fail "step 1 — Word foreground: /errors is empty. Did you type misspellings into the doc before running this test?"
 fi
 pass "step 1 — Word foreground: $n_word errors detected"
+
+# 1c — /ui-state matches what the user sees
+ui_word=$(ui_state)
+info "Word /ui-state: $ui_word"
+pencil_word=$(echo "$ui_word" | jq -r '.pencil_visible')
+tips_word=$(echo "$ui_word" | jq -r '.tips_count')
+fg_word=$(echo "$ui_word" | jq -r '.fg_app')
+if [[ "$pencil_word" != "true" ]]; then
+  fail "step 1c — Word foreground: pencil_visible=$pencil_word (expected true)"
+fi
+if [[ "$tips_word" != "$n_word" ]]; then
+  fail "step 1c — Word foreground: tips_count=$tips_word but /errors has $n_word entries"
+fi
+if [[ "$fg_word" != "microsoft word" ]]; then
+  fail "step 1c — Word foreground: fg_app='$fg_word' (expected 'microsoft word')"
+fi
+pass "step 1c — Word /ui-state matches: pencil_visible=true tips_count=$tips_word"
 
 # Snapshot the Word-side error set (word field) for later comparison.
 word_set=$(echo "$err_word" | jq -r '[.[].word] | sort | join(",")')
@@ -110,6 +133,19 @@ if [[ "$safari_set" != "$word_set" ]]; then
 fi
 pass "step 2 — Safari foreground: $n_safari errors retained"
 
+# 2b — pencil panel hidden in Safari
+ui_safari=$(ui_state)
+pencil_safari=$(echo "$ui_safari" | jq -r '.pencil_visible')
+tips_safari=$(echo "$ui_safari" | jq -r '.tips_count')
+info "Safari /ui-state: $ui_safari"
+if [[ "$pencil_safari" != "false" ]]; then
+  fail "step 2b — Safari foreground: pencil_visible=$pencil_safari (expected false)"
+fi
+if [[ "$tips_safari" != "0" ]]; then
+  fail "step 2b — Safari foreground: tips_count=$tips_safari (expected 0)"
+fi
+pass "step 2b — Safari /ui-state: pencil hidden, tips=0 (no Word leak)"
+
 # --- 3a. Slack foreground (if running) ---
 if osascript -e 'tell application "System Events" to (name of every application process)' 2>/dev/null | grep -qi '\bslack\b'; then
   activate "Slack"
@@ -126,6 +162,19 @@ if osascript -e 'tell application "System Events" to (name of every application 
     fail "step 3a — Slack foreground: error set changed"
   fi
   pass "step 3a — Slack foreground: $n_slack errors retained"
+
+  # 3a-b — pencil panel hidden in Slack
+  ui_slack=$(ui_state)
+  pencil_slack=$(echo "$ui_slack" | jq -r '.pencil_visible')
+  tips_slack=$(echo "$ui_slack" | jq -r '.tips_count')
+  info "Slack /ui-state: $ui_slack"
+  if [[ "$pencil_slack" != "false" ]]; then
+    fail "step 3a-b — Slack foreground: pencil_visible=$pencil_slack (expected false; Word errors must NOT show in Slack)"
+  fi
+  if [[ "$tips_slack" != "0" ]]; then
+    fail "step 3a-b — Slack foreground: tips_count=$tips_slack (expected 0)"
+  fi
+  pass "step 3a-b — Slack /ui-state: pencil hidden, tips=0 (no Word leak)"
 else
   info "step 3a — Slack not running, skipped"
 fi
@@ -146,6 +195,19 @@ if [[ "$term_set" != "$word_set" ]]; then
 fi
 pass "step 3 — Terminal foreground: $n_term errors retained"
 
+# 3b — pencil hidden in Terminal
+ui_term=$(ui_state)
+pencil_term=$(echo "$ui_term" | jq -r '.pencil_visible')
+tips_term=$(echo "$ui_term" | jq -r '.tips_count')
+info "Terminal /ui-state: $ui_term"
+if [[ "$pencil_term" != "false" ]]; then
+  fail "step 3b — Terminal foreground: pencil_visible=$pencil_term (expected false)"
+fi
+if [[ "$tips_term" != "0" ]]; then
+  fail "step 3b — Terminal foreground: tips_count=$tips_term (expected 0)"
+fi
+pass "step 3b — Terminal /ui-state: pencil hidden, tips=0"
+
 # --- 4. Back to Word ---
 activate "Microsoft Word"
 sleep 1
@@ -162,6 +224,19 @@ if [[ "$word2_set" != "$word_set" ]]; then
   fail "step 4 — Back to Word: error set changed (was '$word_set', now '$word2_set')"
 fi
 pass "step 4 — Back to Word: $n_word2 errors intact"
+
+# 4b — pencil + badge restored on return
+ui_word2=$(ui_state)
+pencil_word2=$(echo "$ui_word2" | jq -r '.pencil_visible')
+tips_word2=$(echo "$ui_word2" | jq -r '.tips_count')
+info "Word(2) /ui-state: $ui_word2"
+if [[ "$pencil_word2" != "true" ]]; then
+  fail "step 4b — Back to Word: pencil_visible=$pencil_word2 (expected true)"
+fi
+if [[ "$tips_word2" != "$n_word2" ]]; then
+  fail "step 4b — Back to Word: tips_count=$tips_word2 != /errors length $n_word2"
+fi
+pass "step 4b — Word(2) /ui-state: pencil_visible=true tips_count=$tips_word2"
 
 # --- 5. Completions track foreground ---
 # Terminal's completions should differ from both Word readings (Word's

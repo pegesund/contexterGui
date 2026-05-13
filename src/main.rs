@@ -5419,6 +5419,42 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // Push UI-state snapshot to /ui-state endpoint. Used by the
+        // regression test to verify the badge, pencil, and bulb panels
+        // match the foreground app. This is the data the user actually
+        // sees, not the underlying writing_errors / completions vectors.
+        {
+            let fg = self.platform.foreground_app();
+            let fg_kind = self.platform.classify_app(&fg);
+            let in_word = fg_kind == platform::AppKind::Word;
+            let tips_count = if self.show_grammar && in_word {
+                self.writing_errors.iter()
+                    .filter(|e| !e.ignored && e.rule_name != "llm_correction")
+                    .count()
+            } else {
+                0
+            };
+            let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
+            let pencil_visible = in_word && self.show_grammar
+                && (has_active_errors
+                    || (self.grammar_scanning && self.grammar_queue_total > 0)
+                    || self.llm_waiting);
+            let bulb_has_data = !self.completions.is_empty() || !self.open_completions.is_empty();
+            let bulb_visible = self.show_completions && bulb_has_data && !pencil_visible;
+            let ui_json = format!(
+                r#"{{"fg_app":"{}","fg_kind":"{:?}","pencil_visible":{},"bulb_visible":{},"tips_count":{},"selected_tab":{}}}"#,
+                escape_json_str(&fg.exe_name),
+                fg_kind,
+                pencil_visible,
+                bulb_visible,
+                tips_count,
+                self.selected_tab,
+            );
+            for bridge in &self.manager.bridges {
+                bridge.update_ui_state_json(&ui_json);
+            }
+        }
+
         // Send pending incomplete sentence to grammar actor after 1s idle (user stopped typing)
         if let Some((ref sentence, ref para_id, timestamp)) = self.pending_incomplete_sentence.clone() {
             if timestamp.elapsed() >= Duration::from_millis(1000) {
@@ -6981,7 +7017,14 @@ impl eframe::App for ContextApp {
 
 
                 // --- Error count + AI fix button (only when grammar panel visible) ---
-                if self.show_grammar {
+                // Gate the badge on fg=Word too. writing_errors persists across
+                // app switches (so they reappear when the user returns), but
+                // they aren't relevant to display while in Slack/Safari/Terminal.
+                let badge_in_word = {
+                    let fg = self.platform.foreground_app();
+                    self.platform.classify_app(&fg) == platform::AppKind::Word
+                };
+                if self.show_grammar && badge_in_word {
                     let err_count = self.writing_errors.iter()
                         .filter(|e| !e.ignored && e.rule_name != "llm_correction")
                         .count();

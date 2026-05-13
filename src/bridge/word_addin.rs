@@ -63,6 +63,11 @@ pub struct WordAddinBridge {
     /// JSON snapshot of current 💡 suggestions — read by /completions for
     /// the focus-switching regression test (scripts/test-focus-errors.sh).
     completions_json: Arc<Mutex<String>>,
+    /// JSON snapshot of the UI's current state — read by /ui-state. Used
+    /// by the regression test to verify the badge, pencil and bulb panels
+    /// match the foreground app. Without this the test can't catch
+    /// "Tips: 56" while only 2 underlines render.
+    ui_state_json: Arc<Mutex<String>>,
 }
 
 impl WordAddinBridge {
@@ -87,6 +92,7 @@ impl WordAddinBridge {
         let rescan_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let errors_json: Arc<Mutex<String>> = Arc::new(Mutex::new("[]".to_string()));
         let completions_json: Arc<Mutex<String>> = Arc::new(Mutex::new(r#"{"completions":[],"open_completions":[]}"#.to_string()));
+        let ui_state_json: Arc<Mutex<String>> = Arc::new(Mutex::new(r#"{"fg_app":"","pencil_visible":false,"bulb_visible":false,"tips_count":0,"selected_tab":0}"#.to_string()));
 
         let ctx_clone = Arc::clone(&cached_context);
         let reply_clone = Arc::clone(&reply_queue);
@@ -95,6 +101,7 @@ impl WordAddinBridge {
         let reset_clone = Arc::clone(&reset_requested);
         let errors_clone = Arc::clone(&errors_json);
         let completions_clone = Arc::clone(&completions_json);
+        let ui_state_clone = Arc::clone(&ui_state_json);
         let doc_name_clone = Arc::clone(&current_doc_name);
         let pending_switch_clone = Arc::clone(&pending_doc_switch);
         let rescan_sent_clone = Arc::clone(&rescan_sent);
@@ -182,6 +189,7 @@ impl WordAddinBridge {
                         let rescan_flag = Arc::clone(&rescan_sent_clone);
                         let errors = Arc::clone(&errors_clone);
                         let completions = Arc::clone(&completions_clone);
+                        let ui_state = Arc::clone(&ui_state_clone);
                         let tls_cfg = tls_config.clone();
                         let html = html.clone();
                         let js = js.clone();
@@ -195,7 +203,7 @@ impl WordAddinBridge {
                                     Ok(conn) => {
                                         let mut tls_stream = rustls::StreamOwned::new(conn, tcp_stream);
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &html, &js, &i32, &i64, &i80);
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, &html, &js, &i32, &i64, &i80);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -203,7 +211,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &html, &js, &i32, &i64, &i80);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, &html, &js, &i32, &i64, &i80);
                             }
                         });
                     }
@@ -221,6 +229,7 @@ impl WordAddinBridge {
             deleted_paragraphs,
             errors_json,
             completions_json,
+            ui_state_json,
         }
     }
 
@@ -234,6 +243,13 @@ impl WordAddinBridge {
     /// Update the completions JSON snapshot (called by main thread)
     pub fn update_completions_json(&self, json: &str) {
         if let Ok(mut lock) = self.completions_json.lock() {
+            *lock = json.to_string();
+        }
+    }
+
+    /// Update the UI-state JSON snapshot (called by main thread)
+    pub fn update_ui_state_json(&self, json: &str) {
+        if let Ok(mut lock) = self.ui_state_json.lock() {
             *lock = json.to_string();
         }
     }
@@ -503,6 +519,12 @@ impl TextBridge for WordAddinBridge {
         }
     }
 
+    fn update_ui_state_json(&self, json: &str) {
+        if let Ok(mut lock) = self.ui_state_json.lock() {
+            *lock = json.to_string();
+        }
+    }
+
     fn push_reply(&self, json: &str) {
         let doc = self.current_doc_name.lock().map(|d| d.clone()).unwrap_or_default();
         log_to_file(&format!("PUSH to queue[{}]: {}", doc, json));
@@ -534,6 +556,7 @@ fn handle_request_rw<S: Read + Write>(
     rescan_sent: &Arc<std::sync::atomic::AtomicBool>,
     errors_json: &Arc<Mutex<String>>,
     completions_json: &Arc<Mutex<String>>,
+    ui_state_json: &Arc<Mutex<String>>,
     static_html: &str,
     static_js: &str,
     icon_32: &[u8],
@@ -826,6 +849,16 @@ fn handle_request_rw<S: Read + Write>(
         ("GET", "/completions") => {
             let json = completions_json.lock().map(|l| l.clone())
                 .unwrap_or_else(|_| r#"{"completions":[],"open_completions":[]}"#.to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                cors, json.len(), json
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+
+        ("GET", "/ui-state") => {
+            let json = ui_state_json.lock().map(|l| l.clone())
+                .unwrap_or_else(|_| r#"{"fg_app":"","pencil_visible":false,"bulb_visible":false,"tips_count":0,"selected_tab":0}"#.to_string());
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
                 cors, json.len(), json
