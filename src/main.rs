@@ -5426,8 +5426,17 @@ impl eframe::App for ContextApp {
         {
             let fg = self.platform.foreground_app();
             let fg_kind = self.platform.classify_app(&fg);
-            let in_word = fg_kind == platform::AppKind::Word;
-            let tips_count = if self.show_grammar && in_word {
+            // Mirror the actual UI gates at the bottom of update():
+            // pencil_visible just needs has_active_errors, not an
+            // AppKind::Word check, so /ui-state must follow suit.
+            // Previously these were gated to AppKind::Word to mask the
+            // "Tips: 65 in Slack" leak — that was a symptom of cross-app
+            // error retention, not of the gate. Real fix is per-app
+            // namespacing of writing_errors; until then, report what the
+            // user actually sees in the UI.
+            let in_writing_app = self.platform.is_writing_app(&fg)
+                && !matches!(fg_kind, platform::AppKind::OurApp);
+            let tips_count = if self.show_grammar && in_writing_app {
                 self.writing_errors.iter()
                     .filter(|e| !e.ignored && e.rule_name != "llm_correction")
                     .count()
@@ -5435,7 +5444,7 @@ impl eframe::App for ContextApp {
                 0
             };
             let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
-            let pencil_visible = in_word && self.show_grammar
+            let pencil_visible = in_writing_app && self.show_grammar
                 && (has_active_errors
                     || (self.grammar_scanning && self.grammar_queue_total > 0)
                     || self.llm_waiting);
@@ -5983,23 +5992,38 @@ impl eframe::App for ContextApp {
                 // additionally skip AX-mac when the foreground is Word (the
                 // AX fallback path reads Word's text but Word Add-in is
                 // authoritative for Word documents).
-                // AX-mac never feeds the grammar pipeline. It only provides
-                // cursor-context for the 💡 bulb predictions and the
-                // backspace+paste replacement path. Letting it write
-                // paragraphs (with "ax:N" IDs) registered Slack/Terminal
-                // content as spelling errors, contaminating /errors with
-                // up to 63 stray English entries during a Slack detour.
-                let _fg_kind = {
-                    let fg = self.platform.foreground_app();
-                    self.platform.classify_app(&fg)
-                };
-                let is_com_bridge = active_name == "Word COM";
-                let _ = is_ax_mac_bridge;
+                // AX-mac feeds the grammar pipeline only for non-Word writing
+                // apps (Notes / TextEdit / Slack / Teams / Pages etc.). Two
+                // earlier extremes both broke real flows:
+                //   - feeding for any AppKind::Other foreground polluted /errors
+                //     with Terminal content during a Slack→Terminal detour;
+                //   - cutting AX-mac off entirely killed every error in
+                //     Notes/TextEdit/Slack (user-reported, 2026-05-13).
+                // The gate below restores the non-Word writing apps while
+                // still blocking Terminal/code-editor leakage via
+                // is_writing_app. AX paragraph IDs are "ax:N" (start offset),
+                // distinct from Word Add-in's uniqueLocalId, so even if focus
+                // briefly tags Word the paragraph spaces don't collide.
+                let fg = self.platform.foreground_app();
+                let fg_kind = self.platform.classify_app(&fg);
+                let ax_can_feed = is_ax_mac_bridge
+                    && matches!(fg_kind, platform::AppKind::Other | platform::AppKind::Notepad)
+                    && self.platform.is_writing_app(&fg);
+                let is_com_bridge = active_name == "Word COM" || ax_can_feed;
                 if is_com_bridge {
-                    if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
-                        if let Some((para_id, text, start)) = self.manager.read_paragraph_at(off) {
-                            self.process_com_changed_paragraph(para_id, text, start);
-                        }
+                    let paragraph = if is_ax_mac_bridge {
+                        self.manager.read_paragraph_at(
+                            new_ctx.cursor_doc_offset
+                                .or(self.last_known_cursor_offset)
+                                .unwrap_or(0),
+                        )
+                    } else if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
+                        self.manager.read_paragraph_at(off)
+                    } else {
+                        None
+                    };
+                    if let Some((para_id, text, start)) = paragraph {
+                        self.process_com_changed_paragraph(para_id, text, start);
                     }
                 } else if self.manager.last_user_was_browser {
                     if let Some(doc) = self.manager.read_full_document() {
