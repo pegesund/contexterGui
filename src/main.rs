@@ -5947,12 +5947,17 @@ impl eframe::App for ContextApp {
                 // additionally skip AX-mac when the foreground is Word (the
                 // AX fallback path reads Word's text but Word Add-in is
                 // authoritative for Word documents).
-                let fg_is_word = {
+                // AX-mac may briefly be active while fg is Word (Word Add-in
+                // cache stale) or Browser (cross-app transition). Only allow
+                // the AX paragraph path for AppKind::Other (Slack/Teams/
+                // Notes/TextEdit/etc.); other kinds have authoritative
+                // bridges that own paragraph_texts.
+                let fg_kind = {
                     let fg = self.platform.foreground_app();
-                    self.platform.classify_app(&fg) == platform::AppKind::Word
+                    self.platform.classify_app(&fg)
                 };
                 let is_com_bridge = active_name == "Word COM"
-                    || (is_ax_mac_bridge && !fg_is_word);
+                    || (is_ax_mac_bridge && fg_kind == platform::AppKind::Other);
                 if is_com_bridge {
                     let paragraph = if is_ax_mac_bridge {
                         self.manager.read_paragraph_at(
