@@ -5906,12 +5906,17 @@ impl eframe::App for ContextApp {
             // On macOS we also poll for AppKind::Other (Teams, Slack, TextEdit,
             // etc.) so the follow-cursor window tracks those apps via the AX
             // bridge. The classification doesn't cover every Electron app, so
-            // widening here is intentional.
+            // widening here is intentional. AppKind::Notepad is included
+            // unconditionally so Notepad (Windows + TextEdit on Mac) gets the
+            // same explicit caret-tracking path as Word/Browser — without it,
+            // the popup stayed at its last position because the only update
+            // site was the silent fallback at the post-poll branch below.
             {
                 let fg = self.platform.foreground_app();
                 let kind = self.platform.classify_app(&fg);
                 let ax_poll_kinds = kind == platform::AppKind::Word
                     || kind == platform::AppKind::Browser
+                    || kind == platform::AppKind::Notepad
                     || (cfg!(target_os = "macos") && kind == platform::AppKind::Other);
                 if ax_poll_kinds {
                     // Try platform API first (macOS), fall back to bridge caret_pos (Windows)
