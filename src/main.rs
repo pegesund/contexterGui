@@ -3502,9 +3502,21 @@ impl ContextApp {
     /// This is fast (no SWI/BERT calls) and runs every poll when document changes.
     /// The actual per-sentence grammar checking happens incrementally in process_grammar_queue().
     fn update_grammar_errors(&mut self) {
-        // When Word Add-in is active, sentence detection and error management
-        // is handled by the add-in (process_addin_changed_paragraphs).
-        if self.manager.bridges.iter().any(|b| b.name() == "Word Add-in") {
+        // When the Word Add-in is the ACTIVE bridge, sentence detection and
+        // error management is handled by the add-in's event-driven pipeline
+        // (process_addin_changed_paragraphs), so the full-doc fallback here
+        // would duplicate the work.
+        //
+        // Previously this checked `bridges.iter().any(|b| b.name() == "Word Add-in")`
+        // — i.e. "is the Word Add-in bridge REGISTERED?" — which is always
+        // true on Mac because the add-in bridge is registered at startup
+        // regardless of which app is foreground. That early-return killed
+        // spell/grammar processing for every non-Word app on Mac:
+        // typing in Gmail / Reddit / Notes via the Browser or AX-mac
+        // bridges produced cursor-context (bulb completions worked) but
+        // never produced spelling underlines. Reported by user during
+        // browser-bridge testing on 2026-05-14.
+        if self.manager.active_bridge_name() == "Word Add-in" {
             return;
         }
 
