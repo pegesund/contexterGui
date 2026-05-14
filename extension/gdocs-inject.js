@@ -1,4 +1,4 @@
-// NorskTale Google Docs integration — runs in MAIN world (page context)
+// Spell Google Docs integration — runs in MAIN world (page context)
 // Uses _docs_annotate_getAnnotatedText API for BOTH reading and writing text.
 // This is the same approach as Lingdys — the annotate API is the authoritative
 // document model, not the canvas rendering.
@@ -17,9 +17,9 @@
     if (typeof globalThis._docs_annotate_getAnnotatedText === "function") {
       try {
         annotatedText = await globalThis._docs_annotate_getAnnotatedText("nb");
-        console.log("NorskTale: annotatedText API loaded");
+        console.log("Spell: annotatedText API loaded");
       } catch (e) {
-        console.log("NorskTale: annotatedText API failed: " + e);
+        console.log("Spell: annotatedText API failed: " + e);
       }
     }
     return annotatedText;
@@ -62,7 +62,7 @@
     try {
       fullText = at.getText();
     } catch (e) {
-      console.log("NorskTale: getText() error: " + e);
+      console.log("Spell: getText() error: " + e);
       return;
     }
 
@@ -84,7 +84,7 @@
     // If annotate API returns end-of-text, try to find cursor from DOM caret element
     if (cursorIndex >= fullText.length - 1 || cursorIndex <= 0) {
       const domCursor = getDomCursorOffset(fullText);
-      console.log("NorskTale: DOM cursor fallback: " + domCursor + " (API was " + cursorIndex + ", textLen=" + fullText.length + ")");
+      console.log("Spell: DOM cursor fallback: " + domCursor + " (API was " + cursorIndex + ", textLen=" + fullText.length + ")");
       if (domCursor >= 0) {
         cursorIndex = domCursor;
       }
@@ -100,10 +100,10 @@
     lastEmittedCursor = cursorInPara;
 
     // Cross-world communication via DOM element
-    let el = document.getElementById("norsktale-data");
+    let el = document.getElementById("spell-data");
     if (!el) {
       el = document.createElement("div");
-      el.id = "norsktale-data";
+      el.id = "spell-data";
       el.style.display = "none";
       document.documentElement.appendChild(el);
     }
@@ -155,7 +155,7 @@
     el.setAttribute("data-cursor", String(cursorInPara));
     el.setAttribute("data-caret-x", String(caretScreenX));
     el.setAttribute("data-caret-y", String(caretScreenY));
-    el.dispatchEvent(new Event("norsktale-update", { bubbles: false }));
+    el.dispatchEvent(new Event("spell-update", { bubbles: false }));
   }
 
   // --- DOM-based cursor position detection ---
@@ -251,7 +251,7 @@
 
   // Poll for replace requests from content.js (via DOM element)
   setInterval(() => {
-    const replEl = document.getElementById("norsktale-replace");
+    const replEl = document.getElementById("spell-replace");
     if (!replEl || replEl.getAttribute("data-pending") !== "true") return;
     replEl.setAttribute("data-pending", "false");
     const find = replEl.getAttribute("data-find");
@@ -263,12 +263,12 @@
   async function doReplace(find, replace, charOffset, replEl) {
     // charOffset is paragraph-relative — convert to document-absolute for the annotate API
     const docAbsOffset = lastParaStart + charOffset;
-    console.log("NorskTale gdocs-inject: replace '" + find + "' → '" + replace + "' paraOffset=" + charOffset + " docOffset=" + docAbsOffset);
+    console.log("Spell gdocs-inject: replace '" + find + "' → '" + replace + "' paraOffset=" + charOffset + " docOffset=" + docAbsOffset);
 
     const at = await getAnnotatedText();
     if (!at || typeof at.setSelection !== "function" || typeof at.getText !== "function") {
-      console.log("NorskTale gdocs-inject: annotate API not available");
-      if (replEl) { replEl.setAttribute("data-result", "false"); replEl.dispatchEvent(new Event("norsktale-replace-done")); }
+      console.log("Spell gdocs-inject: annotate API not available");
+      if (replEl) { replEl.setAttribute("data-result", "false"); replEl.dispatchEvent(new Event("spell-replace-done")); }
       return;
     }
 
@@ -293,25 +293,25 @@
       }
 
       if (bestPos >= 0) {
-        console.log("NorskTale gdocs-inject: setSelection(" + bestPos + ", " + (bestPos + find.length) + ")");
+        console.log("Spell gdocs-inject: setSelection(" + bestPos + ", " + (bestPos + find.length) + ")");
         at.setSelection(bestPos, bestPos + find.length);
         const ok = insertReplacementText(replace);
-        console.log("NorskTale gdocs-inject: insertReplacementText result: " + ok);
+        console.log("Spell gdocs-inject: insertReplacementText result: " + ok);
         // Clear lastEmittedText so next poll re-reads from annotate API
         lastEmittedText = "";
-        if (replEl) { replEl.setAttribute("data-result", String(ok)); replEl.dispatchEvent(new Event("norsktale-replace-done")); }
+        if (replEl) { replEl.setAttribute("data-result", String(ok)); replEl.dispatchEvent(new Event("spell-replace-done")); }
         return;
       }
-      console.log("NorskTale gdocs-inject: word not found in getText()");
+      console.log("Spell gdocs-inject: word not found in getText()");
     } catch (e) {
-      console.log("NorskTale gdocs-inject: replace error: " + e);
+      console.log("Spell gdocs-inject: replace error: " + e);
     }
 
-    if (replEl) { replEl.setAttribute("data-result", "false"); replEl.dispatchEvent(new Event("norsktale-replace-done")); }
+    if (replEl) { replEl.setAttribute("data-result", "false"); replEl.dispatchEvent(new Event("spell-replace-done")); }
   }
 
   // Periodic text emission — poll annotate API every 500ms
   setInterval(() => { emitText(); }, 500);
 
-  console.log("NorskTale gdocs-inject.js loaded — annotate API text reading + replace active");
+  console.log("Spell gdocs-inject.js loaded — annotate API text reading + replace active");
 })();

@@ -1,6 +1,6 @@
-// NorskTale background service worker — bridges content scripts to native messaging host
+// Spell background service worker — bridges content scripts to native messaging host
 
-const NATIVE_HOST = "com.norsktale.bridge";
+const NATIVE_HOST = "com.cognio.spell.bridge";
 let nativePort = null;
 let contentPorts = new Map(); // tabId -> [port, port, ...] (multiple frames per tab)
 let lastActiveTabId = null;
@@ -9,11 +9,11 @@ function connectNative() {
   if (nativePort) return;
   try {
     nativePort = chrome.runtime.connectNative(NATIVE_HOST);
-    console.log("NorskTale: native host connected");
+    console.log("Spell: native host connected");
     nativePort.onMessage.addListener((msg) => {
       // Forward replace actions to content script
       if (msg.action === "replace") {
-        console.log("NorskTale replace:", JSON.stringify(msg));
+        console.log("Spell replace:", JSON.stringify(msg));
         if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
           for (const cPort of contentPorts.get(lastActiveTabId)) {
             try { cPort.postMessage(msg); } catch(e) {}
@@ -28,7 +28,7 @@ function connectNative() {
       }
     });
     nativePort.onDisconnect.addListener(() => {
-      console.log("NorskTale native host disconnected:", chrome.runtime.lastError?.message);
+      console.log("Spell native host disconnected:", chrome.runtime.lastError?.message);
       nativePort = null;
       // Reconnect after short delay if we still have content ports
       if (contentPorts.size > 0) {
@@ -36,13 +36,13 @@ function connectNative() {
       }
     });
   } catch (e) {
-    console.error("NorskTale: failed to connect native host:", e);
+    console.error("Spell: failed to connect native host:", e);
     nativePort = null;
   }
 }
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "norsktale-content") return;
+  if (port.name !== "spell-content") return;
 
   const tabId = port.sender?.tab?.id;
   if (tabId) {

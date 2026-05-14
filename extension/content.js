@@ -1,14 +1,14 @@
-// NorskTale content script v8 — active cursor required
+// Spell content script v8 — active cursor required
 // Google Docs: text from canvas hook (gdocs-inject.js), replace via postMessage
 // Other sites: textarea/contenteditable direct
 // RULE: NEVER send text unless user has a blinking cursor in an editable element.
 
 (function() {
   "use strict";
-  console.log("NorskTale content.js v8 loaded");
+  console.log("Spell content.js v8 loaded");
 
-  function norsktaleLog(msg) {
-    console.log("NorskTale: " + msg);
+  function spellLog(msg) {
+    console.log("Spell: " + msg);
     if (!port) connectPort();
     if (port) {
       try {
@@ -40,7 +40,7 @@
 
   function connectPort() {
     try {
-      port = chrome.runtime.connect({ name: "norsktale-content" });
+      port = chrome.runtime.connect({ name: "spell-content" });
       port.onMessage.addListener(handleResponse);
       port.onDisconnect.addListener(() => { port = null; });
     } catch (e) { port = null; }
@@ -95,24 +95,24 @@
     return null;
   }
 
-  // gdocs-inject.js (MAIN world) writes to #norsktale-data.
+  // gdocs-inject.js (MAIN world) writes to #spell-data.
   // Content.js (ISOLATED world) polls it. DOM is shared between worlds.
   let lastDataVersion = "";
   function pollGDocsData() {
     if (!isGoogleDocs()) return;
     if (replaceInProgress) {
-      const el = document.getElementById("norsktale-data");
+      const el = document.getElementById("spell-data");
       const done = el && el.getAttribute("data-replace-done") === "true";
       const timedOut = Date.now() - replaceStartTime > 4000;
       if (done || timedOut) {
-        norsktaleLog("Replace " + (done ? "confirmed" : "timed out") + " — resuming text updates");
+        spellLog("Replace " + (done ? "confirmed" : "timed out") + " — resuming text updates");
         replaceInProgress = false;
         if (el) el.removeAttribute("data-replace-done");
       } else {
         return;
       }
     }
-    const el = document.getElementById("norsktale-data");
+    const el = document.getElementById("spell-data");
     if (!el) return;
     const text = el.getAttribute("data-text");
     const cursor = parseInt(el.getAttribute("data-cursor") || "0", 10);
@@ -127,7 +127,7 @@
     const key = text + "|" + cursor;
     if (key === lastSent) return;
     lastSent = key;
-    norsktaleLog("GDOCS canvas text: " + text.length + " chars, caret=(" + caretX + "," + caretY + ")");
+    spellLog("GDOCS canvas text: " + text.length + " chars, caret=(" + caretX + "," + caretY + ")");
     if (!port) connectPort();
     if (port) {
       try {
@@ -143,19 +143,19 @@
 
   function handleResponse(msg) {
     if (msg.action !== "replace") return;
-    norsktaleLog("REPLACE: find='" + (msg.expected||"") + "' text='" + (msg.text||"") + "'");
+    spellLog("REPLACE: find='" + (msg.expected||"") + "' text='" + (msg.text||"") + "'");
 
     if (isGoogleDocs()) {
       const findText = msg.expected || "";
       const replaceText = msg.text || "";
       if (!findText) {
-        norsktaleLog("REPLACE FAILED: no expected text");
+        spellLog("REPLACE FAILED: no expected text");
         return;
       }
-      let replEl = document.getElementById("norsktale-replace");
+      let replEl = document.getElementById("spell-replace");
       if (!replEl) {
         replEl = document.createElement("div");
-        replEl.id = "norsktale-replace";
+        replEl.id = "spell-replace";
         replEl.style.display = "none";
         document.documentElement.appendChild(replEl);
       }

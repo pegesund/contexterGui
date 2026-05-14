@@ -28,7 +28,7 @@ declare -a SHIP=(
 # Files that do NOT ship (sanity-check that they exist locally so we don't
 # silently miss a critical file by typo)
 declare -a NO_SHIP=(
-    com.norsktale.bridge.json   # native messaging host config (ships with desktop installer, not extension)
+    com.cognio.spell.bridge.json   # native messaging host config (ships with desktop installer, not extension)
     install_native_host.bat     # Windows-only desktop-side install helper
     setup.html                  # not referenced by manifest, dev-only
 )

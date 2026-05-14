@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NorskTale Extension Setup</title>
+<title>Spell Extension Setup</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -133,7 +133,7 @@
 </head>
 <body>
 
-<h1>NorskTale Extension Setup <span>Browser bridge for textarea cursor tracking</span></h1>
+<h1>Spell Extension Setup <span>Browser bridge for textarea cursor tracking</span></h1>
 
 <div class="container">
   <div class="steps">
@@ -147,7 +147,7 @@
         Open <code>edge://extensions/</code> in Edge<br><br>
         Enable <strong>Developer mode</strong> (toggle in sidebar)<br><br>
         Click <strong>Load unpacked</strong> and select:
-        <span class="path">C:\Users\pette\dev\contexter\NorskTale\acatts-rust\extension</span>
+        <span class="path">C:\Users\pette\dev\contexter\Spell\acatts-rust\extension</span>
         <div class="check">
           <input type="checkbox" id="check1" onchange="updateState()">
           <label for="check1">Extension loaded</label>
@@ -175,7 +175,7 @@
       </div>
       <div class="step-body">
         Click <strong>Copy Manifest</strong> on the right, then save to:
-        <span class="path">C:\Users\pette\dev\contexter\NorskTale\acatts-rust\extension\com.norsktale.bridge.json</span>
+        <span class="path">C:\Users\pette\dev\contexter\Spell\acatts-rust\extension\com.cognio.spell.bridge.json</span>
         Or click <strong>Auto-Save</strong> to write it directly.
         <div class="check">
           <input type="checkbox" id="check3" onchange="updateState()">
@@ -201,10 +201,10 @@
     <div class="step" id="step5">
       <div class="step-header">
         <div class="step-num">5</div>
-        <div class="step-title">Restart Edge & NorskTale</div>
+        <div class="step-title">Restart Edge & Spell</div>
       </div>
       <div class="step-body">
-        Close and reopen Edge, then start NorskTale. Click in a textarea — NorskTale should now track your cursor position.
+        Close and reopen Edge, then start Spell. Click in a textarea — Spell should now track your cursor position.
         <div class="check">
           <input type="checkbox" id="check5" onchange="updateState()">
           <label for="check5">Working!</label>
@@ -222,7 +222,7 @@
     </div>
 
     <div class="tab-content active" id="tab-manifest">
-      <div class="section-title">com.norsktale.bridge.json</div>
+      <div class="section-title">com.cognio.spell.bridge.json</div>
       <div class="code-block" id="manifest-code"></div>
     </div>
 
@@ -234,13 +234,13 @@
     <div class="tab-content" id="tab-test">
       <div class="section-title">Quick Test</div>
       <div style="font-size:0.85rem; color:#aaa; margin-bottom:16px; line-height:1.6;">
-        After setup, type in this textarea. If NorskTale picks it up with cursor tracking, the Browser bridge is working.
+        After setup, type in this textarea. If Spell picks it up with cursor tracking, the Browser bridge is working.
       </div>
       <textarea style="width:100%; height:120px; background:#0d1117; color:#e0e0e0; border:1px solid #2a2a4a;
         border-radius:6px; padding:12px; font-size:1rem; font-family:inherit; resize:vertical; outline:none;"
         placeholder="Skriv noe her for å teste..."></textarea>
       <div style="margin-top:12px; font-size:0.82rem; color:#888;">
-        Check <code>%TEMP%\norsktale-browser.json</code> — it should update as you type.
+        Check <code>%TEMP%\spell-browser.json</code> — it should update as you type.
       </div>
     </div>
   </div>
@@ -253,11 +253,11 @@
 
 <script>
 const CONFIG = {
-  hostName: 'com.norsktale.bridge',
-  hostPath: 'C:\\\\Users\\\\pette\\\\dev\\\\contexter\\\\NorskTale\\\\acatts-rust\\\\target\\\\release\\\\native_bridge.exe',
-  manifestPath: 'C:\\\\Users\\\\pette\\\\dev\\\\contexter\\\\NorskTale\\\\acatts-rust\\\\extension\\\\com.norsktale.bridge.json',
-  regEdge: 'HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.norsktale.bridge',
-  regChrome: 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.norsktale.bridge',
+  hostName: 'com.cognio.spell.bridge',
+  hostPath: 'C:\\\\Users\\\\pette\\\\dev\\\\contexter\\\\Spell\\\\acatts-rust\\\\target\\\\release\\\\native_bridge.exe',
+  manifestPath: 'C:\\\\Users\\\\pette\\\\dev\\\\contexter\\\\Spell\\\\acatts-rust\\\\extension\\\\com.cognio.spell.bridge.json',
+  regEdge: 'HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.cognio.spell.bridge',
+  regChrome: 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cognio.spell.bridge',
 };
 
 function getExtId() {
@@ -266,9 +266,9 @@ function getExtId() {
 
 function getManifestObj(extId) {
   return {
-    name: "com.norsktale.bridge",
-    description: "NorskTale native messaging host for browser textarea monitoring",
-    path: "C:\\Users\\pette\\dev\\contexter\\NorskTale\\acatts-rust\\target\\release\\native_bridge.exe",
+    name: "com.cognio.spell.bridge",
+    description: "Spell native messaging host for browser textarea monitoring",
+    path: "C:\\Users\\pette\\dev\\contexter\\Spell\\acatts-rust\\target\\release\\native_bridge.exe",
     type: "stdio",
     allowed_origins: [
       extId ? `chrome-extension://${extId}/` : "chrome-extension://EXTENSION_ID_HERE/"
@@ -282,7 +282,7 @@ function getManifestJson(extId) {
 
 function getRegistryCommands(extId) {
   const mp = CONFIG.manifestPath.replace(/\\\\/g, '\\');
-  return `@echo off\nREM Register NorskTale native messaging host\n\nREM Edge\nreg add "${CONFIG.regEdge}" /ve /t REG_SZ /d "${mp}" /f\n\nREM Chrome\nreg add "${CONFIG.regChrome}" /ve /t REG_SZ /d "${mp}" /f\n\necho Done.`;
+  return `@echo off\nREM Register Spell native messaging host\n\nREM Edge\nreg add "${CONFIG.regEdge}" /ve /t REG_SZ /d "${mp}" /f\n\nREM Chrome\nreg add "${CONFIG.regChrome}" /ve /t REG_SZ /d "${mp}" /f\n\necho Done.`;
 }
 
 function highlightJson(json) {
@@ -356,7 +356,7 @@ function updateState() {
   const doneCount = checks.filter(Boolean).length;
   if (doneCount === 5) {
     dot.className = 'status-dot green';
-    text.textContent = 'Setup complete! NorskTale browser bridge is ready.';
+    text.textContent = 'Setup complete! Spell browser bridge is ready.';
   } else if (extId.length >= 10) {
     dot.className = 'status-dot yellow';
     text.textContent = `${doneCount}/5 steps done — Extension ID: ${extId}`;
