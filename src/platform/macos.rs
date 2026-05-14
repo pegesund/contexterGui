@@ -199,10 +199,15 @@ impl PlatformServices for MacPlatform {
             name,
             // Terminals
             "terminal" | "iterm2" | "iterm" | "warp" | "alacritty" | "kitty" | "tabby"
-            | "hyper" | "wezterm"
+            | "hyper" | "wezterm" | "ghostty"
             // Code editors / IDEs
             | "code" | "code - insiders" | "cursor" | "windsurf" | "zed"
             | "xcode" | "android studio"
+            // AI coding tools — these run in terminal-like UIs and Spell shouldn't
+            // chase the user's cursor through Claude / ChatGPT / Copilot CLIs.
+            // Without this, switching from a writing app to the Claude CLI flips
+            // fg_kind=Other and triggers the cross-app error-isolation wipe.
+            | "claude" | "claude-code" | "claude code" | "aider" | "codex"
             // JetBrains family
             | "intellij idea" | "intellij idea ce" | "pycharm" | "pycharm ce"
             | "webstorm" | "phpstorm" | "rubymine" | "clion" | "goland"
