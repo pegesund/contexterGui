@@ -7,6 +7,7 @@
 /// - Main thread: reads stdin messages, writes data file, sends ack
 /// - Reply thread: polls for reply file every 50ms, sends to extension
 
+use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,12 +17,45 @@ fn data_path() -> PathBuf {
     std::env::temp_dir().join("spell-browser.json")
 }
 
+/// Sibling tmp file used to make data_path() writes atomic
+/// (write to .tmp, then rename onto the final path).
+fn data_tmp_path() -> PathBuf {
+    std::env::temp_dir().join("spell-browser.json.tmp")
+}
+
 fn reply_path() -> PathBuf {
     std::env::temp_dir().join("spell-browser-reply.json")
 }
 
 fn log_path() -> PathBuf {
     std::env::temp_dir().join("spell-native-bridge.log")
+}
+
+/// Atomically replace `data_path()` with `data`.
+///
+/// The previous implementation called `std::fs::write(data_path(), data)`
+/// directly. Native messaging payloads can be up to ~1 MB, and a writer
+/// can be interrupted mid-write; if the desktop side read concurrently
+/// it would see a truncated file and fail JSON parsing. Writing to a
+/// sibling `.tmp` and then `rename`ing is atomic on both POSIX and
+/// Win32 within the same filesystem, so the desktop either sees the
+/// previous complete payload or the new complete payload — never a
+/// half-flushed mix.
+fn write_data_atomic(data: &[u8]) -> io::Result<()> {
+    let tmp = data_tmp_path();
+    let final_path = data_path();
+    // Write to tmp first
+    if let Err(e) = std::fs::write(&tmp, data) {
+        // Best-effort cleanup; ignore rm errors so we surface the write error
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // Rename onto the final path. On failure leave no half-state behind.
+    if let Err(e) = std::fs::rename(&tmp, &final_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn log(msg: &str) {
@@ -100,52 +134,68 @@ fn main() {
     });
 
     // Main thread: read stdin, write data file, send ack
+    let ack: &[u8] = br#"{"status":"ok"}"#;
     loop {
         match read_message() {
             Ok(msg) => {
-                let msg_str = String::from_utf8_lossy(&msg);
+                // Parse the JSON properly instead of substring-matching the
+                // raw bytes. Previously `msg_str.contains("\"type\":\"keepalive\"")`
+                // could be fooled by a user's typed text that happened to
+                // contain the literal string — same for `"type":"log"` and
+                // the URL/text extraction. Parsing once and reading fields
+                // through serde_json::Value is both correct and not much
+                // slower (payloads are small JSON objects).
+                let parsed: Option<Value> = serde_json::from_slice(&msg).ok();
+                let msg_type = parsed.as_ref()
+                    .and_then(|v| v.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
-                // Handle keepalive pings (just ack, don't write to file)
-                if msg_str.contains("\"type\":\"keepalive\"") {
-                    let ack = br#"{"status":"ok"}"#;
-                    if let Ok(mut out) = stdout.lock() {
-                        if write_message_locked(&mut *out, ack).is_err() { break; }
+                match msg_type {
+                    "keepalive" => {
+                        // Keepalive pings: just ack, don't write to file.
+                        if let Ok(mut out) = stdout.lock() {
+                            if write_message_locked(&mut *out, ack).is_err() { break; }
+                        }
+                        continue;
                     }
-                    continue;
+                    "log" => {
+                        // Log messages from the content script. Pull the
+                        // message field through serde so embedded escapes
+                        // (`\"`, `\n`) survive.
+                        if let Some(s) = parsed.as_ref()
+                            .and_then(|v| v.get("message"))
+                            .and_then(|v| v.as_str())
+                        {
+                            log(&format!("JS: {}", s));
+                        }
+                        if let Ok(mut out) = stdout.lock() {
+                            if write_message_locked(&mut *out, ack).is_err() { break; }
+                        }
+                        continue;
+                    }
+                    _ => {}
                 }
 
-                // Handle log messages from content script
-                if msg_str.contains("\"type\":\"log\"") {
-                    if let Some(i) = msg_str.find("\"message\":\"") {
-                        let s = &msg_str[i+11..];
-                        let end = s.find('"').unwrap_or(s.len());
-                        log(&format!("JS: {}", &s[..end]));
-                    }
-                    // Don't write log messages to the data file
-                    let ack = br#"{"status":"ok"}"#;
-                    if let Ok(mut out) = stdout.lock() {
-                        if write_message_locked(&mut *out, ack).is_err() { break; }
-                    }
-                    continue;
-                }
-
-                // Log what we receive: URL and first 80 chars of text
-                let url = msg_str.find("\"url\":\"").map(|i| {
-                    let s = &msg_str[i+7..];
-                    s.find('"').map(|e| &s[..e]).unwrap_or("")
-                }).unwrap_or("");
-                let text_preview = msg_str.find("\"text\":\"").map(|i| {
-                    let s = &msg_str[i+8..];
-                    let end = s.find('"').unwrap_or(80).min(80);
-                    &s[..end]
-                }).unwrap_or("");
+                // Regular payload (text update from a content script).
+                // Log preview using parsed fields, then atomically replace
+                // the data file so the desktop side never sees a partial
+                // write.
+                let url = parsed.as_ref()
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let text_preview: String = parsed.as_ref()
+                    .and_then(|v| v.get("text"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(80).collect())
+                    .unwrap_or_default();
                 log(&format!("RECV url={} text='{}'", url, text_preview));
 
-                if let Err(e) = std::fs::write(data_path(), &msg) {
+                if let Err(e) = write_data_atomic(&msg) {
                     log(&format!("Failed to write data file: {}", e));
                 }
 
-                let ack = br#"{"status":"ok"}"#;
                 if let Ok(mut out) = stdout.lock() {
                     if write_message_locked(&mut *out, ack).is_err() {
                         break;
