@@ -6127,22 +6127,55 @@ impl eframe::App for ContextApp {
                     || kind == platform::AppKind::Notepad
                     || (cfg!(target_os = "macos") && kind == platform::AppKind::Other);
                 if ax_poll_kinds {
-                    // Try platform API first (macOS), fall back to bridge caret_pos (Windows)
+                    // Pick the caret source by foreground-app kind:
+                    //   - Word / Notepad / Other (writing apps): platform AX
+                    //     queries the focused element directly, accurate to a
+                    //     few pixels.
+                    //   - Browser: prefer the extension's bridge-reported
+                    //     caretX/Y. The companion ext computes the cursor
+                    //     position in the actual textarea / contenteditable
+                    //     via DOM (mirror-div for textareas, Range.getClientRects
+                    //     for contenteditable) — pixel-accurate for normal
+                    //     web inputs. Platform AX in Chrome is unreliable for
+                    //     in-page elements: it returns the AXTextField AX
+                    //     rect from Chrome's own UI (location bar / search
+                    //     box / nothing), not the in-page cursor — so the
+                    //     Spell popup landed in the wrong place for every
+                    //     web form.
+                    //
+                    // Reported 2026-05-15: "our desktop app positioning with
+                    // browser just not work properly. app should be
+                    // positioned under cursor exactly the same way it works
+                    // with native desktop apps."
                     let plat_caret = self.platform.caret_screen_position();
                     let bridge_caret = ctx_result.as_ref().and_then(|c| c.caret_pos);
-                    if let Some((x, y)) = plat_caret {
-                        let new_pos = (x, y + 49);
-                        if self.last_caret_pos != Some(new_pos) {
-                            log!("caret from platform: ({}, {}) → stored ({}, {})", x, y, new_pos.0, new_pos.1);
-                            self.last_caret_pos = Some(new_pos);
+                    let prefer_bridge = kind == platform::AppKind::Browser;
+
+                    // Apply the +49 vertical offset only to platform-AX
+                    // coords (it's the historical Word taskbar/title-bar
+                    // adjust). Bridge coords from the extension are already
+                    // in screen space.
+                    let plat_with_offset = plat_caret.map(|(x, y)| (x, y + 49));
+                    let bridge_nonzero = bridge_caret.filter(|(x, y)| *x != 0 || *y != 0);
+
+                    let (chosen, source): (Option<(i32, i32)>, &str) = if prefer_bridge {
+                        match (bridge_nonzero, plat_with_offset) {
+                            (Some(p), _) => (Some(p), "bridge"),
+                            (None, Some(p)) => (Some(p), "platform"),
+                            _ => (None, ""),
                         }
-                    } else if let Some((x, y)) = bridge_caret {
-                        if x != 0 || y != 0 {
-                            let new_pos = (x, y);
-                            if self.last_caret_pos != Some(new_pos) {
-                                log!("caret from bridge: ({}, {})", x, y);
-                                self.last_caret_pos = Some(new_pos);
-                            }
+                    } else {
+                        match (plat_with_offset, bridge_nonzero) {
+                            (Some(p), _) => (Some(p), "platform"),
+                            (None, Some(p)) => (Some(p), "bridge"),
+                            _ => (None, ""),
+                        }
+                    };
+
+                    if let Some(new_pos) = chosen {
+                        if self.last_caret_pos != Some(new_pos) {
+                            log!("caret from {}: ({}, {}) [fg_kind={:?}]", source, new_pos.0, new_pos.1, kind);
+                            self.last_caret_pos = Some(new_pos);
                         }
                     } else {
                         static LAST_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
