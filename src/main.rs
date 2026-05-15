@@ -548,6 +548,32 @@ impl BridgeManager {
             log!("FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}", trunc(&fg_title, 40), fg_pid, fg.exe_name, our_window_focused, word_is_foreground, is_browser, self.last_user_pid);
         }
 
+        // Pre-select active bridge to match the foreground app kind.
+        // Without this, active_idx stays on its initial value (Word Add-in,
+        // bridge 0) until some bridge returns non-empty ctx. If Browser
+        // bridge returns None on early polls (data file not written yet
+        // because the extension hasn't sent anything, or read rate-limited
+        // to 100ms, or modified-time-unchanged short-circuit), active_idx
+        // sticks on Word Add-in. The is_com check at ~line 6147 then sees
+        // "Word Add-in" and SKIPS update_grammar_errors — so typing in
+        // Chrome never produces spell-check underlines until something
+        // else flips active_idx. This was the observed regression during
+        // 2026-05-14 browser-bridge testing.
+        //
+        // Pre-selection by fg kind makes the is_com check robust: active
+        // stays on Browser even while Browser bridge has no data yet.
+        // The actual read_context attempt below still gets to override if
+        // a different bridge has data, but the default is right.
+        if is_browser {
+            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
+                if self.active_idx != browser_idx {
+                    log!("Pre-select Browser bridge (fg={}, was active={})",
+                        fg.exe_name, self.bridges[self.active_idx].name());
+                    self.active_idx = browser_idx;
+                }
+            }
+        }
+
         // Word Add-in bridge is data-driven (HTTP POST), not foreground-driven.
         // Check it first only while Word owns the active writing context. If
         // Slack/Notes/etc. is foreground, the cached add-in text is stale and
@@ -719,7 +745,17 @@ impl BridgeManager {
         // (Path 1) or AXValue (Path 2).
         #[cfg(target_os = "macos")]
         {
-            self.last_user_was_browser = false;
+            // Don't clobber last_user_was_browser if we landed here because
+            // the Browser bridge had no data yet (fg is still a browser).
+            // Otherwise we'd toggle the flag false → true → false every poll
+            // (Block 4 above sets true, this block clobbers to false). That
+            // breaks the poll loop's "else if last_user_was_browser" branch
+            // which is what populates last_doc_text from the extension's
+            // file. Only reset for genuine non-browser fallback (Word fg
+            // without Add-in data, or Notes/Slack/TextEdit fg).
+            if !is_browser {
+                self.last_user_was_browser = false;
+            }
             for bridge in self.bridges.iter() {
                 if bridge.name() == "Accessibility (macOS)" {
                     // Pass PID via the existing hwnd plumbing.
@@ -5313,7 +5349,13 @@ impl eframe::App for ContextApp {
             // would otherwise toggle minimised state). Emit the viewport
             // command only on the boundary so we don't fight the user if they
             // manually un-minimise.
-            if !now_our_app {
+            //
+            // SPELL_NO_MINIMISE=1 disables the auto-minimise entirely. Useful
+            // for debugging the browser bridge where the user needs to click
+            // a terminal to read logs/messages — the default behaviour would
+            // hide Spell every time, making suggestions invisible.
+            let no_minimise = std::env::var("SPELL_NO_MINIMISE").is_ok();
+            if !now_our_app && !no_minimise {
                 let is_writing = self.platform.is_writing_app(&fg);
                 if self.prev_was_writing_app != Some(is_writing) {
                     if !is_writing {
