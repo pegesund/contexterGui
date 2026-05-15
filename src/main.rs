@@ -447,6 +447,15 @@ struct BridgeManager {
     platform: Box<dyn platform::PlatformServices>,
     /// Windows Word COM language ID for the active language (from LanguageVoice trait)
     lang_word_id: i32,
+    /// True once the Chrome/Edge native-messaging extension has ever delivered
+    /// usable context data. Sticky for the desktop session: once we know the
+    /// extension is installed and active, the Mac AX fallback for browser
+    /// foreground is DISABLED (without this, AX-mac reads from whatever app
+    /// happens to be in the AX tree behind Chrome — Word, dock, etc. —
+    /// causing bridge bouncing and "ghost" suggestions for text the user
+    /// never typed in the browser). Safari (no extension) keeps the AX
+    /// fallback because this flag never flips.
+    browser_extension_seen: bool,
 }
 
 impl BridgeManager {
@@ -482,6 +491,10 @@ impl BridgeManager {
             bridge_switch_to: String::new(),
             platform,
             lang_word_id,
+            // If a recent data file was present at startup, the extension
+            // must have been talking to the previous desktop session →
+            // it's installed.
+            browser_extension_seen: browser_file_exists,
         }
     }
 
@@ -640,6 +653,12 @@ impl BridgeManager {
             if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
                 if let Some(ctx) = self.bridges[browser_idx].read_context() {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                        // First non-empty browser context locks in the
+                        // extension-seen flag for the session. After this
+                        // point we never fall through to AX-mac for any
+                        // browser foreground — AX would otherwise read
+                        // garbage from Word/other apps in the background.
+                        self.browser_extension_seen = true;
                         if self.active_idx != browser_idx {
                             log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
                             self.mark_bridge_switch(browser_idx);
@@ -656,7 +675,20 @@ impl BridgeManager {
             {
                 return self.last_context.clone();
             }
-            // On macOS: fall through to the AX fallback block below.
+            // On macOS: only fall through to AX-mac when the extension
+            // ISN'T installed (Safari, or Chrome/Edge before the user has
+            // typed anything that round-tripped through the extension).
+            // Without this guard, AX-mac reads from whatever AX-accessible
+            // app happens to be in the background (Word, Pages, system
+            // dialogs), causing the Browser ↔ AX-mac bouncing observed
+            // during 2026-05-14 testing where the desktop was processing
+            // Word content as if the user had typed it in Chrome.
+            #[cfg(target_os = "macos")]
+            if self.browser_extension_seen {
+                return self.last_context.clone();
+            }
+            // Else: extension not installed (Safari path), fall through
+            // to AX-mac.
         }
 
         // --- WORD ---
