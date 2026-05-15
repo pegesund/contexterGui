@@ -3678,7 +3678,26 @@ impl ContextApp {
         // Prolog sub-splitting skipped (checker moved to actor, split_by_prolog not on Analyzer)
 
         if sentences.is_empty() {
-            return;
+            // No sentence-ending punctuation in the document. In Word this
+            // is rare — people write prose ending in `.` / `!` / `?`. In
+            // browser textareas (Gmail compose, Reddit comments, Slack
+            // input, chat boxes generally) users routinely send half-typed
+            // fragments without terminating punctuation, especially while
+            // mid-message. Bail-without-checking left those fragments with
+            // zero spell-check / grammar feedback, which is exactly the
+            // "extension working in browser?" symptom user reported on
+            // 2026-05-15: bridge sent text, hash changed, `Doc hash
+            // changed` logged, then this guard silently returned.
+            //
+            // Fall back: treat the whole trimmed doc as a single
+            // pseudo-sentence so per-word spelling lookup still runs.
+            // Punctuation-dependent grammar rules will skip naturally;
+            // that's the right trade-off for casual writing surfaces.
+            let trimmed = doc_text.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            sentences = vec![trimmed.to_string()];
         }
 
         // All sentences in the current document with their char offsets.
