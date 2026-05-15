@@ -30,10 +30,16 @@ function connectNative() {
     nativePort.onDisconnect.addListener(() => {
       console.log("Spell native host disconnected:", chrome.runtime.lastError?.message);
       nativePort = null;
-      // Reconnect after short delay if we still have content ports
-      if (contentPorts.size > 0) {
-        setTimeout(connectNative, 500);
-      }
+      // Always retry — the user might still be in a writing app; switching
+      // tabs / navigating breaks content-script ports briefly and used to
+      // leave the native bridge dead until a new tab loaded a fresh script.
+      // Previously this only retried when contentPorts.size > 0, but
+      // service-worker sleep cycles cause genuine disconnects from any
+      // state, and the bridge dying mid-session means typing in a tab
+      // that ALREADY has a content script silently fails to reach the
+      // desktop (extension SW handles the postMessage but native port
+      // is dead → message dropped).
+      setTimeout(connectNative, 500);
     });
   } catch (e) {
     console.error("Spell: failed to connect native host:", e);
@@ -69,10 +75,37 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// Keep service worker alive
+// Keep service worker + native bridge alive.
+//
+// MV3 service workers go to sleep after ~30 s of inactivity. The keepalive
+// alarm wakes us up every 6 s, which:
+//   (1) postpones the SW sleep deadline (because the SW had work to do)
+//   (2) lets us reconnect the native bridge if it died
+//
+// Previously the alarm only called connectNative() when contentPorts.size > 0.
+// That broke the common case where the user briefly switches away from a
+// tab with a Spell content script: the script's port detaches, SW sleeps,
+// native bridge gets EOF on stdin and exits, then when the user switches
+// back and types, the SW wakes from the postMessage but the bridge is
+// dead and the text gets dropped before reaching the desktop. Reported
+// during 2026-05-15 testing: "caught errors on launch then stopped".
+//
+// Now we always try to keep the native bridge connected. The bridge is
+// cheap (a tiny stdio process) and Chrome only spawns it if its
+// connectNative call succeeds — so this is bounded.
 chrome.alarms.create("keepalive", { periodInMinutes: 0.1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "keepalive" && contentPorts.size > 0) {
+  if (alarm.name === "keepalive") {
     connectNative();
   }
+});
+
+// Also wake the SW + bridge on tab activation / window focus so the
+// "switch to a tab the bridge has lost" scenario heals quickly without
+// waiting up to 6 s for the next alarm tick.
+chrome.tabs.onActivated.addListener(() => {
+  connectNative();
+});
+chrome.windows.onFocusChanged.addListener(() => {
+  connectNative();
 });
