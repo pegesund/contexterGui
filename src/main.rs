@@ -5428,6 +5428,15 @@ impl eframe::App for ContextApp {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
                         self.prev_fg_pid, fg.pid,
                         self.writing_errors.len(), self.paragraph_texts.len());
+                    // Sync last_user_was_browser with the NEW foreground so
+                    // BridgeManager.read_full_document at main.rs:~939 routes
+                    // to the right bridge after the switch. Without this,
+                    // the flag stays true from the previous Chrome session,
+                    // read_full_document always pulls from /tmp/spell-browser.json
+                    // (stale browser data), and the destination app's
+                    // pipeline reprocesses Chrome content as if the user
+                    // typed it in Word/Notes/etc.
+                    self.manager.last_user_was_browser = now_browser;
                     self.manager.clear_all_error_underlines();
                     self.writing_errors.clear();
                     self.paragraph_texts.clear();
