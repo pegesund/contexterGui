@@ -5281,8 +5281,17 @@ impl eframe::App for ContextApp {
                 let leaving_browser = self.suppress_errors;
                 let entering_writing_app = !now_browser && !now_our_app
                     && self.platform.is_writing_app(&fg);
-                if entering_writing_app && !leaving_browser {
-                    log!("Cross-app writing switch — clearing writing_errors + paragraph state");
+                // Skip the clear entirely when there's nothing to clear. The
+                // log line was spamming chrome://extensions-style noise on
+                // every app-switch even though the operation was a no-op,
+                // making it hard to spot real bridge events in the log.
+                let has_state_to_clear = !self.writing_errors.is_empty()
+                    || !self.paragraph_texts.is_empty()
+                    || !self.last_doc_text.is_empty();
+                if entering_writing_app && !leaving_browser && has_state_to_clear {
+                    log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
+                        self.prev_fg_pid, fg.pid,
+                        self.writing_errors.len(), self.paragraph_texts.len());
                     self.manager.clear_all_error_underlines();
                     self.writing_errors.clear();
                     self.paragraph_texts.clear();

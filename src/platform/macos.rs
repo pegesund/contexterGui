@@ -212,9 +212,22 @@ impl PlatformServices for MacPlatform {
             | "intellij idea" | "intellij idea ce" | "pycharm" | "pycharm ce"
             | "webstorm" | "phpstorm" | "rubymine" | "clion" | "goland"
             | "datagrip" | "rider" | "appcode" | "fleet"
+            // Git GUIs — viewing diffs, not authoring prose
+            | "github desktop" | "sourcetree" | "fork" | "gitkraken" | "tower"
+            // Communication / media — chat-focused but the app chrome isn't
+            // a text-input target Spell should attach to. The actual message
+            // input is the same Electron text field as Slack/Teams which are
+            // intentionally allowed via AppKind::Other.
+            | "discord" | "telegram" | "whatsapp" | "signal"
+            | "spotify" | "music" | "podcasts" | "tv" | "photos"
+            // Container / virtualization UIs
+            | "docker desktop" | "docker" | "orbstack" | "rancher desktop"
+            | "utm" | "parallels desktop" | "vmware fusion" | "virtualbox"
             // Other dev/system tools where Spell isn't useful
             | "sublime text" | "atom" | "nova" | "bbedit"
             | "system preferences" | "system settings" | "finder" | "activity monitor"
+            | "calculator" | "calendar" | "reminders" | "stocks" | "weather"
+            | "app store" | "image capture" | "preview" | "quicktime player"
         );
         !ignore
     }
