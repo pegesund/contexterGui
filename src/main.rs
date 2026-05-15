@@ -675,17 +675,37 @@ impl BridgeManager {
             {
                 return self.last_context.clone();
             }
-            // On macOS: only fall through to AX-mac when the extension
-            // ISN'T installed (Safari, or Chrome/Edge before the user has
-            // typed anything that round-tripped through the extension).
-            // Without this guard, AX-mac reads from whatever AX-accessible
-            // app happens to be in the background (Word, Pages, system
-            // dialogs), causing the Browser ↔ AX-mac bouncing observed
-            // during 2026-05-14 testing where the desktop was processing
-            // Word content as if the user had typed it in Chrome.
+            // On macOS: previously this fell through to AX-mac when
+            // browser_extension_seen was false. That flag only flipped
+            // on the FIRST non-empty Browser context — but a Chromium
+            // browser plus the companion extension can return None on
+            // many polls (rate-limit window, modified-time-unchanged
+            // short-circuit, briefly-empty bridge file between writes).
+            // Each of those polls fell through and logged
+            // "Bridge switch: Browser → Accessibility (macOS)", which
+            // then triggered the cross-app clear, wiped writing_errors,
+            // and locked update_grammar_errors out via the
+            // active=Word-Add-in early-return on the next cycle.
+            // Observed as a tight bounce loop during 2026-05-15 testing.
+            //
+            // Stricter rule: for Chromium-family browsers (the ones the
+            // companion ext targets via native messaging), NEVER fall
+            // through. If Browser bridge has nothing yet, return the
+            // cached last_context and try again next poll — don't touch
+            // AX-mac which reads garbage from background apps.
+            //
+            // Safari and Firefox don't have our extension, so they keep
+            // the original AX fallback behaviour.
             #[cfg(target_os = "macos")]
-            if self.browser_extension_seen {
-                return self.last_context.clone();
+            {
+                let chromium_family = matches!(
+                    fg.exe_name.as_str(),
+                    "google chrome" | "microsoft edge" | "brave browser"
+                    | "opera" | "vivaldi" | "arc"
+                );
+                if chromium_family || self.browser_extension_seen {
+                    return self.last_context.clone();
+                }
             }
             // Else: extension not installed (Safari path), fall through
             // to AX-mac.
