@@ -3200,8 +3200,22 @@ impl ContextApp {
 
     /// Update last_doc_text, rejecting stale reads that still contain a just-replaced word.
     fn try_update_doc_text(&mut self, doc: String) {
-        // Skip when Word Add-in is active — error management handled by add-in
-        if self.manager.bridges.iter().any(|b| b.name() == "Word Add-in") {
+        // Skip when the Word Add-in is the ACTIVE bridge — its own
+        // event-driven path (process_addin_changed_paragraphs) owns the
+        // doc-text state for Word documents.
+        //
+        // Previously this checked "any bridge named Word Add-in is
+        // REGISTERED", which is always true on Mac (the Add-in bridge is
+        // registered at startup regardless of the active app). That made
+        // try_update_doc_text a no-op for every non-Word path — Browser,
+        // AX-mac, Notepad — so `last_doc_text` stayed empty, and
+        // update_grammar_errors bailed at its `if last_doc_text.is_empty
+        // { return }` guard. The result was that typing in Gmail / Reddit
+        // / etc. produced cursor context + BERT completions (bulb path)
+        // but never spell-check underlines (pencil path). Reported during
+        // 2026-05-15 browser-bridge testing — same root-cause class as
+        // commit e49b58f's fix in update_grammar_errors.
+        if self.manager.active_bridge_name() == "Word Add-in" {
             return;
         }
         if let Some(ref old_word) = self.last_replaced_word {
