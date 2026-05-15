@@ -3969,6 +3969,33 @@ impl ContextApp {
             None => return,
         };
 
+        // Drop /changed POSTs from the Word Add-in pane while the user is
+        // in a different app (typically Browser). The Add-in's JavaScript
+        // polls Word's document content and POSTs updates regardless of
+        // which app is foreground — without this gate, those POSTs add
+        // Word's errors back to writing_errors after the cross-app clear,
+        // and the browser pencil panel keeps showing Word content while
+        // the user types in Gmail / Reddit. User-reported 2026-05-15.
+        //
+        // Drain the queue + reset flag below still runs (we don't want
+        // the queue to grow unbounded while user is away from Word), but
+        // we skip processing the payloads here. Word's next focus will
+        // trigger request_word_rescan which re-emits paragraphs cleanly.
+        {
+            let fg = self.platform.foreground_app();
+            let fg_kind = self.platform.classify_app(&fg);
+            if !matches!(fg_kind, platform::AppKind::Word | platform::AppKind::OurApp) {
+                // Drain any pending paragraphs + reset flags so they
+                // don't pile up; just don't act on them.
+                for bridge in &self.manager.bridges {
+                    let _ = bridge.take_reset();
+                    let _ = bridge.drain_changed_paragraphs();
+                    let _ = bridge.drain_deleted_paragraphs();
+                }
+                return;
+            }
+        }
+
         // Check for reset (new document opened)
         for bridge in &self.manager.bridges {
             if bridge.take_reset() {
