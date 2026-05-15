@@ -5363,9 +5363,33 @@ impl eframe::App for ContextApp {
                 // Safari/Chrome detour so the user can tab back without
                 // losing it. Going FROM Browser TO a writing app still
                 // clears (we don't know if user was bouncing or moving on).
-                let leaving_browser = self.suppress_errors;
-                let entering_writing_app = !now_browser && !now_our_app
-                    && self.platform.is_writing_app(&fg);
+                // Treat browser as a writing surface too. Previously this
+                // was `entering_writing_app && !leaving_browser` — i.e.
+                // skip the clear on browser↔writing-app transitions to
+                // preserve Word state during a Safari detour. In practice
+                // that exemption leaked stale state across apps both ways:
+                //
+                //   - Word → Browser: Word's writing_errors + last_doc_text
+                //     persisted into Browser, so the pencil panel showed
+                //     Word's errors while the user typed in Gmail.
+                //   - Browser → Word: Browser's last_doc_text (e.g. a
+                //     Reddit comment) kept being re-processed under Word's
+                //     bridge until the user cleared all text in Word.
+                //
+                // Reported 2026-05-15: "If word is opened and you have
+                // written some text and its has errors then you switch and
+                // go to browser and write something there, it then keeps
+                // showing the errors from the word app." Petter has
+                // "fixed this several times" — this is the structural
+                // root cause.
+                //
+                // New rule: clear on ANY cross-pid transition between
+                // writing surfaces (browser OR a writing-app exe). Word
+                // state is re-derivable via request_word_rescan() below;
+                // Browser state re-derives from /tmp/spell-browser.json
+                // on the next extension write.
+                let entering_writing_surface = !now_our_app
+                    && (now_browser || self.platform.is_writing_app(&fg));
                 // Skip the clear entirely when there's nothing to clear. The
                 // log line was spamming chrome://extensions-style noise on
                 // every app-switch even though the operation was a no-op,
@@ -5373,7 +5397,7 @@ impl eframe::App for ContextApp {
                 let has_state_to_clear = !self.writing_errors.is_empty()
                     || !self.paragraph_texts.is_empty()
                     || !self.last_doc_text.is_empty();
-                if entering_writing_app && !leaving_browser && has_state_to_clear {
+                if entering_writing_surface && has_state_to_clear {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
                         self.prev_fg_pid, fg.pid,
                         self.writing_errors.len(), self.paragraph_texts.len());
