@@ -331,7 +331,29 @@ impl TextBridge for BrowserBridge {
 
     fn read_context(&self) -> Option<CursorContext> {
         let (text, cursor_start, _cursor_end, caret) = self.read_data_file()?;
-        if text.is_empty() { return None; }
+
+        // Empty text is a meaningful state — the user just cleared the
+        // editor (Cmd+A + Backspace in a Gmail compose / Reddit comment
+        // box).  Previously we bailed with `None` here, which made the
+        // desktop's update_grammar_errors + prune_resolved_errors run
+        // never see the empty doc → writing_errors kept showing the old
+        // misspellings over an empty input field. Reported 2026-05-19.
+        //
+        // Return an empty CursorContext (word/sentence/masked all blank)
+        // so the desktop's "no word, no context" branch at main.rs:~6622
+        // runs and triggers prune_resolved_errors, whose empty-doc
+        // branch at main.rs:3335 clears writing_errors + queues.
+        if text.is_empty() {
+            log_browser("read_context: empty text — returning empty CursorContext to trigger desktop clear");
+            return Some(CursorContext {
+                word: String::new(),
+                sentence: String::new(),
+                masked_sentence: None,
+                caret_pos: caret,
+                cursor_doc_offset: Some(0),
+                paragraph_id: String::new(),
+            });
+        }
 
         // Split text at cursor position (byte-safe)
         let cursor_byte = char_to_byte_offset(&text, cursor_start);
@@ -351,9 +373,14 @@ impl TextBridge for BrowserBridge {
     }
 
     fn read_full_document(&self) -> Option<String> {
-        // Re-read file to get latest text
+        // Re-read file to get latest text. Pass empty text through (do not
+        // collapse to None) so the desktop's try_update_doc_text sets
+        // last_doc_text = "" and the empty-doc branch of
+        // prune_resolved_errors clears stale writing_errors. Without
+        // this the user saw old errors hover over a cleared text box
+        // (reported 2026-05-19).
         let (text, _, _, _) = self.read_data_file()?;
-        if text.is_empty() { None } else { Some(text) }
+        Some(text)
     }
 
     /// Browser/textarea: skip the word at cursor if user is typing at end of document.

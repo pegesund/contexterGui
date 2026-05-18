@@ -369,7 +369,15 @@
       const { paraText, cursorInPara, paraStart } =
         extractParagraphAtCursor(fullText, docCursor);
       lastParaStart = paraStart;
-      if (!paraText.trim()) return null;
+      // Previously: `if (!paraText.trim()) return null;` — that swallowed
+      // the empty state entirely.  Result: after Cmd+A + Backspace in a
+      // Gmail compose / Reddit comment box, the editor became empty but
+      // we never told the desktop, so its writing_errors stayed showing
+      // the old misspellings until the user started typing again.
+      // Reported 2026-05-19.  Now we let empty text through; the
+      // sendUpdate caller forwards it, the browser bridge stores "",
+      // and the desktop's prune_resolved_errors() empty-doc clear at
+      // main.rs:3335 fires.
       return { text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara, caretX, caretY };
     }
 
@@ -381,7 +389,12 @@
     const el = getElementWithActiveCursor();
     if (!el) return;
     const data = getTextAndCursor(el);
-    if (!data || !data.text) return;
+    // Forward the update even when data.text is empty — the desktop relies
+    // on a `text:""` event to detect Cmd+A + Backspace and clear stale
+    // errors via prune_resolved_errors's empty-doc branch.  Previous guard
+    // (`if (!data || !data.text) return;`) dropped those sends so the user
+    // saw old errors lingering over an empty comment box.
+    if (!data) return;
     const key = data.text + "|" + data.cursorStart;
     if (key === lastSent) return;
     lastSent = key;
@@ -433,7 +446,8 @@
     const el = getElementWithActiveCursor();
     if (!el) return;
     const data = getTextAndCursor(el);
-    if (!data || !data.text) return;
+    // Allow empty text through — see comment in sendUpdate() above.
+    if (!data) return;
     if (port) {
       try {
         port.postMessage({
