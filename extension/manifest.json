@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Spell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Norsk staving og grammatikksjekk for nettleseren — virker i Google Dokumenter, tekstfelt og redigerbart innhold.",
   "author": "Cognio AS",
   "homepage_url": "https://cognio.no/spell",
