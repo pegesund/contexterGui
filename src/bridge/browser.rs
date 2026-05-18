@@ -392,12 +392,36 @@ impl TextBridge for BrowserBridge {
         at_end && mid_word && cursor_off >= word_start && cursor_off <= word_end
     }
 
-    /// Browser/textarea: skip grammar for the sentence at cursor if typing at end of an unpunctuated sentence.
-    /// Punctuated sentences (user typed . ! ?) are always checked.
-    fn should_skip_sentence_grammar(&self, cursor_off: usize, sent_start: usize, sent_end: usize, ends_with_punct: bool, doc_char_len: usize, word_at_cursor: &str) -> bool {
+    /// Browser/textarea: skip grammar for the sentence at cursor if typing
+    /// at end of an unpunctuated sentence — BUT ONLY when the mid-word IS
+    /// the entire sentence content (i.e., user is typing the first word of
+    /// a fresh sentence).  Once there are any completed words before the
+    /// cursor we MUST dispatch the sentence to the grammar actor,
+    /// otherwise the user's already-completed misspellings disappear from
+    /// the pencil panel mid-typing.
+    ///
+    /// Reported 2026-05-19: "While writing in Reddit comment section, if I
+    /// am writing a word and lets say I stopped typing our app does not
+    /// show anything, not even the previous errors until I press space."
+    /// Root cause: process_spelling_queue is a no-op (line ~4005 returns
+    /// immediately) — spelling is delivered via the grammar actor's
+    /// unknown-words response.  Skipping the grammar dispatch for the
+    /// whole sentence whenever the cursor was mid-word blocked that path,
+    /// so misspellings for completed words never reached writing_errors
+    /// until the user pressed space and the cursor left mid-word state.
+    fn should_skip_sentence_grammar(&self, cursor_off: usize, sent_start: usize, _sent_end: usize, ends_with_punct: bool, doc_char_len: usize, word_at_cursor: &str) -> bool {
         let at_end = cursor_off >= doc_char_len.saturating_sub(1);
-        let mid_word = !word_at_cursor.is_empty() && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
-        at_end && mid_word && !ends_with_punct && cursor_off >= sent_start && cursor_off <= sent_end
+        let mid_word = !word_at_cursor.is_empty()
+            && word_at_cursor.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        // Position where the current mid-word started.
+        let word_start_pos = cursor_off.saturating_sub(word_at_cursor.chars().count());
+        // True only if there is no completed text before the mid-word in
+        // this sentence (user is partway through the FIRST word of a
+        // fresh sentence).  When this is false there are real words
+        // before the cursor whose errors the user wants to see — we must
+        // not skip.
+        let is_only_word_in_sentence = word_start_pos <= sent_start;
+        at_end && mid_word && !ends_with_punct && is_only_word_in_sentence
     }
 }
 

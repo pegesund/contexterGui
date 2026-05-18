@@ -6,72 +6,43 @@
 (function() {
   "use strict";
 
-  let annotatedText = null;
   let lastEmittedText = "";
   let lastEmittedCursor = -1;
   let lastParaStart = 0; // document offset where the last emitted paragraph begins
 
-  // --- Annotate API initialization ---
+  // --- Annotate API ---
   //
-  // _docs_annotate_getAnnotatedText("nb") hands back an object whose
-  // getText() / getSelection() methods read from a CACHED snapshot of
-  // the document at the moment we called the factory.  Google Docs
-  // updates that snapshot on cursor / click events but NOT on pure
-  // keystrokes inside the texteventtarget iframe — so an `annotatedText`
-  // we cached forever silently stales out the moment the user starts
-  // typing, and the desktop sees no new errors until the user clicks
-  // between words and we get a fresh snapshot.
+  // _docs_annotate_getAnnotatedText("nb") returns an object whose
+  // getText() / getSelection() methods read from a snapshot Google takes
+  // at factory-call time. Google refreshes that snapshot on cursor /
+  // click events but NOT on pure keystrokes inside the texteventtarget
+  // iframe — so any factory result we cache silently stales out the
+  // moment the user starts typing.
   //
-  // Reported 2026-05-19: "it is not showing me suggestions and picking
-  // up errors until I click between different words and it somehow
-  // refresh or trigger some event maybe to fetch latest data from the
-  // doc? or if I refresh my entire page then it also starts showing
-  // the errors."
+  // The previous fix (2026-05-19) tried to attach a keydown listener to
+  // the GDocs input iframe and null the cache on every keystroke.  User
+  // reported it didn't help — likely because that iframe's contentDocument
+  // is locked down in some Google Docs surfaces (sandboxed / cross-origin
+  // wrapper / replaced before our listener fires).
   //
-  // Fix: invalidate the cached factory result on every keystroke in
-  // the GDocs input iframe (that's where typing lands).  The next
-  // emitText() then re-acquires a fresh snapshot via the factory and
-  // sees the latest text.  The factory call itself is cheap once the
-  // page has finished loading — Google's own UI calls it constantly.
+  // Simpler robust fix: don't cache at all.  Call the factory every time
+  // emitText() runs (~ once per 500 ms).  The factory call is cheap —
+  // Google's own UI invokes it constantly — and it always returns a
+  // fresh snapshot, so:
+  //   - typing → next 500 ms tick sees the new text
+  //   - tab-switch and return → next tick sees current state
+  //   - Cmd+A + Backspace → next tick sees empty text
+  // No more "click between words to refresh" workaround needed.
   async function getAnnotatedText() {
-    if (annotatedText) return annotatedText;
-    if (typeof globalThis._docs_annotate_getAnnotatedText === "function") {
-      try {
-        annotatedText = await globalThis._docs_annotate_getAnnotatedText("nb");
-      } catch (e) {
-        console.log("Spell: annotatedText API failed: " + e);
-      }
+    if (typeof globalThis._docs_annotate_getAnnotatedText !== "function") {
+      return null;
     }
-    return annotatedText;
-  }
-
-  // Initialize the API as early as possible
-  getAnnotatedText();
-
-  // Attach a keystroke listener to the GDocs input iframe so we re-fetch
-  // a fresh annotate snapshot on every keystroke. The iframe doesn't
-  // exist immediately on page load, so retry until we find it.
-  function attachKeystrokeInvalidator() {
-    const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
-    if (!iframe) return false;
-    let doc;
-    try { doc = iframe.contentDocument; } catch (e) { return false; }
-    if (!doc) return false;
-    // Capture phase so we invalidate BEFORE the next setInterval tick
-    // gets a chance to fire emitText against the stale cache.
-    const invalidate = () => { annotatedText = null; };
-    doc.addEventListener("keydown", invalidate, true);
-    doc.addEventListener("input", invalidate, true);
-    console.log("Spell gdocs-inject: keystroke invalidator attached");
-    return true;
-  }
-  if (!attachKeystrokeInvalidator()) {
-    const retry = setInterval(() => {
-      if (attachKeystrokeInvalidator()) clearInterval(retry);
-    }, 500);
-    // Stop trying after 30 s — if the iframe never appears the user is
-    // probably not in a doc edit view anyway.
-    setTimeout(() => clearInterval(retry), 30000);
+    try {
+      return await globalThis._docs_annotate_getAnnotatedText("nb");
+    } catch (e) {
+      console.log("Spell: annotatedText API failed: " + e);
+      return null;
+    }
   }
 
   // --- Extract the paragraph containing the cursor ---
@@ -116,7 +87,15 @@
     // Do NOT trimEnd — trailing space after a word is needed to detect word completion
     fullText = fullText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
 
-    if (!fullText) return;
+    // Previously we bailed here when fullText was empty
+    // ("if (!fullText) return;") — same family of bug as content.js:
+    // after Cmd+A + Backspace inside a Google Doc the document went
+    // empty, we suppressed the update, and the desktop kept showing
+    // the stale errors. Reported 2026-05-19: "this issue still
+    // exists in docs". Allow empty text through; the desktop's
+    // prune_resolved_errors empty-doc branch (main.rs:3335) handles
+    // it. We still dedup on (paraText, cursorInPara) below so a
+    // steady-state empty doc only emits once.
 
     // Get cursor position in full document — try annotate API first, fall back to DOM
     let cursorIndex = fullText.length;
