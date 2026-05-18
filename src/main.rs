@@ -2234,6 +2234,24 @@ impl ContextApp {
             .unwrap_or(false);
         let shown_suggestion = best.clone();
 
+        // Dedup: don't add a second spelling error for the same word in the
+        // same paragraph. Mirrors the guard at poll_grammar_responses (line
+        // ~4658). Without this, the spelling_queue path and the grammar-
+        // response path can both flag the same word independently, and the
+        // user sees the same misspelling twice in the pencil panel —
+        // exactly the symptom reported 2026-05-15 ("Word: 3 errors, switch
+        // to Browser, back to Word: 6 errors" — same words counted twice).
+        let already_exists = self.writing_errors.iter().any(|e| {
+            matches!(e.category, ErrorCategory::Spelling)
+                && e.word.to_lowercase() == clean.to_lowercase()
+                && e.paragraph_id == paragraph_id
+                && !e.ignored
+        });
+        if already_exists {
+            log!("Spelling dedup: '{}' already in para={}, skipping push", clean, trunc(paragraph_id, 12));
+            return;
+        }
+
         self.writing_errors.push(WritingError {
             category: ErrorCategory::Spelling,
             word: clean.clone(),
