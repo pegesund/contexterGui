@@ -107,28 +107,37 @@
       el.style.display = "none";
       document.documentElement.appendChild(el);
     }
-    // Get caret screen position for window-follows-cursor
+    // Get caret screen position for window-follows-cursor.
+    //
+    // IMPORTANT: emit PHYSICAL pixels (multiply logical coords by
+    // devicePixelRatio), matching what content.js's viewportToScreen() does
+    // for textareas / contenteditable. Without the `* dpr` multiplier this
+    // path produced LOGICAL points while the textarea path produced
+    // physical, so the desktop side (which now divides bridge caret by
+    // pixels_per_point on macOS to recover logical) over-corrected for
+    // Google Docs and the Spell window jumped to the top of the screen —
+    // observed 2026-05-19 in SS 3 ("Hello I am doi" doc with the window
+    // floating at the top of the page instead of below the caret line).
     let caretScreenX = 0, caretScreenY = 0;
     try {
+      const dpr = window.devicePixelRatio || 1;
       const chromeHeight = window.outerHeight - window.innerHeight;
+      const toPhysical = (lx, ly) => {
+        caretScreenX = Math.round((window.screenX + lx) * dpr);
+        caretScreenY = Math.round((window.screenY + chromeHeight + ly + 5) * dpr);
+      };
       // Primary: kix-cursor-caret (the blinking I-beam)
       const caret = document.querySelector(".kix-cursor-caret");
       if (caret) {
         const r = caret.getBoundingClientRect();
-        if (r.height > 0) {
-          caretScreenX = Math.round(window.screenX + r.left);
-          caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
-        }
+        if (r.height > 0) toPhysical(r.left, r.bottom);
       }
       // Fallback 1: kix-cursor element (parent of kix-cursor-caret)
       if (!caretScreenX && !caretScreenY) {
         const cursor = document.querySelector(".kix-cursor");
         if (cursor) {
           const r = cursor.getBoundingClientRect();
-          if (r.height > 0) {
-            caretScreenX = Math.round(window.screenX + r.left);
-            caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
-          }
+          if (r.height > 0) toPhysical(r.left, r.bottom);
         }
       }
       // Fallback 2: use the selection range from the iframe
@@ -140,10 +149,7 @@
             const iSel = iDoc && iDoc.getSelection && iDoc.getSelection();
             if (iSel && iSel.rangeCount > 0) {
               const r = iSel.getRangeAt(0).getBoundingClientRect();
-              if (r && r.height > 0) {
-                caretScreenX = Math.round(window.screenX + r.left);
-                caretScreenY = Math.round(window.screenY + chromeHeight + r.bottom + 5);
-              }
+              if (r && r.height > 0) toPhysical(r.left, r.bottom);
             }
           } catch(e2) {}
         }
