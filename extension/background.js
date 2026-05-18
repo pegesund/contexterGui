@@ -62,7 +62,29 @@ chrome.runtime.onConnect.addListener((port) => {
     if (nativePort) {
       // Forward ALL messages (textUpdate + log) to native host
       if (msg.type === "textUpdate") msg.tabId = tabId;
-      try { nativePort.postMessage(msg); } catch(e) {}
+      try {
+        nativePort.postMessage(msg);
+      } catch (e) {
+        // postMessage on a half-dead native port silently fails — the port
+        // object exists but the underlying pipe is closed (typical pattern
+        // after a long idle period when Chrome's MV3 service worker
+        // suspended then re-awakened, or after the user restarted the
+        // desktop binary). Without clearing nativePort here, every later
+        // postMessage hits the same dead pipe and the user sees "browser
+        // session broken, even desktop restart doesn't help" — reported
+        // 2026-05-15.
+        //
+        // Drop the reference so the next message goes through
+        // connectNative() at line above and gets a fresh native_bridge.
+        console.warn("Spell: nativePort postMessage failed, reconnecting:", e?.message || e);
+        try { nativePort.disconnect(); } catch (_) {}
+        nativePort = null;
+        // Immediate reconnect attempt + buffer this message for resend
+        connectNative();
+        if (nativePort) {
+          try { nativePort.postMessage(msg); } catch (_) {}
+        }
+      }
     }
   });
 
