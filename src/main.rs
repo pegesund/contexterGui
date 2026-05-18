@@ -1184,6 +1184,16 @@ struct ContextApp {
     load_errors: Vec<String>,
     // Tab navigation
     selected_tab: usize, // 0=Innhold, 1=Grammatikk, 2=Innstillinger, 3=Debug
+    /// When the user clicked the bulb / pencil icon to manually pick a tab.
+    /// Auto-switch (the rule that flips empty tab → tab with content) honours
+    /// this for a short grace window so a manual click doesn't get yanked
+    /// back the next frame.  Reported 2026-05-18: "by default bulb icon is
+    /// off, and when I am trying to toggle it on its not turning on. Its
+    /// like something it forcing it back off."  Root cause: the auto-switch
+    /// runs every frame BEFORE the click handler, so the click sets tab=0
+    /// in frame N and the auto-switch flips it back to 1 in frame N+1
+    /// whenever errors exist + completions don't.
+    manual_tab_click_at: Option<Instant>,
     show_debug_tab: bool,
     /// Independent panel toggles (replaces tab-radio for bulb/pencil). Both
     /// default true so users see suggestions + grammar errors together;
@@ -1835,6 +1845,7 @@ impl ContextApp {
             selected_column: 0,
             load_errors,
             selected_tab: 0,
+            manual_tab_click_at: None,
             show_debug_tab,
             show_completions: saved_settings.show_completions,
             show_grammar: saved_settings.show_grammar,
@@ -2204,9 +2215,21 @@ impl ContextApp {
         }
 
         // Word not found — unified suggestion pipeline
-        // Dedup: skip if this word already has a spelling error in this paragraph
+        // Dedup: skip if this word already has a spelling error in this
+        // paragraph OR in the same sentence-context. The paragraph_id
+        // match alone is not enough: when Word's `uniqueLocalId` for a
+        // paragraph rotates (happens on document save, Word→Browser→Word
+        // refocus, and certain Office sync events), the same misspelling
+        // gets a fresh ID and slips past the strict (word, paragraph_id)
+        // check, producing the "same word shows up twice in the pencil
+        // panel" symptom reported 2026-05-18 ("jkkdf/jaked" + "kkkdf/kaks"
+        // each appeared twice after refocusing Word).
         if self.writing_errors.iter().any(|e| {
-            matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == clean && e.paragraph_id == paragraph_id && !e.ignored
+            matches!(e.category, ErrorCategory::Spelling)
+                && e.word.to_lowercase() == clean
+                && !e.ignored
+                && (e.paragraph_id == paragraph_id
+                    || (!sentence_ctx.is_empty() && e.sentence_context == sentence_ctx))
         }) {
             return;
         }
@@ -2235,20 +2258,23 @@ impl ContextApp {
         let shown_suggestion = best.clone();
 
         // Dedup: don't add a second spelling error for the same word in the
-        // same paragraph. Mirrors the guard at poll_grammar_responses (line
-        // ~4658). Without this, the spelling_queue path and the grammar-
-        // response path can both flag the same word independently, and the
-        // user sees the same misspelling twice in the pencil panel —
-        // exactly the symptom reported 2026-05-15 ("Word: 3 errors, switch
-        // to Browser, back to Word: 6 errors" — same words counted twice).
+        // same paragraph OR same sentence-context. Mirrors the guards at
+        // line ~2208 (this fn, "Word not found" branch) and 4676
+        // (poll_grammar_responses). Strict paragraph_id matching alone is
+        // not enough — Word's uniqueLocalId for a paragraph can rotate
+        // after a save / refocus, and the same word then sneaks past the
+        // dedup with a fresh ID. Sentence-context is the stable fallback
+        // (the misspelling lives in the same trimmed sentence regardless
+        // of how Word numbers the paragraph this session).
         let already_exists = self.writing_errors.iter().any(|e| {
             matches!(e.category, ErrorCategory::Spelling)
                 && e.word.to_lowercase() == clean.to_lowercase()
-                && e.paragraph_id == paragraph_id
                 && !e.ignored
+                && (e.paragraph_id == paragraph_id
+                    || (!sentence_ctx.is_empty() && e.sentence_context == sentence_ctx))
         });
         if already_exists {
-            log!("Spelling dedup: '{}' already in para={}, skipping push", clean, trunc(paragraph_id, 12));
+            log!("Spelling dedup: '{}' already in para={} (sentence_ctx match ok), skipping push", clean, trunc(paragraph_id, 12));
             return;
         }
 
@@ -4672,11 +4698,16 @@ impl ContextApp {
                 } else {
                     log!("  Spelling: '{}' → '{}' (from grammar checker)", unk.word, best);
                 }
-                // Only add if not already in writing_errors for this paragraph
+                // Only add if not already in writing_errors for this
+                // paragraph OR sentence-context. Matches the relaxed dedup
+                // applied at check_spelling (lines ~2208 / ~2244): a strict
+                // paragraph_id-only match misses duplicates when Word
+                // rotates uniqueLocalId on save/refocus.
                 let already_exists = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == unk.word.to_lowercase()
-                    && e.paragraph_id == resp.paragraph_id
                     && !e.ignored
+                    && (e.paragraph_id == resp.paragraph_id
+                        || (!resp.sentence.is_empty() && e.sentence_context == resp.sentence))
                 });
                 if !already_exists {
                     // Collect top 5 alternative candidates (excluding the best pick)
@@ -6166,7 +6197,32 @@ impl eframe::App for ContextApp {
                     // positioned under cursor exactly the same way it works
                     // with native desktop apps."
                     let plat_caret = self.platform.caret_screen_position();
-                    let bridge_caret = ctx_result.as_ref().and_then(|c| c.caret_pos);
+                    // The browser content script always sends caret coords
+                    // in PHYSICAL pixels — see viewportToScreen() in
+                    // extension/content.js, which multiplies the viewport
+                    // position by window.devicePixelRatio. On Windows the
+                    // desktop later divides by ctx.pixels_per_point() (the
+                    // `caret_is_physical_pixels()` branch at line ~7012),
+                    // so physical-in / physical-stored is fine.  On macOS
+                    // platform AX returns LOGICAL points, so
+                    // caret_is_physical_pixels() returns false and the
+                    // divide step is skipped — meaning a Retina (dpr=2)
+                    // bridge value would end up roughly 2× too large,
+                    // pushing the Spell window way off the bottom of the
+                    // screen. Reported 2026-05-18: "On browser, app is
+                    // not positioning itself correctly. And sometimes it
+                    // goes so much below the screen it just goes out of
+                    // view and I can't even see the app anymore."
+                    let bridge_caret_raw = ctx_result.as_ref().and_then(|c| c.caret_pos);
+                    let bridge_caret = if self.platform.caret_is_physical_pixels() {
+                        bridge_caret_raw
+                    } else {
+                        let ppp = ctx.pixels_per_point().max(1.0);
+                        bridge_caret_raw.map(|(x, y)| (
+                            (x as f32 / ppp).round() as i32,
+                            (y as f32 / ppp).round() as i32,
+                        ))
+                    };
                     let prefer_bridge = kind == platform::AppKind::Browser;
 
                     // Apply the +49 vertical offset only to platform-AX
@@ -6208,10 +6264,23 @@ impl eframe::App for ContextApp {
             }
 
             if let Some(new_ctx) = ctx_result {
-                // Update caret position from bridge context (Windows fallback)
+                // Update caret position from bridge context (Windows fallback).
+                // Same physical-vs-logical conversion as the Browser branch
+                // above — extension sends physical px, macOS pos code expects
+                // logical pt. Without this divide the window jumps to ~2×
+                // depth on Retina displays for any bridge that reports caret
+                // coords on macOS.
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
-                        self.last_caret_pos = Some((x, y));
+                        if self.platform.caret_is_physical_pixels() {
+                            self.last_caret_pos = Some((x, y));
+                        } else {
+                            let ppp = ctx.pixels_per_point().max(1.0);
+                            self.last_caret_pos = Some((
+                                (x as f32 / ppp).round() as i32,
+                                (y as f32 / ppp).round() as i32,
+                            ));
+                        }
                     }
                 }
                 let ctx_changed = new_ctx.word != self.context.word
@@ -6919,13 +6988,22 @@ impl eframe::App for ContextApp {
         //   open_completions had 5 entries but the bulb panel was empty.
         //
         // Rule: if the active tab has no content AND the other tab does,
-        // flip to the tab that does. Manual click still wins on the next
-        // frame because the click handlers at lines ~7098 / ~7128 set
-        // selected_tab explicitly.
-        if self.selected_tab == 1 && !has_active_errors && has_completions && self.show_completions {
-            self.selected_tab = 0;
-        } else if self.selected_tab == 0 && !has_completions && has_active_errors && self.show_grammar {
-            self.selected_tab = 1;
+        // flip to the tab that does — but ONLY when the user hasn't
+        // manually clicked a tab in the last few seconds. Without the
+        // grace window the auto-switch yanks the tab back the frame
+        // after a manual click (reported 2026-05-18: "I am trying to
+        // toggle bulb on, it's like something is forcing it back off")
+        // because auto-switch runs every frame BEFORE the click handlers
+        // get a chance to "win" — so the click survives a single frame
+        // before getting overwritten on the next loop.
+        let manual_recent = self.manual_tab_click_at
+            .map_or(false, |t| t.elapsed() < Duration::from_secs(3));
+        if !manual_recent {
+            if self.selected_tab == 1 && !has_active_errors && has_completions && self.show_completions {
+                self.selected_tab = 0;
+            } else if self.selected_tab == 0 && !has_completions && has_active_errors && self.show_grammar {
+                self.selected_tab = 1;
+            }
         }
 
         let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
@@ -7171,6 +7249,10 @@ impl eframe::App for ContextApp {
                         self.selected_tab = 0;
                         self.show_completions = true;
                     }
+                    // Stamp the click time so the per-frame auto-switch at
+                    // line ~6925 doesn't immediately flip the tab back when
+                    // the user clicked into an empty-content tab on purpose.
+                    self.manual_tab_click_at = Some(Instant::now());
                     let mut s = load_settings();
                     s.show_completions = self.show_completions;
                     save_settings(&s);
@@ -7201,6 +7283,9 @@ impl eframe::App for ContextApp {
                         self.selected_tab = 1;
                         self.show_grammar = true;
                     }
+                    // Match the bulb-click stamp so a manual pencil click
+                    // also survives the next auto-switch evaluation.
+                    self.manual_tab_click_at = Some(Instant::now());
                     let mut s = load_settings();
                     s.show_grammar = self.show_grammar;
                     save_settings(&s);
