@@ -12,12 +12,32 @@
   let lastParaStart = 0; // document offset where the last emitted paragraph begins
 
   // --- Annotate API initialization ---
+  //
+  // _docs_annotate_getAnnotatedText("nb") hands back an object whose
+  // getText() / getSelection() methods read from a CACHED snapshot of
+  // the document at the moment we called the factory.  Google Docs
+  // updates that snapshot on cursor / click events but NOT on pure
+  // keystrokes inside the texteventtarget iframe — so an `annotatedText`
+  // we cached forever silently stales out the moment the user starts
+  // typing, and the desktop sees no new errors until the user clicks
+  // between words and we get a fresh snapshot.
+  //
+  // Reported 2026-05-19: "it is not showing me suggestions and picking
+  // up errors until I click between different words and it somehow
+  // refresh or trigger some event maybe to fetch latest data from the
+  // doc? or if I refresh my entire page then it also starts showing
+  // the errors."
+  //
+  // Fix: invalidate the cached factory result on every keystroke in
+  // the GDocs input iframe (that's where typing lands).  The next
+  // emitText() then re-acquires a fresh snapshot via the factory and
+  // sees the latest text.  The factory call itself is cheap once the
+  // page has finished loading — Google's own UI calls it constantly.
   async function getAnnotatedText() {
     if (annotatedText) return annotatedText;
     if (typeof globalThis._docs_annotate_getAnnotatedText === "function") {
       try {
         annotatedText = await globalThis._docs_annotate_getAnnotatedText("nb");
-        console.log("Spell: annotatedText API loaded");
       } catch (e) {
         console.log("Spell: annotatedText API failed: " + e);
       }
@@ -27,6 +47,32 @@
 
   // Initialize the API as early as possible
   getAnnotatedText();
+
+  // Attach a keystroke listener to the GDocs input iframe so we re-fetch
+  // a fresh annotate snapshot on every keystroke. The iframe doesn't
+  // exist immediately on page load, so retry until we find it.
+  function attachKeystrokeInvalidator() {
+    const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
+    if (!iframe) return false;
+    let doc;
+    try { doc = iframe.contentDocument; } catch (e) { return false; }
+    if (!doc) return false;
+    // Capture phase so we invalidate BEFORE the next setInterval tick
+    // gets a chance to fire emitText against the stale cache.
+    const invalidate = () => { annotatedText = null; };
+    doc.addEventListener("keydown", invalidate, true);
+    doc.addEventListener("input", invalidate, true);
+    console.log("Spell gdocs-inject: keystroke invalidator attached");
+    return true;
+  }
+  if (!attachKeystrokeInvalidator()) {
+    const retry = setInterval(() => {
+      if (attachKeystrokeInvalidator()) clearInterval(retry);
+    }, 500);
+    // Stop trying after 30 s — if the iframe never appears the user is
+    // probably not in a doc edit view anyway.
+    setTimeout(() => clearInterval(retry), 30000);
+  }
 
   // --- Extract the paragraph containing the cursor ---
   // Paragraphs in Google Docs are separated by \n.

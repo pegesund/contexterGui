@@ -7018,32 +7018,24 @@ impl eframe::App for ContextApp {
         let slack_layout = fg_for_layout.exe_name.contains("slack");
         let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
 
-        // Auto-switch tabs when the currently-selected tab has nothing to
-        // show but the other tab does. Without this, the user can get
-        // "stuck" on the pencil tab after fixing all errors (pencil panel
-        // empties, bulb has fresh BERT completions, but bulb stays
-        // invisible because selected_tab==1). Reported 2026-05-18:
-        //   /ui-state showed selected_tab=1, pencil_visible=false,
-        //   open_completions had 5 entries but the bulb panel was empty.
+        // No tab auto-switch. The pencil icon's red dot already serves as
+        // the "you have errors" global indicator regardless of which tab
+        // is selected (see pen_color at line ~7180+: red when has_grammar,
+        // green when clean), so the user always knows there's work to do
+        // without us hijacking their tab choice.
         //
-        // Rule: if the active tab has no content AND the other tab does,
-        // flip to the tab that does — but ONLY when the user hasn't
-        // manually clicked a tab in the last few seconds. Without the
-        // grace window the auto-switch yanks the tab back the frame
-        // after a manual click (reported 2026-05-18: "I am trying to
-        // toggle bulb on, it's like something is forcing it back off")
-        // because auto-switch runs every frame BEFORE the click handlers
-        // get a chance to "win" — so the click survives a single frame
-        // before getting overwritten on the next loop.
-        let manual_recent = self.manual_tab_click_at
-            .map_or(false, |t| t.elapsed() < Duration::from_secs(3));
-        if !manual_recent {
-            if self.selected_tab == 1 && !has_active_errors && has_completions && self.show_completions {
-                self.selected_tab = 0;
-            } else if self.selected_tab == 0 && !has_completions && has_active_errors && self.show_grammar {
-                self.selected_tab = 1;
-            }
-        }
+        // Bulb is the default; the user explicitly clicks the pencil icon
+        // to inspect errors, then clicks bulb again when they're done.
+        // The previous auto-switch from e4a1557 + 35c8bf7 (flip empty tab
+        // → tab-with-content, with a 3 s manual-click grace) was
+        // confusing: it fought manual clicks, snapped the panel between
+        // tabs as errors appeared/cleared mid-typing, and made the user
+        // feel like the app was "deciding for them."  Reported
+        // 2026-05-19: "if I switch to pencil mode and start typing
+        // something it switches back to bulb mode" — even with the
+        // grace window in place. Removed both rules; manual_tab_click_at
+        // is kept as a struct field for future use but no longer drives
+        // tab routing.
 
         let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
         let pencil_visible = self.selected_tab == 1 && self.show_grammar && has_active_errors;
