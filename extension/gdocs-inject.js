@@ -66,21 +66,63 @@
     return { paraText, cursorInPara, paraStart };
   }
 
-  // --- Text reading via annotate API ---
+  // --- DOM-based primary text source ---
+  //
+  // Google Docs renders to a CANVAS, not to DOM elements, but it still
+  // maintains a DOM mirror (.kix-paragraphrenderer with
+  // .kix-wordhtmlgenerator-word-node spans) for accessibility / screen
+  // readers, AND that mirror is updated synchronously on every keystroke.
+  // The _docs_annotate_getAnnotatedText("nb") factory, by contrast,
+  // returns a snapshot of Google's internal "annotated text" model
+  // which Google refreshes lazily — it can stay STALE through
+  // Cmd+A+Backspace + retype until the user clicks somewhere, which is
+  // exactly the user-reported 2026-05-19 bug:
+  //   "Then I type something and even press spacebar nothing happens.
+  //    App keeps showing previous errors until I press on a word using
+  //    my cursor which trigger's something to refresh our app."
+  //
+  // Read text from the DOM mirror primarily; use the annotate API only
+  // as a fallback for surfaces where no .kix-paragraphrenderer is
+  // present (read-only viewers, hydration not finished).
+  function getDomFullText() {
+    try {
+      const paragraphs = document.querySelectorAll(".kix-paragraphrenderer");
+      if (paragraphs.length === 0) return null;
+      const parts = [];
+      for (const para of paragraphs) {
+        const spans = para.querySelectorAll(".kix-wordhtmlgenerator-word-node");
+        let paraText = "";
+        for (const span of spans) {
+          paraText += span.textContent;
+        }
+        // Normalize non-breaking spaces to ASCII so downstream
+        // word-splitting works the same as for textareas.
+        parts.push(paraText.replace(/ /g, " "));
+      }
+      return parts.join("\n");
+    } catch (e) {
+      return null;
+    }
+  }
+
   async function emitText() {
     if (!document.hasFocus()) return;
     const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
     if (!iframe) return;
 
-    const at = await getAnnotatedText();
-    if (!at || typeof at.getText !== "function") return;
-
-    let fullText;
-    try {
-      fullText = at.getText();
-    } catch (e) {
-      console.log("Spell: getText() error: " + e);
-      return;
+    let fullText = getDomFullText();
+    // Fallback: only ask the annotate API if the DOM mirror produced no
+    // paragraphs at all.  That keeps us off the stale snapshot Google
+    // returns from _docs_annotate_getAnnotatedText after Cmd+A+Backspace.
+    if (fullText === null) {
+      const at = await getAnnotatedText();
+      if (!at || typeof at.getText !== "function") return;
+      try {
+        fullText = at.getText();
+      } catch (e) {
+        console.log("Spell: getText() error: " + e);
+        return;
+      }
     }
 
     // Strip control characters (annotate API prepends \u0003 ETX)
@@ -97,22 +139,26 @@
     // it. We still dedup on (paraText, cursorInPara) below so a
     // steady-state empty doc only emits once.
 
-    // Get cursor position in full document — try annotate API first, fall back to DOM
-    let cursorIndex = fullText.length;
-    try {
-      const sel = at.getSelection();
-      if (sel && sel.length > 0 && typeof sel[0].start === "number") {
-        cursorIndex = sel[0].start;
-      }
-    } catch (e) {}
-
-    // If annotate API returns end-of-text, try to find cursor from DOM caret element
-    if (cursorIndex >= fullText.length - 1 || cursorIndex <= 0) {
-      const domCursor = getDomCursorOffset(fullText);
-      console.log("Spell: DOM cursor fallback: " + domCursor + " (API was " + cursorIndex + ", textLen=" + fullText.length + ")");
-      if (domCursor >= 0) {
-        cursorIndex = domCursor;
-      }
+    // Cursor position: DOM is the primary source.  The annotate API's
+    // getSelection() has the same stale-snapshot problem as its getText()
+    // — after Cmd+A+Backspace it can return the OLD cursor position
+    // until the user clicks. getDomCursorOffset finds the live
+    // .kix-cursor-caret DOM element + works out the character offset
+    // by walking spans, which always reflects the current state.
+    let cursorIndex = getDomCursorOffset(fullText);
+    if (cursorIndex < 0) {
+      // No live caret in DOM (e.g. window unfocused mid-poll) — try
+      // the annotate API selection as a fallback.
+      cursorIndex = fullText.length;
+      try {
+        const at = await getAnnotatedText();
+        if (at && typeof at.getSelection === "function") {
+          const sel = at.getSelection();
+          if (sel && sel.length > 0 && typeof sel[0].start === "number") {
+            cursorIndex = sel[0].start;
+          }
+        }
+      } catch (e) {}
     }
 
     // Extract only the paragraph the cursor is in (iOS-style: send only the active block)
