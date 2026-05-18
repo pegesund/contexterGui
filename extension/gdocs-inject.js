@@ -238,9 +238,21 @@
   // --- DOM-based cursor position detection ---
   // Google Docs renders text in paragraphs (.kix-paragraphrenderer) with
   // line chunks (.kix-lineview). The user's caret is a div .kix-cursor-caret.
-  // We find which paragraph the caret is in, get the text before the caret
-  // within that paragraph, then search for that text in the annotate API text
-  // to get the character offset.
+  // We find which paragraph the caret is currently OVER (by spatial
+  // bounding-rect lookup), get the text before the caret within that
+  // paragraph, then locate that text in fullText to compute the
+  // document-level character offset.
+  //
+  // IMPORTANT: do NOT use `caret.closest(".kix-paragraphrenderer")` — the
+  // .kix-cursor-caret element's DOM PARENT only updates when the user
+  // clicks somewhere; pure keystrokes move the caret by updating its CSS
+  // transform (which getBoundingClientRect reflects) but DO NOT reparent
+  // it.  So .closest() would return the OLD paragraph the user clicked
+  // into, while getBoundingClientRect already shows the visual position
+  // at the current typing location.  Reported 2026-05-19: "bulb mode
+  // does not seems to be properly working with google docs. It does not
+  // show any suggestions while I am writing. I have to click on the
+  // text then it show suggestions for the current word I am typing."
   function getDomCursorOffset(fullText) {
     try {
       // Find the current user's caret
@@ -249,8 +261,27 @@
       const caretRect = caret.getBoundingClientRect();
       if (caretRect.height === 0) return -1;
 
-      // Walk up to find the paragraph
-      let para = caret.closest(".kix-paragraphrenderer");
+      // Spatial paragraph lookup: pick the .kix-paragraphrenderer whose
+      // bounding rect actually contains the caret's screen position.
+      // Use a midpoint Y inside the caret so a caret sitting exactly on
+      // a paragraph boundary picks the line it's drawing on.
+      const caretMidY = caretRect.top + caretRect.height / 2;
+      const caretX = caretRect.left;
+      let para = null;
+      const allParagraphs = document.querySelectorAll(".kix-paragraphrenderer");
+      for (const p of allParagraphs) {
+        const r = p.getBoundingClientRect();
+        if (caretMidY >= r.top && caretMidY <= r.bottom
+            && caretX >= r.left - 2 && caretX <= r.right + 2) {
+          para = p;
+          break;
+        }
+      }
+      // Last-resort fallback to the old behaviour — if no spatial hit
+      // (e.g. caret floating outside any rendered paragraph during a
+      // transition), keep going with the DOM-parent guess so we at
+      // least produce A position rather than bailing entirely.
+      if (!para) para = caret.closest(".kix-paragraphrenderer");
       if (!para) return -1;
 
       // Get all text spans in this paragraph, in order
