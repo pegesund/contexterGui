@@ -2392,13 +2392,23 @@ impl ContextApp {
 
     /// Poll BERT worker for all response types and handle them.
     fn poll_bert_responses(&mut self, ctx: &egui::Context) {
-        // Drain and discard all BERT results while browser is foreground.
-        if self.suppress_errors {
-            if let Some(worker) = &mut self.bert_worker {
-                while worker.try_recv().is_some() {}
-            }
-            return;
-        }
+        // Previously this block early-returned + drained BERT responses
+        // whenever `suppress_errors` was true (i.e. browser foreground),
+        // which is a leftover from the May-13 Word-only lockdown — before
+        // the browser-bridge feature existed.  Now the browser bridge
+        // dispatches its own BERT completion + spelling requests from
+        // browser text, and unconditionally throwing away every response
+        // meant `self.completions` stayed empty in browser → the bulb
+        // panel never populated. Reported 2026-05-19: "suggestions (bulb
+        // feature) still does not show for browser" — comparing SS 2
+        // (Word with prefix "th" showing the/that/this/they/their) to
+        // SS 3 (browser with prefix "doi" showing nothing).
+        //
+        // Per-app stale-state isolation is now handled by the cross-app
+        // clear (commits 429a200 + b0a2fd8) which wipes writing_errors,
+        // last_doc_text, etc. on every cross-pid writing-surface
+        // transition.  Discarding live BERT responses on top of that is
+        // not needed — and breaks the browser completion path.
         // Collect all available responses first (avoids borrow conflicts)
         let mut responses: Vec<bert_worker::BertResponse> = Vec::new();
         if let Some(worker) = &mut self.bert_worker {
@@ -6564,6 +6574,35 @@ impl eframe::App for ContextApp {
                 }
                 if !self.selection_mode {
                     self.selected_completion = None;
+                }
+                // Drain pending spelling work even while mid-word so errors
+                // for ALREADY-COMPLETED words (the ones before the user's
+                // current word) reappear as the user keeps typing. Without
+                // this, every keystroke runs update_grammar_errors which
+                // marks the existing errors "stale" (sentence changed) and
+                // re-queues them — but the drain only used to happen at the
+                // next word-boundary branch below, so the pencil panel
+                // emptied for every mid-word keystroke and only refilled
+                // when the user hit space. Reported 2026-05-19 on Reddit:
+                // "when I am typing something (a word), if I typed it wrong
+                // it does not show me errors until I press spacebar or I
+                // switch to another app and come back."
+                //
+                // check_spelling pushes BERT work onto pending_spelling_bert
+                // (no inline BERT calls), so this drain is cheap — it just
+                // does dictionary lookups + queues async work. Word/COM
+                // bridges have their own event-driven path so we gate on
+                // !is_com to avoid double-scanning their sentences.
+                if !is_com {
+                    if !self.spelling_queue.is_empty() {
+                        self.process_spelling_queue();
+                    }
+                    if !self.grammar_queue.is_empty() {
+                        self.process_grammar_queue();
+                    }
+                    if self.writing_errors.len() != errors_before {
+                        self.sync_error_underlines();
+                    }
                 }
             } else if self.context.masked_sentence.is_some() {
                 // No prefix but have context (e.g. after space): next-word handled by background thread

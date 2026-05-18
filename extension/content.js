@@ -67,32 +67,37 @@
     }
   });
 
-  // When the user switches browser tabs (or window focus comes back) the
-  // current tab's content script keeps running, BUT its lastSent dedup
-  // string and the desktop's `last_doc_text` snapshot diverge — the desktop
-  // still holds the old tab's text, and the next textUpdate from this tab
-  // gets filtered by lastSent if its content is identical to the
-  // previously-sent string from this same tab.  Result reported 2026-05-19:
-  // "If I switch between tabs inside browser, spell desktop app does not
-  // show errors until I refresh the page."  Fix: on visibilitychange-to-
-  // visible AND window focus, drop the dedup key + dead port so the next
-  // sendUpdate forces a fresh send through the bridge.
-  function refreshOnFocus() {
-    if (document.hidden) return;
-    lastSent = "";
-    lastDataVersion = "";
-    // Drop the port too — Chrome sometimes pauses message delivery while
-    // a tab is in the background, and a paused port can fail silently when
-    // the tab returns.  A null here triggers a fresh connectPort on the
-    // next sendUpdate / pollGDocsData call.
-    port = null;
-    // Kick a fresh send immediately so the user doesn't have to type to
-    // see their existing errors come back when they return to the tab.
-    try { sendUpdate(); } catch(e) {}
-    try { pollGDocsData(); } catch(e) {}
-  }
-  document.addEventListener("visibilitychange", refreshOnFocus);
-  window.addEventListener("focus", refreshOnFocus);
+  // When the user switches browser tabs the current tab's content script
+  // keeps running, BUT its `lastSent` dedup string and the desktop's
+  // `last_doc_text` snapshot diverge — the desktop still holds the OLD
+  // tab's text, and the next textUpdate from this tab gets filtered by
+  // lastSent if its content is identical to the previously-sent string
+  // from this same tab.  Result reported 2026-05-19: "If I switch
+  // between tabs inside browser, spell desktop app does not show errors
+  // until I refresh the page."
+  //
+  // Fix: listen for visibility changes only (not every focus event —
+  // window focus fires for things like Cmd+Tab back into Chrome while
+  // the tab was already foreground in its window, and we don't want to
+  // tear down the port for that). When the tab transitions FROM hidden
+  // TO visible, drop the dedup key + port and kick a fresh send.
+  let wasHidden = document.hidden;
+  document.addEventListener("visibilitychange", () => {
+    if (wasHidden && !document.hidden) {
+      lastSent = "";
+      lastDataVersion = "";
+      // Drop the port too — Chrome sometimes pauses message delivery
+      // while a tab is in the background, and a paused port can fail
+      // silently when the tab returns.  Null here triggers a fresh
+      // connectPort on the next sendUpdate / pollGDocsData call.
+      port = null;
+      // Kick a fresh send immediately so the user doesn't have to type
+      // to see their existing errors come back.
+      try { sendUpdate(); } catch(e) {}
+      try { pollGDocsData(); } catch(e) {}
+    }
+    wasHidden = document.hidden;
+  });
 
   function isGoogleDocs() {
     return location.hostname === "docs.google.com" && location.pathname.startsWith("/document/");
