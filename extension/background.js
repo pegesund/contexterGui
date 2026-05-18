@@ -5,6 +5,31 @@ let nativePort = null;
 let contentPorts = new Map(); // tabId -> [port, port, ...] (multiple frames per tab)
 let lastActiveTabId = null;
 
+// Send a message to every content port in a tab, pruning any that have
+// become stale (e.g. their page was moved into Chrome's back/forward
+// cache). Without pruning, contentPorts keeps growing and Chrome logs
+//   "Unchecked runtime.lastError: The page keeping the extension port
+//    is moved into back/forward cache, so the message channel is closed."
+// for every postMessage to a bfcached page — observed 2026-05-18.
+function sendToTabPorts(tabId, msg) {
+  const ports = contentPorts.get(tabId);
+  if (!ports) return;
+  const alive = [];
+  for (const p of ports) {
+    try {
+      p.postMessage(msg);
+      alive.push(p);
+    } catch (_) {
+      // Port dead — don't keep it. Reading lastError marks the error as
+      // "checked" so Chrome stops emitting the warning even if the
+      // disconnect arrives after we already gave up on the port.
+      void chrome.runtime.lastError;
+    }
+  }
+  if (alive.length === 0) contentPorts.delete(tabId);
+  else contentPorts.set(tabId, alive);
+}
+
 function connectNative() {
   if (nativePort) return;
   try {
@@ -15,14 +40,10 @@ function connectNative() {
       if (msg.action === "replace") {
         console.log("Spell replace:", JSON.stringify(msg));
         if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
-          for (const cPort of contentPorts.get(lastActiveTabId)) {
-            try { cPort.postMessage(msg); } catch(e) {}
-          }
+          sendToTabPorts(lastActiveTabId, msg);
         } else {
-          for (const [tabId, ports] of contentPorts) {
-            for (const cPort of ports) {
-              try { cPort.postMessage(msg); } catch(e) {}
-            }
+          for (const tabId of [...contentPorts.keys()]) {
+            sendToTabPorts(tabId, msg);
           }
         }
       }
@@ -89,6 +110,13 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 
   port.onDisconnect.addListener(() => {
+    // Drain runtime.lastError so Chrome doesn't emit
+    //   "Unchecked runtime.lastError: The page keeping the extension
+    //    port is moved into back/forward cache, ..."
+    // for normal bfcache disconnects. The lastError property has
+    // meaningful info ("Back/forward cache" vs "Receiving end does not
+    // exist") that we don't act on but should at least read.
+    void chrome.runtime.lastError;
     if (tabId && contentPorts.has(tabId)) {
       const ports = contentPorts.get(tabId).filter(p => p !== port);
       if (ports.length === 0) contentPorts.delete(tabId);

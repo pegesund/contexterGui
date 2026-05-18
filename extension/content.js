@@ -42,9 +42,30 @@
     try {
       port = chrome.runtime.connect({ name: "spell-content" });
       port.onMessage.addListener(handleResponse);
-      port.onDisconnect.addListener(() => { port = null; });
+      port.onDisconnect.addListener(() => {
+        // Drain runtime.lastError so Chrome doesn't log
+        // "Unchecked runtime.lastError" when the SW (or the page going
+        // into bfcache) closes the port. The error is expected on
+        // normal page lifecycle events — we don't need to act on it,
+        // just acknowledge it.
+        void chrome.runtime.lastError;
+        port = null;
+      });
     } catch (e) { port = null; }
   }
+
+  // When the page is restored from bfcache, the old `port` reference is
+  // dead but our code doesn't know until the next postMessage fails.
+  // Proactively reconnect on pageshow so the very first textUpdate after
+  // a forward/back navigation goes through cleanly.
+  window.addEventListener("pageshow", (evt) => {
+    if (evt.persisted) {
+      // Page was restored from bfcache — drop the dead port and lazily
+      // reconnect on the next message attempt (connectPort is called
+      // from any !port check site).
+      port = null;
+    }
+  });
 
   function isGoogleDocs() {
     return location.hostname === "docs.google.com" && location.pathname.startsWith("/document/");
