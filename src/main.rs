@@ -6909,6 +6909,25 @@ impl eframe::App for ContextApp {
         let fg_for_layout = self.platform.foreground_app();
         let slack_layout = fg_for_layout.exe_name.contains("slack");
         let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
+
+        // Auto-switch tabs when the currently-selected tab has nothing to
+        // show but the other tab does. Without this, the user can get
+        // "stuck" on the pencil tab after fixing all errors (pencil panel
+        // empties, bulb has fresh BERT completions, but bulb stays
+        // invisible because selected_tab==1). Reported 2026-05-18:
+        //   /ui-state showed selected_tab=1, pencil_visible=false,
+        //   open_completions had 5 entries but the bulb panel was empty.
+        //
+        // Rule: if the active tab has no content AND the other tab does,
+        // flip to the tab that does. Manual click still wins on the next
+        // frame because the click handlers at lines ~7098 / ~7128 set
+        // selected_tab explicitly.
+        if self.selected_tab == 1 && !has_active_errors && has_completions && self.show_completions {
+            self.selected_tab = 0;
+        } else if self.selected_tab == 0 && !has_completions && has_active_errors && self.show_grammar {
+            self.selected_tab = 1;
+        }
+
         let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
         let pencil_visible = self.selected_tab == 1 && self.show_grammar && has_active_errors;
 
