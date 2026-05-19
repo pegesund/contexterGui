@@ -3840,19 +3840,44 @@ impl ContextApp {
             for (s, off) in &new_sentences {
                 available_offsets.entry(s.clone()).or_default().push(*off);
             }
-            let mut claimed: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+            // Distribute errors round-robin across occurrences of a
+            // duplicated sentence — if the sentence appears once, all
+            // sibling errors map to that single offset (the common
+            // case of multiple misspellings in one sentence).  If it
+            // appears N times, errors get spread across the N
+            // occurrences in order.
+            //
+            // Previously this tracked SPECIFIC offsets as "claimed" by
+            // a single error each. That broke when N errors shared one
+            // sentence: only the first error matched Try 1 and the
+            // rest fell to Try 2 (relocate + remove). End result:
+            // every keystroke that changed the trimmed sentence text
+            // removed all but the first error, and the subsequent
+            // has_errors check ("queue empty if any error matches this
+            // sentence") blocked re-dispatch, so the dropped errors
+            // never came back until the cursor moved enough to
+            // invalidate the remaining first error too. Reported
+            // 2026-05-19 as "press space → only 1st error visible,
+            // type next char → all errors come back".
+            let mut per_key_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
             for e in &mut self.writing_errors {
                 if e.ignored { continue; }
                 let key = e.sentence_context.clone();
-                // Try 1: exact sentence match with offset claiming (handles duplicate sentences)
+                // Try 1: exact sentence match.  If the same sentence
+                // appears multiple times in the doc, distribute errors
+                // across occurrences round-robin so duplicate sentences
+                // get balanced error counts.  If there's only one
+                // occurrence (the common case), all sibling errors map
+                // to that single offset — which is correct since they
+                // share the sentence.
                 if let Some(offsets) = available_offsets.get(&key) {
-                    let already_claimed = claimed.entry(key.clone()).or_default();
-                    if let Some(&off) = offsets.iter().find(|o| !already_claimed.contains(o)) {
+                    if !offsets.is_empty() {
+                        let idx = per_key_index.entry(key.clone()).or_insert(0);
+                        let off = offsets[*idx % offsets.len()];
+                        *idx += 1;
                         e.doc_offset = off;
-                        already_claimed.push(off);
                         continue; // success
                     }
-                    // All offsets claimed — fall through to word search
                 }
                 // Try 2: find any new sentence containing this error word
                 // But if the sentence changed, the error may no longer be valid — mark stale
