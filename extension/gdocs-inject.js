@@ -100,14 +100,14 @@
         parts.push(paraText.replace(/ /g, " "));
       }
       const joined = parts.join("\n");
-      // In canvas-rendered Google Docs surfaces .kix-paragraphrenderer
-      // elements exist but are empty (text lives only on the canvas).
-      // Returning "" would propagate as a REAL empty-doc signal that
-      // wipes the desktop's writing_errors. Treat empty DOM mirror as
-      // "DOM source unavailable" so the caller falls through to the
-      // annotate API. Bug reported 2026-05-19 "App has completely
-      // stopped working with google docs".
-      if (joined.trim().length === 0) return null;
+      // Decision: any paragraphs present at all → trust DOM, even if
+      // the joined text is empty (that's the user clearing the doc
+      // with Cmd+A+Backspace and we WANT to propagate that signal).
+      // The earlier "treat empty DOM as unavailable" guard masked the
+      // empty-doc signal and let the stale API snapshot leak through.
+      //
+      // Canvas-only edge case (no .kix-paragraphrenderer at all) is
+      // handled above with `if (paragraphs.length === 0) return null;`.
       return joined;
     } catch (e) {
       return null;
@@ -119,27 +119,35 @@
     const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
     if (!iframe) return;
 
-    // Try the annotate API first.  It's the canonical text source for
-    // Google Docs and works in every surface we've tested.  Its
-    // staleness problem (snapshot doesn't refresh on every keystroke)
-    // is partially mitigated by always re-acquiring the factory result
-    // on every poll (no caching in getAnnotatedText) — and the DOM
-    // caret position is read separately below, so cursor stays live
-    // even when the text snapshot lags by a poll cycle.
+    // DOM mirror is the PRIMARY text source.  Google updates the
+    // .kix-paragraphrenderer DOM mirror synchronously for accessibility
+    // / screen readers, so it tracks the user's typing live.  The
+    // annotate API factory _docs_annotate_getAnnotatedText("nb") returns
+    // a snapshot that Google refreshes LAZILY (effectively only on
+    // cursor / click events) — that's why the previous API-primary
+    // flow produced the user-reported "I have to click on a word to get
+    // suggestions or see errors" behaviour.
     //
-    // Previous attempt (7e0f9a4) used getDomFullText() as the PRIMARY
-    // source. That broke Google Docs entirely in canvas-rendered
-    // surfaces where .kix-paragraphrenderer is empty or in shadow DOM:
-    // getDomFullText returned "" and the desktop interpreted that as
-    // "user cleared the doc" + wiped all errors. Reverted.
-    let fullText = null;
+    // The earlier DOM-primary attempt (7e0f9a4) appeared to break GDocs
+    // entirely, but the actual cause was a SyntaxError in
+    // getDomCursorOffset (duplicate `caretX`) that aborted the whole
+    // script load — fixed in 4b6191c. With that out of the way, DOM-
+    // primary is safe to re-enable.
+    //
+    // Safety net: getDomFullText returns null (not "") on empty DOM
+    // mirror — that hits the canvas-only edge case (rare; e.g. some
+    // viewer surfaces) and falls through to the API rather than
+    // propagating a bogus empty-doc signal.
+    let fullText = getDomFullText();
     let apiSelection = null;
-    const at = await getAnnotatedText();
-    if (at && typeof at.getText === "function") {
+    if (fullText === null) {
+      const at = await getAnnotatedText();
+      if (!at || typeof at.getText !== "function") return;
       try {
         fullText = at.getText();
       } catch (e) {
         console.log("Spell: getText() error: " + e);
+        return;
       }
       try {
         const sel = at.getSelection();
@@ -147,12 +155,6 @@
           apiSelection = sel[0].start;
         }
       } catch (e) {}
-    }
-    // Fall back to DOM mirror only when the API gave us nothing
-    // (read-only viewers / API loading).
-    if (fullText === null) {
-      fullText = getDomFullText();
-      if (fullText === null) return;
     }
 
     // Strip control characters (annotate API prepends \u0003 ETX)
