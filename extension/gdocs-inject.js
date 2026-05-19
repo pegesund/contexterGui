@@ -99,7 +99,16 @@
         // word-splitting works the same as for textareas.
         parts.push(paraText.replace(/ /g, " "));
       }
-      return parts.join("\n");
+      const joined = parts.join("\n");
+      // In canvas-rendered Google Docs surfaces .kix-paragraphrenderer
+      // elements exist but are empty (text lives only on the canvas).
+      // Returning "" would propagate as a REAL empty-doc signal that
+      // wipes the desktop's writing_errors. Treat empty DOM mirror as
+      // "DOM source unavailable" so the caller falls through to the
+      // annotate API. Bug reported 2026-05-19 "App has completely
+      // stopped working with google docs".
+      if (joined.trim().length === 0) return null;
+      return joined;
     } catch (e) {
       return null;
     }
@@ -110,19 +119,40 @@
     const iframe = document.querySelector("iframe.docs-texteventtarget-iframe");
     if (!iframe) return;
 
-    let fullText = getDomFullText();
-    // Fallback: only ask the annotate API if the DOM mirror produced no
-    // paragraphs at all.  That keeps us off the stale snapshot Google
-    // returns from _docs_annotate_getAnnotatedText after Cmd+A+Backspace.
-    if (fullText === null) {
-      const at = await getAnnotatedText();
-      if (!at || typeof at.getText !== "function") return;
+    // Try the annotate API first.  It's the canonical text source for
+    // Google Docs and works in every surface we've tested.  Its
+    // staleness problem (snapshot doesn't refresh on every keystroke)
+    // is partially mitigated by always re-acquiring the factory result
+    // on every poll (no caching in getAnnotatedText) — and the DOM
+    // caret position is read separately below, so cursor stays live
+    // even when the text snapshot lags by a poll cycle.
+    //
+    // Previous attempt (7e0f9a4) used getDomFullText() as the PRIMARY
+    // source. That broke Google Docs entirely in canvas-rendered
+    // surfaces where .kix-paragraphrenderer is empty or in shadow DOM:
+    // getDomFullText returned "" and the desktop interpreted that as
+    // "user cleared the doc" + wiped all errors. Reverted.
+    let fullText = null;
+    let apiSelection = null;
+    const at = await getAnnotatedText();
+    if (at && typeof at.getText === "function") {
       try {
         fullText = at.getText();
       } catch (e) {
         console.log("Spell: getText() error: " + e);
-        return;
       }
+      try {
+        const sel = at.getSelection();
+        if (sel && sel.length > 0 && typeof sel[0].start === "number") {
+          apiSelection = sel[0].start;
+        }
+      } catch (e) {}
+    }
+    // Fall back to DOM mirror only when the API gave us nothing
+    // (read-only viewers / API loading).
+    if (fullText === null) {
+      fullText = getDomFullText();
+      if (fullText === null) return;
     }
 
     // Strip control characters (annotate API prepends \u0003 ETX)
@@ -147,18 +177,10 @@
     // by walking spans, which always reflects the current state.
     let cursorIndex = getDomCursorOffset(fullText);
     if (cursorIndex < 0) {
-      // No live caret in DOM (e.g. window unfocused mid-poll) — try
-      // the annotate API selection as a fallback.
-      cursorIndex = fullText.length;
-      try {
-        const at = await getAnnotatedText();
-        if (at && typeof at.getSelection === "function") {
-          const sel = at.getSelection();
-          if (sel && sel.length > 0 && typeof sel[0].start === "number") {
-            cursorIndex = sel[0].start;
-          }
-        }
-      } catch (e) {}
+      // No live caret in DOM (e.g. window unfocused mid-poll) — use
+      // the annotate API selection we already grabbed above, falling
+      // back to end-of-text if even that's missing.
+      cursorIndex = apiSelection !== null ? apiSelection : fullText.length;
     }
 
     // Extract only the paragraph the cursor is in (iOS-style: send only the active block)
