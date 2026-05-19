@@ -1723,14 +1723,15 @@ impl ContextApp {
         let mut load_errors = Vec::new();
 
         // Load dictionary from resolved path (S3 cache or local dev).
+        log!("Startup: loading dictionary from {}", paths.mtag_fst.display());
         let analyzer: Option<std::sync::Arc<mtag::Analyzer>> = match mtag::Analyzer::new(&paths.mtag_fst) {
             Ok(a) => {
-                eprintln!("Loaded dictionary with {} entries", a.dict_size());
+                log!("Startup: dictionary loaded ({} entries)", a.dict_size());
                 Some(std::sync::Arc::new(a))
             }
             Err(e) => {
                 let msg = format!("Dictionary: {}", e);
-                eprintln!("{}", msg);
+                log!("Startup: DICTIONARY LOAD FAILED — {}", msg);
                 load_errors.push(msg);
                 None
             }
@@ -1751,26 +1752,60 @@ impl ContextApp {
         let baseline_preps: Vec<String> = language.baseline_prepositions().iter().map(|s| s.to_string()).collect();
         let baseline_frame = language.baseline_frame_template().to_string();
         std::thread::spawn(move || {
-            let data = data_dir();
-            let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
-            let minilm_tok = data.join("minilm-onnx/tokenizer.json");
-            let embed_cache = data.join("word_embeddings.bin");
+            log!("Startup: BERT-completer thread started");
+            // Wrap the load in catch_unwind so a panic in Model::load
+            // (e.g. missing onnxruntime.dll on Windows, corrupt .onnx
+            // file) does NOT silently kill the thread and leave the UI
+            // showing "Loading NorBERT4..." forever. Without this, the
+            // startup_tx send below never runs on panic and startup_done
+            // never gets "NorBERT4" added — exactly the symptom user
+            // reported 2026-05-19 on Windows (stuck loading bar).
+            let load_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let data = data_dir();
+                let minilm_onnx = data.join("minilm-onnx/model_optimized.onnx");
+                let minilm_tok = data.join("minilm-onnx/tokenizer.json");
+                let embed_cache = data.join("word_embeddings.bin");
 
-            let mut errors = Vec::new();
-            let (model_opt, prefix_index, baselines, wf, embedding_store) =
-                match ContextApp::load_completer(
-                    &onnx_path, &tokenizer_path, &wordfreq_path,
-                    &minilm_onnx, &minilm_tok, &embed_cache,
-                    &mask_token, &baseline_preps, &baseline_frame,
-                ) {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        let msg = format!("Completer: {}", e);
-                        eprintln!("{}", msg);
-                        errors.push(msg);
-                        (None, None, None, None, None)
-                    }
-                };
+                let mut errors = Vec::new();
+                let (model_opt, prefix_index, baselines, wf, embedding_store) =
+                    match ContextApp::load_completer(
+                        &onnx_path, &tokenizer_path, &wordfreq_path,
+                        &minilm_onnx, &minilm_tok, &embed_cache,
+                        &mask_token, &baseline_preps, &baseline_frame,
+                    ) {
+                        Ok(parts) => parts,
+                        Err(e) => {
+                            let msg = format!("Completer: {}", e);
+                            log!("Startup: completer load FAILED — {}", msg);
+                            errors.push(msg);
+                            (None, None, None, None, None)
+                        }
+                    };
+                (model_opt, prefix_index, baselines, wf, embedding_store, errors)
+            }));
+
+            let (model_opt, prefix_index, baselines, wf, embedding_store, mut errors) = match load_result {
+                Ok(parts) => parts,
+                Err(panic_payload) => {
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        format!("BERT load panic: {}", s)
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        format!("BERT load panic: {}", s)
+                    } else {
+                        "BERT load panic: <non-string payload>".to_string()
+                    };
+                    log!("Startup: {}", msg);
+                    (None, None, None, None, None, vec![msg])
+                }
+            };
+
+            log!("Startup: BERT-completer thread sending Completer item (model_loaded={}, errors={})",
+                model_opt.is_some(), errors.len());
+            if errors.is_empty() && model_opt.is_none() {
+                // Defensive: if we got Ok but everything is None, surface
+                // that as an explicit error so the UI knows.
+                errors.push("BERT model loaded as None without explicit error".to_string());
+            }
             let _ = tx2.send(StartupItem::Completer {
                 model: model_opt, prefix_index,
                 baselines: baselines.map(|b| Arc::new(b)),
@@ -1966,23 +2001,26 @@ impl ContextApp {
         Option<Arc<HashMap<String, u64>>>,
         Option<EmbeddingStore>,
     )> {
-        eprintln!("Loading NorBERT4 from {}...", onnx_path.display());
+        log!("Startup: Loading NorBERT4 from {}", onnx_path.display());
+        log!("Startup:   tokenizer path: {}", tokenizer_path.display());
+        log!("Startup:   onnx exists?    {}", onnx_path.exists());
+        log!("Startup:   tokenizer exists? {}", tokenizer_path.exists());
         let mut model = Model::load(
             onnx_path.to_str().unwrap(),
             tokenizer_path.to_str().unwrap(),
         )?;
-        eprintln!("NorBERT4 loaded. Vocab: {}, backend: {}", model.vocab_size(), model.backend_name());
+        log!("Startup: NorBERT4 loaded. Vocab: {}, backend: {}", model.vocab_size(), model.backend_name());
 
-        eprintln!("Building prefix index...");
+        log!("Startup: Building prefix index");
         let pi = prefix_index::build_prefix_index(&model.tokenizer);
-        eprintln!("Prefix index: {} prefixes", pi.len());
+        log!("Startup: Prefix index ready ({} prefixes)", pi.len());
 
-        eprintln!("Computing baselines...");
+        log!("Startup: Computing baselines");
         let prep_refs: Vec<&str> = baseline_preps.iter().map(|s| s.as_str()).collect();
         let baselines = compute_baseline_with(&mut model, mask_token, &prep_refs, baseline_frame)?;
 
         let wf = wordfreq::load_wordfreq(wordfreq_path.as_path(), 10);
-        eprintln!("WordFreq: {} words", wf.len());
+        log!("Startup: WordFreq loaded ({} words)", wf.len());
 
         // MiniLM embedding store disabled — saves ~500 MB RAM.
         // PMI topic words (via NorBERT4 baselines) still active.
