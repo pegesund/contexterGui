@@ -530,12 +530,45 @@ impl BridgeManager {
             }
         }
 
-        if self.last_check.elapsed() > Duration::from_secs(5) {
+        // Try to late-connect a Word bridge if Word came up after Spell.
+        // Fire immediately when Word is the foreground app (no 5-s wait —
+        // the user wants their first keystroke in Word checked). Outside
+        // of that, throttle to every 5 s so we don't hammer COM lookups.
+        //
+        // Reported 2026-05-19: on Windows the user opened Spell, then
+        // opened Word, switched to it, typed — no errors, no completions.
+        // Log showed bridge name stayed 'Accessibility' the whole time.
+        // Root cause: the late-connect's 5-s throttle + silent fail mode
+        // meant the user had no visibility into whether try_connect was
+        // even being called or what it returned. We now log every attempt
+        // and its result so the next failure is debuggable.
+        let fg_app_kind = self.platform.classify_app(&self.platform.foreground_app());
+        let word_is_fg = fg_app_kind == platform::AppKind::Word;
+        let has_word = self.bridges.iter().any(|b| b.name().contains("Word"));
+        let should_try = !has_word
+            && (word_is_fg || self.last_check.elapsed() > Duration::from_secs(5));
+        if should_try {
             self.last_check = Instant::now();
-            let has_word = self.bridges.iter().any(|b| b.name().contains("Word"));
-            if !has_word {
-                for new_bridge in bridge::try_connect_word_bridge(self.lang_word_id) {
-                    log!("{} bridge connected (late)", new_bridge.name());
+            let attempts = bridge::try_connect_word_bridge(self.lang_word_id);
+            if attempts.is_empty() {
+                // Only log per 30 s when periodically retrying without
+                // a foreground Word, so we don't spam every poll while
+                // user works in another app. When Word IS the foreground
+                // app, log every attempt so a failing Office install is
+                // visible immediately.
+                static LAST_FAIL_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now_ms = self.last_check.elapsed().as_millis() as u64;
+                let last = LAST_FAIL_LOG.load(std::sync::atomic::Ordering::Relaxed);
+                if word_is_fg || now_ms.wrapping_sub(last) > 30_000 {
+                    LAST_FAIL_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    log!(
+                        "Word COM bridge late-connect attempted (fg=Word? {}) — try_connect returned None (Word window 'OpusApp' not found OR IDispatch lookup failed). Make sure Word is fully started; restart Spell if Word was opened from a different user session.",
+                        word_is_fg
+                    );
+                }
+            } else {
+                for new_bridge in attempts {
+                    log!("{} bridge connected (late) — Word is now reachable via COM", new_bridge.name());
                     self.bridges.insert(0, new_bridge);
                 }
             }
