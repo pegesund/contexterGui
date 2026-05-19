@@ -198,7 +198,8 @@
 
     // Strip control characters (annotate API prepends \u0003 ETX)
     // Do NOT trimEnd — trailing space after a word is needed to detect word completion
-    fullText = fullText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
+    // Stripping of control characters now happens on paraText after
+    // extraction (see below) so cursorIndex stays aligned with fullText.
 
     // Previously we bailed here when fullText was empty
     // ("if (!fullText) return;") — same family of bug as content.js:
@@ -224,9 +225,25 @@
       cursorIndex = apiSelection !== null ? apiSelection : fullText.length;
     }
 
-    // Extract only the paragraph the cursor is in (iOS-style: send only the active block)
-    const { paraText, cursorInPara, paraStart } = extractParagraphAtCursor(fullText, cursorIndex);
+    // Extract only the paragraph the cursor is in (iOS-style: send only the active block).
+    // cursorIndex was computed against the ORIGINAL fullText, so the
+    // raw fullText (with annotate API control chars left in place) must
+    // be what we feed in here. Stripping happens AFTER extraction.
+    const { paraText: rawParaText, cursorInPara: rawCursorInPara, paraStart } = extractParagraphAtCursor(fullText, cursorIndex);
     lastParaStart = paraStart; // remember for doReplace offset conversion
+
+    // NOW strip control characters from the extracted paragraph, and
+    // shift cursorInPara to account for any control chars that sat
+    // before the cursor inside this paragraph.
+    let ctrlBeforeCursor = 0;
+    for (let i = 0; i < rawCursorInPara && i < rawParaText.length; i++) {
+      const c = rawParaText.charCodeAt(i);
+      if ((c >= 0x00 && c <= 0x08) || c === 0x0B || c === 0x0C || (c >= 0x0E && c <= 0x1F)) {
+        ctrlBeforeCursor++;
+      }
+    }
+    const paraText = rawParaText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
+    const cursorInPara = rawCursorInPara - ctrlBeforeCursor;
 
     // Skip if neither paragraph text nor cursor-within-paragraph changed
     if (paraText === lastEmittedText && cursorInPara === lastEmittedCursor) return;
