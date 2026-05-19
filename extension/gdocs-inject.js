@@ -138,16 +138,31 @@
     // mirror — that hits the canvas-only edge case (rare; e.g. some
     // viewer surfaces) and falls through to the API rather than
     // propagating a bogus empty-doc signal.
-    let fullText = getDomFullText();
+    // EXPERIMENT 1 (cheap): nudge Google's internal model to refresh
+    // by dispatching a synthetic selectionchange.  The user's report
+    // ("only updates on click / refresh / tab-switch") strongly hints
+    // that Google refreshes its accessibility tree + annotated-text
+    // snapshot on cursor / focus events.  If selectionchange triggers
+    // a refresh, we get fresh data on the very next read below
+    // without needing any user interaction.
+    try {
+      document.dispatchEvent(new Event('selectionchange', { bubbles: true }));
+    } catch (e) {}
+
+    // Read BOTH text sources so we can compare them in the diagnostic
+    // log below.  This is what tells us which of {DOM mirror, annotate
+    // API} is lagging — and whether the synthetic selectionchange
+    // above made any difference.  Once we know which source is live
+    // we can simplify back to one path.
+    const domText = getDomFullText();
+    let apiText = null;
     let apiSelection = null;
-    if (fullText === null) {
-      const at = await getAnnotatedText();
-      if (!at || typeof at.getText !== "function") return;
+    const at = await getAnnotatedText();
+    if (at && typeof at.getText === "function") {
       try {
-        fullText = at.getText();
+        apiText = at.getText();
       } catch (e) {
         console.log("Spell: getText() error: " + e);
-        return;
       }
       try {
         const sel = at.getSelection();
@@ -156,6 +171,18 @@
         }
       } catch (e) {}
     }
+
+    // Diagnostic: show both sources in the console so we can see
+    // which one (if any) tracks the user's typing live.  Reload the
+    // extension, type in a doc, then check Console under the Spell
+    // extension's "Inspect views: service worker" / page console.
+    console.log("[Spell diag] DOM=" + (domText === null ? "<null>" : JSON.stringify(domText.slice(-60))) +
+                "  API=" + (apiText === null ? "<null>" : JSON.stringify(apiText.slice(-60))) +
+                "  apiSel=" + apiSelection);
+
+    // Prefer DOM if available (it claims to be live); fall back to API.
+    let fullText = domText !== null ? domText : apiText;
+    if (fullText === null) return;
 
     // Strip control characters (annotate API prepends \u0003 ETX)
     // Do NOT trimEnd — trailing space after a word is needed to detect word completion
