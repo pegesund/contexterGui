@@ -172,13 +172,25 @@
       } catch (e) {}
     }
 
-    // Diagnostic: show both sources in the console so we can see
-    // which one (if any) tracks the user's typing live.  Reload the
-    // extension, type in a doc, then check Console under the Spell
-    // extension's "Inspect views: service worker" / page console.
-    console.log("[Spell diag] DOM=" + (domText === null ? "<null>" : JSON.stringify(domText.slice(-60))) +
-                "  API=" + (apiText === null ? "<null>" : JSON.stringify(apiText.slice(-60))) +
-                "  apiSel=" + apiSelection);
+    // Diagnostic: show both sources side by side.  Also pipe the same
+    // info through a data-diag attribute on #spell-data so content.js
+    // can forward it via spellLog → native bridge → the desktop's
+    // log file.  That way we can read the diagnostic without needing
+    // DevTools.
+    const diagMsg = "DOM=" + (domText === null ? "<null>" : JSON.stringify(domText.slice(-60))) +
+                    "  API=" + (apiText === null ? "<null>" : JSON.stringify(apiText.slice(-60))) +
+                    "  apiSel=" + apiSelection;
+    console.log("[Spell diag] " + diagMsg);
+    try {
+      let diagEl = document.getElementById("spell-data");
+      if (!diagEl) {
+        diagEl = document.createElement("div");
+        diagEl.id = "spell-data";
+        diagEl.style.display = "none";
+        document.documentElement.appendChild(diagEl);
+      }
+      diagEl.setAttribute("data-diag", diagMsg);
+    } catch (e) {}
 
     // Prefer DOM if available (it claims to be live); fall back to API.
     let fullText = domText !== null ? domText : apiText;
