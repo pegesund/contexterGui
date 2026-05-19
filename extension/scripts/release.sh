@@ -20,15 +20,25 @@
 #   --no-commit         Bump + build but don't git commit/push or upload
 #   --no-tag-push       Build + commit but don't push, don't upload
 #   --no-upload         Tag and push but don't create the GitHub release
+#   --no-track-version  Bump + build + upload, then revert manifest.json on
+#                       disk (no commit/push). Use when you don't want a
+#                       "Browser ext: bump to vX.Y.Z" commit in the
+#                       contexterGui history for every release — the
+#                       published version still goes out to the Chrome
+#                       Web Store / binaries repo, but the source-tree
+#                       manifest stays at whatever version it was before.
+#                       Mirrors the desktop flow where Cargo.toml is not
+#                       version-bumped per release.
 #   --draft             Create the GitHub release as a draft (link-only access)
 #
 # Examples:
-#   bash scripts/release.sh                       # auto-patch + full pipeline
-#   bash scripts/release.sh --minor               # auto-minor + full pipeline
-#   bash scripts/release.sh 0.2.0                 # explicit + full pipeline
-#   bash scripts/release.sh --patch --dry-run     # preview only
-#   bash scripts/release.sh --patch --no-upload   # commit + push, no GH release
-#   bash scripts/release.sh --patch --draft       # GH release as draft (Petter-only link)
+#   bash scripts/release.sh                            # auto-patch + full pipeline
+#   bash scripts/release.sh --minor                    # auto-minor + full pipeline
+#   bash scripts/release.sh 0.2.0                      # explicit + full pipeline
+#   bash scripts/release.sh --patch --dry-run          # preview only
+#   bash scripts/release.sh --patch --no-upload        # commit + push, no GH release
+#   bash scripts/release.sh --patch --no-track-version # upload but don't commit the bump
+#   bash scripts/release.sh --patch --draft            # GH release as draft (Petter-only link)
 #
 # Output:
 #   dist/Spell-Browser-Extension-<version>.zip
@@ -64,6 +74,11 @@ DO_COMMIT=true
 DO_TAG_PUSH=true
 DO_UPLOAD=true
 DRAFT=false
+# When false, revert manifest.json after the upload so the contexterGui
+# source tree stays at its pre-release version (no per-release bump
+# commit). The Chrome Web Store / spell_binaries release still carries
+# the new version — only the in-repo file gets restored.
+TRACK_VERSION=true
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -76,6 +91,15 @@ while [ $# -gt 0 ]; do
         --no-commit)    DO_COMMIT=false; DO_TAG_PUSH=false; DO_UPLOAD=false ;;
         --no-tag-push)  DO_TAG_PUSH=false; DO_UPLOAD=false ;;
         --no-upload)    DO_UPLOAD=false ;;
+        --no-track-version)
+            # Bump + build + upload, but DO NOT commit the manifest bump.
+            # Manifest gets reverted on disk at the end so the repo stays
+            # at its previous version (parallels desktop's Cargo.toml).
+            TRACK_VERSION=false
+            DO_COMMIT=false
+            DO_TAG_PUSH=false
+            # Note: DO_UPLOAD stays true — that's the whole point.
+            ;;
         --draft)        DRAFT=true ;;
         -h|--help)
             sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
@@ -167,8 +191,9 @@ echo "  New version:       $VERSION"
 echo "  Tag:               $TAG (on $RELEASES_REPO)"
 echo "  Build:             $DO_BUILD"
 echo "  Commit + push:     $DO_COMMIT (to contexterGui main)"
-echo "  Push tag:          $DO_TAG_PUSH"
+echo "  Push contexterGui: $DO_TAG_PUSH"
 echo "  GitHub release:    $DO_UPLOAD ($RELEASES_REPO)"
+$TRACK_VERSION || echo "  Track version:     false (manifest.json will be reverted after upload)"
 $DRAFT && echo "  Release type:      DRAFT"
 if $DO_BUILD; then
     echo "  Zip:               $ZIP"
@@ -183,12 +208,17 @@ if $DRY_RUN; then
     $DO_COMMIT    && actions+=("git commit + push to contexterGui main")
     $DO_TAG_PUSH  && actions+=("create + push tag $TAG to $RELEASES_REPO")
     $DO_UPLOAD    && actions+=("create GH release $TAG on $RELEASES_REPO + upload zip")
+    $TRACK_VERSION || actions+=("revert extension/manifest.json on disk back to $CURRENT_MANIFEST")
     echo "[DRY RUN] Would: $(printf ', %s' "${actions[@]}" | sed 's/^, //'). Nothing else."
     exit 0
 fi
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
-if $DO_COMMIT; then
+# Need a clean extension/ tree both when we'll commit (DO_COMMIT) AND when
+# we'll revert at the end (--no-track-version, !TRACK_VERSION). In the
+# revert case, `git checkout -- extension/manifest.json` would wipe any
+# uncommitted edits the user had in that file.
+if $DO_COMMIT || ! $TRACK_VERSION; then
     # Only check extension/ tree — contexterGui repo may have desktop WIP we don't touch.
     if [ -n "$(cd "$REPO_DIR" && git status --porcelain -- extension/)" ]; then
         echo "ERROR: extension/ has uncommitted changes. Stash or commit first." >&2
@@ -221,49 +251,83 @@ if $DO_BUILD; then
     bash scripts/build-extension.sh
 fi
 
-if ! $DO_COMMIT; then
+# ── Commit the manifest bump to contexterGui (if tracking version) ─────────
+# Use a function so we can revert the on-disk manifest reliably on script
+# exit when running in --no-track-version mode (even if a later step
+# fails).  Without this, a failed `gh release create` after the bump
+# would leave the working tree dirty.
+revert_manifest_if_untracked() {
+    if ! $TRACK_VERSION; then
+        (cd "$REPO_DIR" && git checkout -- extension/manifest.json) 2>/dev/null \
+            && echo "  Reverted extension/manifest.json on disk (--no-track-version)"
+    fi
+}
+trap revert_manifest_if_untracked EXIT
+
+if $DO_COMMIT; then
+    echo
+    (
+        cd "$REPO_DIR"
+        git add extension/manifest.json
+        git commit -m "Browser ext: bump to v$VERSION" >/dev/null
+        echo "  Committed: $(git rev-parse --short HEAD)  Browser ext: bump to v$VERSION"
+    )
+elif $TRACK_VERSION; then
+    # --no-commit / --no-build path: user wants to inspect / commit manually.
     echo
     echo "  Skipped commit (--no-commit). To commit + tag manually:"
     echo "    (cd $REPO_DIR && git add extension/manifest.json && \\"
     echo "     git commit -m 'Browser ext: bump to v$VERSION' && \\"
     echo "     git push origin main)"
+    # No revert wanted in --no-commit mode (user might want to commit by
+    # hand). Clear the trap so it doesn't run on this exit.
+    trap - EXIT
     exit 0
+else
+    # --no-track-version mode: skip commit but continue to upload. The
+    # SOURCE_SHA below will reference current HEAD, since we never made
+    # a new commit.
+    echo
+    echo "  Skipped commit (--no-track-version) — manifest will be reverted at end"
 fi
-
-# ── Commit + push the manifest bump to contexterGui ─────────────────────────
-echo
-(
-    cd "$REPO_DIR"
-    git add extension/manifest.json
-    git commit -m "Browser ext: bump to v$VERSION" >/dev/null
-    echo "  Committed: $(git rev-parse --short HEAD)  Browser ext: bump to v$VERSION"
-)
 
 SOURCE_SHA="$(cd "$REPO_DIR" && git rev-parse --short HEAD)"
 
-if ! $DO_TAG_PUSH; then
+if $DO_TAG_PUSH; then
+    (cd "$REPO_DIR" && git push origin main) >/dev/null
+    echo "  Pushed contexterGui main"
+elif $TRACK_VERSION; then
+    # --no-tag-push mode (user explicitly opted out of pushing).
     echo
     echo "  Skipped push (--no-tag-push). To push manually:"
     echo "    (cd $REPO_DIR && git push origin main)"
     echo "    gh release create $TAG '$ZIP' --repo $RELEASES_REPO --title '...' --notes '...'"
+    trap - EXIT
     exit 0
 fi
-
-(cd "$REPO_DIR" && git push origin main) >/dev/null
-echo "  Pushed contexterGui main"
+# else --no-track-version mode: silently skip push and continue to upload.
 
 if ! $DO_UPLOAD; then
     echo
     echo "  Skipped GitHub release (--no-upload). To create manually:"
     echo "    gh release create $TAG '$ZIP' --repo $RELEASES_REPO \\"
     echo "      --title 'Spell Browser Companion Ext v$VERSION' --notes '...'"
+    # Let the EXIT trap revert manifest if --no-track-version was set
+    # alongside --no-upload (unlikely combo, but stay correct).
     exit 0
 fi
 
 # ── Create the GitHub release on spell_binaries with the zip attached ───────
 echo
 NOTES_FILE="$(mktemp)"
-trap 'rm -f "$NOTES_FILE"' EXIT
+# Chain the notes-file cleanup with the manifest-revert trap that may
+# already be installed (see revert_manifest_if_untracked above).  Setting
+# a fresh `trap '...' EXIT` would silently replace the prior trap and
+# leave the working tree dirty if --no-track-version was passed.
+trap '
+    rm -f "$NOTES_FILE"
+    revert_manifest_if_untracked
+' EXIT
 
 cat > "$NOTES_FILE" <<EOF
 Spell browser companion extension v$VERSION.
