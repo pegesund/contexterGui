@@ -1,9 +1,10 @@
 {
   "name": "com.cognio.spell.bridge",
-  "description": "Spell native messaging host for browser textarea monitoring",
-  "path": "D:\\Epresente\\ContexterGui\\contexterGui\\target\\debug\\native_bridge.exe",
+  "description": "Spell native messaging host (dev / manual-install template)",
+  "_NOTE": "Production installs auto-register this manifest via src/native_host.rs at desktop startup; the path below is just a placeholder for manual dev setups via install_native_host.bat. Update `path` to your local native_bridge binary if running the .bat manually.",
+  "path": "REPLACE_WITH_PATH_TO_native_bridge.exe_OR_native_bridge",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://ikdncjkonmegknmlpepafnmpncpfhiec/"
+    "chrome-extension://dcnbinagicnahihcgjfnlhepckfcpgob/"
   ]
 }

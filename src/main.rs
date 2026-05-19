@@ -14,6 +14,7 @@ pub mod downloader;
 mod grammar_actor;
 mod latext_no;
 mod math_ocr;
+mod native_host;
 mod ocr;
 mod platform;
 mod setup;
@@ -1719,6 +1720,16 @@ impl ContextApp {
     ) -> Self {
         let platform = platform::create_platform();
         platform.init_runtime();
+
+        // Auto-register the browser-companion native messaging host with
+        // Chrome / Edge / Brave / Chromium. Idempotent — overwrites the
+        // existing manifest + registry entry each launch so the path
+        // stays accurate after Velopack restages the binary into a new
+        // versioned folder. Without this, fresh Windows installs need
+        // manual editing of com.cognio.spell.bridge.json + running
+        // install_native_host.bat as Administrator before the browser
+        // extension can connect (reported 2026-05-19).
+        native_host::register_native_messaging_host_best_effort();
 
         let mut load_errors = Vec::new();
 
