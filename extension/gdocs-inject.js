@@ -138,31 +138,30 @@
     // mirror — that hits the canvas-only edge case (rare; e.g. some
     // viewer surfaces) and falls through to the API rather than
     // propagating a bogus empty-doc signal.
-    // EXPERIMENT 1 (cheap): nudge Google's internal model to refresh
-    // by dispatching a synthetic selectionchange.  The user's report
-    // ("only updates on click / refresh / tab-switch") strongly hints
-    // that Google refreshes its accessibility tree + annotated-text
-    // snapshot on cursor / focus events.  If selectionchange triggers
-    // a refresh, we get fresh data on the very next read below
-    // without needing any user interaction.
+    // Nudge Google's internal model to refresh by dispatching a synthetic
+    // selectionchange. Without this the annotate API's getText() returns
+    // a stale snapshot that only refreshes on click/focus/refresh events
+    // (Reported 2026-05-19: "I have to click on a word to get suggestions
+    // or see errors").  selectionchange triggers Google to refresh its
+    // internal model on every poll without disturbing the user's typing.
     try {
       document.dispatchEvent(new Event('selectionchange', { bubbles: true }));
     } catch (e) {}
 
-    // Read BOTH text sources so we can compare them in the diagnostic
-    // log below.  This is what tells us which of {DOM mirror, annotate
-    // API} is lagging — and whether the synthetic selectionchange
-    // above made any difference.  Once we know which source is live
-    // we can simplify back to one path.
+    // DOM mirror first (when available — works in some Google Docs
+    // surfaces). Annotate API is the canonical fallback that works
+    // everywhere now that the selectionchange nudge above keeps it live.
     const domText = getDomFullText();
-    let apiText = null;
     let apiSelection = null;
-    const at = await getAnnotatedText();
-    if (at && typeof at.getText === "function") {
+    let fullText = domText;
+    if (fullText === null) {
+      const at = await getAnnotatedText();
+      if (!at || typeof at.getText !== "function") return;
       try {
-        apiText = at.getText();
+        fullText = at.getText();
       } catch (e) {
         console.log("Spell: getText() error: " + e);
+        return;
       }
       try {
         const sel = at.getSelection();
@@ -171,29 +170,6 @@
         }
       } catch (e) {}
     }
-
-    // Diagnostic: show both sources side by side.  Also pipe the same
-    // info through a data-diag attribute on #spell-data so content.js
-    // can forward it via spellLog → native bridge → the desktop's
-    // log file.  That way we can read the diagnostic without needing
-    // DevTools.
-    const diagMsg = "DOM=" + (domText === null ? "<null>" : JSON.stringify(domText.slice(-60))) +
-                    "  API=" + (apiText === null ? "<null>" : JSON.stringify(apiText.slice(-60))) +
-                    "  apiSel=" + apiSelection;
-    console.log("[Spell diag] " + diagMsg);
-    try {
-      let diagEl = document.getElementById("spell-data");
-      if (!diagEl) {
-        diagEl = document.createElement("div");
-        diagEl.id = "spell-data";
-        diagEl.style.display = "none";
-        document.documentElement.appendChild(diagEl);
-      }
-      diagEl.setAttribute("data-diag", diagMsg);
-    } catch (e) {}
-
-    // Prefer DOM if available (it claims to be live); fall back to API.
-    let fullText = domText !== null ? domText : apiText;
     if (fullText === null) return;
 
     // Strip control characters (annotate API prepends \u0003 ETX)

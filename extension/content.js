@@ -151,21 +151,6 @@
   // gdocs-inject.js (MAIN world) writes to #spell-data.
   // Content.js (ISOLATED world) polls it. DOM is shared between worlds.
   let lastDataVersion = "";
-  // Diagnostic forwarder: gdocs-inject.js writes its DOM-vs-API
-  // comparison string into #spell-data's data-diag attribute every
-  // poll. Forward each new value through spellLog so we can read it
-  // from the desktop's native-bridge log file (no DevTools needed).
-  let lastDiag = "";
-  function forwardGDocsDiag() {
-    const el = document.getElementById("spell-data");
-    if (!el) return;
-    const diag = el.getAttribute("data-diag");
-    if (!diag || diag === lastDiag) return;
-    lastDiag = diag;
-    spellLog("GDOCS diag " + diag);
-  }
-  setInterval(forwardGDocsDiag, 500);
-
   function pollGDocsData() {
     if (!isGoogleDocs()) return;
     if (replaceInProgress) {
