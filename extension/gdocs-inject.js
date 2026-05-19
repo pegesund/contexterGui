@@ -310,9 +310,14 @@
       const spans = para.querySelectorAll(".kix-wordhtmlgenerator-word-node");
       if (!spans.length) return -1;
 
-      // Collect text before and at the caret position
+      // Collect text before and at the caret position.  caretX is
+      // already declared above (line ~291) by the spatial paragraph
+      // lookup — reuse it. Previously this re-declared `let caretX =
+      // caretRect.left;` and produced a SyntaxError ("Identifier
+      // 'caretX' has already been declared") which aborted the whole
+      // gdocs-inject.js script load. That is what made Google Docs
+      // appear "completely stopped working" — observed 2026-05-19.
       let textBefore = "";
-      let caretX = caretRect.left;
       for (const span of spans) {
         const spanRect = span.getBoundingClientRect();
         // Span is entirely before caret
