@@ -165,8 +165,16 @@ case "$ARCH" in
 esac
 rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true
 cargo build --release --bin acatts-rust --target "$RUST_TARGET"
+# Also build the browser-companion native messaging host so the desktop's
+# auto-registration code (src/native_host.rs) can find it next to the
+# main binary. Without this, fresh installs log:
+#   Native host: registration failed: native_bridge not found next to Spell.app
+# and the browser companion extension can't connect.
+cargo build --release --bin native_bridge --target "$RUST_TARGET"
 BIN_SRC="$PROJECT_DIR/target/$RUST_TARGET/release/acatts-rust"
+BRIDGE_SRC="$PROJECT_DIR/target/$RUST_TARGET/release/native_bridge"
 [ -f "$BIN_SRC" ] || { echo "ERROR: built binary not found at $BIN_SRC"; exit 1; }
+[ -f "$BRIDGE_SRC" ] || { echo "ERROR: native_bridge not found at $BRIDGE_SRC"; exit 1; }
 
 # ── 2. Assemble bundle skeleton ──────────────────────────────────────────────
 step "Assemble Spell.app skeleton"
@@ -176,6 +184,11 @@ mkdir -p "$MACOS" "$FRAMEWORKS" "$RESOURCES"
 # Binary: install as Spell (not acatts-rust) so it matches CFBundleExecutable
 cp "$BIN_SRC" "$MACOS/$APP_NAME"
 chmod 755 "$MACOS/$APP_NAME"
+
+# Browser companion's native messaging host: ship as a sibling of the
+# main binary so native_host::find_native_bridge_path() can locate it.
+cp "$BRIDGE_SRC" "$MACOS/native_bridge"
+chmod 755 "$MACOS/native_bridge"
 
 # Add @rpath so the binary finds bundled dylibs at runtime
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/$APP_NAME" 2>/dev/null || true
