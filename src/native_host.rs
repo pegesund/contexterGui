@@ -169,35 +169,32 @@ fn register_inner() -> std::io::Result<()> {
 
     let mut registered_any = false;
     for (label, prefix) in &browsers {
-        let key_path = format!(r"HKCU\{}\{}", prefix, HOST_NAME);
-        // Shell out to `reg add` rather than adding a winreg crate
-        // dependency just for one call site. /ve sets the default value,
-        // /f overwrites without prompting, /d is the data (manifest
-        // path), REG_SZ is the type.
-        let out = std::process::Command::new("reg")
-            .args([
-                "add",
-                &key_path,
-                "/ve",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &manifest_str,
-                "/f",
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                crate::log!("Native host: registered {} → {}", key_path, manifest_str);
+        let subkey = format!(r"{}\{}", prefix, HOST_NAME);
+        // Use the Win32 registry API directly instead of spawning
+        // `reg add` as a child process.  The previous shell-out path
+        // produced an intermittent dialog on the user's Windows box:
+        //   reg.exe - Application Error
+        //   The application was unable to start correctly (0xc0000142).
+        // 0xc0000142 is STATUS_DLL_INIT_FAILED — typically caused by
+        // app-compat layers, security software, or environment-block
+        // weirdness propagated from the parent process when launching
+        // children. Reported 2026-05-19 ("I saw this error on windows
+        // app 2 times when I opened it today and then it did started").
+        //
+        // RegCreateKeyExW + RegSetValueExW are in-process API calls.
+        // No process spawn, no DLL-init dance for an external binary,
+        // no possible UI dialog.
+        match write_registry_default_string(&subkey, &manifest_str) {
+            Ok(()) => {
+                crate::log!("Native host: registered HKCU\\{} → {}", subkey, manifest_str);
                 registered_any = true;
             }
-            Ok(o) => crate::log!(
-                "Native host: reg add failed for {} ({}): {}",
+            Err(e) => crate::log!(
+                "Native host: registry write failed for {} (HKCU\\{}): {}",
                 label,
-                o.status,
-                String::from_utf8_lossy(&o.stderr).trim()
+                subkey,
+                e
             ),
-            Err(e) => crate::log!("Native host: reg add for {} errored: {}", label, e),
         }
     }
     if !registered_any {
@@ -211,6 +208,61 @@ fn register_inner() -> std::io::Result<()> {
         bridge_path.display(),
         EXTENSION_ID
     );
+    Ok(())
+}
+
+/// Set the default (unnamed) value of HKCU\<subkey> to a UTF-16 string.
+/// Creates the key if it doesn't exist. Idempotent.
+#[cfg(target_os = "windows")]
+fn write_registry_default_string(subkey: &str, value: &str) -> std::io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::WIN32_ERROR;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+    use windows::core::PCWSTR;
+
+    let subkey_w: Vec<u16> = std::ffi::OsStr::new(subkey).encode_wide().chain(once(0)).collect();
+    let mut value_w: Vec<u16> = std::ffi::OsStr::new(value).encode_wide().chain(once(0)).collect();
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        // windows 0.61 signature: reserved is `u32` (must be 0), not
+        // Option<u32>; lpsecurityattributes / lpdwdisposition ARE
+        // Option types.
+        let create_status: WIN32_ERROR = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR::from_raw(subkey_w.as_ptr()),
+            0,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut hkey,
+            None,
+        );
+        if create_status.is_err() {
+            return Err(std::io::Error::from_raw_os_error(create_status.0 as i32));
+        }
+
+        // RegSetValueExW expects the byte length INCLUDING the trailing
+        // NUL terminator for REG_SZ values, which is exactly what
+        // value_w.len() * 2 gives us (encode_wide().chain(once(0))).
+        let bytes_len = value_w.len() * std::mem::size_of::<u16>();
+        let value_bytes = std::slice::from_raw_parts(
+            value_w.as_mut_ptr() as *const u8,
+            bytes_len,
+        );
+        // windows 0.61 signature: reserved is `u32` (must be 0).
+        let set_status: WIN32_ERROR =
+            RegSetValueExW(hkey, PCWSTR::null(), 0, REG_SZ, Some(value_bytes));
+        let _ = RegCloseKey(hkey);
+        if set_status.is_err() {
+            return Err(std::io::Error::from_raw_os_error(set_status.0 as i32));
+        }
+    }
     Ok(())
 }
 
