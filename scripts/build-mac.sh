@@ -14,6 +14,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
+# Make local release builds work from fresh/non-login shells. Homebrew installs
+# rustup as a keg-only formula, and vpk is a .NET global tool under ~/.dotnet.
+for tool_dir in \
+    /opt/homebrew/bin \
+    /opt/homebrew/sbin \
+    /opt/homebrew/opt/rustup/bin \
+    "$HOME/.cargo/bin" \
+    "$HOME/.dotnet/tools" \
+    /opt/homebrew/opt/dotnet@8/bin; do
+    if [ -d "$tool_dir" ]; then
+        PATH="$tool_dir:$PATH"
+    fi
+done
+export PATH
+if [ -z "${DOTNET_ROOT:-}" ] && [ -d /opt/homebrew/opt/dotnet@8/libexec ]; then
+    export DOTNET_ROOT="/opt/homebrew/opt/dotnet@8/libexec"
+fi
+
 # ── Args ─────────────────────────────────────────────────────────────────────
 SIGN=true
 NOTARIZE=true
@@ -61,6 +79,10 @@ ONNX_DYLIB="$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 step() { echo; echo "=== $* ==="; }
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || { echo "ERROR: required command not found: $1"; exit 1; }
+}
 
 # Copy a dylib into Frameworks/, rewrite its install name to @rpath, and
 # rewrite any @rpath/abs-path deps that we know about.
@@ -122,8 +144,24 @@ retry_notarize() {
     local max=3 delay=30 attempt=1
     while [ $attempt -le $max ]; do
         echo "  Notarizing $(basename "$target") (attempt $attempt/$max)..."
-        if xcrun notarytool submit "$target" --keychain-profile "$NOTARY_PROFILE" --wait; then
+        local output status
+        output="$(xcrun notarytool submit "$target" \
+            --keychain-profile "$NOTARY_PROFILE" \
+            --wait \
+            --output-format json 2>&1)" || true
+        printf '%s\n' "$output"
+        status="$(printf '%s\n' "$output" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('status', ''))
+except Exception:
+    print('')
+" 2>/dev/null)"
+        if [ "$status" = "Accepted" ]; then
             return 0
+        fi
+        if [ -n "$status" ]; then
+            echo "  Notarization finished with status: $status"
         fi
         [ $attempt -lt $max ] && echo "  Retrying in ${delay}s..." && sleep $delay && delay=$((delay * 2))
         attempt=$((attempt + 1))
@@ -141,6 +179,14 @@ mkdir -p "$DIST/releases"
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 step "Preflight"
+require_cmd brew
+require_cmd rustup
+require_cmd cargo
+require_cmd dylibbundler
+if $MAKE_DMG; then
+    require_cmd vpk
+    require_cmd create-dmg
+fi
 [ -f "$ICON" ] || { echo "ERROR: $ICON missing — run scripts/make-icns.sh first"; exit 1; }
 [ -f "$SWIPL_DYLIB" ] || { echo "ERROR: SWI-Prolog libswipl not found at $SWIPL_DYLIB"; exit 1; }
 [ -f "$GMP_DYLIB" ] || { echo "ERROR: libgmp not found at $GMP_DYLIB"; exit 1; }
@@ -360,6 +406,20 @@ unzip -q "$PORTABLE_ZIP" -d "$DIST"
 rm -rf "$DIST/__MACOSX"
 [ -d "$APP" ] || { echo "ERROR: Velopack .app not at expected path $APP"; exit 1; }
 echo "  Substituted Velopack-managed .app into $APP"
+
+if $SIGN; then
+    step "Re-sign Velopack-managed app"
+    # vpk pack can leave a stapled-ticket blob at Contents/CodeResources.
+    # Re-signing after that without removing it can leave the final app with
+    # an invalid main executable signature once it is placed in the DMG.
+    rm -f "$APP/Contents/CodeResources"
+    retry_codesign --force --deep --timestamp --options runtime \
+        --sign "$SIGNING_IDENTITY" \
+        --entitlements "$ENTITLEMENTS" \
+        "$APP"
+    codesign --verify --deep --strict --verbose=2 "$APP"
+    echo "  Velopack-managed app signature verified"
+fi
 
 # Drop artifacts we don't ship: the Setup.pkg (we distribute via DMG)
 # and the Portable.zip (auto-update reads .nupkg, not the .zip).
