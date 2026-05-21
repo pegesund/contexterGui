@@ -76,6 +76,14 @@ features = [
     "Win32_System_Ole",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    # Win32_Security gates RegCreateKeyExW in windows 0.61 (the function
+    # accepts SECURITY_ATTRIBUTES so the crate hides it behind the security
+    # feature flag). Required by src/native_host.rs::write_registry_default_string
+    # to register the browser-companion native messaging host in HKCU at
+    # startup. Without it the Windows release build fails with
+    # "no `RegCreateKeyExW` in `Win32::System::Registry`" (E0432). Mac dev
+    # box can't catch this — the whole module is #[cfg(target_os = "windows")].
+    "Win32_Security",
     "Win32_Media_Speech",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",

@@ -229,13 +229,15 @@ fn write_registry_default_string(subkey: &str, value: &str) -> std::io::Result<(
 
     unsafe {
         let mut hkey = HKEY::default();
-        // windows 0.61 signature: reserved is `u32` (must be 0), not
-        // Option<u32>; lpsecurityattributes / lpdwdisposition ARE
-        // Option types.
+        // windows 0.61 signature: `reserved` is `Option<u32>` (the Win32
+        // docs say "must be zero", so we pass None — equivalent to a NULL
+        // reserved slot). The earlier comment claiming reserved was a bare
+        // `u32` was wrong and caused E0308 / E0432 on Windows CI; Mac dev
+        // can't catch this because the whole fn is #[cfg(target_os = "windows")].
         let create_status: WIN32_ERROR = RegCreateKeyExW(
             HKEY_CURRENT_USER,
             PCWSTR::from_raw(subkey_w.as_ptr()),
-            0,
+            None,
             PCWSTR::null(),
             REG_OPTION_NON_VOLATILE,
             KEY_SET_VALUE,
@@ -255,9 +257,9 @@ fn write_registry_default_string(subkey: &str, value: &str) -> std::io::Result<(
             value_w.as_mut_ptr() as *const u8,
             bytes_len,
         );
-        // windows 0.61 signature: reserved is `u32` (must be 0).
+        // windows 0.61 signature: `reserved` is `Option<u32>` here too.
         let set_status: WIN32_ERROR =
-            RegSetValueExW(hkey, PCWSTR::null(), 0, REG_SZ, Some(value_bytes));
+            RegSetValueExW(hkey, PCWSTR::null(), None, REG_SZ, Some(value_bytes));
         let _ = RegCloseKey(hkey);
         if set_status.is_err() {
             return Err(std::io::Error::from_raw_os_error(set_status.0 as i32));
