@@ -60,12 +60,13 @@ jobs:
 
       - name: Checkout sibling source repos (private)
         # contexterGui's Cargo.toml has path deps to sibling repos:
-        #   ../../rustSpell/{mtag-rs, language-rs}
-        #   ../../contexter-repo/nostos-cognio
-        #   ../../norwegian_piper            (Piper TTS G2P + ONNX inference)
+        #   ../rustSpell/{mtag-rs, language-rs}
+        #   ../contexter/nostos-cognio
+        #   ../norwegian_piper            (Piper TTS G2P + ONNX inference)
         # On the runner, contexterGui sits at D:\a\contexterGui\contexterGui\,
-        # so the deps resolve to D:\a\rustSpell\..., D:\a\contexter-repo\...,
-        # D:\a\norwegian_piper\... — clone all three there.
+        # so the deps resolve to D:\a\contexterGui\rustSpell\...,
+        # D:\a\contexterGui\contexter\..., D:\a\contexterGui\norwegian_piper\...
+        # — clone all three there.
         # RELEASES_REPO_TOKEN must have `repo` scope (not just public_repo)
         # since these source repos are private.
         shell: pwsh
@@ -76,8 +77,8 @@ jobs:
               Write-Error "RELEASES_REPO_TOKEN is empty — cannot clone private source repos"
               exit 1
           }
-          $base = Split-Path -Parent (Split-Path -Parent $env:GITHUB_WORKSPACE)
-          # $base = D:\a
+          $base = Split-Path -Parent $env:GITHUB_WORKSPACE
+          # $base = D:\a\contexterGui
           Write-Host "Cloning sibling repos under $base"
 
           # Skip Git LFS smudge during clone. Two of the sibling repos
@@ -113,9 +114,7 @@ jobs:
           }
 
           Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/rustSpell.git" "$base\rustSpell"
-          # GitHub repo is named 'contexter'; locally it's 'contexter-repo'. Cargo.toml
-          # uses the local name, so clone INTO contexter-repo.
-          Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/contexter.git" "$base\contexter-repo"
+          Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/contexter.git" "$base\contexter"
           Clone-Sibling "https://x-access-token:$env:GH_TOKEN@github.com/pegesund/norwegian_piper.git" "$base\norwegian_piper"
 
           Write-Host "Sibling layout:"
