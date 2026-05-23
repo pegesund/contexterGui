@@ -459,6 +459,31 @@ struct BridgeManager {
     browser_extension_seen: bool,
 }
 
+struct ForegroundRoute {
+    app: platform::ForegroundApp,
+    #[allow(dead_code)]
+    kind: platform::AppKind,
+    our_window_focused: bool,
+    word_is_foreground: bool,
+    is_browser: bool,
+    is_notepad: bool,
+    is_other: bool,
+}
+
+impl ForegroundRoute {
+    fn new(app: platform::ForegroundApp, kind: platform::AppKind) -> Self {
+        Self {
+            app,
+            kind,
+            our_window_focused: kind == platform::AppKind::OurApp,
+            word_is_foreground: kind == platform::AppKind::Word,
+            is_browser: kind == platform::AppKind::Browser,
+            is_notepad: kind == platform::AppKind::Notepad,
+            is_other: kind == platform::AppKind::Other,
+        }
+    }
+}
+
 impl BridgeManager {
     fn new(platform: Box<dyn platform::PlatformServices>, lang_word_id: i32) -> Self {
         let mut bridges: Vec<Box<dyn TextBridge>> = bridge::create_bridges(lang_word_id);
@@ -505,321 +530,211 @@ impl BridgeManager {
         self.bridge_switched = true;
     }
 
-    fn read_context(&mut self) -> Option<CursorContext> {
-        // Idle gate (Windows): when the user hasn't moved the mouse or
-        // touched the keyboard for >10s, there's nothing new to read.
-        // Skip the per-frame bridge poll so we stop hammering target
-        // apps with cross-process COM (Word) / UIA (Notepad/Sticky/...)
-        // reads. Each read is a context switch + provider work in the
-        // target process; firing at the egui repaint cadence (5–10 Hz)
-        // for hours is what made user PCs slow down.
-        //
-        // Wake-up is instant: any keypress or mouse move resets
-        // GetLastInputInfo's clock to ~0, so the very next frame after
-        // activity polls normally. The trade-off is at most 100–200ms
-        // of staleness on cursor context the moment they come back —
-        // imperceptible compared to typing latency anyway.
-        //
-        // macOS doesn't need this: AX is in-process and ARC-managed,
-        // so its polling cost is amortised by the kernel and doesn't
-        // accumulate cross-process bookkeeping.
-        #[cfg(target_os = "windows")]
-        {
-            if crate::platform::windows::idle_millis() > 10_000 {
-                return self.last_context.clone();
-            }
-        }
-
-        // Try to late-connect a Word bridge if Word came up after Spell.
-        // Fire immediately when Word is the foreground app (no 5-s wait —
-        // the user wants their first keystroke in Word checked). Outside
-        // of that, throttle to every 5 s so we don't hammer COM lookups.
-        //
-        // Reported 2026-05-19: on Windows the user opened Spell, then
-        // opened Word, switched to it, typed — no errors, no completions.
-        // Log showed bridge name stayed 'Accessibility' the whole time.
-        // Root cause: the late-connect's 5-s throttle + silent fail mode
-        // meant the user had no visibility into whether try_connect was
-        // even being called or what it returned. We now log every attempt
-        // and its result so the next failure is debuggable.
+    fn maybe_late_connect_word_bridge(&mut self) {
         let fg_app_kind = self.platform.classify_app(&self.platform.foreground_app());
         let word_is_fg = fg_app_kind == platform::AppKind::Word;
         let has_word = self.bridges.iter().any(|b| b.name().contains("Word"));
         let should_try = !has_word
             && (word_is_fg || self.last_check.elapsed() > Duration::from_secs(5));
-        if should_try {
-            self.last_check = Instant::now();
-            let attempts = bridge::try_connect_word_bridge(self.lang_word_id);
-            if attempts.is_empty() {
-                // Only log per 30 s when periodically retrying without
-                // a foreground Word, so we don't spam every poll while
-                // user works in another app. When Word IS the foreground
-                // app, log every attempt so a failing Office install is
-                // visible immediately.
-                static LAST_FAIL_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let now_ms = self.last_check.elapsed().as_millis() as u64;
-                let last = LAST_FAIL_LOG.load(std::sync::atomic::Ordering::Relaxed);
-                if word_is_fg || now_ms.wrapping_sub(last) > 30_000 {
-                    LAST_FAIL_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    log!(
-                        "Word COM bridge late-connect attempted (fg=Word? {}) — try_connect returned None (Word window 'OpusApp' not found OR IDispatch lookup failed). Make sure Word is fully started; restart Spell if Word was opened from a different user session.",
-                        word_is_fg
-                    );
-                }
-            } else {
-                for new_bridge in attempts {
-                    log!("{} bridge connected (late) — Word is now reachable via COM", new_bridge.name());
-                    self.bridges.insert(0, new_bridge);
-                }
-            }
+        if !should_try {
+            return;
         }
 
-        // Detect which app the user clicked on via platform abstraction.
-        // When our own always-on-top window is foreground, keep reading from the
-        // last known user app (user is just looking at our UI, caret is still
-        // in the other app).
-        let fg = self.platform.foreground_app();
-        let fg_hwnd_raw = fg.handle;
-        let fg_pid = fg.pid;
-        let fg_title = fg.title.clone();
-        let app_kind = self.platform.classify_app(&fg);
-        let our_window_focused = app_kind == platform::AppKind::OurApp;
-        let word_is_foreground = app_kind == platform::AppKind::Word;
-        let is_browser = app_kind == platform::AppKind::Browser;
+        self.last_check = Instant::now();
+        let attempts = bridge::try_connect_word_bridge(self.lang_word_id);
+        if attempts.is_empty() {
+            // Only log per 30 s when periodically retrying without a foreground
+            // Word, so we don't spam every poll while user works in another app.
+            // When Word IS the foreground app, log every attempt so a failing
+            // Office install is visible immediately.
+            static LAST_FAIL_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now_ms = self.last_check.elapsed().as_millis() as u64;
+            let last = LAST_FAIL_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if word_is_fg || now_ms.wrapping_sub(last) > 30_000 {
+                LAST_FAIL_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                log!(
+                    "Word COM bridge late-connect attempted (fg=Word? {}) — try_connect returned None (Word window 'OpusApp' not found OR IDispatch lookup failed). Make sure Word is fully started; restart Spell if Word was opened from a different user session.",
+                    word_is_fg
+                );
+            }
+            return;
+        }
 
-        // Log every focus change (not just every 3 seconds)
+        for new_bridge in attempts {
+            log!("{} bridge connected (late) — Word is now reachable via COM", new_bridge.name());
+            self.bridges.insert(0, new_bridge);
+        }
+    }
+
+    fn foreground_route(&self) -> ForegroundRoute {
+        let app = self.platform.foreground_app();
+        let kind = self.platform.classify_app(&app);
+        ForegroundRoute::new(app, kind)
+    }
+
+    fn log_foreground_change(&self, fg: &ForegroundRoute) {
         static LAST_FG_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let prev_fg = LAST_FG_PID.load(std::sync::atomic::Ordering::Relaxed);
-        if fg_pid != prev_fg {
-            LAST_FG_PID.store(fg_pid, std::sync::atomic::Ordering::Relaxed);
-            log!("FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}", trunc(&fg_title, 40), fg_pid, fg.exe_name, our_window_focused, word_is_foreground, is_browser, self.last_user_pid);
+        if fg.app.pid != prev_fg {
+            LAST_FG_PID.store(fg.app.pid, std::sync::atomic::Ordering::Relaxed);
+            log!(
+                "FG: '{}' pid={} exe='{}' our={} word={} browser={} last_user={}",
+                trunc(&fg.app.title, 40),
+                fg.app.pid,
+                fg.app.exe_name,
+                fg.our_window_focused,
+                fg.word_is_foreground,
+                fg.is_browser,
+                self.last_user_pid
+            );
+        }
+    }
+
+    fn preselect_browser_bridge(&mut self, fg: &ForegroundRoute) {
+        if !fg.is_browser {
+            return;
         }
 
-        // Pre-select active bridge to match the foreground app kind.
-        // Without this, active_idx stays on its initial value (Word Add-in,
-        // bridge 0) until some bridge returns non-empty ctx. If Browser
-        // bridge returns None on early polls (data file not written yet
-        // because the extension hasn't sent anything, or read rate-limited
-        // to 100ms, or modified-time-unchanged short-circuit), active_idx
-        // sticks on Word Add-in. The is_com check at ~line 6147 then sees
-        // "Word Add-in" and SKIPS update_grammar_errors — so typing in
-        // Chrome never produces spell-check underlines until something
-        // else flips active_idx. This was the observed regression during
-        // 2026-05-14 browser-bridge testing.
-        //
-        // Pre-selection by fg kind makes the is_com check robust: active
-        // stays on Browser even while Browser bridge has no data yet.
-        // The actual read_context attempt below still gets to override if
-        // a different bridge has data, but the default is right.
-        if is_browser {
-            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
-                if self.active_idx != browser_idx {
-                    log!("Pre-select Browser bridge (fg={}, was active={})",
-                        fg.exe_name, self.bridges[self.active_idx].name());
-                    self.active_idx = browser_idx;
-                }
+        if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
+            if self.active_idx != browser_idx {
+                log!(
+                    "Pre-select Browser bridge (fg={}, was active={})",
+                    fg.app.exe_name,
+                    self.bridges[self.active_idx].name()
+                );
+                self.active_idx = browser_idx;
             }
         }
+    }
 
+    fn try_word_addin_context(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
         // Word Add-in bridge is data-driven (HTTP POST), not foreground-driven.
         // Check it first only while Word owns the active writing context. If
         // Slack/Notes/etc. is foreground, the cached add-in text is stale and
-        // must not beat the AX bridge.
+        // must not beat the platform AX/UIA bridge.
         let active_is_word = self.bridges.get(self.active_idx)
             .map(|b| b.name().contains("Word"))
             .unwrap_or(false);
-        if word_is_foreground || (our_window_focused && active_is_word && !is_browser) {
-            for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name() == "Word Add-in" {
-                    if let Some(ctx) = bridge.read_context() {
-                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                            if self.active_idx != i {
-                                log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
-                                self.mark_bridge_switch(i);
-                            }
-                            self.active_idx = i;
-                            // Only record fg_pid as "last user pid" when it isn't
-                            // OUR app. Our app gets focus when the user clicks a
-                            // suggestion; if we record that, we lose the real
-                            // target app (Word) for subsequent focus-redirects.
-                            if !our_window_focused {
-                                self.last_user_pid = fg_pid;
-                            }
-                            self.last_context = Some(ctx.clone());
-                            return Some(ctx);
-                        }
-                    }
-                    break;
-                }
-            }
+        if !(fg.word_is_foreground || (fg.our_window_focused && active_is_word && !fg.is_browser)) {
+            return None;
         }
 
-        // Our window is foreground — return cached context.
-        // NEVER try COM calls here — causes tight loop freeze.
-        if our_window_focused {
-            self.restore_last_external_target();
-            return self.last_context.clone();
-        }
-
-        // Activate for: Word, browsers (Edge/Chrome/Firefox/...), Notepad, and
-        // — on both macOS and Windows — any other foreground app via the
-        // platform AX bridge. Earlier the Windows path bailed for AppKind::Other,
-        // so apps like Sticky Notes / WordPad / WhatsApp got no cursor tracking
-        // and no completions even though their text fields are UIA-readable.
-        // The AX bridge already handles "anything UIA exposes" via
-        // GetFocusedElement → TextPattern2 → cached fallback, so let it try.
-        let is_notepad = app_kind == platform::AppKind::Notepad;
-        let is_other = app_kind == platform::AppKind::Other;
-        let use_ax_bridge = is_notepad
-            || (cfg!(any(target_os = "macos", target_os = "windows")) && is_other);
-        let is_supported = word_is_foreground || is_browser || use_ax_bridge;
-        if !is_supported {
-            return self.last_context.clone();
-        }
-
-        // --- BROWSER ---
-        // Prefer the native-messaging Browser bridge (rich cursor info from
-        // the Chrome/Edge extension). On macOS, if that bridge has no data
-        // (no extension installed, or Safari which has no extension), fall
-        // through to the AX bridge below instead of giving up.
-        if is_browser {
-            self.last_user_was_browser = true;
-            if let Some(browser_idx) = self.bridges.iter().position(|b| b.name() == "Browser") {
-                if let Some(ctx) = self.bridges[browser_idx].read_context() {
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name() == "Word Add-in" {
+                if let Some(ctx) = bridge.read_context() {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                        // First non-empty browser context locks in the
-                        // extension-seen flag for the session. After this
-                        // point we never fall through to AX-mac for any
-                        // browser foreground — AX would otherwise read
-                        // garbage from Word/other apps in the background.
-                        self.browser_extension_seen = true;
-                        if self.active_idx != browser_idx {
-                            log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
-                            self.mark_bridge_switch(browser_idx);
+                        if self.active_idx != i {
+                            log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
+                            self.mark_bridge_switch(i);
                         }
-                        self.active_idx = browser_idx;
-                        self.last_user_pid = fg_pid;
+                        self.active_idx = i;
+                        // Only record fg_pid as "last user pid" when it isn't
+                        // OUR app. Our app gets focus when the user clicks a
+                        // suggestion; if we record that, we lose the real
+                        // target app (Word) for subsequent focus-redirects.
+                        if !fg.our_window_focused {
+                            self.last_user_pid = fg.app.pid;
+                        }
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
                     }
                 }
+                break;
             }
-            // On non-macOS: keep the original "no fallback" behaviour.
-            #[cfg(not(target_os = "macos"))]
-            {
-                return self.last_context.clone();
-            }
-            // On macOS: previously this fell through to AX-mac when
-            // browser_extension_seen was false. That flag only flipped
-            // on the FIRST non-empty Browser context — but a Chromium
-            // browser plus the companion extension can return None on
-            // many polls (rate-limit window, modified-time-unchanged
-            // short-circuit, briefly-empty bridge file between writes).
-            // Each of those polls fell through and logged
-            // "Bridge switch: Browser → Accessibility (macOS)", which
-            // then triggered the cross-app clear, wiped writing_errors,
-            // and locked update_grammar_errors out via the
-            // active=Word-Add-in early-return on the next cycle.
-            // Observed as a tight bounce loop during 2026-05-15 testing.
-            //
-            // Stricter rule: for Chromium-family browsers (the ones the
-            // companion ext targets via native messaging), NEVER fall
-            // through. If Browser bridge has nothing yet, return the
-            // cached last_context and try again next poll — don't touch
-            // AX-mac which reads garbage from background apps.
-            //
-            // Safari and Firefox don't have our extension, so they keep
-            // the original AX fallback behaviour.
-            #[cfg(target_os = "macos")]
-            {
-                let chromium_family = matches!(
-                    fg.exe_name.as_str(),
-                    "google chrome" | "microsoft edge" | "brave browser"
-                    | "opera" | "vivaldi" | "arc"
-                );
-                if chromium_family || self.browser_extension_seen {
-                    return self.last_context.clone();
-                }
-            }
-            // Else: extension not installed (Safari path), fall through
-            // to AX-mac.
+        }
+        None
+    }
+
+    fn try_browser_context(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
+        self.last_user_was_browser = true;
+        let browser_idx = self.bridges.iter().position(|b| b.name() == "Browser")?;
+        let ctx = self.bridges[browser_idx].read_context()?;
+        if ctx.word.is_empty() && ctx.sentence.is_empty() {
+            return None;
         }
 
-        // --- WORD ---
-        if word_is_foreground {
-            self.last_user_was_browser = false;
-            for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name().contains("Word") {
-                    if let Some(ctx) = bridge.read_context() {
-                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                            if self.active_idx != i {
-                                log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
-                                self.mark_bridge_switch(i);
-                            }
-                            self.active_idx = i;
-                            self.last_user_pid = fg_pid;
-                            self.last_context = Some(ctx.clone());
-                            return Some(ctx);
+        // First non-empty browser context locks in the extension-seen flag for
+        // the session. After this point macOS never falls through to AX-mac for
+        // Chromium foregrounds.
+        self.browser_extension_seen = true;
+        if self.active_idx != browser_idx {
+            log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
+            self.mark_bridge_switch(browser_idx);
+        }
+        self.active_idx = browser_idx;
+        self.last_user_pid = fg.app.pid;
+        self.last_context = Some(ctx.clone());
+        Some(ctx)
+    }
+
+    fn try_word_context(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
+        self.last_user_was_browser = false;
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name().contains("Word") {
+                if let Some(ctx) = bridge.read_context() {
+                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                        if self.active_idx != i {
+                            log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
+                            self.mark_bridge_switch(i);
                         }
+                        self.active_idx = i;
+                        self.last_user_pid = fg.app.pid;
+                        self.last_context = Some(ctx.clone());
+                        return Some(ctx);
                     }
-                    break;
                 }
+                break;
             }
-            #[cfg(target_os = "macos")]
-            {
-                for bridge in self.bridges.iter() {
-                    if bridge.name() == "Accessibility (macOS)" {
-                        bridge.set_fg_hwnd(fg_pid as isize);
-                    }
-                }
-                for (i, bridge) in self.bridges.iter().enumerate() {
-                    if bridge.name() == "Accessibility (macOS)" {
-                        if let Some(ctx) = bridge.read_context() {
-                            if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                                if self.active_idx != i {
-                                    log!("Bridge switch: {} → Accessibility (macOS) for Word fallback", self.bridges[self.active_idx].name());
-                                    self.mark_bridge_switch(i);
-                                }
-                                self.active_idx = i;
-                                self.last_user_pid = fg_pid;
-                                self.last_context = Some(ctx.clone());
-                                return Some(ctx);
-                            }
-                        }
-                        break;
-                    }
-                }
+        }
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_context_windows(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
+        let is_supported = fg.word_is_foreground || fg.is_browser || fg.is_notepad || fg.is_other;
+        if !is_supported {
+            return self.last_context.clone();
+        }
+
+        if fg.is_browser {
+            if let Some(ctx) = self.try_browser_context(fg) {
+                return Some(ctx);
             }
             return self.last_context.clone();
         }
 
-        // --- WINDOWS AX BRIDGE: Notepad + any other UIA-accessible app ---
-        // Covers Notepad, Sticky Notes, WordPad, Mail, search bars, generic
-        // Win32 + UWP text fields. The bridge tries TextPattern2 (with caret),
-        // then TextPattern v1 (Edge textareas), then ValuePattern as fallback.
-        #[cfg(target_os = "windows")]
-        if is_notepad || is_other {
+        if fg.word_is_foreground {
+            if let Some(ctx) = self.try_word_context(fg) {
+                return Some(ctx);
+            }
+            return self.last_context.clone();
+        }
+
+        // Windows UIA bridge: Notepad + any other UIA-accessible app. Covers
+        // Sticky Notes, WordPad, Mail, search bars, generic Win32 + UWP text
+        // fields.
+        if fg.is_notepad || fg.is_other {
             self.last_user_was_browser = false;
             let accessibility_idx = self.bridges
                 .iter()
                 .position(|b| b.name() == "Accessibility");
             for bridge in self.bridges.iter() {
                 if bridge.name() == "Accessibility" {
-                    bridge.set_fg_hwnd(fg_hwnd_raw);
+                    bridge.set_fg_hwnd(fg.app.handle);
                 }
             }
             if let Some(i) = accessibility_idx {
                 if self.active_idx != i {
                     log!("Bridge switch: {} → Accessibility (kind={:?})",
-                        self.bridges[self.active_idx].name(), app_kind);
+                        self.bridges[self.active_idx].name(), fg.kind);
                     self.mark_bridge_switch(i);
                 }
                 self.active_idx = i;
-                self.last_user_pid = fg_pid;
+                self.last_user_pid = fg.app.pid;
 
                 if let Some(ctx) = self.bridges[i].read_context() {
-                    // Returning this even when the text is momentarily empty
-                    // is important on Windows: modern Notepad/Sticky Notes can
+                    // Returning this even when the text is momentarily empty is
+                    // important on Windows: modern Notepad/Sticky Notes can
                     // expose a blank focused element for the first focus poll.
                     // Falling through would return Word/previous-app context
                     // and make Spell look stuck until another app switch.
@@ -832,49 +747,151 @@ impl BridgeManager {
             }
         }
 
-        // --- macOS AX fallback: Teams, Safari/Chrome inputs, TextEdit, etc. ---
-        // Runs when: foreground app isn't Word, and either isn't a browser or
-        // the browser bridge had no data. Produces context via AXStringForRange
-        // (Path 1) or AXValue (Path 2).
-        #[cfg(target_os = "macos")]
-        {
-            // Don't clobber last_user_was_browser if we landed here because
-            // the Browser bridge had no data yet (fg is still a browser).
-            // Otherwise we'd toggle the flag false → true → false every poll
-            // (Block 4 above sets true, this block clobbers to false). That
-            // breaks the poll loop's "else if last_user_was_browser" branch
-            // which is what populates last_doc_text from the extension's
-            // file. Only reset for genuine non-browser fallback (Word fg
-            // without Add-in data, or Notes/Slack/TextEdit fg).
-            if !is_browser {
-                self.last_user_was_browser = false;
+        self.last_context.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read_context_macos(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
+        let use_ax_bridge = fg.is_notepad || fg.is_other;
+        let is_supported = fg.word_is_foreground || fg.is_browser || use_ax_bridge;
+        if !is_supported {
+            return self.last_context.clone();
+        }
+
+        if fg.is_browser {
+            if let Some(ctx) = self.try_browser_context(fg) {
+                return Some(ctx);
             }
-            for bridge in self.bridges.iter() {
-                if bridge.name() == "Accessibility (macOS)" {
-                    // Pass PID via the existing hwnd plumbing.
-                    bridge.set_fg_hwnd(fg_pid as isize);
-                }
-            }
-            for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name() == "Accessibility (macOS)" {
-                    if let Some(ctx) = bridge.read_context() {
-                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                            if self.active_idx != i {
-                                log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
-                                self.mark_bridge_switch(i);
-                            }
-                            self.active_idx = i;
-                            self.last_user_pid = fg_pid;
-                            self.last_context = Some(ctx.clone());
-                            return Some(ctx);
-                        }
-                    }
-                    break;
-                }
+
+            // Chromium-family browsers have native-messaging support. If the
+            // Browser bridge has no fresh data, keep the cached Browser context
+            // and never fall through to AX-mac, which can read stale background
+            // app text. Safari and Firefox keep the AX fallback path.
+            let chromium_family = matches!(
+                fg.app.exe_name.as_str(),
+                "google chrome" | "microsoft edge" | "brave browser"
+                | "opera" | "vivaldi" | "arc"
+            );
+            if chromium_family || self.browser_extension_seen {
+                return self.last_context.clone();
             }
         }
 
+        if fg.word_is_foreground {
+            if let Some(ctx) = self.try_word_context(fg) {
+                return Some(ctx);
+            }
+            if let Some(ctx) = self.try_macos_word_ax_fallback(fg) {
+                return Some(ctx);
+            }
+            return self.last_context.clone();
+        }
+
+        if let Some(ctx) = self.try_macos_ax_context(fg) {
+            return Some(ctx);
+        }
         self.last_context.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn try_macos_word_ax_fallback(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
+        for bridge in self.bridges.iter() {
+            if bridge.name() == "Accessibility (macOS)" {
+                bridge.set_fg_hwnd(fg.app.pid as isize);
+            }
+        }
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name() == "Accessibility (macOS)" {
+                if let Some(ctx) = bridge.read_context() {
+                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                        if self.active_idx != i {
+                            log!("Bridge switch: {} → Accessibility (macOS) for Word fallback", self.bridges[self.active_idx].name());
+                            self.mark_bridge_switch(i);
+                        }
+                        self.active_idx = i;
+                        self.last_user_pid = fg.app.pid;
+                        self.last_context = Some(ctx.clone());
+                        return Some(ctx);
+                    }
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn try_macos_ax_context(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
+        // Don't clobber last_user_was_browser if we landed here because the
+        // Browser bridge had no data yet (fg is still a browser). Otherwise
+        // we'd toggle the flag false → true → false every poll and break the
+        // browser full-document path.
+        if !fg.is_browser {
+            self.last_user_was_browser = false;
+        }
+        for bridge in self.bridges.iter() {
+            if bridge.name() == "Accessibility (macOS)" {
+                bridge.set_fg_hwnd(fg.app.pid as isize);
+            }
+        }
+        for (i, bridge) in self.bridges.iter().enumerate() {
+            if bridge.name() == "Accessibility (macOS)" {
+                if let Some(ctx) = bridge.read_context() {
+                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                        if self.active_idx != i {
+                            log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
+                            self.mark_bridge_switch(i);
+                        }
+                        self.active_idx = i;
+                        self.last_user_pid = fg.app.pid;
+                        self.last_context = Some(ctx.clone());
+                        return Some(ctx);
+                    }
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    fn read_context(&mut self) -> Option<CursorContext> {
+        #[cfg(target_os = "windows")]
+        {
+            if crate::platform::windows::idle_millis() > 10_000 {
+                return self.last_context.clone();
+            }
+        }
+
+        self.maybe_late_connect_word_bridge();
+        let fg = self.foreground_route();
+        self.log_foreground_change(&fg);
+        self.preselect_browser_bridge(&fg);
+
+        if let Some(ctx) = self.try_word_addin_context(&fg) {
+            return Some(ctx);
+        }
+
+        // Our window is foreground — return cached context.
+        // NEVER try COM calls here — causes tight loop freeze.
+        if fg.our_window_focused {
+            self.restore_last_external_target();
+            return self.last_context.clone();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            return self.read_context_windows(&fg);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            return self.read_context_macos(&fg);
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            self.last_context.clone()
+        }
     }
 
     fn active_bridge(&self) -> Option<&dyn TextBridge> {
