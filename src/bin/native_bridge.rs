@@ -9,18 +9,34 @@
 
 use serde_json::Value;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(
+        lpExistingFileName: *const u16,
+        lpNewFileName: *const u16,
+        dwFlags: u32,
+    ) -> i32;
+}
 
 fn data_path() -> PathBuf {
     std::env::temp_dir().join("spell-browser.json")
 }
 
-/// Sibling tmp file used to make data_path() writes atomic
-/// (write to .tmp, then rename onto the final path).
-fn data_tmp_path() -> PathBuf {
-    std::env::temp_dir().join("spell-browser.json.tmp")
+/// Sibling tmp file used to make writes replace the final payload cleanly.
+/// Include the process id so two browser profiles/native hosts do not fight
+/// over the same .tmp name while they both target spell-browser.json.
+fn tmp_path_for(final_path: &Path) -> PathBuf {
+    let mut name = final_path
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| "spell-browser.json".into());
+    name.push(format!(".{}.tmp", std::process::id()));
+    final_path.with_file_name(name)
 }
 
 fn reply_path() -> PathBuf {
@@ -31,31 +47,65 @@ fn log_path() -> PathBuf {
     std::env::temp_dir().join("spell-native-bridge.log")
 }
 
-/// Atomically replace `data_path()` with `data`.
+/// Replace `final_path` with `data` without ever exposing partial JSON.
 ///
 /// The previous implementation called `std::fs::write(data_path(), data)`
 /// directly. Native messaging payloads can be up to ~1 MB, and a writer
 /// can be interrupted mid-write; if the desktop side read concurrently
 /// it would see a truncated file and fail JSON parsing. Writing to a
-/// sibling `.tmp` and then `rename`ing is atomic on both POSIX and
-/// Win32 within the same filesystem, so the desktop either sees the
-/// previous complete payload or the new complete payload — never a
-/// half-flushed mix.
-fn write_data_atomic(data: &[u8]) -> io::Result<()> {
-    let tmp = data_tmp_path();
-    let final_path = data_path();
+/// sibling `.tmp` and then replacing the final file means the desktop
+/// either sees the previous complete payload or the new complete payload.
+fn write_data_atomic_to(final_path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = tmp_path_for(final_path);
     // Write to tmp first
     if let Err(e) = std::fs::write(&tmp, data) {
         // Best-effort cleanup; ignore rm errors so we surface the write error
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    // Rename onto the final path. On failure leave no half-state behind.
-    if let Err(e) = std::fs::rename(&tmp, &final_path) {
+    // Replace the final path. On failure leave no half-state behind.
+    if let Err(e) = replace_file(&tmp, final_path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(())
+}
+
+fn write_data_atomic(data: &[u8]) -> io::Result<()> {
+    write_data_atomic_to(&data_path(), data)
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, final_path: &Path) -> io::Result<()> {
+    std::fs::rename(tmp, final_path)
+}
+
+#[cfg(windows)]
+fn replace_file(tmp: &Path, final_path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
+
+    let tmp_w: Vec<u16> = tmp.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let final_w: Vec<u16> = final_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let ok = unsafe {
+        MoveFileExW(
+            tmp_w.as_ptr(),
+            final_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn log(msg: &str) {
@@ -211,4 +261,25 @@ fn main() {
 
     alive.store(false, std::sync::atomic::Ordering::Relaxed);
     log("Native bridge exiting");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_data_atomic_to_overwrites_existing_file() {
+        let final_path = std::env::temp_dir().join(format!(
+            "spell-native-bridge-test-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&final_path);
+        std::fs::write(&final_path, br#"{"old":true}"#).unwrap();
+
+        write_data_atomic_to(&final_path, br#"{"new":true}"#).unwrap();
+
+        let actual = std::fs::read_to_string(&final_path).unwrap();
+        assert_eq!(actual, r#"{"new":true}"#);
+        let _ = std::fs::remove_file(&final_path);
+    }
 }

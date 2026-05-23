@@ -195,6 +195,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release --bin acatts-rust --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Also build the browser-companion native messaging host. The
           # desktop's src/native_host.rs auto-registration looks for
           # native_bridge.exe next to Spell.exe at startup; without this
@@ -205,6 +206,7 @@ jobs:
           # and the browser extension's chrome.runtime.connectNative call
           # silently fails (no host registered with Chrome).
           cargo build --release --bin native_bridge --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Cargo build download diagnostic
         id: download_diag
