@@ -559,6 +559,17 @@ impl TextBridge for AccessibilityBridge {
     }
 
     fn set_fg_hwnd(&self, hwnd: isize) {
+        if hwnd != self.fg_hwnd.get() {
+            bridge_log(&format!(
+                "Foreground HWND changed: {} → {} — clearing cached UIA text",
+                self.fg_hwnd.get(),
+                hwnd
+            ));
+            self.edit_hwnd.set(0);
+            self.cached_doc.borrow_mut().clear();
+            *self.saved_element.borrow_mut() = None;
+            self.saved_element_pid.set(0);
+        }
         self.fg_hwnd.set(hwnd);
     }
 }

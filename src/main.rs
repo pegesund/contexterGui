@@ -800,28 +800,35 @@ impl BridgeManager {
         #[cfg(target_os = "windows")]
         if is_notepad || is_other {
             self.last_user_was_browser = false;
+            let accessibility_idx = self.bridges
+                .iter()
+                .position(|b| b.name() == "Accessibility");
             for bridge in self.bridges.iter() {
                 if bridge.name() == "Accessibility" {
                     bridge.set_fg_hwnd(fg_hwnd_raw);
                 }
             }
-            for (i, bridge) in self.bridges.iter().enumerate() {
-                if bridge.name() == "Accessibility" {
-                    if let Some(ctx) = bridge.read_context() {
-                        if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                            if self.active_idx != i {
-                                log!("Bridge switch: {} → Accessibility (kind={:?})",
-                                    self.bridges[self.active_idx].name(), app_kind);
-                                self.mark_bridge_switch(i);
-                            }
-                            self.active_idx = i;
-                            self.last_user_pid = fg_pid;
-                            self.last_context = Some(ctx.clone());
-                            return Some(ctx);
-                        }
-                    }
-                    break;
+            if let Some(i) = accessibility_idx {
+                if self.active_idx != i {
+                    log!("Bridge switch: {} → Accessibility (kind={:?})",
+                        self.bridges[self.active_idx].name(), app_kind);
+                    self.mark_bridge_switch(i);
                 }
+                self.active_idx = i;
+                self.last_user_pid = fg_pid;
+
+                if let Some(ctx) = self.bridges[i].read_context() {
+                    // Returning this even when the text is momentarily empty
+                    // is important on Windows: modern Notepad/Sticky Notes can
+                    // expose a blank focused element for the first focus poll.
+                    // Falling through would return Word/previous-app context
+                    // and make Spell look stuck until another app switch.
+                    self.last_context = Some(ctx.clone());
+                    return Some(ctx);
+                }
+
+                self.last_context = None;
+                return None;
             }
         }
 
@@ -5542,6 +5549,8 @@ impl eframe::App for ContextApp {
                 self.cached_mtag_supplement = None;
                 self.selected_completion = None;
                 self.last_caret_pos = None;
+                self.manager.clear_context();
+                self.manager.last_user_was_browser = now_browser;
 
                 // Per-app error isolation: each writing app's errors are
                 // scoped to that app, so a switch to a *different* writing
@@ -5594,15 +5603,6 @@ impl eframe::App for ContextApp {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
                         self.prev_fg_pid, fg.pid,
                         self.writing_errors.len(), self.paragraph_texts.len());
-                    // Sync last_user_was_browser with the NEW foreground so
-                    // BridgeManager.read_full_document at main.rs:~939 routes
-                    // to the right bridge after the switch. Without this,
-                    // the flag stays true from the previous Chrome session,
-                    // read_full_document always pulls from /tmp/spell-browser.json
-                    // (stale browser data), and the destination app's
-                    // pipeline reprocesses Chrome content as if the user
-                    // typed it in Word/Notes/etc.
-                    self.manager.last_user_was_browser = now_browser;
                     self.manager.clear_all_error_underlines();
                     self.writing_errors.clear();
                     self.paragraph_texts.clear();
