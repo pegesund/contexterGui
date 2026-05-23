@@ -40,6 +40,7 @@ pub struct DownloadProgress {
 pub type SharedProgress = Arc<Mutex<Vec<DownloadProgress>>>;
 
 /// A file to download.
+#[derive(Clone)]
 pub struct DownloadItem {
     /// S3 object key (e.g. "lang/nb/fullform_bm.mfst")
     pub s3_key: String,

@@ -10389,7 +10389,7 @@ fn run_download_window(lang_code: &str) {
     // Append Piper TTS files (model + FST + espeak-ng for English).
     // For "en" this performs a synchronous manifest fetch (~100 ms).
     items.extend(downloader::piper_files(lang_code));
-    let progress = downloader::download_missing(items);
+    let progress = downloader::download_missing(items.clone());
 
     // If nothing to download, return immediately
     if downloader::all_done(&progress) {
@@ -10415,7 +10415,7 @@ fn run_download_window(lang_code: &str) {
     let prog = std::sync::Arc::clone(&progress);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 340.0])
+            .with_inner_size([720.0, 560.0])
             .with_decorations(true)
             .with_title(&win_title),
         ..Default::default()
@@ -10423,10 +10423,13 @@ fn run_download_window(lang_code: &str) {
 
     struct DownloadApp {
         progress: downloader::SharedProgress,
+        items: Vec<downloader::DownloadItem>,
         done: bool,
         heading: String,
         lang_code: String,
         error_text: &'static str,
+        retry_text: &'static str,
+        close_text: &'static str,
     }
 
     impl eframe::App for DownloadApp {
@@ -10444,57 +10447,106 @@ fn run_download_window(lang_code: &str) {
                     });
                     ui.add_space(16.0);
 
-                    if let Ok(items) = self.progress.lock() {
-                        for item in items.iter() {
-                            ui.horizontal(|ui| {
-                                let pct = if item.total > 0 {
-                                    item.downloaded as f32 / item.total as f32
-                                } else {
-                                    0.0
-                                };
-                                let status = if item.done {
-                                    if item.error.is_some() { "Feil" } else { "Ferdig" }
-                                } else if item.total > 0 {
-                                    ""
-                                } else {
-                                    "Ventar..."
-                                };
+                    let all_done = downloader::all_done(&self.progress);
+                    let first_error = downloader::any_error(&self.progress);
+                    let footer_height = if all_done && first_error.is_some() { 96.0 } else { 8.0 };
+                    let scroll_height = (ui.available_height() - footer_height).max(160.0);
 
-                                let color = if item.error.is_some() {
-                                    egui::Color32::from_rgb(200, 50, 50)
-                                } else if item.done {
-                                    egui::Color32::from_rgb(0, 130, 60)
-                                } else {
-                                    egui::Color32::from_rgb(50, 50, 50)
-                                };
+                    egui::ScrollArea::vertical()
+                        .id_salt("download-progress-list")
+                        .auto_shrink([false, false])
+                        .max_height(scroll_height)
+                        .show(ui, |ui| {
+                            let rows = self.progress.lock()
+                                .map(|items| grouped_download_rows(&items))
+                                .unwrap_or_default();
+                            for item in rows.iter() {
+                                    let row_width = ui.available_width();
+                                    let label_width = (row_width * 0.42).clamp(150.0, 420.0);
+                                    let progress_width = (row_width * 0.26).clamp(120.0, 220.0);
 
-                                ui.label(egui::RichText::new(&item.label).size(16.0).color(color));
-                                ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        let pct = if item.total > 0 {
+                                            item.downloaded as f32 / item.total as f32
+                                        } else {
+                                            0.0
+                                        };
+                                        let status = if item.error.is_some() {
+                                            Some("Feil".to_string())
+                                        } else if item.done {
+                                            Some("Ferdig".to_string())
+                                        } else if item.count > 1 {
+                                            Some(format!("{}/{}", item.done_count, item.count))
+                                        } else if item.total > 0 {
+                                            None
+                                        } else {
+                                            Some("Ventar...".to_string())
+                                        };
 
-                                if !status.is_empty() {
-                                    ui.label(egui::RichText::new(status).size(14.0).color(color));
-                                } else {
-                                    let bar = egui::ProgressBar::new(pct)
-                                        .desired_width(180.0)
-                                        .text(format!("{:.0}%", pct * 100.0));
-                                    ui.add(bar);
-                                    let mb = item.downloaded as f64 / (1024.0 * 1024.0);
-                                    let total_mb = item.total as f64 / (1024.0 * 1024.0);
-                                    ui.label(egui::RichText::new(
-                                        format!("{:.1}/{:.1} MB", mb, total_mb)
-                                    ).size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
-                                }
-                            });
-                            ui.add_space(4.0);
-                        }
-                    }
+                                        let color = if item.error.is_some() {
+                                            egui::Color32::from_rgb(200, 50, 50)
+                                        } else if item.done {
+                                            egui::Color32::from_rgb(0, 130, 60)
+                                        } else {
+                                            egui::Color32::from_rgb(50, 50, 50)
+                                        };
 
-                    if downloader::all_done(&self.progress) {
+                                        ui.add_sized(
+                                            [label_width, 22.0],
+                                            egui::Label::new(egui::RichText::new(item.display_label())
+                                                .size(16.0).color(color)),
+                                        );
+                                        ui.add_space(8.0);
+
+                                        if let Some(status) = status {
+                                            ui.add_sized(
+                                                [80.0, 22.0],
+                                                egui::Label::new(egui::RichText::new(status)
+                                                    .size(14.0).color(color)),
+                                            );
+                                        } else {
+                                            let bar = egui::ProgressBar::new(pct)
+                                                .desired_width(progress_width)
+                                                .text(format!("{:.0}%", pct * 100.0));
+                                            ui.add(bar);
+                                            let mb = item.downloaded as f64 / (1024.0 * 1024.0);
+                                            let total_mb = item.total as f64 / (1024.0 * 1024.0);
+                                            ui.label(egui::RichText::new(
+                                                format!("{:.1}/{:.1} MB", mb, total_mb)
+                                            ).size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                                        }
+                                    });
+
+                                    if let Some(err) = &item.error {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add_space(16.0);
+                                            ui.label(egui::RichText::new(
+                                                format!("Detalj: {}", download_error_code(err))
+                                            ).size(12.0).color(egui::Color32::from_rgb(150, 50, 50)));
+                                        });
+                                    }
+                                    ui.add_space(4.0);
+                            }
+                        });
+
+                    if all_done {
                         self.done = true;
                         ui.add_space(12.0);
-                        if downloader::any_error(&self.progress).is_some() {
+                        if let Some(err) = first_error {
+                            ui.separator();
                             ui.label(egui::RichText::new(self.error_text)
                                 .size(16.0).color(egui::Color32::from_rgb(200, 50, 50)));
+                            ui.label(egui::RichText::new(format!("Detalj: {}", download_error_code(&err)))
+                                .size(13.0).color(egui::Color32::from_rgb(100, 100, 100)));
+                            ui.horizontal(|ui| {
+                                if ui.button(self.retry_text).clicked() {
+                                    self.progress = downloader::download_missing(self.items.clone());
+                                    self.done = false;
+                                }
+                                if ui.button(self.close_text).clicked() {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                            });
                         } else {
                             // Auto-close after download completes
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -10508,9 +10560,14 @@ fn run_download_window(lang_code: &str) {
     }
 
     let error_text_static: &'static str = if lang_code == "nn" {
-        "Nedlasting feila. Start programmet på nytt."
+        "Nedlasting feila. Nokre filer manglar."
     } else {
-        "Nedlasting feilet. Start programmet på nytt."
+        "Nedlasting feilet. Noen filer mangler."
+    };
+    let retry_text_static: &'static str = if lang_code == "nn" {
+        "Prøv igjen"
+    } else {
+        "Prøv på nytt"
     };
     let _ = eframe::run_native(
         &win_title,
@@ -10518,13 +10575,70 @@ fn run_download_window(lang_code: &str) {
         Box::new(move |_cc| {
             Ok(Box::new(DownloadApp {
                 progress: prog,
+                items,
                 done: false,
                 heading: heading_text,
                 lang_code: dl_lang_code,
                 error_text: error_text_static,
+                retry_text: retry_text_static,
+                close_text: "Lukk",
             }) as Box<dyn eframe::App>)
         }),
     );
+}
+
+fn download_error_code(err: &str) -> &str {
+    err.split_whitespace().next().unwrap_or("UNKNOWN_DOWNLOAD_ERROR")
+}
+
+#[derive(Default)]
+struct DownloadDisplayRow {
+    label: String,
+    downloaded: u64,
+    total: u64,
+    done: bool,
+    error: Option<String>,
+    count: usize,
+    done_count: usize,
+}
+
+impl DownloadDisplayRow {
+    fn display_label(&self) -> String {
+        if self.count > 1 {
+            format!("{} ({})", self.label, self.count)
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
+fn grouped_download_rows(items: &[downloader::DownloadProgress]) -> Vec<DownloadDisplayRow> {
+    let mut rows: Vec<DownloadDisplayRow> = Vec::new();
+    for item in items {
+        if let Some(row) = rows.iter_mut().find(|row| row.label == item.label) {
+            row.downloaded = row.downloaded.saturating_add(item.downloaded);
+            row.total = row.total.saturating_add(item.total);
+            row.done = row.done && item.done;
+            row.count += 1;
+            if item.done {
+                row.done_count += 1;
+            }
+            if row.error.is_none() {
+                row.error = item.error.clone();
+            }
+        } else {
+            rows.push(DownloadDisplayRow {
+                label: item.label.clone(),
+                downloaded: item.downloaded,
+                total: item.total,
+                done: item.done,
+                error: item.error.clone(),
+                count: 1,
+                done_count: usize::from(item.done),
+            });
+        }
+    }
+    rows
 }
 
 fn main() -> eframe::Result {
