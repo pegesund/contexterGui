@@ -10449,7 +10449,9 @@ fn run_download_window(lang_code: &str) {
 
                     let all_done = downloader::all_done(&self.progress);
                     let first_error = downloader::any_error(&self.progress);
-                    let footer_height = if all_done && first_error.is_some() { 96.0 } else { 8.0 };
+                    let paused_on_error = first_error.is_some();
+                    let mut retry_clicked = false;
+                    let footer_height = if paused_on_error { 96.0 } else { 8.0 };
                     let scroll_height = (ui.available_height() - footer_height).max(160.0);
 
                     egui::ScrollArea::vertical()
@@ -10461,76 +10463,81 @@ fn run_download_window(lang_code: &str) {
                                 .map(|items| grouped_download_rows(&items))
                                 .unwrap_or_default();
                             for item in rows.iter() {
-                                    let row_width = ui.available_width();
-                                    let label_width = (row_width * 0.42).clamp(150.0, 420.0);
-                                    let progress_width = (row_width * 0.26).clamp(120.0, 220.0);
+                                let row_width = ui.available_width();
+                                let label_width = (row_width * 0.42).clamp(150.0, 420.0);
+                                let progress_width = (row_width * 0.26).clamp(120.0, 220.0);
 
-                                    ui.horizontal(|ui| {
-                                        let pct = if item.total > 0 {
-                                            item.downloaded as f32 / item.total as f32
-                                        } else {
-                                            0.0
-                                        };
-                                        let status = if item.error.is_some() {
-                                            Some("Feil".to_string())
-                                        } else if item.done {
-                                            Some("Ferdig".to_string())
-                                        } else if item.count > 1 {
-                                            Some(format!("{}/{}", item.done_count, item.count))
-                                        } else if item.total > 0 {
-                                            None
-                                        } else {
-                                            Some("Ventar...".to_string())
-                                        };
+                                ui.horizontal(|ui| {
+                                    let pct = if item.total > 0 {
+                                        item.downloaded as f32 / item.total as f32
+                                    } else {
+                                        0.0
+                                    };
+                                    let status = if item.error.is_some() {
+                                        Some("Feil".to_string())
+                                    } else if item.done {
+                                        Some("Ferdig".to_string())
+                                    } else if item.count > 1 {
+                                        Some(format!("{}/{}", item.done_count, item.count))
+                                    } else if item.total > 0 {
+                                        None
+                                    } else {
+                                        Some("Ventar...".to_string())
+                                    };
 
-                                        let color = if item.error.is_some() {
-                                            egui::Color32::from_rgb(200, 50, 50)
-                                        } else if item.done {
-                                            egui::Color32::from_rgb(0, 130, 60)
-                                        } else {
-                                            egui::Color32::from_rgb(50, 50, 50)
-                                        };
+                                    let color = if item.error.is_some() {
+                                        egui::Color32::from_rgb(200, 50, 50)
+                                    } else if item.done {
+                                        egui::Color32::from_rgb(0, 130, 60)
+                                    } else {
+                                        egui::Color32::from_rgb(50, 50, 50)
+                                    };
 
+                                    ui.add_sized(
+                                        [label_width, 22.0],
+                                        egui::Label::new(egui::RichText::new(item.display_label())
+                                            .size(16.0).color(color)),
+                                    );
+                                    ui.add_space(8.0);
+
+                                    if let Some(status) = status {
                                         ui.add_sized(
-                                            [label_width, 22.0],
-                                            egui::Label::new(egui::RichText::new(item.display_label())
-                                                .size(16.0).color(color)),
+                                            [80.0, 22.0],
+                                            egui::Label::new(egui::RichText::new(status)
+                                                .size(14.0).color(color)),
                                         );
-                                        ui.add_space(8.0);
-
-                                        if let Some(status) = status {
-                                            ui.add_sized(
-                                                [80.0, 22.0],
-                                                egui::Label::new(egui::RichText::new(status)
-                                                    .size(14.0).color(color)),
-                                            );
-                                        } else {
-                                            let bar = egui::ProgressBar::new(pct)
-                                                .desired_width(progress_width)
-                                                .text(format!("{:.0}%", pct * 100.0));
-                                            ui.add(bar);
-                                            let mb = item.downloaded as f64 / (1024.0 * 1024.0);
-                                            let total_mb = item.total as f64 / (1024.0 * 1024.0);
-                                            ui.label(egui::RichText::new(
-                                                format!("{:.1}/{:.1} MB", mb, total_mb)
-                                            ).size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
-                                        }
-                                    });
-
-                                    if let Some(err) = &item.error {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.add_space(16.0);
-                                            ui.label(egui::RichText::new(
-                                                format!("Detalj: {}", download_error_code(err))
-                                            ).size(12.0).color(egui::Color32::from_rgb(150, 50, 50)));
-                                        });
+                                    } else {
+                                        let bar = egui::ProgressBar::new(pct)
+                                            .desired_width(progress_width)
+                                            .text(format!("{:.0}%", pct * 100.0));
+                                        ui.add(bar);
+                                        let mb = item.downloaded as f64 / (1024.0 * 1024.0);
+                                        let total_mb = item.total as f64 / (1024.0 * 1024.0);
+                                        ui.label(egui::RichText::new(
+                                            format!("{:.1}/{:.1} MB", mb, total_mb)
+                                        ).size(13.0).color(egui::Color32::from_rgb(120, 120, 120)));
                                     }
-                                    ui.add_space(4.0);
+
+                                    if item.error.is_some()
+                                        && ui.button("↻").on_hover_text(self.retry_text).clicked()
+                                    {
+                                        retry_clicked = true;
+                                    }
+                                });
+
+                                if let Some(err) = &item.error {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.add_space(16.0);
+                                        ui.label(egui::RichText::new(
+                                            format!("Detalj: {}", download_error_code(err))
+                                        ).size(12.0).color(egui::Color32::from_rgb(150, 50, 50)));
+                                    });
+                                }
+                                ui.add_space(4.0);
                             }
                         });
 
-                    if all_done {
-                        self.done = true;
+                    if paused_on_error {
                         ui.add_space(12.0);
                         if let Some(err) = first_error {
                             ui.separator();
@@ -10540,17 +10547,23 @@ fn run_download_window(lang_code: &str) {
                                 .size(13.0).color(egui::Color32::from_rgb(100, 100, 100)));
                             ui.horizontal(|ui| {
                                 if ui.button(self.retry_text).clicked() {
-                                    self.progress = downloader::download_missing(self.items.clone());
-                                    self.done = false;
+                                    retry_clicked = true;
                                 }
                                 if ui.button(self.close_text).clicked() {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                 }
                             });
-                        } else {
-                            // Auto-close after download completes
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
+                    } else if all_done {
+                        self.done = true;
+                        ui.add_space(12.0);
+                        // Auto-close after download completes
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    if retry_clicked {
+                        self.progress = downloader::download_missing(self.items.clone());
+                        self.done = false;
                     }
                 });
 

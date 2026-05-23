@@ -887,6 +887,11 @@ pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
                         p[i].error = Some(e);
                         p[i].done = true;
                     }
+                    // Stop at the failed package. The download window keeps
+                    // the failed row visible with a retry action; retrying
+                    // requeues only files that are still missing, then
+                    // continues from this point.
+                    break;
                 }
             }
         })
