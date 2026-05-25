@@ -43,13 +43,13 @@ fn bundled_dll(name: &str) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
     let path = exe_dir.join("Frameworks").join(name);
-    path.exists().then(|| path.to_string_lossy().into_owned())
+    path.exists().then(|| path_to_swi_string(&path))
 }
 
 fn push_existing_path(paths: &mut Vec<String>, path: impl AsRef<Path>) {
     let path = path.as_ref();
     if path.exists() {
-        let candidate = path.to_string_lossy().into_owned();
+        let candidate = path_to_swi_string(path);
         if !paths.iter().any(|p| p.eq_ignore_ascii_case(&candidate)) {
             paths.push(candidate);
         }
@@ -59,18 +59,40 @@ fn push_existing_path(paths: &mut Vec<String>, path: impl AsRef<Path>) {
 fn env_file(var: &str) -> Option<String> {
     std::env::var(var).ok().and_then(|value| {
         let path = PathBuf::from(value);
-        path.exists().then(|| path.to_string_lossy().into_owned())
+        path.exists().then(|| path_to_swi_string(&path))
     })
 }
 
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    let candidate = path
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{}", rest))
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
+fn canonical_for_swi(path: PathBuf) -> PathBuf {
+    path.canonicalize()
+        .map(strip_verbatim_prefix)
+        .unwrap_or(path)
+}
+
+fn path_to_swi_string(path: &Path) -> String {
+    strip_verbatim_prefix(path.to_path_buf())
         .to_string_lossy()
+        .into_owned()
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    let path = strip_verbatim_prefix(path);
+    let candidate = path_to_swi_string(&path)
         .replace('/', "\\")
         .to_ascii_lowercase();
     if !paths.iter().any(|existing| {
-        existing
-            .to_string_lossy()
+        path_to_swi_string(existing)
             .replace('/', "\\")
             .to_ascii_lowercase()
             == candidate
@@ -206,7 +228,7 @@ fn find_swipl_dll() -> String {
     let candidates = swipl_dll_candidates();
     for path in &candidates {
         if path.exists() {
-            return path.to_string_lossy().into_owned();
+            return path_to_swi_string(path);
         }
     }
 
@@ -225,7 +247,7 @@ fn swipl_home_for_dll(swipl_path: &str) -> Option<PathBuf> {
 
     let app_home = dll_parent.join("../Resources/swipl");
     if app_home.join("boot.prc").exists() {
-        return Some(app_home.canonicalize().unwrap_or(app_home));
+        return Some(canonical_for_swi(app_home));
     }
 
     for candidate in [
@@ -237,7 +259,7 @@ fn swipl_home_for_dll(swipl_path: &str) -> Option<PathBuf> {
     .flatten()
     {
         if candidate.join("boot.prc").exists() && candidate.join("library").is_dir() {
-            return Some(candidate.canonicalize().unwrap_or(candidate));
+            return Some(canonical_for_swi(candidate));
         }
     }
 
@@ -245,7 +267,13 @@ fn swipl_home_for_dll(swipl_path: &str) -> Option<PathBuf> {
 }
 
 pub fn configure_swipl_home_env() {
-    if std::env::var("SWI_HOME_DIR").is_ok() {
+    if let Ok(home) = std::env::var("SWI_HOME_DIR") {
+        let normalized = path_to_swi_string(Path::new(&home));
+        if normalized != home {
+            unsafe {
+                std::env::set_var("SWI_HOME_DIR", normalized);
+            }
+        }
         return;
     }
 
@@ -255,7 +283,7 @@ pub fn configure_swipl_home_env() {
     };
 
     unsafe {
-        std::env::set_var("SWI_HOME_DIR", &home);
+        std::env::set_var("SWI_HOME_DIR", path_to_swi_string(&home));
     }
 }
 
