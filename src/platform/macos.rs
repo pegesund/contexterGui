@@ -16,6 +16,34 @@ fn bundled_framework(name: &str) -> Option<String> {
     path.exists().then(|| path.to_string_lossy().into_owned())
 }
 
+fn find_swipl_dylib() -> String {
+    if let Some(path) = bundled_framework("libswipl.dylib") {
+        return path;
+    }
+
+    if let Ok(path) = std::env::var("SPELL_SWIPL_DYLIB") {
+        if std::path::Path::new(&path).exists() {
+            return path;
+        }
+    }
+
+    for path in [
+        "/opt/homebrew/opt/swi-prolog/lib/swipl/lib/arm64-darwin/libswipl.dylib",
+        "/opt/homebrew/lib/swipl/lib/arm64-darwin/libswipl.dylib",
+        "/opt/homebrew/lib/libswipl.dylib",
+        "/usr/local/opt/swi-prolog/lib/swipl/lib/x86_64-darwin/libswipl.dylib",
+        "/usr/local/lib/swipl/lib/x86_64-darwin/libswipl.dylib",
+        "/usr/local/lib/libswipl.dylib",
+        "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+
+    "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib".to_string()
+}
+
 /// Log each distinct caret-trace message at most once per 3s.
 fn trace_caret(msg: &str) {
     static LAST: std::sync::OnceLock<Mutex<(String, Instant)>> = std::sync::OnceLock::new();
@@ -423,11 +451,7 @@ impl PlatformServices for MacPlatform {
 
     fn swipl_path(&self) -> &str {
         static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        PATH.get_or_init(|| {
-            bundled_framework("libswipl.dylib")
-                .unwrap_or_else(|| "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib".to_string())
-        })
-        .as_str()
+        PATH.get_or_init(find_swipl_dylib).as_str()
     }
 
     fn init_tts(&self, lang: &dyn language::LanguageVoice) {
