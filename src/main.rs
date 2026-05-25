@@ -6293,96 +6293,26 @@ impl eframe::App for ContextApp {
                     log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
-            // Update caret position — platform-specific or from bridge context.
-            // On macOS we also poll for AppKind::Other (Teams, Slack, TextEdit,
-            // etc.) so the follow-cursor window tracks those apps via the AX
-            // bridge. The classification doesn't cover every Electron app, so
-            // widening here is intentional. AppKind::Notepad is included
-            // unconditionally so Notepad (Windows + TextEdit on Mac) gets the
-            // same explicit caret-tracking path as Word/Browser — without it,
-            // the popup stayed at its last position because the only update
-            // site was the silent fallback at the post-poll branch below.
+            // Update caret position — source selection and coordinate
+            // normalization are platform policy.
             {
                 let fg = self.platform.foreground_app();
                 let kind = self.platform.classify_app(&fg);
-                let ax_poll_kinds = kind == platform::AppKind::Word
-                    || kind == platform::AppKind::Browser
-                    || kind == platform::AppKind::Notepad
-                    || (cfg!(target_os = "macos") && kind == platform::AppKind::Other);
-                if ax_poll_kinds {
-                    // Pick the caret source by foreground-app kind:
-                    //   - Word / Notepad / Other (writing apps): platform AX
-                    //     queries the focused element directly, accurate to a
-                    //     few pixels.
-                    //   - Browser: prefer the extension's bridge-reported
-                    //     caretX/Y. The companion ext computes the cursor
-                    //     position in the actual textarea / contenteditable
-                    //     via DOM (mirror-div for textareas, Range.getClientRects
-                    //     for contenteditable) — pixel-accurate for normal
-                    //     web inputs. Platform AX in Chrome is unreliable for
-                    //     in-page elements: it returns the AXTextField AX
-                    //     rect from Chrome's own UI (location bar / search
-                    //     box / nothing), not the in-page cursor — so the
-                    //     Spell popup landed in the wrong place for every
-                    //     web form.
-                    //
-                    // Reported 2026-05-15: "our desktop app positioning with
-                    // browser just not work properly. app should be
-                    // positioned under cursor exactly the same way it works
-                    // with native desktop apps."
+                if self.platform.should_poll_caret_position(kind) {
                     let plat_caret = self.platform.caret_screen_position();
-                    // The browser content script always sends caret coords
-                    // in PHYSICAL pixels — see viewportToScreen() in
-                    // extension/content.js, which multiplies the viewport
-                    // position by window.devicePixelRatio. On Windows the
-                    // desktop later divides by ctx.pixels_per_point() (the
-                    // `caret_is_physical_pixels()` branch at line ~7012),
-                    // so physical-in / physical-stored is fine.  On macOS
-                    // platform AX returns LOGICAL points, so
-                    // caret_is_physical_pixels() returns false and the
-                    // divide step is skipped — meaning a Retina (dpr=2)
-                    // bridge value would end up roughly 2× too large,
-                    // pushing the Spell window way off the bottom of the
-                    // screen. Reported 2026-05-18: "On browser, app is
-                    // not positioning itself correctly. And sometimes it
-                    // goes so much below the screen it just goes out of
-                    // view and I can't even see the app anymore."
                     let bridge_caret_raw = ctx_result.as_ref().and_then(|c| c.caret_pos);
-                    let bridge_caret = if self.platform.caret_is_physical_pixels() {
-                        bridge_caret_raw
-                    } else {
-                        let ppp = ctx.pixels_per_point().max(1.0);
-                        bridge_caret_raw.map(|(x, y)| (
-                            (x as f32 / ppp).round() as i32,
-                            (y as f32 / ppp).round() as i32,
-                        ))
-                    };
-                    let prefer_bridge = kind == platform::AppKind::Browser;
-
-                    // Apply the +49 vertical offset only to platform-AX
-                    // coords (it's the historical Word taskbar/title-bar
-                    // adjust). Bridge coords from the extension are already
-                    // in screen space.
-                    let plat_with_offset = plat_caret.map(|(x, y)| (x, y + 49));
-                    let bridge_nonzero = bridge_caret.filter(|(x, y)| *x != 0 || *y != 0);
-
-                    let (chosen, source): (Option<(i32, i32)>, &str) = if prefer_bridge {
-                        match (bridge_nonzero, plat_with_offset) {
-                            (Some(p), _) => (Some(p), "bridge"),
-                            (None, Some(p)) => (Some(p), "platform"),
-                            _ => (None, ""),
-                        }
-                    } else {
-                        match (plat_with_offset, bridge_nonzero) {
-                            (Some(p), _) => (Some(p), "platform"),
-                            (None, Some(p)) => (Some(p), "bridge"),
-                            _ => (None, ""),
-                        }
-                    };
-
-                    if let Some(new_pos) = chosen {
+                    if let Some(decision) = self.platform.choose_caret_position(
+                        kind,
+                        plat_caret,
+                        bridge_caret_raw,
+                        ctx.pixels_per_point(),
+                    ) {
+                        let new_pos = decision.position;
                         if self.last_caret_pos != Some(new_pos) {
-                            log!("caret from {}: ({}, {}) [fg_kind={:?}]", source, new_pos.0, new_pos.1, kind);
+                            log!(
+                                "caret from {}: ({}, {}) [fg_kind={:?}]",
+                                decision.source, new_pos.0, new_pos.1, kind
+                            );
                             self.last_caret_pos = Some(new_pos);
                         }
                     } else {
@@ -6399,22 +6329,11 @@ impl eframe::App for ContextApp {
 
             if let Some(new_ctx) = ctx_result {
                 // Update caret position from bridge context (Windows fallback).
-                // Same physical-vs-logical conversion as the Browser branch
-                // above — extension sends physical px, macOS pos code expects
-                // logical pt. Without this divide the window jumps to ~2×
-                // depth on Retina displays for any bridge that reports caret
-                // coords on macOS.
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
-                        if self.platform.caret_is_physical_pixels() {
-                            self.last_caret_pos = Some((x, y));
-                        } else {
-                            let ppp = ctx.pixels_per_point().max(1.0);
-                            self.last_caret_pos = Some((
-                                (x as f32 / ppp).round() as i32,
-                                (y as f32 / ppp).round() as i32,
-                            ));
-                        }
+                        self.last_caret_pos = self
+                            .platform
+                            .normalize_bridge_caret_position(Some((x, y)), ctx.pixels_per_point());
                     }
                 }
                 let ctx_changed = new_ctx.word != self.context.word
@@ -7241,13 +7160,9 @@ impl eframe::App for ContextApp {
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
                 let slack_positioning = slack_layout;
-                // DPI scaling: Windows returns physical pixels, macOS returns logical points.
-                let (lx, ly) = if self.platform.caret_is_physical_pixels() {
-                    let dpi_scale = ctx.pixels_per_point();
-                    (x as f32 / dpi_scale, y as f32 / dpi_scale)
-                } else {
-                    (x as f32, y as f32)
-                };
+                let (lx, ly) = self
+                    .platform
+                    .caret_position_to_logical((x, y), ctx.pixels_per_point());
                 // Push the window 5 cm below the caret so it doesn't cover the line
                 // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
                 let caret_offset = self.platform.caret_offset_below();

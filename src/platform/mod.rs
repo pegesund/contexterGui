@@ -36,6 +36,13 @@ pub enum AppKind {
     Other,
 }
 
+/// Chosen caret position plus its source, for logging/debugging.
+#[derive(Debug, Clone, Copy)]
+pub struct CaretPositionDecision {
+    pub position: (i32, i32),
+    pub source: &'static str,
+}
+
 /// Platform-specific services consumed by `BridgeManager` and `ContextApp`.
 ///
 /// Every method that touches the OS goes through this trait so that the
@@ -90,6 +97,69 @@ pub trait PlatformServices: Send + Sync {
 
     /// Get the screen position of the text cursor (caret) in the focused app.
     fn caret_screen_position(&self) -> Option<(i32, i32)> { None }
+
+    /// Whether this foreground kind should trigger explicit caret polling.
+    fn should_poll_caret_position(&self, kind: AppKind) -> bool {
+        matches!(kind, AppKind::Word | AppKind::Browser | AppKind::Notepad)
+    }
+
+    /// Convert bridge-reported caret coordinates into this platform's
+    /// last-caret coordinate space.
+    fn normalize_bridge_caret_position(
+        &self,
+        caret: Option<(i32, i32)>,
+        _pixels_per_point: f32,
+    ) -> Option<(i32, i32)> {
+        caret
+    }
+
+    /// Convert platform AX/UIA caret coordinates into this platform's
+    /// last-caret coordinate space.
+    fn normalize_platform_caret_position(&self, caret: Option<(i32, i32)>) -> Option<(i32, i32)> {
+        caret.map(|(x, y)| (x, y + 49))
+    }
+
+    /// Choose between platform and bridge caret sources for the current app.
+    fn choose_caret_position(
+        &self,
+        kind: AppKind,
+        platform_caret: Option<(i32, i32)>,
+        bridge_caret: Option<(i32, i32)>,
+        pixels_per_point: f32,
+    ) -> Option<CaretPositionDecision> {
+        let platform_caret = self.normalize_platform_caret_position(platform_caret);
+        let bridge_caret = self
+            .normalize_bridge_caret_position(bridge_caret, pixels_per_point)
+            .filter(|(x, y)| *x != 0 || *y != 0);
+
+        let prefer_bridge = kind == AppKind::Browser;
+        let (position, source) = if prefer_bridge {
+            match (bridge_caret, platform_caret) {
+                (Some(pos), _) => (pos, "bridge"),
+                (None, Some(pos)) => (pos, "platform"),
+                _ => return None,
+            }
+        } else {
+            match (platform_caret, bridge_caret) {
+                (Some(pos), _) => (pos, "platform"),
+                (None, Some(pos)) => (pos, "bridge"),
+                _ => return None,
+            }
+        };
+
+        Some(CaretPositionDecision { position, source })
+    }
+
+    /// Convert a stored caret position into egui logical points.
+    fn caret_position_to_logical(&self, caret: (i32, i32), pixels_per_point: f32) -> (f32, f32) {
+        if self.caret_is_physical_pixels() {
+            let dpi_scale = pixels_per_point.max(1.0);
+            (caret.0 as f32 / dpi_scale, caret.1 as f32 / dpi_scale)
+        } else {
+            (caret.0 as f32, caret.1 as f32)
+        }
+    }
+
     fn set_tab_intercept(&self, _active: bool) {}
     fn take_tab_press(&self) -> bool { false }
     fn take_space_press(&self) -> bool { false }

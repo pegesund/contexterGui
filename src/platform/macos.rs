@@ -266,6 +266,21 @@ impl PlatformServices for MacPlatform {
     fn caret_offset_below(&self) -> f32 { 30.0 }
     fn caret_offset_right(&self) -> f32 { -38.0 }
     fn caret_is_physical_pixels(&self) -> bool { false }
+    fn should_poll_caret_position(&self, kind: AppKind) -> bool {
+        matches!(kind, AppKind::Word | AppKind::Browser | AppKind::Notepad | AppKind::Other)
+    }
+
+    fn normalize_bridge_caret_position(
+        &self,
+        caret: Option<(i32, i32)>,
+        pixels_per_point: f32,
+    ) -> Option<(i32, i32)> {
+        let ppp = pixels_per_point.max(1.0);
+        caret.map(|(x, y)| (
+            (x as f32 / ppp).round() as i32,
+            (y as f32 / ppp).round() as i32,
+        ))
+    }
 
     fn copy_to_clipboard(&self, text: &str) {
         let _ = Command::new("pbcopy")
