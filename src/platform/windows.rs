@@ -1,6 +1,9 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+const ONNX_RUNTIME_VERSION: &str = "1.24.4";
 
 /// Milliseconds since the user's last keyboard or mouse input, system-wide.
 ///
@@ -40,6 +43,184 @@ fn bundled_dll(name: &str) -> Option<String> {
     let exe_dir = exe.parent()?;
     let path = exe_dir.join("Frameworks").join(name);
     path.exists().then(|| path.to_string_lossy().into_owned())
+}
+
+fn push_existing_path(paths: &mut Vec<String>, path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    if path.exists() {
+        let candidate = path.to_string_lossy().into_owned();
+        if !paths.iter().any(|p| p.eq_ignore_ascii_case(&candidate)) {
+            paths.push(candidate);
+        }
+    }
+}
+
+fn env_file(var: &str) -> Option<String> {
+    std::env::var(var).ok().and_then(|value| {
+        let path = PathBuf::from(value);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    })
+}
+
+fn path_entries_with_file(name: &str) -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .filter(|candidate| candidate.exists())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_windows_system32(path: &Path) -> bool {
+    let lower = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    lower.ends_with("\\windows\\system32\\onnxruntime.dll")
+}
+
+fn program_files_dirs() -> Vec<PathBuf> {
+    ["ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(|var| std::env::var_os(var).map(PathBuf::from))
+        .collect()
+}
+
+fn program_files_swipl_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for root in program_files_dirs() {
+        push_swipl_dir_candidate(&mut candidates, root.join("swipl"));
+        push_swipl_dir_candidate(&mut candidates, root.join("SWI-Prolog"));
+
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.contains("swipl") || name.contains("swi-prolog") {
+                    push_swipl_dir_candidate(&mut candidates, entry.path());
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn push_swipl_dir_candidate(candidates: &mut Vec<PathBuf>, dir: PathBuf) {
+    let dll = dir.join("bin").join("libswipl.dll");
+    if dll.exists() && !candidates.iter().any(|path| path == &dll) {
+        candidates.push(dll);
+    }
+}
+
+fn find_swipl_dll() -> String {
+    if let Some(path) = bundled_dll("libswipl.dll") {
+        return path;
+    }
+
+    for var in ["SPELL_SWIPL_DLL", "SWIPL_DLL"] {
+        if let Some(path) = env_file(var) {
+            return path;
+        }
+    }
+
+    if let Ok(home) = std::env::var("SWI_HOME_DIR") {
+        let dll = PathBuf::from(home).join("bin").join("libswipl.dll");
+        if dll.exists() {
+            return dll.to_string_lossy().into_owned();
+        }
+    }
+
+    for path in [
+        PathBuf::from("C:/Program Files/swipl/bin/libswipl.dll"),
+        PathBuf::from("C:/Program Files/SWI-Prolog/bin/libswipl.dll"),
+        PathBuf::from("C:/msys64/mingw64/bin/libswipl.dll"),
+        PathBuf::from("C:/msys64/ucrt64/bin/libswipl.dll"),
+    ] {
+        if path.exists() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+
+    for path in path_entries_with_file("libswipl.dll") {
+        return path.to_string_lossy().into_owned();
+    }
+
+    for path in program_files_swipl_candidates() {
+        return path.to_string_lossy().into_owned();
+    }
+
+    "C:/Program Files/swipl/bin/libswipl.dll".to_string()
+}
+
+fn swipl_home_for_dll(swipl_path: &str) -> Option<PathBuf> {
+    let dll_parent = Path::new(swipl_path).parent()?;
+
+    let app_home = dll_parent.join("../Resources/swipl");
+    if app_home.join("boot.prc").exists() {
+        return Some(app_home.canonicalize().unwrap_or(app_home));
+    }
+
+    for candidate in [
+        dll_parent.parent().map(|p| p.to_path_buf()),
+        dll_parent.parent().map(|p| p.join("lib").join("swipl")),
+        Some(dll_parent.join("../lib/swipl")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate.join("boot.prc").exists() && candidate.join("library").is_dir() {
+            return Some(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+
+    None
+}
+
+pub fn configure_swipl_home_env() {
+    if std::env::var("SWI_HOME_DIR").is_ok() {
+        return;
+    }
+
+    let swipl_path = find_swipl_dll();
+    let Some(home) = swipl_home_for_dll(&swipl_path) else {
+        return;
+    };
+
+    unsafe { std::env::set_var("SWI_HOME_DIR", &home); }
+}
+
+fn windows_ort_candidates() -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(bundled) = bundled_dll("onnxruntime.dll") {
+        paths.push(bundled);
+    }
+    if let Some(path) = env_file("SPELL_ORT_DYLIB") {
+        paths.push(path);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_existing_path(
+        &mut paths,
+        manifest_dir.join(format!("../../onnxruntime/onnxruntime-win-x64-{ONNX_RUNTIME_VERSION}/lib/onnxruntime.dll")),
+    );
+    push_existing_path(
+        &mut paths,
+        manifest_dir.join("../../onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll"),
+    );
+    push_existing_path(
+        &mut paths,
+        format!("C:/onnxruntime/onnxruntime-win-x64-{ONNX_RUNTIME_VERSION}/lib/onnxruntime.dll"),
+    );
+    push_existing_path(
+        &mut paths,
+        "C:/onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll",
+    );
+
+    for path in path_entries_with_file("onnxruntime.dll") {
+        if !is_windows_system32(&path) {
+            push_existing_path(&mut paths, path);
+        }
+    }
+
+    paths
 }
 
 pub struct WindowsPlatform {
@@ -342,22 +523,12 @@ impl PlatformServices for WindowsPlatform {
     }
 
     fn ort_dylib_candidates(&self) -> Vec<String> {
-        let mut v = Vec::new();
-        if let Some(bundled) = bundled_dll("onnxruntime.dll") {
-            v.push(bundled);
-        }
-        v.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../onnxruntime/onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll").to_string());
-        v.push("C:\\Windows\\System32\\onnxruntime.dll".to_string());
-        v
+        windows_ort_candidates()
     }
 
     fn swipl_path(&self) -> &str {
         static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        PATH.get_or_init(|| {
-            bundled_dll("libswipl.dll")
-                .unwrap_or_else(|| "C:/Program Files/swipl/bin/libswipl.dll".to_string())
-        })
-        .as_str()
+        PATH.get_or_init(find_swipl_dll).as_str()
     }
 
     // Windows AX bridge already nudges the caret by +4 px in

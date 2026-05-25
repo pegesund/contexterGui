@@ -2069,6 +2069,14 @@ impl ContextApp {
         Option<Arc<HashMap<String, u64>>>,
         Option<EmbeddingStore>,
     )> {
+        #[cfg(target_os = "windows")]
+        if std::env::var("ORT_DYLIB_PATH").map(|s| s.is_empty()).unwrap_or(true) {
+            anyhow::bail!(
+                "ONNX Runtime 1.23+ DLL not found for Windows dev run. \
+Set ORT_DYLIB_PATH, set SPELL_ORT_DYLIB, or extract ONNX Runtime to \
+C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
+            );
+        }
         log!("Startup: Loading NorBERT4 from {}", onnx_path.display());
         log!("Startup:   tokenizer path: {}", tokenizer_path.display());
         log!("Startup:   onnx exists?    {}", onnx_path.exists());
@@ -10553,6 +10561,8 @@ fn main() -> eframe::Result {
 
     #[cfg(target_os = "macos")]
     platform::macos::configure_swipl_home_env();
+    #[cfg(target_os = "windows")]
+    platform::windows::configure_swipl_home_env();
 
     let setup_platform = platform::create_platform();
 
@@ -10585,6 +10595,29 @@ fn main() -> eframe::Result {
                 break;
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(path) = std::env::var("ORT_DYLIB_PATH") {
+        let normalized = path.replace('/', "\\").to_ascii_lowercase();
+        if normalized.ends_with("\\windows\\system32\\onnxruntime.dll") {
+            eprintln!(
+                "Ignoring incompatible Windows System32 ONNX Runtime DLL: {}",
+                path
+            );
+            unsafe { std::env::remove_var("ORT_DYLIB_PATH"); }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    if std::env::var("ORT_DYLIB_PATH").map(|s| s.is_empty()).unwrap_or(true) {
+        eprintln!(
+            "ONNX Runtime 1.23+ not found; NorBERT completions will stay disabled. \
+Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib."
+        );
+        log!(
+            "Startup: ONNX Runtime 1.23+ not found; skipped ORT fallback to avoid incompatible System32 DLL"
+        );
     }
 
     /// Test helper: block until all pending BERT worker responses are received.
