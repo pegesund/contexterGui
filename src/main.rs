@@ -10601,6 +10601,9 @@ fn main() -> eframe::Result {
     // ConcentrateDotNet does at the top of Program.cs.
     velopack::VelopackApp::build().run();
 
+    #[cfg(target_os = "macos")]
+    platform::macos::configure_swipl_home_env();
+
     let setup_platform = platform::create_platform();
 
     // Clear stale underlines from previous session (saved in document formatting)

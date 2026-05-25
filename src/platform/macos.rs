@@ -1,4 +1,5 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +43,37 @@ fn find_swipl_dylib() -> String {
     }
 
     "/Applications/SWI-Prolog.app/Contents/Frameworks/libswipl.dylib".to_string()
+}
+
+fn swipl_home_for_dylib(swipl_path: &str) -> Option<PathBuf> {
+    let dylib_parent = Path::new(swipl_path).parent()?;
+
+    let app_home = dylib_parent.join("../Resources/swipl");
+    if app_home.join("boot.prc").exists() {
+        return Some(app_home.canonicalize().unwrap_or(app_home));
+    }
+
+    for ancestor in dylib_parent.ancestors() {
+        if ancestor.join("boot.prc").exists() && ancestor.join("library").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+
+    None
+}
+
+pub fn configure_swipl_home_env() {
+    if std::env::var("SWI_HOME_DIR").is_ok() {
+        return;
+    }
+
+    let swipl_path = find_swipl_dylib();
+    let Some(home) = swipl_home_for_dylib(&swipl_path) else {
+        return;
+    };
+
+    // Called from main before MacPlatform starts polling threads.
+    unsafe { std::env::set_var("SWI_HOME_DIR", &home); }
 }
 
 /// Log each distinct caret-trace message at most once per 3s.
