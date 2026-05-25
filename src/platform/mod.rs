@@ -43,6 +43,45 @@ pub struct CaretPositionDecision {
     pub source: &'static str,
 }
 
+/// Platform policy for feeding text into the grammar checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrammarFeedPolicy {
+    /// Use a bridge paragraph read instead of full-document scanning.
+    pub use_paragraph_feed: bool,
+    /// Suppress the full-document fallback because another event source owns
+    /// grammar updates for this bridge.
+    pub suppress_full_doc_scan: bool,
+    /// Some bridges can synthesize a paragraph from offset 0 when the bridge
+    /// has not reported a cursor offset yet.
+    pub force_cursor_offset: bool,
+}
+
+impl GrammarFeedPolicy {
+    pub fn full_document() -> Self {
+        Self {
+            use_paragraph_feed: false,
+            suppress_full_doc_scan: false,
+            force_cursor_offset: false,
+        }
+    }
+
+    pub fn paragraph(force_cursor_offset: bool) -> Self {
+        Self {
+            use_paragraph_feed: true,
+            suppress_full_doc_scan: true,
+            force_cursor_offset,
+        }
+    }
+
+    pub fn external() -> Self {
+        Self {
+            use_paragraph_feed: false,
+            suppress_full_doc_scan: true,
+            force_cursor_offset: false,
+        }
+    }
+}
+
 /// Platform-specific services consumed by `BridgeManager` and `ContextApp`.
 ///
 /// Every method that touches the OS goes through this trait so that the
@@ -117,6 +156,20 @@ pub trait PlatformServices: Send + Sync {
     /// last-caret coordinate space.
     fn normalize_platform_caret_position(&self, caret: Option<(i32, i32)>) -> Option<(i32, i32)> {
         caret.map(|(x, y)| (x, y + 49))
+    }
+
+    /// Choose how the active bridge should feed text into grammar checking.
+    fn grammar_feed_policy(
+        &self,
+        active_bridge_name: &str,
+        _app: &ForegroundApp,
+        _kind: AppKind,
+    ) -> GrammarFeedPolicy {
+        if active_bridge_name == "Word COM" {
+            GrammarFeedPolicy::paragraph(false)
+        } else {
+            GrammarFeedPolicy::full_document()
+        }
     }
 
     /// Choose between platform and bridge caret sources for the current app.

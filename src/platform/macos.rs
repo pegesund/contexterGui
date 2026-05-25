@@ -1,4 +1,4 @@
-use super::{AppKind, ForegroundApp, PlatformServices};
+use super::{AppKind, ForegroundApp, GrammarFeedPolicy, PlatformServices};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -340,6 +340,26 @@ impl PlatformServices for MacPlatform {
             (x as f32 / ppp).round() as i32,
             (y as f32 / ppp).round() as i32,
         ))
+    }
+
+    fn grammar_feed_policy(
+        &self,
+        active_bridge_name: &str,
+        app: &ForegroundApp,
+        kind: AppKind,
+    ) -> GrammarFeedPolicy {
+        match active_bridge_name {
+            "Word Add-in" => GrammarFeedPolicy::external(),
+            "Accessibility (macOS)" => {
+                if matches!(kind, AppKind::Other | AppKind::Notepad) && self.is_writing_app(app) {
+                    GrammarFeedPolicy::paragraph(true)
+                } else {
+                    GrammarFeedPolicy::external()
+                }
+            }
+            "Word COM" => GrammarFeedPolicy::paragraph(false),
+            _ => GrammarFeedPolicy::full_document(),
+        }
     }
 
     fn copy_to_clipboard(&self, text: &str) {

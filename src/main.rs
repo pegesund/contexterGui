@@ -6386,62 +6386,18 @@ impl eframe::App for ContextApp {
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
                 }
-                // Incremental paragraph scan: takes the bridges that push
-                // paragraph-shaped events with stable IDs and DO implement
-                // read_paragraph_at — currently Word COM on Windows, and the
-                // macOS AX bridge (added in a96c2e3). Word Add-in has its own
-                // event-driven flow via /changed; other bridges (Windows
-                // Accessibility, Browser) need the full-document scan path.
-                //
-                // d257b6a restricted this to "Word COM" only to fix a Windows
-                // regression where the Windows Accessibility bridge was being
-                // mis-routed onto the paragraph-scan path (it has no
-                // read_paragraph_at impl) and falling through to a blocked
-                // update_grammar_errors(). That fix was too broad: it caught
-                // the macOS AX bridge in the same net, so Mac users typing in
-                // TextEdit / Notes / Pages / etc. got zero error detection
-                // (paragraph path skipped; update_grammar_errors short-circuits
-                // because Word Add-in is always registered on Mac). The
-                // explicit allowlist below restores Mac while keeping the
-                // Windows tightening.
+                // Incremental paragraph scan: platform policy decides which
+                // bridges feed paragraph-shaped events and which bridges take
+                // the full-document fallback.
                 let active_name = self.manager.active_bridge_name();
-                let is_ax_mac_bridge = active_name == "Accessibility (macOS)";
-                let _is_word_addin_bridge = active_name == "Word Add-in";
-                // Word Add-in has its own event-driven pipeline via
-                // process_addin_changed_paragraphs (driven by /changed POSTs
-                // with uniqueLocalId paragraph IDs). Running read_paragraph_at
-                // on top would duplicate every error under an "ax:0"-style
-                // paragraph_id — exactly the "4 cards for 2 underlines"
-                // regression. So we cover "Word COM" plus AX-mac, AND we
-                // additionally skip AX-mac when the foreground is Word (the
-                // AX fallback path reads Word's text but Word Add-in is
-                // authoritative for Word documents).
-                // AX-mac feeds the grammar pipeline only for non-Word writing
-                // apps (Notes / TextEdit / Slack / Teams / Pages etc.). Two
-                // earlier extremes both broke real flows:
-                //   - feeding for any AppKind::Other foreground polluted /errors
-                //     with Terminal content during a Slack→Terminal detour;
-                //   - cutting AX-mac off entirely killed every error in
-                //     Notes/TextEdit/Slack (user-reported, 2026-05-13).
-                // The gate below restores the non-Word writing apps while
-                // still blocking Terminal/code-editor leakage via
-                // is_writing_app. AX paragraph IDs are "ax:N" (start offset),
-                // distinct from Word Add-in's uniqueLocalId, so even if focus
-                // briefly tags Word the paragraph spaces don't collide.
                 let fg = self.platform.foreground_app();
                 let fg_kind = self.platform.classify_app(&fg);
-                let ax_can_feed = is_ax_mac_bridge
-                    && matches!(fg_kind, platform::AppKind::Other | platform::AppKind::Notepad)
-                    && self.platform.is_writing_app(&fg);
-                let is_com_bridge = active_name == "Word COM" || ax_can_feed;
-                if is_com_bridge {
-                    let paragraph = if is_ax_mac_bridge {
-                        self.manager.read_paragraph_at(
-                            new_ctx.cursor_doc_offset
-                                .or(self.last_known_cursor_offset)
-                                .unwrap_or(0),
-                        )
-                    } else if let Some(off) = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset) {
+                let grammar_feed = self.platform.grammar_feed_policy(active_name, &fg, fg_kind);
+                if grammar_feed.use_paragraph_feed {
+                    let offset = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset);
+                    let paragraph = if grammar_feed.force_cursor_offset {
+                        self.manager.read_paragraph_at(offset.unwrap_or(0))
+                    } else if let Some(off) = offset {
                         self.manager.read_paragraph_at(off)
                     } else {
                         None
@@ -6506,8 +6462,8 @@ impl eframe::App for ContextApp {
                                 }
                             }
                         }
-                        if big_change && !is_com_bridge {
-                            // Paste/cut/move detected — trigger grammar rescan (non-COM only)
+                        if big_change && !grammar_feed.suppress_full_doc_scan {
+                            // Paste/cut/move detected — trigger grammar rescan.
                             self.update_grammar_errors();
                             self.sync_error_underlines();
                         }
@@ -6574,25 +6530,19 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            // Scan for errors — bridges that push paragraph events run the
-            // incremental scan above; everything else takes the full-doc
-            // path via update_grammar_errors(). Must mirror is_com_bridge
-            // exactly: if we used the paragraph path above, skip the
-            // full-doc fallback here (would double-scan); if we DIDN'T use
-            // the paragraph path, run the fallback. Mismatching the two
-            // checks is what caused the regression that left "No errors
-            // found" stuck on Mac for TextEdit/Notes users (and was the
-            // original symptom on Windows Notepad before d257b6a).
-            let active_name_for_com = self.manager.active_bridge_name();
-            // Word Add-in handled separately via process_addin_changed_paragraphs;
-            // don't also run update_grammar_errors against last_doc_text — it
-            // duplicates scanning and re-pushes errors. Mirror the is_com_bridge
-            // gating above so the two paths agree.
-            let is_com = active_name_for_com == "Word COM"
-                || active_name_for_com == "Accessibility (macOS)"
-                || active_name_for_com == "Word Add-in";
+            // Scan for errors. Bridges that own incremental/external grammar
+            // updates suppress the full-document fallback.
+            let active_name_for_grammar = self.manager.active_bridge_name();
+            let fg_for_grammar = self.platform.foreground_app();
+            let fg_kind_for_grammar = self.platform.classify_app(&fg_for_grammar);
+            let grammar_scan_policy = self.platform.grammar_feed_policy(
+                active_name_for_grammar,
+                &fg_for_grammar,
+                fg_kind_for_grammar,
+            );
+            let suppress_full_doc_scan = grammar_scan_policy.suppress_full_doc_scan;
             let errors_before = self.writing_errors.len();
-            if !is_com {
+            if !suppress_full_doc_scan {
                 self.update_grammar_errors();
             }
             self.prune_resolved_errors();
@@ -6635,8 +6585,8 @@ impl eframe::App for ContextApp {
                 // (no inline BERT calls), so this drain is cheap — it just
                 // does dictionary lookups + queues async work. Word/COM
                 // bridges have their own event-driven path so we gate on
-                // !is_com to avoid double-scanning their sentences.
-                if !is_com {
+                // suppress_full_doc_scan to avoid double-scanning their sentences.
+                if !suppress_full_doc_scan {
                     if !self.spelling_queue.is_empty() {
                         self.process_spelling_queue();
                     }
@@ -6687,8 +6637,8 @@ impl eframe::App for ContextApp {
                 self.validate_consonant_checks();
                 // Sentence boundary: run grammar check
                 self.run_grammar_check();
-                // Non-COM bridges: trigger full doc scan
-                if !is_com && self.grammar_queue.is_empty() {
+                // Bridges without incremental/external grammar feed: trigger full doc scan.
+                if !suppress_full_doc_scan && self.grammar_queue.is_empty() {
                     self.update_grammar_errors();
                 }
                 // Word boundary work: prune, upgrade, drain grammar queue
@@ -6723,7 +6673,7 @@ impl eframe::App for ContextApp {
                 }
                 self.validate_consonant_checks();
                 self.run_grammar_check();
-                if !is_com && self.grammar_queue.is_empty() {
+                if !suppress_full_doc_scan && self.grammar_queue.is_empty() {
                     self.update_grammar_errors();
                 }
                 // Word boundary work: prune, upgrade, drain grammar queue
