@@ -10,6 +10,12 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $workspaceRoot = Resolve-Path (Join-Path $repoRoot "..\..")
 
+function Test-IsAdmin {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Download-File {
     param(
         [string[]]$Urls,
@@ -70,8 +76,14 @@ if (-not $SkipSwipl) {
         )
         Download-File -Urls $urls -OutFile $installer
 
-        Write-Host "Installing SWI-Prolog silently. This may prompt for administrator permission."
-        Start-Process -FilePath $installer -ArgumentList "/S" -Wait -NoNewWindow
+        Write-Host "Installing SWI-Prolog silently."
+        if (Test-IsAdmin) {
+            Start-Process -FilePath $installer -ArgumentList "/S" -Wait -NoNewWindow
+        } else {
+            Write-Host "Administrator permission is required for the official SWI-Prolog installer."
+            Write-Host "Accept the UAC prompt, then this script will continue."
+            Start-Process -FilePath $installer -ArgumentList "/S" -Verb RunAs -Wait
+        }
 
         if (-not (Test-Path $swiplDll)) {
             throw "SWI-Prolog install did not produce $swiplDll. Set SPELL_SWIPL_DLL to your libswipl.dll path."
