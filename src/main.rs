@@ -2933,16 +2933,26 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
         } // analyzer borrow dropped
 
-        // Source 7: Wordfreq — common words with trigram overlap
-        if let Some(wf) = &self.wordfreq {
-            for (w, _freq) in wf.iter() {
-                let wl = w.to_lowercase();
-                if wl == word_lower || seen.contains(&wl) { continue; }
-                if wl.chars().next().unwrap_or(' ') != word_first { continue; }
-                let w_trigrams = Self::trigrams(&wl);
-                let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-                if common >= 2 && seen.insert(wl.clone()) {
-                    candidates.push(wl);
+        // Source 7: Wordfreq — common words with trigram overlap. This map is
+        // large, so use it only as a fallback when dictionary sources did not
+        // already produce enough candidates.
+        if candidates.len() < 30 {
+            if let Some(wf) = &self.wordfreq {
+                let target_len = word_lower.chars().count() as isize;
+                let mut added = 0usize;
+                for (w, _freq) in wf.iter() {
+                    if added >= 50 { break; }
+                    let wl = w.to_lowercase();
+                    if wl == word_lower || seen.contains(&wl) { continue; }
+                    if wl.chars().next().unwrap_or(' ') != word_first { continue; }
+                    let wl_len = wl.chars().count() as isize;
+                    if (wl_len - target_len).unsigned_abs() > 3 { continue; }
+                    let w_trigrams = Self::trigrams(&wl);
+                    let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
+                    if common >= 2 && seen.insert(wl.clone()) {
+                        candidates.push(wl);
+                        added += 1;
+                    }
                 }
             }
         }
@@ -3386,9 +3396,12 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         if self.manager.active_bridge_name() == "Word Add-in" {
             return;
         }
-        if let Some(ref old_word) = self.last_replaced_word {
+        if let Some(old_word) = self.last_replaced_word.clone() {
             if doc.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| w == old_word.as_str()) {
-                return; // stale — still has the old word
+                if self.last_replace_time.elapsed() < Duration::from_millis(1500) {
+                    return; // stale — still has the old word
+                }
+                log!("Post-replace stale guard expired for '{}'; accepting fresh bridge text", old_word);
             }
             self.last_replaced_word = None;
         }
@@ -5965,6 +5978,14 @@ impl eframe::App for ContextApp {
                 r
             };
             if ok {
+                self.last_replace_time = Instant::now();
+                self.completions.clear();
+                self.open_completions.clear();
+                self.selected_completion = None;
+                self.pending_completion = false;
+                self.last_completed_prefix.clear();
+                self.last_dispatched_sentence.clear();
+                self.dispatched_key.clear();
                 // Kick off the focus-then-cursor flow: verify we have a Word PID,
                 // spawn a thread to activate Word via osascript, and queue a
                 // pending_cursor_place state. The main update loop will poll the
@@ -6337,6 +6358,7 @@ impl eframe::App for ContextApp {
 
             if let Some(new_ctx) = ctx_result {
                 // Update caret position from bridge context (Windows fallback).
+                #[cfg(target_os = "windows")]
                 if let Some((x, y)) = new_ctx.caret_pos {
                     if x != 0 || y != 0 {
                         self.last_caret_pos = self

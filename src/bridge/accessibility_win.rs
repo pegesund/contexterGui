@@ -1,5 +1,6 @@
 use super::{CursorContext, RawCursorText, TextBridge, build_context, extract_word_before_cursor, extract_word_after_cursor};
 use std::io::Write;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
@@ -31,6 +32,9 @@ pub struct AccessibilityBridge {
     saved_element: std::cell::RefCell<Option<IUIAutomationElement>>,
     /// PID of the app that owns the saved element
     saved_element_pid: std::cell::Cell<u32>,
+    /// UIA can report pre-replace text for a few frames after EM_REPLACESEL.
+    replace_old_word: std::cell::RefCell<String>,
+    replace_freeze_until: std::cell::Cell<Option<Instant>>,
 }
 
 impl AccessibilityBridge {
@@ -42,9 +46,67 @@ impl AccessibilityBridge {
             cached_doc: std::cell::RefCell::new(String::new()),
             saved_element: std::cell::RefCell::new(None),
             saved_element_pid: std::cell::Cell::new(0),
+            replace_old_word: std::cell::RefCell::new(String::new()),
+            replace_freeze_until: std::cell::Cell::new(None),
         }
     }
 
+    fn doc_contains_word(doc: &str, word: &str) -> bool {
+        doc.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == word)
+    }
+
+    fn should_reject_stale_doc(&self, doc: &str) -> bool {
+        let old_word = self.replace_old_word.borrow().clone();
+        if old_word.is_empty() {
+            return false;
+        }
+        let still_in_freeze = self.replace_freeze_until.get()
+            .map(|until| Instant::now() < until)
+            .unwrap_or(false);
+        if still_in_freeze && Self::doc_contains_word(doc, &old_word) {
+            bridge_log(&format!("Rejecting stale UIA read after replace: still contains '{}'", old_word));
+            return true;
+        }
+        self.replace_old_word.borrow_mut().clear();
+        self.replace_freeze_until.set(None);
+        false
+    }
+
+    fn activate_replace_freeze(&self, old_word: &str) {
+        *self.replace_old_word.borrow_mut() = old_word.to_lowercase();
+        self.replace_freeze_until.set(Some(Instant::now() + Duration::from_millis(1200)));
+    }
+
+    fn accept_text_element(&self, element: IUIAutomationElement) -> Option<(RawCursorText, String, IUIAutomationElement)> {
+        let (raw, doc) = Self::try_read_raw(&element)?;
+        if doc.is_empty() || !Self::is_text_field(&doc) || self.should_reject_stale_doc(&doc) {
+            return None;
+        }
+        Some((raw, doc, element))
+    }
+
+    fn find_text_element_from_hwnd(&self, uia: &IUIAutomation, hwnd: HWND) -> Option<(RawCursorText, String, IUIAutomationElement)> {
+        unsafe {
+            let root = uia.ElementFromHandle(hwnd).ok()?;
+            if let Some(found) = self.accept_text_element(root.clone()) {
+                return Some(found);
+            }
+
+            let condition = uia.CreateTrueCondition().ok()?;
+            let descendants = root.FindAll(TreeScope_Descendants, &condition).ok()?;
+            let count = descendants.Length().unwrap_or(0);
+            for i in 0..count.min(100) {
+                if let Ok(desc) = descendants.GetElement(i) {
+                    if let Some(found) = self.accept_text_element(desc) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+    }
 
     /// Try to read text from a UIA element using TextPattern2, TextPattern v1, or ValuePattern.
     fn try_read_raw(element: &IUIAutomationElement) -> Option<(RawCursorText, String)> {
@@ -138,25 +200,43 @@ impl AccessibilityBridge {
             if let Ok(focused) = uia.GetFocusedElement() {
                 let focused_pid = focused.CurrentProcessId().unwrap_or(0) as u32;
                 if focused_pid != our_pid && focused_pid != 0 {
-                    if let Some((raw, doc)) = Self::try_read_raw(&focused) {
-                        if !doc.is_empty() && Self::is_text_field(&doc) {
-                            bridge_log(&format!("Focused text field: '{}' ({} chars)",
-                                {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
-                            *self.cached_doc.borrow_mut() = doc;
-                            *self.saved_element.borrow_mut() = Some(focused);
-                            self.saved_element_pid.set(focused_pid);
-                            return Some(raw);
-                        }
+                    if let Some((raw, doc, element)) = self.accept_text_element(focused) {
+                        bridge_log(&format!("Focused text field: '{}' ({} chars)",
+                            {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                        *self.cached_doc.borrow_mut() = doc;
+                        *self.saved_element.borrow_mut() = Some(element);
+                        self.saved_element_pid.set(focused_pid);
+                        return Some(raw);
                     }
                 }
             }
 
-            // Step 2: Focused element was wrong — re-read from saved element
+            // Step 2: Focused element was wrong — discover the edit element
+            // under the foreground HWND. Win11 Notepad can initially expose
+            // only a container until another UI event nudges UIA.
+            if fg_hwnd_val != 0 {
+                let mut fg_pid = 0u32;
+                GetWindowThreadProcessId(HWND(fg_hwnd_val as *mut _), Some(&mut fg_pid));
+                if fg_pid != our_pid && fg_pid != 0 {
+                    if let Some((raw, doc, element)) =
+                        self.find_text_element_from_hwnd(&uia, HWND(fg_hwnd_val as *mut _))
+                    {
+                        bridge_log(&format!("HWND text field: '{}' ({} chars)",
+                            {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                        *self.cached_doc.borrow_mut() = doc;
+                        *self.saved_element.borrow_mut() = Some(element);
+                        self.saved_element_pid.set(fg_pid);
+                        return Some(raw);
+                    }
+                }
+            }
+
+            // Step 3: Focused element was wrong — re-read from saved element
             // This gives us LIVE text even when the terminal has focus
             let saved = self.saved_element.borrow().clone();
             if let Some(ref element) = saved {
                 if let Some((raw, doc)) = Self::try_read_raw(element) {
-                    if !doc.is_empty() {
+                    if !doc.is_empty() && !self.should_reject_stale_doc(&doc) {
                         bridge_log(&format!("Saved element re-read: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
                         *self.cached_doc.borrow_mut() = doc;
@@ -314,6 +394,7 @@ impl AccessibilityBridge {
                     let _ = word_range.Select();
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     send_string(replace_text);
+                    self.activate_replace_freeze(&format!("{}{}", word_before, word_after));
                     return true;
                 }
             }
@@ -490,6 +571,7 @@ impl AccessibilityBridge {
                         *cached = cached.replacen(find, replace, 1);
                         bridge_log(&format!("DOC AFTER ({} chars):\n{}", cached.len(), &*cached));
                     }
+                    self.activate_replace_freeze(find);
 
                     return true;
                 }
@@ -525,6 +607,19 @@ impl TextBridge for AccessibilityBridge {
     }
 
     fn replace_word(&self, new_text: &str) -> bool {
+        if let Some((prefix, word)) = new_text.split_once('|') {
+            if word.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                let suffix: String = word.chars().skip(prefix.chars().count()).collect();
+                if suffix.is_empty() {
+                    return true;
+                }
+                self.restore_target_foreground();
+                send_string(&suffix);
+                self.activate_replace_freeze(prefix);
+                return true;
+            }
+            return self.replace_word_impl(word);
+        }
         self.replace_word_impl(new_text)
     }
 
