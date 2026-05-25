@@ -1,5 +1,6 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,8 @@ const ONNX_RUNTIME_VERSION: &str = "1.24.4";
 /// `GetLastInputInfo` is itself a cheap kernel call (~µs) that doesn't
 /// allocate handles, so calling it on every poll iteration is free.
 pub fn idle_millis() -> u32 {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     unsafe {
         let mut info = LASTINPUTINFO {
             cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -62,6 +63,22 @@ fn env_file(var: &str) -> Option<String> {
     })
 }
 
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    let candidate = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    if !paths.iter().any(|existing| {
+        existing
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+            == candidate
+    }) {
+        paths.push(path);
+    }
+}
+
 fn path_entries_with_file(name: &str) -> Vec<PathBuf> {
     std::env::var_os("PATH")
         .map(|path| {
@@ -73,8 +90,28 @@ fn path_entries_with_file(name: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+fn where_exe_paths(name: &str) -> Vec<PathBuf> {
+    Command::new("where.exe")
+        .arg(name)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn is_windows_system32(path: &Path) -> bool {
-    let lower = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let lower = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
     lower.ends_with("\\windows\\system32\\onnxruntime.dll")
 }
 
@@ -105,46 +142,79 @@ fn program_files_swipl_candidates() -> Vec<PathBuf> {
 
 fn push_swipl_dir_candidate(candidates: &mut Vec<PathBuf>, dir: PathBuf) {
     let dll = dir.join("bin").join("libswipl.dll");
-    if dll.exists() && !candidates.iter().any(|path| path == &dll) {
-        candidates.push(dll);
-    }
+    push_unique_path(candidates, dll);
 }
 
-fn find_swipl_dll() -> String {
+fn swipl_dll_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
     if let Some(path) = bundled_dll("libswipl.dll") {
-        return path;
+        push_unique_path(&mut candidates, PathBuf::from(path));
     }
 
     for var in ["SPELL_SWIPL_DLL", "SWIPL_DLL"] {
-        if let Some(path) = env_file(var) {
-            return path;
+        if let Ok(path) = std::env::var(var) {
+            push_unique_path(&mut candidates, PathBuf::from(path));
         }
     }
 
-    if let Ok(home) = std::env::var("SWI_HOME_DIR") {
-        let dll = PathBuf::from(home).join("bin").join("libswipl.dll");
-        if dll.exists() {
-            return dll.to_string_lossy().into_owned();
+    for var in ["SWI_HOME_DIR", "SWIPL_HOME_DIR", "SWIPL_HOME", "SWI_HOME"] {
+        if let Ok(home) = std::env::var(var) {
+            push_swipl_dir_candidate(&mut candidates, PathBuf::from(home));
         }
     }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_swipl_dir_candidate(&mut candidates, manifest_dir.join("../../swipl"));
+    push_swipl_dir_candidate(&mut candidates, manifest_dir.join("../../swi-prolog"));
+    push_swipl_dir_candidate(&mut candidates, manifest_dir.join("../../vendor/swipl"));
 
     for path in [
         PathBuf::from("C:/Program Files/swipl/bin/libswipl.dll"),
         PathBuf::from("C:/Program Files/SWI-Prolog/bin/libswipl.dll"),
+        PathBuf::from("C:/swipl/bin/libswipl.dll"),
+        PathBuf::from("C:/tools/swipl/bin/libswipl.dll"),
+        PathBuf::from("C:/ProgramData/chocolatey/lib/swi-prolog/tools/swipl/bin/libswipl.dll"),
+        PathBuf::from("C:/ProgramData/chocolatey/lib/swipl/tools/swipl/bin/libswipl.dll"),
         PathBuf::from("C:/msys64/mingw64/bin/libswipl.dll"),
         PathBuf::from("C:/msys64/ucrt64/bin/libswipl.dll"),
     ] {
+        push_unique_path(&mut candidates, path);
+    }
+
+    for path in path_entries_with_file("libswipl.dll") {
+        push_unique_path(&mut candidates, path);
+    }
+
+    for exe in where_exe_paths("swipl.exe") {
+        if let Some(bin_dir) = exe.parent() {
+            push_unique_path(&mut candidates, bin_dir.join("libswipl.dll"));
+        }
+    }
+    for path in where_exe_paths("libswipl.dll") {
+        push_unique_path(&mut candidates, path);
+    }
+
+    for path in program_files_swipl_candidates() {
+        push_unique_path(&mut candidates, path);
+    }
+
+    candidates
+}
+
+fn find_swipl_dll() -> String {
+    let candidates = swipl_dll_candidates();
+    for path in &candidates {
         if path.exists() {
             return path.to_string_lossy().into_owned();
         }
     }
 
-    for path in path_entries_with_file("libswipl.dll") {
-        return path.to_string_lossy().into_owned();
-    }
-
-    for path in program_files_swipl_candidates() {
-        return path.to_string_lossy().into_owned();
+    eprintln!("SWI-Prolog libswipl.dll not found for Windows dev run.");
+    eprintln!("Install SWI-Prolog, or set SPELL_SWIPL_DLL to libswipl.dll.");
+    eprintln!("Checked SWI-Prolog candidates:");
+    for path in candidates.iter().take(24) {
+        eprintln!("  {}", path.display());
     }
 
     "C:/Program Files/swipl/bin/libswipl.dll".to_string()
@@ -184,7 +254,9 @@ pub fn configure_swipl_home_env() {
         return;
     };
 
-    unsafe { std::env::set_var("SWI_HOME_DIR", &home); }
+    unsafe {
+        std::env::set_var("SWI_HOME_DIR", &home);
+    }
 }
 
 fn windows_ort_candidates() -> Vec<String> {
@@ -199,7 +271,9 @@ fn windows_ort_candidates() -> Vec<String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     push_existing_path(
         &mut paths,
-        manifest_dir.join(format!("../../onnxruntime/onnxruntime-win-x64-{ONNX_RUNTIME_VERSION}/lib/onnxruntime.dll")),
+        manifest_dir.join(format!(
+            "../../onnxruntime/onnxruntime-win-x64-{ONNX_RUNTIME_VERSION}/lib/onnxruntime.dll"
+        )),
     );
     push_existing_path(
         &mut paths,
@@ -297,7 +371,7 @@ impl WindowsPlatform {
 /// per thread is the documented Microsoft pattern.
 pub fn cached_uia() -> Option<windows::Win32::UI::Accessibility::IUIAutomation> {
     use std::cell::RefCell;
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
     use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
     thread_local! {
         static UIA: RefCell<Option<IUIAutomation>> = const { RefCell::new(None) };
@@ -360,12 +434,12 @@ impl PlatformServices for WindowsPlatform {
     }
 
     fn foreground_app(&self) -> ForegroundApp {
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        };
         use windows::Win32::UI::WindowsAndMessaging::{
             GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-        };
-        use windows::Win32::System::Threading::{
-            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-            PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
         // Hot path: serve from cache if the last query was <150ms ago.
@@ -385,16 +459,18 @@ impl PlatformServices for WindowsPlatform {
 
         let fg = unsafe { GetForegroundWindow() };
         let mut pid = 0u32;
-        unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)); }
+        unsafe {
+            GetWindowThreadProcessId(fg, Some(&mut pid));
+        }
 
         let mut buf = [0u16; 128];
         let len = unsafe { GetWindowTextW(fg, &mut buf) };
         let title = String::from_utf16_lossy(&buf[..len as usize]);
 
         let exe = if pid > 0 {
-            if let Ok(handle) = unsafe {
-                OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-            } {
+            if let Ok(handle) =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            {
                 let mut exe_buf = [0u16; 260];
                 let mut exe_len = exe_buf.len() as u32;
                 let result = if unsafe {
@@ -492,9 +568,9 @@ impl PlatformServices for WindowsPlatform {
     }
 
     fn copy_to_clipboard(&self, text: &str) {
+        use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::DataExchange::*;
         use windows::Win32::System::Memory::*;
-        use windows::Win32::Foundation::HANDLE;
         unsafe {
             if OpenClipboard(None).is_ok() {
                 let _ = EmptyClipboard();
@@ -539,7 +615,9 @@ impl PlatformServices for WindowsPlatform {
     // ~80 px below caret bottom after the +49 platform adjustment); match
     // that net distance here so the popup sticks close to the line you're
     // writing on without overlapping it.
-    fn caret_offset_below(&self) -> f32 { 30.0 }
+    fn caret_offset_below(&self) -> f32 {
+        30.0
+    }
 
     fn read_selected_text(&self) -> Option<String> {
         if let Ok(lock) = self.cached_selected_text.lock() {
