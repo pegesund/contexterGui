@@ -35,7 +35,8 @@ impl MultiBackendTtsEngine {
 impl TtsEngine for MultiBackendTtsEngine {
     fn speak(&self, text: &str) {
         // Stop the inactive backend so a re-route doesn't leave a stale stream playing.
-        if Self::is_piper_voice(&self.piper.current_voice()) {
+        let piper_voice = self.piper.current_voice();
+        if Self::is_piper_voice(&piper_voice) && self.piper.is_voice_ready(&piper_voice) {
             self.system.stop();
             self.piper.speak(text);
         } else {

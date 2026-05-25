@@ -59,7 +59,10 @@ impl WindowsSystemTtsEngine {
             };
             available_w.store(true, Ordering::Release);
 
-            while let Ok(cmd) = rx.recv() {
+            while let Ok(mut cmd) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    cmd = newer;
+                }
                 stop_w.store(false, Ordering::Relaxed);
                 let text = HSTRING::from(cmd.text.as_str());
                 let mut flags = SPF_ASYNC.0 as u32;
@@ -115,6 +118,7 @@ impl WindowsSystemTtsEngine {
 
 impl TtsEngine for WindowsSystemTtsEngine {
     fn speak(&self, text: &str) {
+        self.stop.store(true, Ordering::Release);
         let _ = self.sender.send(SpeakCmd {
             text: text.to_string(),
             stop_current: true,

@@ -24,7 +24,10 @@ impl MacTtsEngine {
 
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
-            while let Ok(word) = rx.recv() {
+            while let Ok(mut word) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    word = newer;
+                }
                 TTS_STOP.store(false, Ordering::Relaxed);
                 TTS_SPEAKING.store(true, Ordering::Relaxed);
                 let voice = CURRENT_VOICE.get()
@@ -96,6 +99,7 @@ impl MacTtsEngine {
 
 impl TtsEngine for MacTtsEngine {
     fn speak(&self, text: &str) {
+        TTS_STOP.store(true, Ordering::Release);
         if let Some(tx) = TTS_SENDER.get() { let _ = tx.send(text.to_string()); }
     }
 

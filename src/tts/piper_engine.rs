@@ -65,7 +65,10 @@ impl PiperTtsEngine {
 
         std::thread::spawn(move || {
             let mut loaded: Option<(String, LoadedVoice)> = None;
-            while let Ok(cmd) = rx.recv() {
+            while let Ok(mut cmd) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    cmd = newer;
+                }
                 stop_w.store(false, Ordering::Relaxed);
 
                 let need_load = match &loaded {
@@ -177,10 +180,16 @@ fn voice_paths(voice_id: &str, asset_dir: &Path) -> Option<Vec<PathBuf>> {
     if let Some(voice) = voice_id.strip_prefix("piper:") {
         if voice.starts_with("en_") {
             let base = asset_dir.join(voice);
-            return Some(vec![
+            let mut paths = vec![
                 base.join(format!("{}.onnx", voice)),
                 base.join(format!("{}.onnx.json", voice)),
-            ]);
+            ];
+            paths.push(asset_dir.join("bin").join(if cfg!(target_os = "windows") {
+                "espeak-ng.exe"
+            } else {
+                "espeak-ng"
+            }));
+            return Some(paths);
         }
     }
     None
@@ -316,6 +325,7 @@ fn play_wav(_path: &Path, _samples: &[f32], _sample_rate: u32, _stop: &AtomicBoo
 impl TtsEngine for PiperTtsEngine {
     fn speak(&self, text: &str) {
         let voice_id = self.current_voice.read().unwrap().clone();
+        self.stop.store(true, Ordering::Release);
         let _ = self.sender.send(SpeakCmd {
             voice_id,
             text: text.to_string(),
