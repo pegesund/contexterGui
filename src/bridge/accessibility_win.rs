@@ -57,6 +57,31 @@ impl AccessibilityBridge {
             .any(|w| w == word)
     }
 
+    fn looks_like_slack_window_dump(doc: &str) -> bool {
+        if doc.len() < 1000 {
+            return false;
+        }
+
+        let doc_lower = doc.to_lowercase();
+        let markers = [
+            "show workspace switcher",
+            "back in history",
+            "forward in history",
+            "chat with slackbot",
+            "drafts & sent",
+            "jump to date",
+            "toggle file",
+            "message ready to be sent",
+            "processing uploaded file",
+        ];
+        let marker_hits = markers
+            .iter()
+            .filter(|marker| doc_lower.contains(**marker))
+            .count();
+
+        marker_hits >= 3
+    }
+
     fn should_reject_stale_doc(&self, doc: &str) -> bool {
         let old_word = self.replace_old_word.borrow().clone();
         if old_word.is_empty() {
@@ -82,6 +107,10 @@ impl AccessibilityBridge {
     fn accept_text_element(&self, element: IUIAutomationElement) -> Option<(RawCursorText, String, IUIAutomationElement)> {
         let (raw, doc) = Self::try_read_raw(&element)?;
         if doc.is_empty() || !Self::is_text_field(&doc) || self.should_reject_stale_doc(&doc) {
+            return None;
+        }
+        if Self::looks_like_slack_window_dump(&doc) {
+            bridge_log("Rejecting Slack window dump from UIA; waiting for focused composer text");
             return None;
         }
         Some((raw, doc, element))

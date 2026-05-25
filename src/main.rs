@@ -175,6 +175,40 @@ fn trunc(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+fn normalized_contains_sentence(doc: &str, sentence: &str) -> bool {
+    let needle = sentence.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    doc.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .contains(&needle)
+}
+
+fn looks_like_slack_window_dump(doc: &str) -> bool {
+    if doc.len() < 1000 {
+        return false;
+    }
+
+    let doc_lower = doc.to_lowercase();
+    [
+        "show workspace switcher",
+        "back in history",
+        "forward in history",
+        "chat with slackbot",
+        "drafts & sent",
+        "jump to date",
+        "toggle file",
+        "message ready to be sent",
+        "processing uploaded file",
+    ]
+    .iter()
+    .filter(|marker| doc_lower.contains(**marker))
+    .count() >= 3
+}
+
 use nostos_cognio::baseline::{compute_baseline_with, Baselines};
 use nostos_cognio::complete::{complete_word, grammar_filter, GrammarCheckResult, Completion};
 use nostos_cognio::embeddings::EmbeddingStore;
@@ -691,7 +725,8 @@ impl BridgeManager {
 
     #[cfg(target_os = "windows")]
     fn read_context_windows(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
-        let is_supported = fg.word_is_foreground || fg.is_browser || fg.is_notepad || fg.is_other;
+        let other_writing_app = fg.is_other && self.platform.is_writing_app(&fg.app);
+        let is_supported = fg.word_is_foreground || fg.is_browser || fg.is_notepad || other_writing_app;
         if !is_supported {
             return self.last_context.clone();
         }
@@ -713,7 +748,7 @@ impl BridgeManager {
         // Windows UIA bridge: Notepad + any other UIA-accessible app. Covers
         // Sticky Notes, WordPad, Mail, search bars, generic Win32 + UWP text
         // fields.
-        if fg.is_notepad || fg.is_other {
+        if fg.is_notepad || other_writing_app {
             self.last_user_was_browser = false;
             let accessibility_idx = self.bridges
                 .iter()
@@ -2855,6 +2890,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     /// 4. Walk up to 50 candidates for grammar checking
     /// 5. Fallback: BERT MLM predictions filtered by ortho similarity to misspelled word
     fn find_spelling_suggestions(&mut self, word: &str, sentence_ctx: &str) -> Vec<(String, f32)> {
+        if Self::is_code_like_spelling_token(word) {
+            return Vec::new();
+        }
+
         let word_lower = word.to_lowercase();
         let word_trigrams = Self::trigrams(&word_lower);
         let word_first = word_lower.chars().next().unwrap_or(' ');
@@ -3215,6 +3254,33 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         passing
     }
 
+    fn is_code_like_spelling_token(word: &str) -> bool {
+        let char_count = word.chars().count();
+        if char_count > 28 {
+            return true;
+        }
+
+        if word.contains('\\')
+            || word.contains('/')
+            || word.contains(':')
+            || word.contains('_')
+            || word.contains('`')
+            || word.contains('@')
+        {
+            return true;
+        }
+
+        let non_word_punct = word
+            .chars()
+            .filter(|c| !c.is_alphabetic() && *c != '\'' && *c != '’' && *c != '-')
+            .count();
+        if non_word_punct > 0 && char_count > 8 {
+            return true;
+        }
+
+        word.chars().any(|c| c.is_ascii_digit()) && char_count > 6
+    }
+
     /// Generate candidate corrections for a sentence with grammar errors,
     /// score each with BERT, and return the top candidates (up to 3).
     fn best_sentence_corrections(&mut self, sentence: &str, errors: &[GrammarError]) -> Vec<(String, String, String, f32)> {
@@ -3394,6 +3460,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // 2026-05-15 browser-bridge testing — same root-cause class as
         // commit e49b58f's fix in update_grammar_errors.
         if self.manager.active_bridge_name() == "Word Add-in" {
+            return;
+        }
+        if looks_like_slack_window_dump(&doc) {
+            log!("Rejecting Slack window dump before grammar scan ({} chars)", doc.len());
             return;
         }
         if let Some(old_word) = self.last_replaced_word.clone() {
@@ -4743,6 +4813,17 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 };
                 if is_stale {
                     log!("Stale grammar response discarded: sentence no longer in para={}", trunc(&resp.paragraph_id, 10));
+                    self.grammar_inflight.remove(&sent_h);
+                    continue;
+                }
+            } else {
+                let stale_full_doc = self.last_doc_text.is_empty()
+                    || !normalized_contains_sentence(&self.last_doc_text, &resp.sentence);
+                if stale_full_doc {
+                    log!("Stale grammar response discarded: full-doc sentence no longer current '{}'",
+                        trunc(&resp.sentence, 50));
+                    self.grammar_inflight.remove(&sent_h);
+                    self.processed_sentence_hashes.remove(&sent_h);
                     continue;
                 }
             }

@@ -569,6 +569,26 @@ impl PlatformServices for WindowsPlatform {
         AppKind::Other
     }
 
+    fn is_writing_app(&self, app: &ForegroundApp) -> bool {
+        if app.pid == std::process::id() {
+            return false;
+        }
+        if matches!(self.classify_app(app), AppKind::Word | AppKind::Browser | AppKind::Notepad) {
+            return true;
+        }
+
+        !matches!(
+            app.exe_name.as_str(),
+            "werfault.exe"
+                | "snippingtool.exe"
+                | "shellexperiencehost.exe"
+                | "searchhost.exe"
+                | "startmenuexperiencehost.exe"
+                | "taskmgr.exe"
+                | "explorer.exe"
+        )
+    }
+
     fn screen_size(&self) -> (f32, f32) {
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::*;
