@@ -26,7 +26,7 @@ pub mod llm_actor;
 pub mod compound_walker;
 pub mod updates;
 
-use bridge::{CursorContext, TextBridge};
+use bridge::{build_context, CursorContext, RawCursorText, TextBridge};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -1115,6 +1115,13 @@ fn extract_prefix(word: &str) -> &str {
     word.trim()
 }
 
+fn byte_index_for_char(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(text.len())
+}
+
 fn escape_json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1842,6 +1849,32 @@ impl ContextApp {
                 tts::speak_word(&word);
             }
         }
+    }
+
+    fn context_from_paragraph_window(
+        base: &CursorContext,
+        paragraph_id: &str,
+        text: &str,
+        start_offset: usize,
+    ) -> Option<CursorContext> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let cursor_abs = base.cursor_doc_offset?;
+        let text_len = text.chars().count();
+        let local_cursor = cursor_abs.saturating_sub(start_offset).min(text_len);
+        let split = byte_index_for_char(text, local_cursor);
+        let raw = RawCursorText {
+            before: text[..split].to_string(),
+            after: text[split..].to_string(),
+        };
+        let mut ctx = build_context(&raw, base.caret_pos);
+        if ctx.word.is_empty() && ctx.sentence.is_empty() && ctx.masked_sentence.is_none() {
+            return None;
+        }
+        ctx.cursor_doc_offset = Some(cursor_abs);
+        ctx.paragraph_id = paragraph_id.to_string();
+        Some(ctx)
     }
 
     fn new(
@@ -4355,6 +4388,8 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
         }
 
+        let mut completion_context_refreshed = false;
+
         // Drain from all bridges that support it
         for bridge in &self.manager.bridges {
             let changed = bridge.drain_changed_paragraphs();
@@ -4366,6 +4401,12 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
                 log!("Addin changed paragraph: '{}' (para={} cursor={:?})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10), p.cursor_start);
                 self.paragraph_texts.insert(p.paragraph_id.clone(), p.text.clone());
+                if !self.context.paragraph_id.is_empty()
+                    && self.context.paragraph_id == p.paragraph_id
+                    && self.context.masked_sentence.is_some()
+                {
+                    completion_context_refreshed = true;
+                }
 
                 // Derive cursor context from paragraph text for fast suggestion triggering
                 // (don't wait for the slow /context POST — use paragraph data directly)
@@ -4579,6 +4620,23 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
         // Rebuild document word counts for suggestion boosting
         self.rebuild_doc_word_counts();
+
+        if completion_context_refreshed {
+            log!("Word Add-in paragraph cache refreshed current completion context; retrying bulb suggestions");
+            self.completions.clear();
+            self.open_completions.clear();
+            self.last_completed_prefix.clear();
+            self.last_dispatched_sentence.clear();
+            self.dispatched_key.clear();
+            self.cached_forward = None;
+            self.cached_right_column = None;
+            self.cached_mtag_supplement = None;
+            self.last_context_change = Instant::now()
+                .checked_sub(Duration::from_millis(self.debounce_ms))
+                .unwrap_or_else(Instant::now);
+            self.completion_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
 
         // Prune errors whose word is no longer in the document (e.g., after cut)
         self.prune_resolved_errors();
@@ -6483,7 +6541,7 @@ impl eframe::App for ContextApp {
                 }
             }
 
-            if let Some(new_ctx) = ctx_result {
+            if let Some(mut new_ctx) = ctx_result {
                 // Update caret position from bridge context (Windows fallback).
                 #[cfg(target_os = "windows")]
                 if let Some((x, y)) = new_ctx.caret_pos {
@@ -6501,9 +6559,10 @@ impl eframe::App for ContextApp {
                     self.last_known_cursor_offset = Some(off);
                 }
                 if ctx_changed {
-                log!("Context: word='{}' sentence='{}' masked={} offset={:?}",
+                log!("Context: word='{}' sentence='{}' masked={} offset={:?} para='{}'",
                     trunc(&new_ctx.word, 20), trunc(&new_ctx.sentence, 40),
-                    new_ctx.masked_sentence.is_some(), new_ctx.cursor_doc_offset);
+                    new_ctx.masked_sentence.is_some(), new_ctx.cursor_doc_offset,
+                    trunc(&new_ctx.paragraph_id, 10));
                 // Clear ALL stale state when switching between bridges
                 if self.manager.bridge_switched {
                     self.manager.bridge_switched = false;
@@ -6560,6 +6619,22 @@ impl eframe::App for ContextApp {
                         None
                     };
                     if let Some((para_id, text, start)) = paragraph {
+                        if let Some(refined) =
+                            Self::context_from_paragraph_window(&new_ctx, &para_id, &text, start)
+                        {
+                            if refined.sentence != new_ctx.sentence
+                                || refined.paragraph_id != new_ctx.paragraph_id
+                            {
+                                log!(
+                                    "Context refined from paragraph: word='{}' sentence='{}' para={} start={}",
+                                    trunc(&refined.word, 20),
+                                    trunc(&refined.sentence, 40),
+                                    trunc(&refined.paragraph_id, 10),
+                                    start
+                                );
+                            }
+                            new_ctx = refined;
+                        }
                         self.process_com_changed_paragraph(para_id, text, start);
                     }
                 } else if self.manager.last_user_was_browser {
