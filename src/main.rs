@@ -7270,7 +7270,15 @@ impl eframe::App for ContextApp {
                     .platform
                     .caret_position_to_logical((x, y), ctx.pixels_per_point());
                 let caret_offset = self.platform.caret_offset_below();
-                let above_gap = if slack_positioning { 80.0 * s } else { 30.0 };
+                let above_gap = if slack_positioning {
+                    120.0 * s
+                } else {
+                    // The stored macOS/Windows caret is intentionally nudged
+                    // downward for below-caret placement. When flipping above,
+                    // reserve a larger band so the popup clears the actual text
+                    // line instead of touching the adjusted caret point.
+                    (caret_offset + 70.0 * s).max(95.0 * s)
+                };
                 let below_top = ly + caret_offset;
                 let available_below = (screen_h - below_top).max(0.0);
                 let available_above = (ly - above_gap).max(0.0);
