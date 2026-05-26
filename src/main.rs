@@ -7228,7 +7228,8 @@ impl eframe::App for ContextApp {
             90.0
         };
         let max_h = if slack_layout { 190.0 } else { 335.0 };
-        let win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, max_h * s);
+        let desired_win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, max_h * s);
+        let mut win_h = desired_win_h;
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
@@ -7255,9 +7256,7 @@ impl eframe::App for ContextApp {
             }
         }
 
-        // Always update window size (even when unpinned, so Cmd+scroll works)
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-
+        let mut next_outer_pos = None;
         if self.follow_cursor && self.goto_freeze_until.is_none() {
             if self.show_settings_window {
                 ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
@@ -7270,22 +7269,29 @@ impl eframe::App for ContextApp {
                 let (lx, ly) = self
                     .platform
                     .caret_position_to_logical((x, y), ctx.pixels_per_point());
-                // Push the window 5 cm below the caret so it doesn't cover the line
-                // the user is currently writing on. 5 cm at 96 DPI = ~189 logical px.
                 let caret_offset = self.platform.caret_offset_below();
-                let would_overflow_below = (ly + caret_offset + win_h) > screen_h;
-                let pos_y = if would_overflow_below {
-                    // Not enough room below — flip above the caret with a 30 px gap.
-                    if slack_positioning {
-                        ly - win_h - (80.0 * s)
-                    } else {
-                        ly - win_h - 30.0
+                let above_gap = if slack_positioning { 80.0 * s } else { 30.0 };
+                let below_top = ly + caret_offset;
+                let available_below = (screen_h - below_top).max(0.0);
+                let available_above = (ly - above_gap).max(0.0);
+                let place_above = desired_win_h > available_below && available_above >= available_below;
+                let side_available = if place_above { available_above } else { available_below };
+                if side_available > 0.0 && desired_win_h > side_available {
+                    // If the caret is near the bottom of the screen/document,
+                    // shrink the panel to the space on the chosen side instead
+                    // of clamping it back over the typing line.
+                    win_h = side_available.min(screen_h).max(60.0 * s);
+                    if win_h > side_available {
+                        win_h = side_available;
                     }
+                }
+                let pos_y = if place_above {
+                    (ly - above_gap - win_h).max(0.0)
                 } else {
-                    ly + caret_offset
+                    let max_y = (screen_h - win_h).max(0.0);
+                    below_top.min(max_y)
                 };
-                let pos_y = pos_y.max(0.0).min(screen_h - win_h);
-                let pos_x = if slack_positioning && would_overflow_below {
+                let pos_x = if slack_positioning && place_above {
                     let right_side = lx + 260.0;
                     let left_side = lx - win_w - 260.0;
                     if right_side + win_w <= screen_w {
@@ -7297,12 +7303,16 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     lx + self.platform.caret_offset_right()
-                }.min(screen_w - win_w).max(0.0);
+                }.min((screen_w - win_w).max(0.0)).max(0.0);
 
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
-                    egui::pos2(pos_x, pos_y),
-                ));
+                next_outer_pos = Some(egui::pos2(pos_x, pos_y));
             }
+        }
+
+        // Always update window size (even when unpinned, so Cmd+scroll works)
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+        if let Some(pos) = next_outer_pos {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
 
         // Repaint at 200ms interval — fast enough for responsive UI, avoids burning CPU.
