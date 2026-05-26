@@ -126,7 +126,7 @@ unsafe fn try_all_patterns(el: &IUIAutomationElement) {
             }
             Err(e) => println!("    TextPattern2.DocumentRange failed: {:?}", e),
         }
-        let mut is_active = windows::core::BOOL::default();
+        let mut is_active = windows::Win32::Foundation::BOOL::default();
         match tp2.GetCaretRange(&mut is_active) {
             Ok(cr) => {
                 let before = cr.Clone().and_then(|r| {

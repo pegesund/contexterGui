@@ -1,6 +1,7 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -337,6 +338,7 @@ pub struct WindowsPlatform {
     /// image-path queries — wasted work because the foreground app
     /// rarely changes within 150ms.
     cached_fg: Mutex<Option<(Instant, ForegroundApp)>>,
+    last_space_down: AtomicBool,
 }
 
 impl WindowsPlatform {
@@ -383,6 +385,7 @@ impl WindowsPlatform {
         Self {
             cached_selected_text,
             cached_fg: Mutex::new(None),
+            last_space_down: AtomicBool::new(false),
         }
     }
 }
@@ -450,6 +453,54 @@ fn poll_uia_selected_text() -> Option<String> {
         }
         None
     }
+}
+
+fn read_word_before_cursor_uia() -> Option<String> {
+    unsafe {
+        use windows::Win32::UI::Accessibility::*;
+
+        let uia = cached_uia()?;
+        let focused = uia.GetFocusedElement().ok()?;
+
+        if let Ok(pattern2) =
+            focused.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
+        {
+            let mut is_active = windows::Win32::Foundation::BOOL::default();
+            if let Ok(caret_range) = pattern2.GetCaretRange(&mut is_active) {
+                let lookback = caret_range.Clone().ok()?;
+                let _ = lookback.MoveEndpointByUnit(
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    -80,
+                );
+                let text = lookback.GetText(-1).ok()?.to_string();
+                return last_word(&text);
+            }
+        }
+
+        if let Ok(value) =
+            focused.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        {
+            if let Ok(text) = value.CurrentValue() {
+                return last_word(&text.to_string());
+            }
+        }
+
+        None
+    }
+}
+
+fn last_word(text: &str) -> Option<String> {
+    text.trim_end()
+        .rsplit(|c: char| c.is_whitespace())
+        .next()
+        .map(|word| {
+            word.trim_matches(|c: char| {
+                !(c.is_alphanumeric() || c == '-' || c == '\'')
+            })
+            .to_string()
+        })
+        .filter(|word| !word.is_empty())
 }
 
 #[cfg(target_os = "windows")]
@@ -613,6 +664,19 @@ impl PlatformServices for WindowsPlatform {
         let ctrl = unsafe { GetAsyncKeyState(0x11) } < 0;
         let space = unsafe { GetAsyncKeyState(0x20) } < 0;
         (ctrl, space)
+    }
+
+    fn take_space_press(&self) -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        let state = unsafe { GetAsyncKeyState(0x20) };
+        let space_down = state < 0;
+        let pressed_since_last_query = (state & 1) != 0;
+        let was_down = self.last_space_down.swap(space_down, Ordering::Relaxed);
+        pressed_since_last_query || (space_down && !was_down)
+    }
+
+    fn get_word_before_cursor(&self) -> Option<String> {
+        read_word_before_cursor_uia()
     }
 
     fn copy_to_clipboard(&self, text: &str) {

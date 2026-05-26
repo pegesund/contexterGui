@@ -1802,6 +1802,48 @@ impl ContextApp {
             .unwrap_or_else(Instant::now);
     }
 
+    fn cached_word_for_space_tts(&self) -> Option<String> {
+        let from_context = if !self.context.word.trim().is_empty() {
+            Some(self.context.word.trim().to_string())
+        } else {
+            self.context
+                .sentence
+                .trim_end()
+                .rsplit(|c: char| c.is_whitespace())
+                .next()
+                .map(|word| {
+                    word.trim_matches(|c: char| {
+                        !(c.is_alphanumeric() || c == '-' || c == '\'')
+                    })
+                    .to_string()
+                })
+        };
+        from_context.filter(|word| !word.is_empty())
+    }
+
+    fn handle_space_tts(&mut self) {
+        if !self.speak_on_space || self.last_space_speak.elapsed() <= Duration::from_millis(400) {
+            return;
+        }
+        if !self.platform.take_space_press() {
+            return;
+        }
+        let fg = self.platform.foreground_app();
+        if self.platform.classify_app(&fg) == platform::AppKind::OurApp {
+            return;
+        }
+
+        let word = self
+            .cached_word_for_space_tts()
+            .or_else(|| self.platform.get_word_before_cursor());
+        if let Some(word) = word {
+            if !word.is_empty() {
+                self.last_space_speak = Instant::now();
+                tts::speak_word(&word);
+            }
+        }
+    }
+
     fn new(
         language: std::sync::Arc<dyn language::LanguageBundle>,
         grammar_completion: bool,
@@ -5860,6 +5902,10 @@ impl eframe::App for ContextApp {
         // Allow copying text from labels
         ctx.style_mut(|s| s.interaction.selectable_labels = true);
 
+        // Speak-on-space should run before the heavier context/grammar poll.
+        // On Windows this also polls the global space key edge.
+        self.handle_space_tts();
+
       if !skip_processing {
         // Spawn grammar actor on first update — loads SWI-Prolog on its own thread.
         if self.grammar_actor.is_none() && self.analyzer.is_some() {
@@ -6566,7 +6612,7 @@ impl eframe::App for ContextApp {
                         self.last_doc_approx_len = approx_len;
                         // For browser: read clean text from extension file
                         // (masked_sentence glues <mask> to prefix — not valid doc text)
-                        if self.manager.last_user_was_browser {
+                        if self.manager.last_user_was_browser && !grammar_feed.suppress_full_doc_scan {
                             if let Some(doc) = self.manager.read_full_document() {
                                 if doc.len() > self.last_doc_text.len() / 2 {
                                     self.try_update_doc_text(doc);
@@ -7767,22 +7813,6 @@ impl eframe::App for ContextApp {
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // === Whisper transcription result — shown in separate centered window ===
             // (rendering happens below via show_viewport_immediate)
-
-            // === Space press: speak the word just typed (accessibility TTS) ===
-            if self.platform.take_space_press() && self.speak_on_space
-                && self.last_space_speak.elapsed() > Duration::from_millis(400)
-            {
-                let fg = self.platform.foreground_app();
-                let kind = self.platform.classify_app(&fg);
-                if kind != platform::AppKind::OurApp {
-                    if let Some(word) = self.platform.get_word_before_cursor() {
-                        if !word.is_empty() {
-                            self.last_space_speak = Instant::now();
-                            tts::speak_word(&word);
-                        }
-                    }
-                }
-            }
 
             // === Panel: Grammar (rendered first when both shown so errors —
             // the more critical signal — appear at the top of the popup) ===

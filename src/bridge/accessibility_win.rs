@@ -27,6 +27,8 @@ pub struct AccessibilityBridge {
     edit_hwnd: std::cell::Cell<isize>,
     /// Cached full document text from last successful read
     cached_doc: std::cell::RefCell<String>,
+    /// Cursor offset inside cached_doc. For windowed reads this is local to cached_doc.
+    cached_cursor: std::cell::Cell<usize>,
     /// Last known good UIA text element (e.g. the Edge textarea).
     /// Re-read from this when GetFocusedElement() returns something else.
     saved_element: std::cell::RefCell<Option<IUIAutomationElement>>,
@@ -44,6 +46,7 @@ impl AccessibilityBridge {
             fg_hwnd: std::cell::Cell::new(0),
             edit_hwnd: std::cell::Cell::new(0),
             cached_doc: std::cell::RefCell::new(String::new()),
+            cached_cursor: std::cell::Cell::new(0),
             saved_element: std::cell::RefCell::new(None),
             saved_element_pid: std::cell::Cell::new(0),
             replace_old_word: std::cell::RefCell::new(String::new()),
@@ -104,7 +107,7 @@ impl AccessibilityBridge {
         self.replace_freeze_until.set(Some(Instant::now() + Duration::from_millis(1200)));
     }
 
-    fn accept_text_element(&self, element: IUIAutomationElement) -> Option<(RawCursorText, String, IUIAutomationElement)> {
+    fn accept_text_element(&self, element: IUIAutomationElement) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
         let (raw, doc) = Self::try_read_raw(&element)?;
         if doc.is_empty() || !Self::is_text_field(&doc) || self.should_reject_stale_doc(&doc) {
             return None;
@@ -113,10 +116,11 @@ impl AccessibilityBridge {
             bridge_log("Rejecting Slack window dump from UIA; waiting for focused composer text");
             return None;
         }
-        Some((raw, doc, element))
+        let caret = Self::estimate_caret_from_element(&element, &raw.before);
+        Some((raw, doc, element, caret))
     }
 
-    fn find_text_element_from_hwnd(&self, uia: &IUIAutomation, hwnd: HWND) -> Option<(RawCursorText, String, IUIAutomationElement)> {
+    fn find_text_element_from_hwnd(&self, uia: &IUIAutomation, hwnd: HWND) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
         unsafe {
             let root = uia.ElementFromHandle(hwnd).ok()?;
             if let Some(found) = self.accept_text_element(root.clone()) {
@@ -144,7 +148,7 @@ impl AccessibilityBridge {
             if let Ok(pattern2) =
                 element.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
             {
-                let mut is_active = windows::core::BOOL::default();
+                let mut is_active = BOOL::default();
                 if let Ok(caret_range) = pattern2.GetCaretRange(&mut is_active) {
                     let before = (|| -> Option<String> {
                         let r = caret_range.Clone().ok()?;
@@ -172,7 +176,7 @@ impl AccessibilityBridge {
                 element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
             {
                 if let Ok(doc_range) = tp1.DocumentRange() {
-                    let text = doc_range.GetText(-1).unwrap_or_default().to_string();
+                    let text = doc_range.GetText(6000).unwrap_or_default().to_string();
                     if !text.is_empty() {
                         // No caret info from v1 — put everything as "before" (cursor at end)
                         return Some((RawCursorText { before: text.clone(), after: String::new() }, text));
@@ -185,7 +189,15 @@ impl AccessibilityBridge {
                 element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             {
                 if let Ok(value) = vp.CurrentValue() {
-                    let text = value.to_string();
+                    let value_text = value.to_string();
+                    let total = value_text.chars().count();
+                    let text = if total > 6000 {
+                        let start = total.saturating_sub(6000);
+                        let start_byte = Self::char_to_byte_offset(&value_text, start);
+                        value_text[start_byte..].to_string()
+                    } else {
+                        value_text
+                    };
                     if !text.is_empty() {
                         return Some((RawCursorText { before: text.clone(), after: String::new() }, text));
                     }
@@ -202,11 +214,83 @@ impl AccessibilityBridge {
         doc.len() < 100_000
     }
 
+    fn estimate_caret_from_element(element: &IUIAutomationElement, before: &str) -> Option<(i32, i32)> {
+        unsafe {
+            let rect = element.CurrentBoundingRectangle().ok()?;
+            let width = (rect.right - rect.left).max(1) as f32;
+            let height = (rect.bottom - rect.top).max(1) as f32;
+            if rect.left < 20 || width < 40.0 || height < 12.0 {
+                return None;
+            }
+
+            let avg_char_w = 7.5f32;
+            let line_h = 20.0f32;
+            let pad_x = 12.0f32;
+            let pad_y = 8.0f32;
+            let usable_w = (width - pad_x * 2.0).max(80.0);
+            let chars_per_line = (usable_w / avg_char_w).floor().max(1.0) as usize;
+            let current_line = before.rsplit('\n').next().unwrap_or(before);
+            let col_chars = current_line.chars().count();
+            let visual_line = col_chars / chars_per_line;
+            let col = col_chars % chars_per_line;
+            let x = rect.left as f32 + pad_x + col as f32 * avg_char_w;
+            let y = rect.top as f32 + pad_y + (visual_line as f32 + 1.0) * line_h;
+            Some((x.round() as i32, y.min(rect.bottom as f32 + line_h).round() as i32))
+        }
+    }
+
+    fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
+        text.char_indices()
+            .nth(char_offset)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(text.len())
+    }
+
+    fn paragraph_window_from_cached(doc: &str, cursor: usize) -> Option<(String, String, usize)> {
+        if doc.trim().is_empty() {
+            return None;
+        }
+        let cursor = cursor.min(doc.chars().count());
+        let cursor_byte = Self::char_to_byte_offset(doc, cursor);
+        let para_start_byte = doc[..cursor_byte]
+            .rfind('\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+        let para_end_byte = doc[cursor_byte..]
+            .find('\n')
+            .map(|pos| cursor_byte + pos)
+            .unwrap_or(doc.len());
+        let para_start_char = doc[..para_start_byte].chars().count();
+        let para_end_char = doc[..para_end_byte].chars().count();
+        let max_chars = 6000usize;
+
+        let (start_char, end_char) = if para_end_char.saturating_sub(para_start_char) <= max_chars {
+            (para_start_char, para_end_char)
+        } else {
+            let half = max_chars / 2;
+            let mut start = cursor.saturating_sub(half).max(para_start_char);
+            let mut end = start.saturating_add(max_chars).min(para_end_char);
+            if end.saturating_sub(start) < max_chars {
+                start = end.saturating_sub(max_chars).max(para_start_char);
+            }
+            end = end.max(start);
+            (start, end)
+        };
+
+        let start_byte = Self::char_to_byte_offset(doc, start_char);
+        let end_byte = Self::char_to_byte_offset(doc, end_char);
+        let text = doc[start_byte..end_byte].to_string();
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some((format!("uia:{}", start_char), text, start_char))
+    }
+
     /// Get raw text from the user's text field. Strategy:
     /// 1. If fg_hwnd PID changed (user switched apps), clear saved element
     /// 2. Try GetFocusedElement() — if it's a text field, save it and read
     /// 3. If focused element is wrong (terminal, etc.), re-read from saved element
-    fn get_raw_text(&self) -> Option<RawCursorText> {
+    fn get_raw_text(&self) -> Option<(RawCursorText, Option<(i32, i32)>)> {
         unsafe {
             let uia = crate::platform::windows::cached_uia()?;
             let our_pid = std::process::id();
@@ -229,13 +313,14 @@ impl AccessibilityBridge {
             if let Ok(focused) = uia.GetFocusedElement() {
                 let focused_pid = focused.CurrentProcessId().unwrap_or(0) as u32;
                 if focused_pid != our_pid && focused_pid != 0 {
-                    if let Some((raw, doc, element)) = self.accept_text_element(focused) {
+                    if let Some((raw, doc, element, caret)) = self.accept_text_element(focused) {
                         bridge_log(&format!("Focused text field: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                        self.cached_cursor.set(raw.before.chars().count());
                         *self.cached_doc.borrow_mut() = doc;
                         *self.saved_element.borrow_mut() = Some(element);
                         self.saved_element_pid.set(focused_pid);
-                        return Some(raw);
+                        return Some((raw, caret));
                     }
                 }
             }
@@ -247,15 +332,16 @@ impl AccessibilityBridge {
                 let mut fg_pid = 0u32;
                 GetWindowThreadProcessId(HWND(fg_hwnd_val as *mut _), Some(&mut fg_pid));
                 if fg_pid != our_pid && fg_pid != 0 {
-                    if let Some((raw, doc, element)) =
+                    if let Some((raw, doc, element, caret)) =
                         self.find_text_element_from_hwnd(&uia, HWND(fg_hwnd_val as *mut _))
                     {
                         bridge_log(&format!("HWND text field: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                        self.cached_cursor.set(raw.before.chars().count());
                         *self.cached_doc.borrow_mut() = doc;
                         *self.saved_element.borrow_mut() = Some(element);
                         self.saved_element_pid.set(fg_pid);
-                        return Some(raw);
+                        return Some((raw, caret));
                     }
                 }
             }
@@ -268,8 +354,10 @@ impl AccessibilityBridge {
                     if !doc.is_empty() && !self.should_reject_stale_doc(&doc) {
                         bridge_log(&format!("Saved element re-read: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
+                        let caret = Self::estimate_caret_from_element(element, &raw.before);
+                        self.cached_cursor.set(raw.before.chars().count());
                         *self.cached_doc.borrow_mut() = doc;
-                        return Some(raw);
+                        return Some((raw, caret));
                     }
                 }
                 // Saved element no longer readable — clear it
@@ -311,7 +399,7 @@ impl AccessibilityBridge {
             if let Ok(pattern2) =
                 focused.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
             {
-                let mut is_active = windows::core::BOOL::default();
+                let mut is_active = BOOL::default();
                 if let Ok(caret_range) = pattern2.GetCaretRange(&mut is_active) {
                     let context_range = caret_range.Clone().ok()?;
                     let _ = context_range.MoveEndpointByUnit(
@@ -379,7 +467,7 @@ impl AccessibilityBridge {
             if let Ok(pattern2) =
                 focused.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
             {
-                let mut is_active = windows::core::BOOL::default();
+                let mut is_active = BOOL::default();
                 if let Ok(caret_range) = pattern2.GetCaretRange(&mut is_active) {
                     // Scan backwards to find word start
                     let back_range = caret_range.Clone().unwrap();
@@ -624,12 +712,22 @@ impl TextBridge for AccessibilityBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        let caret_pos = self.get_caret_pos();
+        let gui_caret = self.get_caret_pos();
         let raw = self.get_raw_text();
         match raw {
-            Some(raw) => Some(build_context(&raw, caret_pos)),
+            Some((raw, estimated_caret)) => {
+                let caret_pos = gui_caret.or(estimated_caret);
+                let mut ctx = build_context(&raw, caret_pos);
+                let cursor = raw.before.chars().count();
+                ctx.cursor_doc_offset = Some(cursor);
+                let cached = self.cached_doc.borrow();
+                if let Some((para_id, _, _)) = Self::paragraph_window_from_cached(cached.as_str(), cursor) {
+                    ctx.paragraph_id = para_id;
+                }
+                Some(ctx)
+            }
             None => Some(CursorContext {
-                caret_pos,
+                caret_pos: gui_caret,
                 ..Default::default()
             }),
         }
@@ -675,6 +773,11 @@ impl TextBridge for AccessibilityBridge {
         }
     }
 
+    fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> {
+        let cached = self.cached_doc.borrow();
+        Self::paragraph_window_from_cached(cached.as_str(), self.cached_cursor.get())
+    }
+
     fn set_target_hwnd(&self, hwnd: isize) {
         if hwnd != self.target_hwnd.get() {
             self.edit_hwnd.set(0); // Reset cached edit control when app changes
@@ -691,6 +794,7 @@ impl TextBridge for AccessibilityBridge {
             ));
             self.edit_hwnd.set(0);
             self.cached_doc.borrow_mut().clear();
+            self.cached_cursor.set(0);
             *self.saved_element.borrow_mut() = None;
             self.saved_element_pid.set(0);
         }

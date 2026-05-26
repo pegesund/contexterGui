@@ -160,6 +160,51 @@ fn byte_index_for_char(text: &str, char_idx: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+fn paragraph_window_from_text(
+    text: &str,
+    cursor_char: usize,
+    base_char_offset: usize,
+    max_chars: usize,
+) -> Option<(String, String, usize)> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let cursor_char = cursor_char.min(text.chars().count());
+    let cursor_byte = byte_index_for_char(text, cursor_char);
+    let para_start_byte = text[..cursor_byte]
+        .rfind('\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let para_end_byte = text[cursor_byte..]
+        .find('\n')
+        .map(|pos| cursor_byte + pos)
+        .unwrap_or(text.len());
+    let para_start_char = text[..para_start_byte].chars().count();
+    let para_end_char = text[..para_end_byte].chars().count();
+
+    let (start_char, end_char) = if para_end_char.saturating_sub(para_start_char) <= max_chars {
+        (para_start_char, para_end_char)
+    } else {
+        let half = max_chars / 2;
+        let mut start = cursor_char.saturating_sub(half).max(para_start_char);
+        let mut end = start.saturating_add(max_chars).min(para_end_char);
+        if end.saturating_sub(start) < max_chars {
+            start = end.saturating_sub(max_chars).max(para_start_char);
+        }
+        end = end.max(start);
+        (start, end)
+    };
+
+    let start_byte = byte_index_for_char(text, start_char);
+    let end_byte = byte_index_for_char(text, end_char);
+    let para_text = text[start_byte..end_byte].to_string();
+    if para_text.trim().is_empty() {
+        return None;
+    }
+    let absolute_start = base_char_offset + start_char;
+    Some((format!("ax:{}", absolute_start), para_text, absolute_start))
+}
+
 fn text_at_char_offset_matches(text: &str, find: &str, char_offset: usize) -> bool {
     let find_chars = find.chars().count();
     let start = byte_index_for_char(text, char_offset);
@@ -547,23 +592,41 @@ unsafe fn find_context_in_app_windows(app: AXUIElementRef) -> Option<(String, &'
 }
 
 unsafe fn paragraph_from_element(elem: AXUIElementRef) -> Option<(String, String, usize)> {
-    let (full_text, cursor) = text_from_element(elem)?;
-    let cursor_byte = full_text
-        .char_indices()
-        .nth(cursor)
-        .map(|(b, _)| b)
-        .unwrap_or(full_text.len());
-    let para_start = full_text[..cursor_byte]
-        .rfind('\n')
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    let para_end = full_text[cursor_byte..]
-        .find('\n')
-        .map(|p| cursor_byte + p)
-        .unwrap_or(full_text.len());
-    let para_text = full_text[para_start..para_end].to_string();
-    if para_text.trim().is_empty() { return None; }
-    Some((format!("ax:{}", para_start), para_text, para_start))
+    if role_accepts_range_context(&role_of(elem)) {
+        let cursor = selected_cursor(elem, usize::MAX);
+        if cursor != usize::MAX {
+            let mut count_val: CFTypeRef = std::ptr::null();
+            let err = AXUIElementCopyAttributeValue(
+                elem,
+                CFString::new("AXNumberOfCharacters").as_concrete_TypeRef(),
+                &mut count_val,
+            );
+            let total: usize = if err == 0 && !count_val.is_null() {
+                let n = core_foundation::number::CFNumber::wrap_under_create_rule(count_val as _);
+                n.to_i64().unwrap_or(0).max(0) as usize
+            } else {
+                0
+            };
+            if total > 0 {
+                let max_chars = 6000usize;
+                let half = max_chars / 2;
+                let start = cursor.saturating_sub(half);
+                let end = start.saturating_add(max_chars).min(total);
+                let start = end.saturating_sub(max_chars).min(start);
+                let local = read_string_for_range(
+                    elem,
+                    core_foundation::base::CFRange {
+                        location: start as isize,
+                        length: end.saturating_sub(start) as isize,
+                    },
+                )?;
+                return paragraph_window_from_text(&local, cursor.saturating_sub(start), start, max_chars);
+            }
+        }
+    }
+
+    let (full_text, cursor) = text_from_value(elem)?;
+    paragraph_window_from_text(&full_text, cursor, 0, 6000)
 }
 
 unsafe fn paragraph_from_focused_element(elem: AXUIElementRef) -> Option<(String, String, usize)> {
@@ -867,31 +930,7 @@ impl TextBridge for AxMacBridge {
     }
 
     fn read_document_context(&self) -> Option<String> {
-        let pid = self.target_pid.load(Ordering::Relaxed) as i32;
-        if pid <= 0 { return None; }
-        unsafe {
-            let app = AXUIElementCreateApplication(pid);
-            let mut focused: CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyAttributeValue(
-                app,
-                CFString::new("AXFocusedUIElement").as_concrete_TypeRef(),
-                &mut focused,
-            );
-
-            let mut text = None;
-            if err == 0 && !focused.is_null() {
-                text = find_readable_text(focused as AXUIElementRef, 0, 6).map(|(t, _)| t);
-                CFRelease(focused);
-            }
-            if text.is_none() {
-                text = find_text_in_app_window(app).map(|(t, _)| t);
-            }
-            if text.is_none() {
-                text = find_text_in_app_windows(app).map(|(t, _)| t);
-            }
-            CFRelease(app as _);
-            text
-        }
+        self.read_paragraph_at(0).map(|(_, text, _)| text)
     }
 
     fn read_full_document(&self) -> Option<String> {
@@ -1064,9 +1103,10 @@ unsafe fn try_read_via_text_range(elem: AXUIElementRef) -> Option<CursorContext>
     // Tier 2: focused-element frame (Electron apps like Teams/Slack/VSCode
     //         that Apple's private AXBoundsForRange APIs intentionally
     //         don't support — see electron/electron#34755).
-    // Char-count × glyph-width estimation was tried but fails for line
-    // wraps, variable-width fonts, and emoji — not worth the complexity.
+    // Tier 2 estimates Electron caret movement from the focused field frame
+    // when Slack/Teams refuse AXBoundsForRange.
     let caret_pos = read_caret_bounds(elem, sel)
+        .or_else(|| unsafe { estimate_caret_from_text(elem, &before) })
         .or_else(|| unsafe { element_frame_bottom_left(elem) });
     let mut ctx = build_context(&RawCursorText { before, after }, caret_pos);
     // Expose the cursor's character offset so main.rs's incremental scan
@@ -1138,6 +1178,54 @@ unsafe fn read_caret_bounds(
     }
 
     None
+}
+
+unsafe fn estimate_caret_from_text(elem: AXUIElementRef, before: &str) -> Option<(i32, i32)> {
+    let mut pos_val: CFTypeRef = std::ptr::null();
+    let perr = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new("AXPosition").as_concrete_TypeRef(),
+        &mut pos_val,
+    );
+    if perr != 0 || pos_val.is_null() { return None; }
+    let mut size_val: CFTypeRef = std::ptr::null();
+    let serr = AXUIElementCopyAttributeValue(
+        elem,
+        CFString::new("AXSize").as_concrete_TypeRef(),
+        &mut size_val,
+    );
+    if serr != 0 || size_val.is_null() {
+        CFRelease(pos_val);
+        return None;
+    }
+    let mut pos = core_graphics::geometry::CGPoint::new(0.0, 0.0);
+    let mut sz = core_graphics::geometry::CGSize::new(0.0, 0.0);
+    let ok_p = AXValueGetValue(pos_val as AXValueRef, kAXValueTypeCGPoint, &mut pos as *mut _ as *mut _);
+    let ok_s = AXValueGetValue(size_val as AXValueRef, kAXValueTypeCGSize, &mut sz as *mut _ as *mut _);
+    CFRelease(pos_val);
+    CFRelease(size_val);
+    if !ok_p || !ok_s || pos.x < 50.0 || sz.width < 40.0 || sz.height < 12.0 {
+        return None;
+    }
+
+    let avg_char_w = 7.4f64;
+    let line_h = 20.0f64;
+    let pad_x = 12.0f64;
+    let pad_y = 8.0f64;
+    let usable_w = (sz.width - pad_x * 2.0).max(80.0);
+    let chars_per_line = (usable_w / avg_char_w).floor().max(1.0) as usize;
+    let current_line = before.rsplit('\n').next().unwrap_or(before);
+    let col_chars = current_line.chars().count();
+    let visual_line = col_chars / chars_per_line;
+    let col = col_chars % chars_per_line;
+    let x = pos.x + pad_x + col as f64 * avg_char_w;
+    let y = pos.y + pad_y + (visual_line as f64 + 1.0) * line_h;
+    trace_once(&format!(
+        "ax_mac estimated caret: col={} line={} frame=({},{} {}x{}) -> ({},{})",
+        col, visual_line, pos.x as i32, pos.y as i32, sz.width as i32, sz.height as i32,
+        x as i32, y as i32
+    ));
+    Some((x.round() as i32, y.min(pos.y + sz.height + line_h).round() as i32))
 }
 
 unsafe fn element_frame_bottom_left(elem: AXUIElementRef) -> Option<(i32, i32)> {

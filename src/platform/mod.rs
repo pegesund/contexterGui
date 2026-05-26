@@ -167,6 +167,8 @@ pub trait PlatformServices: Send + Sync {
     ) -> GrammarFeedPolicy {
         if active_bridge_name == "Word COM" {
             GrammarFeedPolicy::paragraph(false)
+        } else if active_bridge_name == "Browser" || active_bridge_name == "Accessibility" {
+            GrammarFeedPolicy::paragraph(true)
         } else {
             GrammarFeedPolicy::full_document()
         }

@@ -383,6 +383,19 @@ impl TextBridge for BrowserBridge {
         Some(text)
     }
 
+    fn read_paragraph_at(&self, cursor_offset: usize) -> Option<(String, String, usize)> {
+        let (text, cursor_start, _, _) = self.read_data_file()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        let cursor = if cursor_offset > 0 { cursor_offset } else { cursor_start };
+        let (para_text, para_start) = paragraph_window_around_cursor(&text, cursor, 6000);
+        if para_text.trim().is_empty() {
+            return None;
+        }
+        Some((format!("browser:{}", para_start), para_text, para_start))
+    }
+
     /// Browser/textarea: skip the word at cursor if user is typing at end of document.
     /// When editing in the middle (cursor not at end), always check — user changed existing text.
     fn should_skip_word_spelling(&self, cursor_off: usize, word_start: usize, word_end: usize, doc_char_len: usize, word_at_cursor: &str) -> bool {
@@ -431,6 +444,36 @@ fn char_to_byte_offset(s: &str, char_offset: usize) -> usize {
         .nth(char_offset)
         .map(|(byte_idx, _)| byte_idx)
         .unwrap_or(s.len())
+}
+
+fn paragraph_window_around_cursor(text: &str, cursor_char: usize, max_chars: usize) -> (String, usize) {
+    let cursor_char = cursor_char.min(text.chars().count());
+    let cursor_byte = char_to_byte_offset(text, cursor_char);
+    let para_start_byte = text[..cursor_byte]
+        .rfind('\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let para_end_byte = text[cursor_byte..]
+        .find('\n')
+        .map(|pos| cursor_byte + pos)
+        .unwrap_or(text.len());
+    let para_start_char = text[..para_start_byte].chars().count();
+    let para_end_char = text[..para_end_byte].chars().count();
+
+    if para_end_char.saturating_sub(para_start_char) <= max_chars {
+        return (text[para_start_byte..para_end_byte].to_string(), para_start_char);
+    }
+
+    let half = max_chars / 2;
+    let mut start_char = cursor_char.saturating_sub(half).max(para_start_char);
+    let mut end_char = start_char.saturating_add(max_chars).min(para_end_char);
+    if end_char.saturating_sub(start_char) < max_chars {
+        start_char = end_char.saturating_sub(max_chars).max(para_start_char);
+    }
+    end_char = end_char.max(start_char);
+    let start_byte = char_to_byte_offset(text, start_char);
+    let end_byte = char_to_byte_offset(text, end_char);
+    (text[start_byte..end_byte].to_string(), start_char)
 }
 
 /// Extract a string value from JSON by key (simple parser, no serde needed)

@@ -12,7 +12,7 @@ use windows::Win32::Media::Speech::{
     ISpVoice, SpVoice, SPF_ASYNC, SPF_PURGEBEFORESPEAK, SPVOICESTATUS, SPRS_DONE,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
 use windows::core::HSTRING;
 
@@ -43,7 +43,7 @@ impl WindowsSystemTtsEngine {
         let available_w = available.clone();
 
         std::thread::spawn(move || unsafe {
-            let coinit = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let coinit = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if coinit.is_err() {
                 eprintln!("SAPI 5: CoInitializeEx failed: {:?}", coinit);
                 return;

@@ -350,6 +350,7 @@ impl PlatformServices for MacPlatform {
     ) -> GrammarFeedPolicy {
         match active_bridge_name {
             "Word Add-in" => GrammarFeedPolicy::external(),
+            "Browser" => GrammarFeedPolicy::paragraph(true),
             "Accessibility (macOS)" => {
                 if matches!(kind, AppKind::Other | AppKind::Notepad) && self.is_writing_app(app) {
                     GrammarFeedPolicy::paragraph(true)
