@@ -76,6 +76,34 @@ pub fn register_native_messaging_host_best_effort() {
     }
 }
 
+/// Stop Chrome/Edge-spawned native hosts that are running from this install.
+///
+/// Velopack updates and uninstalls need to replace/delete
+/// AppData\Local\Spell\current. A live native_bridge.exe keeps its own file
+/// locked, so the cleanup must happen before Velopack starts moving files.
+pub fn stop_native_bridge_processes_best_effort() {
+    #[cfg(target_os = "windows")]
+    match stop_native_bridge_processes_inner() {
+        Ok(killed) => {
+            if killed > 0 {
+                crate::log!("Native host: stopped {} native_bridge.exe process(es)", killed);
+            }
+        }
+        Err(e) => crate::log!("Native host: stop native_bridge.exe failed: {}", e),
+    }
+}
+
+/// Remove per-user browser native-host registration during uninstall.
+pub fn unregister_native_messaging_host_best_effort() {
+    #[cfg(target_os = "windows")]
+    match unregister_inner() {
+        Ok(removed) => {
+            crate::log!("Native host: unregistered {} browser host key(s)", removed);
+        }
+        Err(e) => crate::log!("Native host: unregister failed: {}", e),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn register_inner() -> std::io::Result<()> {
     let bridge_path = find_native_bridge_path().ok_or_else(|| {
@@ -209,6 +237,154 @@ fn register_inner() -> std::io::Result<()> {
         EXTENSION_ID
     );
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn unregister_inner() -> std::io::Result<usize> {
+    let browsers = [
+        r"Software\Google\Chrome\NativeMessagingHosts",
+        r"Software\Microsoft\Edge\NativeMessagingHosts",
+        r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
+        r"Software\Chromium\NativeMessagingHosts",
+    ];
+
+    let mut removed = 0usize;
+    for prefix in &browsers {
+        let subkey = format!(r"{}\{}", prefix, HOST_NAME);
+        match delete_registry_tree(&subkey) {
+            Ok(true) => {
+                crate::log!("Native host: deleted HKCU\\{}", subkey);
+                removed += 1;
+            }
+            Ok(false) => {}
+            Err(e) => crate::log!("Native host: delete HKCU\\{} failed: {}", subkey, e),
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(target_os = "windows")]
+fn delete_registry_tree(subkey: &str) -> std::io::Result<bool> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    use windows::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
+    use windows::core::PCWSTR;
+
+    let subkey_w: Vec<u16> = std::ffi::OsStr::new(subkey).encode_wide().chain(once(0)).collect();
+    let status = unsafe {
+        RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR::from_raw(subkey_w.as_ptr()))
+    };
+    if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+        Ok(false)
+    } else if status.is_err() {
+        Err(std::io::Error::from_raw_os_error(status.0 as i32))
+    } else {
+        Ok(true)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_native_bridge_processes_inner() -> std::io::Result<usize> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let target = find_native_bridge_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "native_bridge.exe not found next to current executable",
+        )
+    })?;
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    let mut killed = 0usize;
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry).is_ok() };
+    while has_entry {
+        if process_entry_name(&entry).eq_ignore_ascii_case("native_bridge.exe")
+            && entry.th32ProcessID != std::process::id()
+        {
+            if stop_process_if_image_matches(entry.th32ProcessID, &target)? {
+                killed += 1;
+            }
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry).is_ok() };
+    }
+
+    let _ = unsafe { CloseHandle(snapshot) };
+    Ok(killed)
+}
+
+#[cfg(target_os = "windows")]
+fn stop_process_if_image_matches(pid: u32, target: &Path) -> std::io::Result<bool> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+    use windows::core::PWSTR;
+
+    let access = windows::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(
+        PROCESS_QUERY_LIMITED_INFORMATION.0 | PROCESS_TERMINATE.0,
+    );
+    let handle = match unsafe { OpenProcess(access, false, pid) } {
+        Ok(handle) => handle,
+        Err(_) => return Ok(false),
+    };
+
+    let mut buf = [0u16; 32768];
+    let mut len = buf.len() as u32;
+    let image = if unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    }
+    .is_ok()
+    {
+        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+    } else {
+        None
+    };
+
+    let should_stop = image
+        .as_ref()
+        .map(|path| path_eq_windows(path, target))
+        .unwrap_or(false);
+    if should_stop {
+        let _ = unsafe { TerminateProcess(handle, 0) };
+    }
+    let _ = unsafe { CloseHandle(handle) };
+    Ok(should_stop)
+}
+
+#[cfg(target_os = "windows")]
+fn process_entry_name(entry: &windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W) -> String {
+    let len = entry
+        .szExeFile
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(entry.szExeFile.len());
+    String::from_utf16_lossy(&entry.szExeFile[..len])
+}
+
+#[cfg(target_os = "windows")]
+fn path_eq_windows(a: &Path, b: &Path) -> bool {
+    fn clean(path: &Path) -> String {
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    }
+    clean(a) == clean(b)
 }
 
 /// Set the default (unnamed) value of HKCU\<subkey> to a UTF-16 string.

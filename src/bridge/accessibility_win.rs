@@ -1,6 +1,7 @@
 use super::{CursorContext, RawCursorText, TextBridge, build_context, extract_word_before_cursor, extract_word_after_cursor};
 use std::io::Write;
 use std::time::{Duration, Instant};
+use windows::core::BOOL;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;

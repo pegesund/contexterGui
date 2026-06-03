@@ -10783,7 +10783,20 @@ fn main() -> eframe::Result {
     // does its work, and exits the process. Touching the platform layer or
     // any I/O before this point would race the bootstrapper. Mirrors what
     // ConcentrateDotNet does at the top of Program.cs.
-    velopack::VelopackApp::build().run();
+    let mut velo_app = velopack::VelopackApp::build();
+    #[cfg(target_os = "windows")]
+    {
+        velo_app = velo_app
+            .on_before_update_fast_callback(|_| {
+                native_host::unregister_native_messaging_host_best_effort();
+                native_host::stop_native_bridge_processes_best_effort();
+            })
+            .on_before_uninstall_fast_callback(|_| {
+                native_host::unregister_native_messaging_host_best_effort();
+                native_host::stop_native_bridge_processes_best_effort();
+            });
+    }
+    velo_app.run();
 
     #[cfg(target_os = "macos")]
     platform::macos::configure_swipl_home_env();

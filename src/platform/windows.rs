@@ -465,7 +465,7 @@ fn read_word_before_cursor_uia() -> Option<String> {
         if let Ok(pattern2) =
             focused.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
         {
-            let mut is_active = windows::Win32::Foundation::BOOL::default();
+            let mut is_active = windows::core::BOOL::default();
             if let Ok(caret_range) = pattern2.GetCaretRange(&mut is_active) {
                 let lookback = caret_range.Clone().ok()?;
                 let _ = lookback.MoveEndpointByUnit(

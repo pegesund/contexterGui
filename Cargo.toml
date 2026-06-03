@@ -95,6 +95,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     # Win32_System_SystemInformation provides GetTickCount, used by

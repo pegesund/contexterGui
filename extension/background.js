@@ -28,6 +28,22 @@ function sendToTabPorts(tabId, msg) {
   }
   if (alive.length === 0) contentPorts.delete(tabId);
   else contentPorts.set(tabId, alive);
+  disconnectNativeIfIdle();
+}
+
+function hasContentPorts() {
+  for (const ports of contentPorts.values()) {
+    if (ports.length > 0) return true;
+  }
+  return false;
+}
+
+function disconnectNativeIfIdle() {
+  if (nativePort && !hasContentPorts()) {
+    console.log("Spell: native host idle; disconnecting");
+    try { nativePort.disconnect(); } catch (_) {}
+    nativePort = null;
+  }
 }
 
 function connectNative() {
@@ -51,16 +67,11 @@ function connectNative() {
     nativePort.onDisconnect.addListener(() => {
       console.log("Spell native host disconnected:", chrome.runtime.lastError?.message);
       nativePort = null;
-      // Always retry — the user might still be in a writing app; switching
-      // tabs / navigating breaks content-script ports briefly and used to
-      // leave the native bridge dead until a new tab loaded a fresh script.
-      // Previously this only retried when contentPorts.size > 0, but
-      // service-worker sleep cycles cause genuine disconnects from any
-      // state, and the bridge dying mid-session means typing in a tab
-      // that ALREADY has a content script silently fails to reach the
-      // desktop (extension SW handles the postMessage but native port
-      // is dead → message dropped).
-      setTimeout(connectNative, 500);
+      // Reconnect only while a content script is attached. Keeping the
+      // native host open with no page-side consumer leaves native_bridge.exe
+      // running after the desktop app is uninstalled, which locks
+      // AppData\Local\Spell\current and blocks the next install.
+      if (hasContentPorts()) setTimeout(connectNative, 500);
     });
   } catch (e) {
     console.error("Spell: failed to connect native host:", e);
@@ -122,31 +133,22 @@ chrome.runtime.onConnect.addListener((port) => {
       if (ports.length === 0) contentPorts.delete(tabId);
       else contentPorts.set(tabId, ports);
     }
+    disconnectNativeIfIdle();
   });
 });
 
-// Keep service worker + native bridge alive.
+// Keep the service worker awake enough to repair active page connections.
 //
 // MV3 service workers go to sleep after ~30 s of inactivity. The keepalive
-// alarm wakes us up every 6 s, which:
-//   (1) postpones the SW sleep deadline (because the SW had work to do)
-//   (2) lets us reconnect the native bridge if it died
-//
-// Previously the alarm only called connectNative() when contentPorts.size > 0.
-// That broke the common case where the user briefly switches away from a
-// tab with a Spell content script: the script's port detaches, SW sleeps,
-// native bridge gets EOF on stdin and exits, then when the user switches
-// back and types, the SW wakes from the postMessage but the bridge is
-// dead and the text gets dropped before reaching the desktop. Reported
-// during 2026-05-15 testing: "caught errors on launch then stopped".
-//
-// Now we always try to keep the native bridge connected. The bridge is
-// cheap (a tiny stdio process) and Chrome only spawns it if its
-// connectNative call succeeds — so this is bounded.
+// alarm wakes us up every 6 s and reconnects the native bridge only when a
+// content script is currently attached. A page-side textUpdate still calls
+// connectNative() immediately, so bridge recovery is driven by real input
+// instead of a permanent background native_bridge.exe process.
 chrome.alarms.create("keepalive", { periodInMinutes: 0.1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "keepalive") {
-    connectNative();
+    if (hasContentPorts()) connectNative();
+    else disconnectNativeIfIdle();
   }
 });
 
@@ -154,8 +156,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // "switch to a tab the bridge has lost" scenario heals quickly without
 // waiting up to 6 s for the next alarm tick.
 chrome.tabs.onActivated.addListener(() => {
-  connectNative();
+  if (hasContentPorts()) connectNative();
 });
 chrome.windows.onFocusChanged.addListener(() => {
-  connectNative();
+  if (hasContentPorts()) connectNative();
 });

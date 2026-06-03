@@ -54,6 +54,18 @@
     } catch (e) { port = null; }
   }
 
+  function postToBackground(msg) {
+    if (!port) connectPort();
+    if (!port) return false;
+    try {
+      port.postMessage(msg);
+      return true;
+    } catch (e) {
+      port = null;
+      return false;
+    }
+  }
+
   // When the page is restored from bfcache, the old `port` reference is
   // dead but our code doesn't know until the next postMessage fails.
   // Proactively reconnect on pageshow so the very first textUpdate after
@@ -174,22 +186,18 @@
     if (!text) return;
     const version = text + "|" + cursor + "|" + caretX + "|" + caretY;
     if (version === lastDataVersion) return;
-    lastDataVersion = version;
     const data = { text: text, cursorStart: cursor, cursorEnd: cursor };
     lastGDocsText = data;
     const key = text + "|" + cursor;
     if (key === lastSent) return;
-    lastSent = key;
     spellLog("GDOCS canvas text: " + text.length + " chars, caret=(" + caretX + "," + caretY + ")");
-    if (!port) connectPort();
-    if (port) {
-      try {
-        port.postMessage({
-          type: "textUpdate", text: text,
-          cursorStart: cursor, cursorEnd: cursor,
-          caretX: caretX, caretY: caretY, url: window.location.href
-        });
-      } catch (e) { port = null; }
+    if (postToBackground({
+      type: "textUpdate", text: text,
+      cursorStart: cursor, cursorEnd: cursor,
+      caretX: caretX, caretY: caretY, url: window.location.href
+    })) {
+      lastSent = key;
+      lastDataVersion = version;
     }
   }
   setInterval(pollGDocsData, 500);
@@ -397,19 +405,15 @@
     if (!data) return;
     const key = data.text + "|" + data.cursorStart;
     if (key === lastSent) return;
-    lastSent = key;
     activeElement = el;
     lastTextElement = el;
     if (el.spellcheck !== false) el.spellcheck = false;
-    if (!port) connectPort();
-    if (port) {
-      try {
-        port.postMessage({
-          type: "textUpdate", text: data.text,
-          cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
-          caretX: data.caretX, caretY: data.caretY, url: window.location.href
-        });
-      } catch (e) { port = null; }
+    if (postToBackground({
+      type: "textUpdate", text: data.text,
+      cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
+      caretX: data.caretX, caretY: data.caretY, url: window.location.href
+    })) {
+      lastSent = key;
     }
   }
 
@@ -424,22 +428,19 @@
   }, true);
 
   setInterval(() => {
-    if (!port) connectPort();
     if (isGoogleDocs()) {
       if (replaceInProgress) {
-        if (port) { try { port.postMessage({ type: "keepalive" }); } catch(e) { port = null; } }
+        postToBackground({ type: "keepalive" });
         return;
       }
-      if (document.hasFocus() && port && lastGDocsText) {
-        try {
-          port.postMessage({
-            type: "textUpdate", text: lastGDocsText.text,
-            cursorStart: lastGDocsText.cursorStart, cursorEnd: lastGDocsText.cursorEnd,
-            caretX: 0, caretY: 0, url: window.location.href
-          });
-        } catch (e) { port = null; }
-      } else if (port) {
-        try { port.postMessage({ type: "keepalive" }); } catch(e) { port = null; }
+      if (document.hasFocus() && lastGDocsText) {
+        postToBackground({
+          type: "textUpdate", text: lastGDocsText.text,
+          cursorStart: lastGDocsText.cursorStart, cursorEnd: lastGDocsText.cursorEnd,
+          caretX: 0, caretY: 0, url: window.location.href
+        });
+      } else {
+        postToBackground({ type: "keepalive" });
       }
       return;
     }
@@ -448,14 +449,10 @@
     const data = getTextAndCursor(el);
     // Allow empty text through — see comment in sendUpdate() above.
     if (!data) return;
-    if (port) {
-      try {
-        port.postMessage({
-          type: "textUpdate", text: data.text,
-          cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
-          caretX: data.caretX, caretY: data.caretY, url: window.location.href
-        });
-      } catch (e) { port = null; }
-    }
+    postToBackground({
+      type: "textUpdate", text: data.text,
+      cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
+      caretX: data.caretX, caretY: data.caretY, url: window.location.href
+    });
   }, 2000);
 })();
