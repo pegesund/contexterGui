@@ -478,14 +478,28 @@ fn read_word_before_cursor_uia() -> Option<String> {
             }
         }
 
-        if let Ok(value) =
-            focused.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        if let Ok(pattern) =
+            focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
         {
-            if let Ok(text) = value.CurrentValue() {
-                return last_word(&text.to_string());
+            if let Ok(selection) = pattern.GetSelection() {
+                if selection.Length().ok()? > 0 {
+                    let range: IUIAutomationTextRange = selection.GetElement(0).ok()?;
+                    let lookback = range.Clone().ok()?;
+                    let _ = lookback.MoveEndpointByUnit(
+                        TextPatternRangeEndpoint_Start,
+                        TextUnit_Character,
+                        -80,
+                    );
+                    let text = lookback.GetText(-1).ok()?.to_string();
+                    return last_word(&text);
+                }
             }
         }
 
+        // Do not use ValuePattern.CurrentValue() here. It exposes the whole
+        // control value but no caret offset, so a mid-document Space press
+        // would speak the final word of the field instead of the word behind
+        // the cursor.
         None
     }
 }

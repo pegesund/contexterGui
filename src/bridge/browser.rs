@@ -3,7 +3,7 @@
 /// The extension sends text + cursor position to a native messaging host,
 /// which writes it to a temp JSON file. This bridge reads that file.
 
-use super::{CursorContext, RawCursorText, TextBridge, build_context};
+use super::{CursorContext, RawCursorText, TextBridge, build_context, extract_previous_word_before_cursor};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -370,6 +370,14 @@ impl TextBridge for BrowserBridge {
         let mut ctx = build_context(&raw, caret);
         ctx.cursor_doc_offset = Some(cursor_start);
         Some(ctx)
+    }
+
+    fn read_word_before_cursor_for_tts(&self) -> Option<String> {
+        let (text, cursor_start, _, _) = self.read_data_file()?;
+        let cursor_byte = char_to_byte_offset(&text, cursor_start);
+        let before = &text[..cursor_byte];
+        let word = extract_previous_word_before_cursor(before);
+        if word.is_empty() { None } else { Some(word) }
     }
 
     fn read_full_document(&self) -> Option<String> {

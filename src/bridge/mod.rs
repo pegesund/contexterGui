@@ -37,6 +37,13 @@ pub trait TextBridge {
     /// Read the current word, sentence, and caret position.
     fn read_context(&self) -> Option<CursorContext>;
 
+    /// Read the completed word immediately before the caret.
+    ///
+    /// This is intentionally separate from `read_context().word`: right
+    /// after the user presses Space, the current word is empty, but TTS still
+    /// needs the word that was just completed.
+    fn read_word_before_cursor_for_tts(&self) -> Option<String> { None }
+
     /// Replace the current word at the cursor with new text.
     fn replace_word(&self, new_text: &str) -> bool;
 
@@ -247,6 +254,26 @@ pub fn extract_word_before_cursor(before: &str) -> String {
         .to_string()
 }
 
+/// Extract the completed word immediately before the cursor.
+///
+/// Unlike `extract_word_before_cursor`, this skips trailing whitespace and
+/// punctuation first. That makes it suitable for speak-on-space, where the
+/// cursor is usually just after a blank.
+pub fn extract_previous_word_before_cursor(before: &str) -> String {
+    let trimmed = before
+        .trim_end_matches(|c: char| c.is_whitespace())
+        .trim_end_matches(|c: char| !(c.is_alphanumeric() || c == '-' || c == '\''));
+
+    trimmed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>()
+}
+
 /// Extract the rest of the word after cursor (when caret is mid-word).
 pub fn extract_word_after_cursor(after: &str) -> String {
     after
@@ -354,5 +381,23 @@ pub fn build_context(raw: &RawCursorText, caret_pos: Option<(i32, i32)>) -> Curs
         caret_pos,
         cursor_doc_offset: None,
         paragraph_id: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_previous_word_before_cursor;
+
+    #[test]
+    fn previous_word_skips_space_and_punctuation() {
+        assert_eq!(extract_previous_word_before_cursor("hello "), "hello");
+        assert_eq!(extract_previous_word_before_cursor("hello, "), "hello");
+        assert_eq!(extract_previous_word_before_cursor("one two   "), "two");
+        assert_eq!(extract_previous_word_before_cursor("can't "), "can't");
+    }
+
+    #[test]
+    fn previous_word_uses_cursor_prefix_not_sentence_end() {
+        assert_eq!(extract_previous_word_before_cursor("first middle "), "middle");
     }
 }

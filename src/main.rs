@@ -491,6 +491,9 @@ struct BridgeManager {
     /// never typed in the browser). Safari (no extension) keeps the AX
     /// fallback because this flag never flips.
     browser_extension_seen: bool,
+    /// Last time we repaired browser native-host registration after seeing a
+    /// browser foreground with no extension data.
+    last_browser_host_repair: Option<Instant>,
 }
 
 struct ForegroundRoute {
@@ -555,6 +558,7 @@ impl BridgeManager {
             // must have been talking to the previous desktop session →
             // it's installed.
             browser_extension_seen: browser_file_exists,
+            last_browser_host_repair: None,
         }
     }
 
@@ -701,6 +705,20 @@ impl BridgeManager {
         Some(ctx)
     }
 
+    fn maybe_repair_browser_native_host(&mut self) {
+        let should_repair = self
+            .last_browser_host_repair
+            .map(|last| last.elapsed() >= Duration::from_secs(30))
+            .unwrap_or(true);
+        if !should_repair {
+            return;
+        }
+
+        self.last_browser_host_repair = Some(Instant::now());
+        log!("Browser bridge unavailable while browser is foreground; refreshing native-host registration");
+        native_host::register_native_messaging_host_best_effort();
+    }
+
     fn try_word_context(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
         self.last_user_was_browser = false;
         for (i, bridge) in self.bridges.iter().enumerate() {
@@ -735,6 +753,7 @@ impl BridgeManager {
             if let Some(ctx) = self.try_browser_context(fg) {
                 return Some(ctx);
             }
+            self.maybe_repair_browser_native_host();
             return self.last_context.clone();
         }
 
@@ -797,6 +816,7 @@ impl BridgeManager {
             if let Some(ctx) = self.try_browser_context(fg) {
                 return Some(ctx);
             }
+            self.maybe_repair_browser_native_host();
 
             // Chromium-family browsers have native-messaging support. If the
             // Browser bridge has no fresh data, keep the cached Browser context
@@ -1036,6 +1056,19 @@ impl BridgeManager {
             return None;
         }
         self.effective_bridge().and_then(|b| b.read_full_document())
+    }
+
+    fn read_word_before_cursor_for_tts(&self, fg: &ForegroundRoute) -> Option<String> {
+        if fg.is_browser || self.last_user_was_browser {
+            return self
+                .bridges
+                .iter()
+                .find(|b| b.name() == "Browser")
+                .and_then(|b| b.read_word_before_cursor_for_tts());
+        }
+
+        self.effective_bridge()
+            .and_then(|b| b.read_word_before_cursor_for_tts())
     }
 
     fn select_range(&self, char_start: usize, char_end: usize) -> Option<(i32, i32)> {
@@ -1810,22 +1843,12 @@ impl ContextApp {
     }
 
     fn cached_word_for_space_tts(&self) -> Option<String> {
-        let from_context = if !self.context.word.trim().is_empty() {
-            Some(self.context.word.trim().to_string())
+        let word = self.context.word.trim();
+        if word.is_empty() {
+            None
         } else {
-            self.context
-                .sentence
-                .trim_end()
-                .rsplit(|c: char| c.is_whitespace())
-                .next()
-                .map(|word| {
-                    word.trim_matches(|c: char| {
-                        !(c.is_alphanumeric() || c == '-' || c == '\'')
-                    })
-                    .to_string()
-                })
-        };
-        from_context.filter(|word| !word.is_empty())
+            Some(word.to_string())
+        }
     }
 
     fn handle_space_tts(&mut self) {
@@ -1840,9 +1863,19 @@ impl ContextApp {
             return;
         }
 
+        let kind = self.platform.classify_app(&fg);
+        let route = ForegroundRoute::new(fg, kind);
         let word = self
-            .cached_word_for_space_tts()
-            .or_else(|| self.platform.get_word_before_cursor());
+            .manager
+            .read_word_before_cursor_for_tts(&route)
+            .or_else(|| {
+                if route.is_browser {
+                    None
+                } else {
+                    self.platform.get_word_before_cursor()
+                }
+            })
+            .or_else(|| self.cached_word_for_space_tts());
         if let Some(word) = word {
             if !word.is_empty() {
                 self.last_space_speak = Instant::now();
