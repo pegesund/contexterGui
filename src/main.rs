@@ -461,6 +461,14 @@ fn resolve_paths(lang: &dyn language::LanguageBundle) -> ResolvedPaths {
     ResolvedPaths { mtag_fst, onnx, tokenizer, wordfreq, prolog_rules, prolog_dir }
 }
 
+fn language_model_label(lang: &dyn language::LanguageBundle) -> &'static str {
+    match lang.code() {
+        "en" => "ModernBERT",
+        "nb" | "nn" | "no" => "NorBERT4",
+        _ => "Language model",
+    }
+}
+
 // --- Bridge manager: picks the best available bridge ---
 
 struct BridgeManager {
@@ -1198,6 +1206,7 @@ struct PendingConsonantBert {
 /// Items delivered by background startup threads
 enum StartupItem {
     Completer {
+        model_label: String,
         model: Option<Model>,
         prefix_index: Option<PrefixIndex>,
         baselines: Option<Arc<Baselines>>,
@@ -1965,17 +1974,18 @@ impl ContextApp {
         let onnx_path = paths.onnx.clone();
         let tokenizer_path = paths.tokenizer.clone();
         let wordfreq_path = paths.wordfreq.clone();
+        let model_label = language_model_label(&*language).to_string();
         let mask_token = language.mask_token().to_string();
         let baseline_preps: Vec<String> = language.baseline_prepositions().iter().map(|s| s.to_string()).collect();
         let baseline_frame = language.baseline_frame_template().to_string();
         std::thread::spawn(move || {
-            log!("Startup: BERT-completer thread started");
+            log!("Startup: {} completer thread started", model_label);
             // Wrap the load in catch_unwind so a panic in Model::load
             // (e.g. missing onnxruntime.dll on Windows, corrupt .onnx
             // file) does NOT silently kill the thread and leave the UI
-            // showing "Loading NorBERT4..." forever. Without this, the
+            // showing "Loading <model>..." forever. Without this, the
             // startup_tx send below never runs on panic and startup_done
-            // never gets "NorBERT4" added — exactly the symptom user
+            // never gets the model label added — exactly the symptom user
             // reported 2026-05-19 on Windows (stuck loading bar).
             let load_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let data = data_dir();
@@ -1988,6 +1998,7 @@ impl ContextApp {
                     match ContextApp::load_completer(
                         &onnx_path, &tokenizer_path, &wordfreq_path,
                         &minilm_onnx, &minilm_tok, &embed_cache,
+                        &model_label,
                         &mask_token, &baseline_preps, &baseline_frame,
                     ) {
                         Ok(parts) => parts,
@@ -2024,6 +2035,7 @@ impl ContextApp {
                 errors.push("BERT model loaded as None without explicit error".to_string());
             }
             let _ = tx2.send(StartupItem::Completer {
+                model_label,
                 model: model_opt, prefix_index,
                 baselines: baselines.map(|b| Arc::new(b)),
                 wordfreq: wf,
@@ -2210,7 +2222,7 @@ impl ContextApp {
     fn load_completer(
         onnx_path: &PathBuf, tokenizer_path: &PathBuf, wordfreq_path: &PathBuf,
         minilm_onnx: &PathBuf, minilm_tok: &PathBuf, embed_cache: &PathBuf,
-        mask_token: &str, baseline_preps: &[String], baseline_frame: &str,
+        model_label: &str, mask_token: &str, baseline_preps: &[String], baseline_frame: &str,
     ) -> anyhow::Result<(
         Option<Model>,
         Option<PrefixIndex>,
@@ -2226,7 +2238,7 @@ Set ORT_DYLIB_PATH, set SPELL_ORT_DYLIB, or extract ONNX Runtime to \
 C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             );
         }
-        log!("Startup: Loading NorBERT4 from {}", onnx_path.display());
+        log!("Startup: Loading {} from {}", model_label, onnx_path.display());
         log!("Startup:   tokenizer path: {}", tokenizer_path.display());
         log!("Startup:   onnx exists?    {}", onnx_path.exists());
         log!("Startup:   tokenizer exists? {}", tokenizer_path.exists());
@@ -2234,7 +2246,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             onnx_path.to_str().unwrap(),
             tokenizer_path.to_str().unwrap(),
         )?;
-        log!("Startup: NorBERT4 loaded. Vocab: {}, backend: {}", model.vocab_size(), model.backend_name());
+        log!("Startup: {} loaded. Vocab: {}, backend: {}", model_label, model.vocab_size(), model.backend_name());
 
         log!("Startup: Building prefix index");
         let pi = prefix_index::build_prefix_index(&model.tokenizer);
@@ -6388,7 +6400,7 @@ impl eframe::App for ContextApp {
         if let Some(rx) = &self.startup_rx {
             while let Ok(item) = rx.try_recv() {
                 match item {
-                    StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
+                    StartupItem::Completer { model_label, model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
                         // Store data FIRST so worker gets the right values
                         self.prefix_index = prefix_index;
                         self.baselines = baselines;
@@ -6423,11 +6435,11 @@ impl eframe::App for ContextApp {
                             self.bert_ready = true;
                         }
                         self.load_errors.extend(errors);
-                        self.startup_done.push("NorBERT4".into());
+                        self.startup_done.push(model_label.clone());
                         // Force rescan — spelling was skipped while BERT was loading
                         self.last_doc_hash = 0;
                         // processed_sentence_hashes NOT cleared — only invalidate changed sentence
-                        log!("Startup: NorBERT4 completer ready (bert_worker spawned)");
+                        log!("Startup: {} completer ready (bert_worker spawned)", model_label);
                     }
                 }
             }
@@ -7303,9 +7315,10 @@ impl eframe::App for ContextApp {
 
         let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
         let pencil_visible = self.selected_tab == 1 && self.show_grammar && has_active_errors;
-
-        let has_content = bulb_visible || pencil_visible || !self.grammar_errors.is_empty();
-        let recently_replaced = self.last_replace_time.elapsed() < Duration::from_secs(1);
+        let suggestion_status_visible = self.selected_tab == 0
+            && self.show_completions
+            && !has_completions
+            && (self.startup_rx.is_some() || (!self.bert_ready && !self.load_errors.is_empty()));
 
         // Width: wider when the pencil panel is showing (its rows have an
         // action-button cluster that needs the room). Otherwise compact.
@@ -7323,23 +7336,37 @@ impl eframe::App for ContextApp {
             let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
             content_rows += (errors as f32 * 6.0).max(3.0);
         }
+        if suggestion_status_visible {
+            content_rows += 1.5;
+        }
         // Inter-panel separator only if BOTH panels are actually showing.
         if bulb_visible && pencil_visible {
             content_rows += 1.0;
         }
-        // Base overhead: toolbar (~22) + toolbar panel margins (16) + central
-        // panel top margin (8) + scrollbar/separator padding (~10) ≈ 60px.
-        // Bulb panel gets 10 px extra so the full list stays visible.
-        let base_h = if bulb_visible { 70.0 } else { 60.0 };
-        // Minimum height drops when nothing is visible — collapse to toolbar.
-        // When a panel IS visible we keep a floor so the window doesn't
-        // jitter on every keystroke as completions appear/disappear.
+        // Base overhead: compact toolbar + modest content padding. Keep the
+        // toolbar-only state small; the old 90 px floor made the popup look
+        // like an empty panel was still open.
+        let base_h = if bulb_visible {
+            58.0
+        } else if pencil_visible {
+            60.0
+        } else if suggestion_status_visible {
+            48.0
+        } else {
+            34.0
+        };
+        // Keep pencil cards roomy, but let suggestion-only and toolbar-only
+        // states shrink so Windows doesn't show excessive top/left whitespace.
         let min_h = if slack_layout && (bulb_visible || pencil_visible) {
             130.0
-        } else if bulb_visible || pencil_visible {
+        } else if pencil_visible {
             240.0
+        } else if bulb_visible {
+            155.0
+        } else if suggestion_status_visible {
+            74.0
         } else {
-            90.0
+            42.0
         };
         let max_h = if slack_layout { 190.0 } else { 335.0 };
         let desired_win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, max_h * s);
@@ -7497,10 +7524,14 @@ impl eframe::App for ContextApp {
                 )
             }
         };
-        let panel_frame = egui::Frame::new()
+        let toolbar_frame = egui::Frame::new()
             .fill(theme.bg)
             .stroke(egui::Stroke::new(1.0, stroke_col))
-            .inner_margin(8.0);
+            .inner_margin(egui::Margin::symmetric(5, 3));
+        let content_frame = egui::Frame::new()
+            .fill(theme.bg)
+            .stroke(egui::Stroke::new(1.0, stroke_col))
+            .inner_margin(egui::Margin { left: 5, right: 5, top: 2, bottom: 5 });
 
         // Startup loading status bar
         if self.startup_rx.is_some() {
@@ -7512,7 +7543,8 @@ impl eframe::App for ContextApp {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     let progress = self.startup_done.len() as f32 / self.startup_total as f32;
-                    let loading: Vec<&str> = ["NorBERT4"]
+                    let model_label = language_model_label(&*self.language);
+                    let loading: Vec<&str> = [model_label]
                         .iter()
                         .filter(|s| !self.startup_done.iter().any(|d| d.starts_with(*s)))
                         .copied()
@@ -7534,7 +7566,7 @@ impl eframe::App for ContextApp {
         // Toolbar at bottom
         let tts_speaking = tts::is_speaking();
         let ocr_is_busy = self.ocr_receiver.is_some();
-        egui::TopBottomPanel::top("toolbar").frame(panel_frame).show(ctx, |ui| {
+        egui::TopBottomPanel::top("toolbar").frame(toolbar_frame).show(ctx, |ui| {
             let header_resp = ui.horizontal(|ui| {
                 let sep = egui::Color32::from_rgb(180, 170, 140);
                 let active = egui::Color32::from_rgb(0, 70, 160);
@@ -7548,7 +7580,7 @@ impl eframe::App for ContextApp {
                 // 💡 Forslag — toggle word/next-word suggestions panel
                 let bulb_color = if self.show_completions && self.selected_tab == 0 { active } else { inactive };
                 let bulb_resp = ax_icon(ui,
-                    egui::RichText::new("\u{1F4A1}").size(16.0 * s).color(bulb_color),
+                    "\u{1F4A1}", 16.0 * s, bulb_color,
                     self.language.ui_suggestions(),
                 );
                 if toolbar_clicked(ui, &bulb_resp, slack_layout) {
@@ -7582,7 +7614,7 @@ impl eframe::App for ContextApp {
                     egui::Color32::from_rgb(0, 160, 60)
                 };
                 let pen_resp = ax_icon(ui,
-                    egui::RichText::new("\u{270F}").size(16.0 * s).color(pen_color),
+                    "\u{270F}", 16.0 * s, pen_color,
                     self.language.ui_grammar(),
                 );
                 if toolbar_clicked(ui, &pen_resp, slack_layout) {
@@ -7630,7 +7662,7 @@ impl eframe::App for ContextApp {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     if ax_icon(ui,
-                        egui::RichText::new("\u{1F3A4}").size(13.0 * s).color(mic_color),
+                        "\u{1F3A4}", 13.0 * s, mic_color,
                         self.language.ui_speech_recognition(),
                     ).clicked() {
                             if whisper_ready {
@@ -7727,7 +7759,7 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     if ax_icon(ui,
-                        egui::RichText::new("▶").size(14.0 * s).color(inactive),
+                        "▶", 14.0 * s, inactive,
                         self.language.ui_read_selected_text(),
                     ).clicked() {
                         log!("Speak button clicked!");
@@ -7765,8 +7797,7 @@ impl eframe::App for ContextApp {
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                         if !self.llm_waiting {
                             if ax_icon(ui,
-                                egui::RichText::new("✨").size(14.0 * s)
-                                    .color(egui::Color32::from_rgb(0, 120, 220)),
+                                "✨", 14.0 * s, egui::Color32::from_rgb(0, 120, 220),
                                 self.language.ui_ai_fix_all(),
                             ).clicked() {
                                 // Apply local suggestions for every active
@@ -7809,7 +7840,7 @@ impl eframe::App for ContextApp {
                     self.language.ui_pin_cursor_off()
                 };
                 if ax_icon(ui,
-                    egui::RichText::new("\u{1F4CC}").size(14.0 * s).color(pin_color),
+                    "\u{1F4CC}", 14.0 * s, pin_color,
                     pin_tooltip,
                 ).clicked() {
                     self.follow_cursor = !self.follow_cursor;
@@ -7827,7 +7858,7 @@ impl eframe::App for ContextApp {
                 );
                 let gear_resp = ax_icon(
                     ui,
-                    egui::RichText::new("\u{2699}").size(16.0 * s).color(settings_color),
+                    "\u{2699}", 16.0 * s, settings_color,
                     self.language.ui_settings(),
                 );
                 if update_available {
@@ -7853,7 +7884,7 @@ impl eframe::App for ContextApp {
 
                 // ▁ Minimize
                 if ax_icon(ui,
-                    egui::RichText::new("–").size(14.0 * s).color(inactive),
+                    "–", 14.0 * s, inactive,
                     self.language.ui_minimize(),
                 ).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -7942,7 +7973,7 @@ impl eframe::App for ContextApp {
             }
         }
 
-        egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(content_frame).show(ctx, |ui| {
             // === Whisper transcription result — shown in separate centered window ===
             // (rendering happens below via show_viewport_immediate)
 
@@ -7966,6 +7997,35 @@ impl eframe::App for ContextApp {
                 let has_sugg = !self.completions.is_empty() || !self.open_completions.is_empty();
                 if has_sugg && !self.selection_mode { self.platform.set_tab_intercept(true); }
                 else if !has_sugg { self.platform.set_tab_intercept(false); self.selection_mode = false; }
+
+                if !has_sugg {
+                    let model_label = language_model_label(&*self.language);
+                    if self.startup_rx.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                egui::RichText::new(self.language.ui_loading(model_label))
+                                    .size(11.0 * s)
+                                    .color(theme.muted),
+                            );
+                        });
+                    } else if !self.bert_ready && !self.load_errors.is_empty() {
+                        let detail = self.load_errors.first().map(String::as_str).unwrap_or("");
+                        let status = if self.language.code() == "en" {
+                            format!("{} not ready", model_label)
+                        } else {
+                            format!("{} ikke klar", model_label)
+                        };
+                        let resp = ui.label(
+                            egui::RichText::new(status)
+                                .size(11.0 * s)
+                                .color(theme.err),
+                        );
+                        if !detail.is_empty() {
+                            resp.on_hover_text(detail);
+                        }
+                    }
+                }
 
                 if self.platform.take_tab_press() && has_sugg {
                     self.selection_mode = true;
@@ -10105,15 +10165,32 @@ fn tint_bg(base: egui::Color32, accent: egui::Color32, amount: f32) -> egui::Col
     )
 }
 
-/// Clickable icon label with a proper accessibility name.
-/// egui's default Label widget_info uses the raw text (often an emoji
-/// like "\u{1F4CC}") — screen readers read the Unicode name which is
-/// useless. Override with the human-readable label, which also becomes
-/// the hover tooltip.
-fn ax_icon(ui: &mut egui::Ui, icon: egui::RichText, label: &str) -> egui::Response {
-    let resp = ui.add(egui::Label::new(icon).sense(egui::Sense::click()));
+/// Clickable toolbar icon with a proper accessibility name and stable hitbox.
+fn ax_icon(
+    ui: &mut egui::Ui,
+    icon: &str,
+    icon_size: f32,
+    color: egui::Color32,
+    label: &str,
+) -> egui::Response {
+    let side = (icon_size + 7.0).max(18.0);
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(side, side),
+        egui::Sense::click() | egui::Sense::hover(),
+    );
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    resp.on_hover_text(label)
+    let resp = resp.on_hover_text(label);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(icon_size),
+        color,
+    );
+    resp
 }
 
 fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
@@ -10943,7 +11020,7 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
             eprintln!("Waiting for BERT model to load...");
             while let Ok(item) = rx.recv() {
                 match item {
-                    StartupItem::Completer { model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
+                    StartupItem::Completer { model_label: _, model, prefix_index, baselines, wordfreq, embedding_store, errors } => {
                         if let Some(m) = model {
                             app.bert_worker = Some(bert_worker::spawn_bert_worker(
                                 m, egui::Context::default(), build_bpe_completions, build_mtag_completions, build_right_completions,
