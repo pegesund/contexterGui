@@ -28,6 +28,8 @@ pub struct BrowserBridge {
     last_text: std::cell::RefCell<String>,
     last_cursor: std::cell::Cell<usize>,
     last_caret: std::cell::Cell<Option<(i32, i32)>>,
+    last_source: std::cell::RefCell<String>,
+    pending_completed_word: std::cell::RefCell<Option<String>>,
     last_read: std::cell::Cell<Option<Instant>>,
     /// After sending a replace command, freeze reads from the file until fresh data arrives.
     /// The file still contains pre-replace text; re-reading it would undo the cached fix.
@@ -47,6 +49,8 @@ impl BrowserBridge {
             last_text: std::cell::RefCell::new(String::new()),
             last_cursor: std::cell::Cell::new(0),
             last_caret: std::cell::Cell::new(None),
+            last_source: std::cell::RefCell::new(String::new()),
+            pending_completed_word: std::cell::RefCell::new(None),
             last_read: std::cell::Cell::new(None),
             replace_freeze_modified: std::cell::Cell::new(0),
             replace_old_word: std::cell::RefCell::new(String::new()),
@@ -143,10 +147,32 @@ impl BrowserBridge {
             (Some(x), Some(y)) => Some((x as i32, y as i32)),
             _ => None,
         };
+        let source = format!(
+            "{}|{}",
+            extract_json_number(&content, "tabId").unwrap_or(0),
+            extract_json_string(&content, "url").unwrap_or_default(),
+        );
+
+        let previous_source = self.last_source.borrow().clone();
+        if !previous_source.is_empty() && previous_source == source {
+            let previous_text = self.last_text.borrow();
+            if let Some(word) = completed_word_from_transition(
+                &previous_text,
+                self.last_cursor.get(),
+                &text,
+                cursor_start,
+            ) {
+                log_browser(&format!("Browser TTS boundary: '{}'", word));
+                *self.pending_completed_word.borrow_mut() = Some(word);
+            }
+        } else {
+            self.pending_completed_word.borrow_mut().take();
+        }
 
         *self.last_text.borrow_mut() = text.clone();
         self.last_cursor.set(cursor_start);
         self.last_caret.set(caret);
+        *self.last_source.borrow_mut() = source;
 
         Some((text, cursor_start, cursor_end, caret))
     }
@@ -372,12 +398,12 @@ impl TextBridge for BrowserBridge {
         Some(ctx)
     }
 
-    fn read_word_before_cursor_for_tts(&self) -> Option<String> {
-        let (text, cursor_start, _, _) = self.read_data_file()?;
-        let cursor_byte = char_to_byte_offset(&text, cursor_start);
-        let before = &text[..cursor_byte];
-        let word = extract_previous_word_before_cursor(before);
-        if word.is_empty() { None } else { Some(word) }
+    fn take_completed_word_for_tts(&self) -> Option<String> {
+        // Pull a fresh payload before consuming the event. Google Docs
+        // publishes its text after the OS key event, so reading here is what
+        // makes speak-on-space follow the updated browser cursor.
+        let _ = self.read_data_file();
+        self.pending_completed_word.borrow_mut().take()
     }
 
     fn read_full_document(&self) -> Option<String> {
@@ -452,6 +478,33 @@ fn char_to_byte_offset(s: &str, char_offset: usize) -> usize {
         .nth(char_offset)
         .map(|(byte_idx, _)| byte_idx)
         .unwrap_or(s.len())
+}
+
+fn completed_word_from_transition(
+    previous_text: &str,
+    previous_cursor: usize,
+    current_text: &str,
+    current_cursor: usize,
+) -> Option<String> {
+    if previous_text == current_text || current_cursor == 0 {
+        return None;
+    }
+
+    let current_byte = char_to_byte_offset(current_text, current_cursor);
+    let current_before = &current_text[..current_byte];
+    let inserted_space = matches!(current_before.chars().next_back(), Some(' ' | '\u{00a0}'));
+    if !inserted_space {
+        return None;
+    }
+
+    let previous_byte = char_to_byte_offset(previous_text, previous_cursor);
+    let previous_before = &previous_text[..previous_byte];
+    if matches!(previous_before.chars().next_back(), Some(' ' | '\u{00a0}')) {
+        return None;
+    }
+
+    let word = extract_previous_word_before_cursor(current_before);
+    (!word.is_empty()).then_some(word)
 }
 
 fn paragraph_window_around_cursor(text: &str, cursor_char: usize, max_chars: usize) -> (String, usize) {
@@ -555,4 +608,45 @@ fn has_whole_word(text: &str, word: &str) -> bool {
         pos = abs + 1;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::completed_word_from_transition;
+
+    #[test]
+    fn completed_word_is_emitted_after_fresh_space_payload() {
+        assert_eq!(
+            completed_word_from_transition("hello", 5, "hello ", 6),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            completed_word_from_transition("hei", 3, "hei\u{00a0}", 4),
+            Some("hei".to_string())
+        );
+    }
+
+    #[test]
+    fn completed_word_handles_google_docs_poll_skips() {
+        assert_eq!(
+            completed_word_from_transition("h", 1, "hello world ", 12),
+            Some("world".to_string())
+        );
+    }
+
+    #[test]
+    fn completed_word_ignores_keepalives_and_cursor_moves() {
+        assert_eq!(
+            completed_word_from_transition("hello ", 6, "hello ", 6),
+            None
+        );
+        assert_eq!(
+            completed_word_from_transition("hello world", 5, "hello world", 6),
+            None
+        );
+        assert_eq!(
+            completed_word_from_transition("hello ", 6, "hello  ", 7),
+            None
+        );
+    }
 }

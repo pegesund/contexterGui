@@ -37,12 +37,11 @@ pub trait TextBridge {
     /// Read the current word, sentence, and caret position.
     fn read_context(&self) -> Option<CursorContext>;
 
-    /// Read the completed word immediately before the caret.
+    /// Consume a word-completion event produced by this bridge.
     ///
-    /// This is intentionally separate from `read_context().word`: right
-    /// after the user presses Space, the current word is empty, but TTS still
-    /// needs the word that was just completed.
-    fn read_word_before_cursor_for_tts(&self) -> Option<String> { None }
+    /// Browser text arrives asynchronously after the native Space key event,
+    /// so its bridge derives this event from the fresh text/cursor payload.
+    fn take_completed_word_for_tts(&self) -> Option<String> { None }
 
     /// Replace the current word at the cursor with new text.
     fn replace_word(&self, new_text: &str) -> bool;

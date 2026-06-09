@@ -1,4 +1,6 @@
-use super::{AppKind, ForegroundApp, GrammarFeedPolicy, PlatformServices};
+use super::{
+    AppKind, CaretPositionDecision, ForegroundApp, GrammarFeedPolicy, PlatformServices,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -107,6 +109,27 @@ fn needs_ax_reenable(app_name: &str) -> bool {
             | "microsoft excel" | "microsoft powerpoint"
             | "microsoft outlook"
     )
+}
+
+fn normalize_macos_bridge_caret(
+    kind: AppKind,
+    caret: Option<(i32, i32)>,
+    pixels_per_point: f32,
+) -> Option<(i32, i32)> {
+    let (x, y) = caret?;
+    if kind == AppKind::Browser {
+        // Browser JS emits physical pixels so Chrome coordinates match
+        // Windows. Convert them back to macOS logical screen points.
+        let ppp = pixels_per_point.max(1.0);
+        Some((
+            (x as f32 / ppp).round() as i32,
+            (y as f32 / ppp).round() as i32,
+        ))
+    } else {
+        // AXBoundsForRange, AXPosition and AXSize already use macOS logical
+        // screen points. Dividing these by Retina scale halves both axes.
+        Some((x, y))
+    }
 }
 
 /// macOS platform services.
@@ -330,16 +353,32 @@ impl PlatformServices for MacPlatform {
         matches!(kind, AppKind::Word | AppKind::Browser | AppKind::Notepad | AppKind::Other)
     }
 
-    fn normalize_bridge_caret_position(
+    fn choose_caret_position(
         &self,
-        caret: Option<(i32, i32)>,
+        kind: AppKind,
+        platform_caret: Option<(i32, i32)>,
+        bridge_caret: Option<(i32, i32)>,
         pixels_per_point: f32,
-    ) -> Option<(i32, i32)> {
-        let ppp = pixels_per_point.max(1.0);
-        caret.map(|(x, y)| (
-            (x as f32 / ppp).round() as i32,
-            (y as f32 / ppp).round() as i32,
-        ))
+    ) -> Option<CaretPositionDecision> {
+        let platform_caret = self.normalize_platform_caret_position(platform_caret);
+        let bridge_caret = normalize_macos_bridge_caret(kind, bridge_caret, pixels_per_point)
+            .filter(|(x, y)| *x != 0 || *y != 0);
+
+        let (position, source) = if kind == AppKind::Browser {
+            match (bridge_caret, platform_caret) {
+                (Some(pos), _) => (pos, "bridge"),
+                (None, Some(pos)) => (pos, "platform"),
+                _ => return None,
+            }
+        } else {
+            match (platform_caret, bridge_caret) {
+                (Some(pos), _) => (pos, "platform"),
+                (None, Some(pos)) => (pos, "bridge"),
+                _ => return None,
+            }
+        };
+
+        Some(CaretPositionDecision { position, source })
     }
 
     fn grammar_feed_policy(
@@ -1180,5 +1219,30 @@ fn get_word_before_cursor_ax() -> Option<String> {
             .map(|w| w.to_string())
             .filter(|w| !w.is_empty());
         word
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppKind, normalize_macos_bridge_caret};
+
+    #[test]
+    fn browser_caret_converts_from_physical_pixels() {
+        assert_eq!(
+            normalize_macos_bridge_caret(AppKind::Browser, Some((1000, 800)), 2.0),
+            Some((500, 400))
+        );
+    }
+
+    #[test]
+    fn accessibility_caret_stays_in_logical_points() {
+        assert_eq!(
+            normalize_macos_bridge_caret(AppKind::Other, Some((465, 792)), 2.0),
+            Some((465, 792))
+        );
+        assert_eq!(
+            normalize_macos_bridge_caret(AppKind::Notepad, Some((173, 220)), 2.0),
+            Some((173, 220))
+        );
     }
 }

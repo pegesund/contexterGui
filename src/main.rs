@@ -1058,17 +1058,11 @@ impl BridgeManager {
         self.effective_bridge().and_then(|b| b.read_full_document())
     }
 
-    fn read_word_before_cursor_for_tts(&self, fg: &ForegroundRoute) -> Option<String> {
-        if fg.is_browser || self.last_user_was_browser {
-            return self
-                .bridges
-                .iter()
-                .find(|b| b.name() == "Browser")
-                .and_then(|b| b.read_word_before_cursor_for_tts());
-        }
-
-        self.effective_bridge()
-            .and_then(|b| b.read_word_before_cursor_for_tts())
+    fn take_browser_completed_word_for_tts(&self) -> Option<String> {
+        self.bridges
+            .iter()
+            .find(|b| b.name() == "Browser")
+            .and_then(|b| b.take_completed_word_for_tts())
     }
 
     fn select_range(&self, char_start: usize, char_end: usize) -> Option<(i32, i32)> {
@@ -1852,29 +1846,41 @@ impl ContextApp {
     }
 
     fn handle_space_tts(&mut self) {
-        if !self.speak_on_space || self.last_space_speak.elapsed() <= Duration::from_millis(400) {
-            return;
-        }
-        if !self.platform.take_space_press() {
-            return;
-        }
-        let fg = self.platform.foreground_app();
-        if self.platform.classify_app(&fg) == platform::AppKind::OurApp {
+        if !self.speak_on_space {
             return;
         }
 
+        let fg = self.platform.foreground_app();
         let kind = self.platform.classify_app(&fg);
+        if kind == platform::AppKind::OurApp {
+            return;
+        }
+
         let route = ForegroundRoute::new(fg, kind);
+        if route.is_browser {
+            // Clear the native key edge, but wait for the browser's fresh
+            // text/cursor payload to identify the completed word.
+            let _ = self.platform.take_space_press();
+            if self.last_space_speak.elapsed() <= Duration::from_millis(400) {
+                return;
+            }
+            if let Some(word) = self.manager.take_browser_completed_word_for_tts() {
+                self.last_space_speak = Instant::now();
+                log!("Browser speak-on-space: '{}'", word);
+                tts::speak_word(&word);
+            }
+            return;
+        }
+
+        if self.last_space_speak.elapsed() <= Duration::from_millis(400)
+            || !self.platform.take_space_press()
+        {
+            return;
+        }
+
         let word = self
-            .manager
-            .read_word_before_cursor_for_tts(&route)
-            .or_else(|| {
-                if route.is_browser {
-                    None
-                } else {
-                    self.platform.get_word_before_cursor()
-                }
-            })
+            .platform
+            .get_word_before_cursor()
             .or_else(|| self.cached_word_for_space_tts());
         if let Some(word) = word {
             if !word.is_empty() {
