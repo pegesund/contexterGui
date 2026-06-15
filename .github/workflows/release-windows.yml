@@ -26,6 +26,8 @@ env:
   RELEASES_REPO: pegesund/spell_binaries
   ONNX_VERSION: '1.24.4'
   SWIPL_VERSION: '9.2.9'
+  WHISPER_CPP_REPO: 'https://github.com/ggerganov/whisper.cpp.git'
+  WHISPER_CPP_REF: 'master'
   RUST_TOOLCHAIN: stable
 
 jobs:
@@ -190,6 +192,34 @@ jobs:
               Write-Error "ONNX Runtime extraction failed"
               exit 1
           }
+
+      - name: Build Whisper runtime
+        shell: pwsh
+        run: |
+          Write-Host "Checking out whisper.cpp from $env:WHISPER_CPP_REPO ($env:WHISPER_CPP_REF)"
+          git clone --depth 1 $env:WHISPER_CPP_REPO whisper.cpp
+          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to clone whisper.cpp"; exit $LASTEXITCODE }
+          git -C whisper.cpp checkout $env:WHISPER_CPP_REF
+          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to checkout whisper.cpp ref $env:WHISPER_CPP_REF"; exit $LASTEXITCODE }
+
+          $whisperCppDir = (Resolve-Path "whisper.cpp").Path
+          cmake -S native\whisper_wrapper -B whisper-build -A x64 `
+              -DWHISPER_CPP_DIR="$whisperCppDir"
+          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to configure Whisper runtime"; exit $LASTEXITCODE }
+
+          cmake --build whisper-build --config Release --target spell_whisper --parallel
+          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to build Whisper runtime"; exit $LASTEXITCODE }
+
+          $dll = Get-ChildItem -Path whisper-build -Filter whisper.dll -Recurse |
+              Where-Object { $_.FullName -like "*\Release\*" -or $_.FullName -like "*\bin\*" } |
+              Select-Object -First 1
+          if (-not $dll) {
+              Write-Host "Whisper build outputs:"
+              Get-ChildItem -Path whisper-build -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName)" }
+              Write-Error "Whisper runtime build did not produce whisper.dll"
+              exit 1
+          }
+          Write-Host "Built Whisper runtime: $($dll.FullName)"
 
       - name: Cargo build (release)
         shell: pwsh
@@ -453,6 +483,14 @@ jobs:
               if (Test-Path $resolved) {
                   $whisperDll = (Resolve-Path $resolved).Path
                   break
+              }
+          }
+          if (-not $whisperDll -and (Test-Path "whisper-build")) {
+              $hit = Get-ChildItem -Path "whisper-build" -Filter "whisper.dll" -Recurse `
+                  -ErrorAction SilentlyContinue -Force |
+                  Select-Object -First 1 -ExpandProperty FullName
+              if ($hit) {
+                  $whisperDll = (Resolve-Path $hit).Path
               }
           }
 

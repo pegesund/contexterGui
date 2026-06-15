@@ -5,21 +5,9 @@ use std::os::raw::{c_char, c_int, c_float, c_void};
 
 type WhisperContext = c_void;
 
-const WHISPER_SAMPLING_GREEDY: c_int = 0;
-const PARAMS_SIZE: usize = 296;
-
-// Field offsets (from bundled bindings, verified for x64)
-const OFF_N_THREADS: usize = 4;
-const OFF_PRINT_SPECIAL: usize = 24;
-const OFF_PRINT_PROGRESS: usize = 25;
-const OFF_PRINT_REALTIME: usize = 26;
-const OFF_PRINT_TIMESTAMPS: usize = 27;
-const OFF_LANGUAGE: usize = 96;
-
 type FnInit = unsafe extern "C" fn(*const c_char) -> *mut WhisperContext;
 type FnFree = unsafe extern "C" fn(*mut WhisperContext);
-type FnDefaultParams = unsafe extern "C" fn(c_int) -> [u8; PARAMS_SIZE];
-type FnFull = unsafe extern "C" fn(*mut WhisperContext, [u8; PARAMS_SIZE], *const c_float, c_int) -> c_int;
+type FnFull = unsafe extern "C" fn(*mut WhisperContext, *const c_float, c_int, *const c_char) -> c_int;
 type FnSegments = unsafe extern "C" fn(*mut WhisperContext) -> c_int;
 type FnSegmentText = unsafe extern "C" fn(*mut WhisperContext, c_int) -> *const c_char;
 
@@ -28,7 +16,6 @@ pub struct WhisperEngine {
     _lib: Library,
     ctx: *mut WhisperContext,
     fn_free: FnFree,
-    fn_default_params: FnDefaultParams,
     fn_full: FnFull,
     fn_n_segments: FnSegments,
     fn_segment_text: FnSegmentText,
@@ -66,13 +53,12 @@ impl WhisperEngine {
             .map_err(|e| lang.ui_whisper_dll_load_failed(&format!("{} ({})", dll_path, e)))?;
 
         unsafe {
-            let fn_init: FnInit = *lib.get::<FnInit>(b"whisper_init_from_file")
-                .map_err(|e| format!("whisper_init_from_file not found: {}", e))?;
-            let fn_free: FnFree = *lib.get::<FnFree>(b"whisper_free").unwrap();
-            let fn_default_params: FnDefaultParams = *lib.get::<FnDefaultParams>(b"whisper_full_default_params").unwrap();
-            let fn_full: FnFull = *lib.get::<FnFull>(b"whisper_full").unwrap();
-            let fn_n_segments: FnSegments = *lib.get::<FnSegments>(b"whisper_full_n_segments").unwrap();
-            let fn_segment_text: FnSegmentText = *lib.get::<FnSegmentText>(b"whisper_full_get_segment_text").unwrap();
+            let fn_init: FnInit = *lib.get::<FnInit>(b"spell_whisper_init_from_file")
+                .map_err(|e| format!("spell_whisper_init_from_file not found: {}", e))?;
+            let fn_free: FnFree = *lib.get::<FnFree>(b"spell_whisper_free").unwrap();
+            let fn_full: FnFull = *lib.get::<FnFull>(b"spell_whisper_full").unwrap();
+            let fn_n_segments: FnSegments = *lib.get::<FnSegments>(b"spell_whisper_full_n_segments").unwrap();
+            let fn_segment_text: FnSegmentText = *lib.get::<FnSegmentText>(b"spell_whisper_full_get_segment_text").unwrap();
 
             let model_c = CString::new(model_path)
                 .map_err(|_| "ugyldig modellsti".to_string())?;
@@ -89,7 +75,6 @@ impl WhisperEngine {
                 _lib: lib,
                 ctx,
                 fn_free,
-                fn_default_params,
                 fn_full,
                 fn_n_segments,
                 fn_segment_text,
@@ -103,21 +88,15 @@ impl WhisperEngine {
 impl SttEngine for WhisperEngine {
     fn transcribe(&self, audio: &[f32]) -> String {
         unsafe {
-            let mut params = (self.fn_default_params)(WHISPER_SAMPLING_GREEDY);
-
-            params[OFF_N_THREADS..OFF_N_THREADS+4].copy_from_slice(&4_i32.to_ne_bytes());
-            params[OFF_PRINT_SPECIAL] = 0;
-            params[OFF_PRINT_PROGRESS] = 0;
-            params[OFF_PRINT_REALTIME] = 0;
-            params[OFF_PRINT_TIMESTAMPS] = 0;
-
-            let lang_ptr_bytes = (self.stt_lang_code.as_ptr() as usize).to_ne_bytes();
-            params[OFF_LANGUAGE..OFF_LANGUAGE+8].copy_from_slice(&lang_ptr_bytes);
-
             mic_log(&format!("Whisper: transcribing {} samples ({:.1}s)...", audio.len(), audio.len() as f64 / 16000.0));
             let start = std::time::Instant::now();
 
-            let ret = (self.fn_full)(self.ctx, params, audio.as_ptr(), audio.len() as c_int);
+            let ret = (self.fn_full)(
+                self.ctx,
+                audio.as_ptr(),
+                audio.len() as c_int,
+                self.stt_lang_code.as_ptr(),
+            );
             if ret != 0 {
                 return format!("Feil: Whisper-transkribering feilet (kode {})", ret);
             }
