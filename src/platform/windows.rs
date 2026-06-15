@@ -1,6 +1,5 @@
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,15 +35,27 @@ pub fn idle_millis() -> u32 {
 }
 
 /// When running from a packaged Spell-windows-x64 zip extraction, return the
-/// absolute path to a DLL bundled at `<Spell.exe>/Frameworks/<name>`. Returns
-/// `None` otherwise. The Frameworks/Resources layout mirrors the Mac .app
-/// bundle so nostos-cognio's swipl-home lookup (`<dylib>/../Resources/swipl`)
-/// resolves to `Resources/swipl/` on both platforms.
-fn bundled_dll(name: &str) -> Option<String> {
+/// absolute path to the bundled `Frameworks` directory. Returns `None`
+/// outside a packaged install.
+pub fn bundled_frameworks_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
-    let path = exe_dir.join("Frameworks").join(name);
-    path.exists().then(|| path_to_swi_string(&path))
+    let dir = exe_dir.join("Frameworks");
+    dir.is_dir().then_some(dir)
+}
+
+/// Return the absolute path to a DLL bundled at
+/// `<Spell.exe>/Frameworks/<name>`. The Frameworks/Resources layout mirrors
+/// the Mac .app bundle so nostos-cognio's swipl-home lookup
+/// (`<dylib>/../Resources/swipl`) resolves to `Resources/swipl/` on both
+/// platforms.
+pub fn bundled_dll_path(name: &str) -> Option<PathBuf> {
+    let path = bundled_frameworks_dir()?.join(name);
+    path.exists().then_some(path)
+}
+
+fn bundled_dll(name: &str) -> Option<String> {
+    bundled_dll_path(name).map(|path| path_to_swi_string(&path))
 }
 
 fn push_existing_path(paths: &mut Vec<String>, path: impl AsRef<Path>) {
@@ -108,23 +119,6 @@ fn path_entries_with_file(name: &str) -> Vec<PathBuf> {
             std::env::split_paths(&path)
                 .map(|dir| dir.join(name))
                 .filter(|candidate| candidate.exists())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn where_exe_paths(name: &str) -> Vec<PathBuf> {
-    Command::new("where.exe")
-        .arg(name)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(PathBuf::from)
                 .collect()
         })
         .unwrap_or_default()
@@ -209,13 +203,10 @@ fn swipl_dll_candidates() -> Vec<PathBuf> {
         push_unique_path(&mut candidates, path);
     }
 
-    for exe in where_exe_paths("swipl.exe") {
+    for exe in path_entries_with_file("swipl.exe") {
         if let Some(bin_dir) = exe.parent() {
             push_unique_path(&mut candidates, bin_dir.join("libswipl.dll"));
         }
-    }
-    for path in where_exe_paths("libswipl.dll") {
-        push_unique_path(&mut candidates, path);
     }
 
     for path in program_files_swipl_candidates() {

@@ -378,6 +378,101 @@ jobs:
 
           # ONNX Runtime
           Copy-Item "C:\onnxruntime\onnxruntime-win-x64-${{ env.ONNX_VERSION }}\lib\onnxruntime.dll" "$bundleDir\Frameworks\"
+          if (-not (Test-Path "$bundleDir\Frameworks\onnxruntime.dll")) {
+              Write-Error "onnxruntime.dll missing from Frameworks after copy"
+              exit 1
+          }
+
+          # ONNX Runtime and whisper.dll are built with MSVC. Clean Windows
+          # machines may not have the matching VC++ runtime installed, so copy
+          # the redistributable DLLs beside the native libraries. This keeps
+          # LoadLibraryExW from failing with ERROR_MOD_NOT_FOUND even when the
+          # top-level DLL itself is present.
+          $vcRequiredDeps = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+          $vcOptionalDeps = @("concrt140.dll", "msvcp140_1.dll")
+          $vcSourceDirs = @(
+              "$env:SystemRoot\System32",
+              "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC",
+              "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Redist\MSVC",
+              "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC",
+              "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC"
+          )
+
+          function Copy-VcRuntimeDep([string]$dep, [bool]$required) {
+              if (Test-Path "$bundleDir\Frameworks\$dep") { return }
+
+              foreach ($dir in $vcSourceDirs) {
+                  if (-not (Test-Path $dir)) { continue }
+                  $candidate = Join-Path $dir $dep
+                  if (Test-Path $candidate) {
+                      Write-Host "  copying $dep from $dir"
+                      Copy-Item $candidate "$bundleDir\Frameworks\"
+                      return
+                  }
+
+                  $hit = Get-ChildItem -Path $dir -Filter $dep -Recurse `
+                      -ErrorAction SilentlyContinue -Force |
+                      Select-Object -First 1 -ExpandProperty FullName
+                  if ($hit) {
+                      Write-Host "  copying $dep from $hit"
+                      Copy-Item $hit "$bundleDir\Frameworks\"
+                      return
+                  }
+              }
+
+              if ($required) {
+                  Write-Error "Missing required MSVC runtime dependency: $dep"
+                  exit 1
+              }
+              Write-Host "  optional MSVC runtime dependency not found: $dep"
+          }
+
+          foreach ($dep in $vcRequiredDeps) { Copy-VcRuntimeDep $dep $true }
+          foreach ($dep in $vcOptionalDeps) { Copy-VcRuntimeDep $dep $false }
+
+          # Whisper native runtime. WHISPER_DLL may point directly to
+          # whisper.dll; otherwise we look for the local developer/CI build
+          # output. Copy every DLL in the same directory because whisper.cpp
+          # builds often emit companion ggml/OpenMP DLLs.
+          $whisperCandidates = @()
+          if ($env:WHISPER_DLL) { $whisperCandidates += $env:WHISPER_DLL }
+          $whisperCandidates += @(
+              "whisper-build\bin\Release\whisper.dll",
+              "..\whisper-build\bin\Release\whisper.dll",
+              "C:\whisper-build\bin\Release\whisper.dll"
+          )
+
+          $whisperDll = $null
+          foreach ($candidate in $whisperCandidates) {
+              if (-not $candidate) { continue }
+              $resolved = if ((Test-Path $candidate -PathType Container)) {
+                  Join-Path $candidate "whisper.dll"
+              } else {
+                  $candidate
+              }
+              if (Test-Path $resolved) {
+                  $whisperDll = (Resolve-Path $resolved).Path
+                  break
+              }
+          }
+
+          if (-not $whisperDll) {
+              Write-Host "Looked for whisper.dll in:"
+              $whisperCandidates | ForEach-Object { Write-Host "  $_" }
+              Write-Error "whisper.dll missing. Set WHISPER_DLL or build whisper-build\bin\Release\whisper.dll before packaging."
+              exit 1
+          }
+
+          $whisperDir = Split-Path $whisperDll -Parent
+          Write-Host "Whisper DLL source: $whisperDll"
+          Get-ChildItem "$whisperDir\*.dll" | ForEach-Object {
+              Write-Host ("  copying Whisper runtime {0,-40} {1:N0}" -f $_.Name, $_.Length)
+              Copy-Item $_.FullName "$bundleDir\Frameworks\"
+          }
+          if (-not (Test-Path "$bundleDir\Frameworks\whisper.dll")) {
+              Write-Error "whisper.dll missing from Frameworks after copy"
+              exit 1
+          }
 
           # Fonts
           Copy-Item "fonts\OpenSans-Regular.ttf" "$bundleDir\Resources\"

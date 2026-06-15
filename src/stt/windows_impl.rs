@@ -63,7 +63,7 @@ impl WhisperEngine {
 
         let dll_path = format!("{}\\whisper.dll", dll_dir);
         let lib = unsafe { Library::new(&dll_path) }
-            .map_err(|e| lang.ui_whisper_dll_load_failed(&e.to_string()))?;
+            .map_err(|e| lang.ui_whisper_dll_load_failed(&format!("{} ({})", dll_path, e)))?;
 
         unsafe {
             let fn_init: FnInit = *lib.get::<FnInit>(b"whisper_init_from_file")

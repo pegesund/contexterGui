@@ -728,32 +728,58 @@ pub fn piper_cached(lang_code: &str) -> bool {
     }
 }
 
+/// Local path for a downloaded Whisper GGML model.
+pub fn whisper_model_path(lang_code: &str, filename: &str) -> PathBuf {
+    let model_lang = match lang_code {
+        // Bokmal and Nynorsk share the Norwegian Whisper models.
+        "nb" | "nn" | "no" => "nb",
+        "en" => "en",
+        other => other,
+    };
+    data_dir()
+        .join("models/whisper")
+        .join(model_lang)
+        .join(filename)
+}
+
 /// Whisper STT model files for a language.
 pub fn whisper_files(lang_code: &str, mode: u8) -> Vec<DownloadItem> {
-    let base = data_dir();
     let mut items = Vec::new();
 
     match lang_code {
-        "nb" | "nn" => {
-            let dir = base.join("models/whisper/nb");
+        "nb" | "nn" | "no" => {
             if mode == 0 {
                 // Rask: tiny only
                 items.push(DownloadItem {
                     s3_key: "models/whisper/nb/ggml-nb-whisper-tiny.bin".into(),
-                    local_path: dir.join("ggml-nb-whisper-tiny.bin"),
+                    local_path: whisper_model_path(lang_code, "ggml-nb-whisper-tiny.bin"),
                     label: "Talemodell (rask)".into(),
                 });
             } else {
                 // Beste: base + medium-q5
                 items.push(DownloadItem {
                     s3_key: "models/whisper/nb/ggml-nb-whisper-base.bin".into(),
-                    local_path: dir.join("ggml-nb-whisper-base.bin"),
+                    local_path: whisper_model_path(lang_code, "ggml-nb-whisper-base.bin"),
                     label: "Talemodell (strøyming)".into(),
                 });
                 items.push(DownloadItem {
                     s3_key: "models/whisper/nb/ggml-nb-whisper-medium-q5.bin".into(),
-                    local_path: dir.join("ggml-nb-whisper-medium-q5.bin"),
+                    local_path: whisper_model_path(lang_code, "ggml-nb-whisper-medium-q5.bin"),
                     label: "Talemodell (beste)".into(),
+                });
+            }
+        }
+        "en" => {
+            items.push(DownloadItem {
+                s3_key: "models/whisper/en/ggml-base.en.bin".into(),
+                local_path: whisper_model_path(lang_code, "ggml-base.en.bin"),
+                label: "Speech model (fast)".into(),
+            });
+            if mode != 0 {
+                items.push(DownloadItem {
+                    s3_key: "models/whisper/en/ggml-medium.en.bin".into(),
+                    local_path: whisper_model_path(lang_code, "ggml-medium.en.bin"),
+                    label: "Speech model (best)".into(),
                 });
             }
         }
@@ -761,6 +787,13 @@ pub fn whisper_files(lang_code: &str, mode: u8) -> Vec<DownloadItem> {
     }
 
     items
+}
+
+/// Returns true if the Whisper files needed for the selected mode are cached.
+pub fn whisper_cached(lang_code: &str, mode: u8) -> bool {
+    whisper_files(lang_code, mode)
+        .iter()
+        .all(|item| is_cached(item))
 }
 
 /// Download all items that aren't already cached.

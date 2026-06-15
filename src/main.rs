@@ -413,6 +413,15 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contexter-repo/training-data")
 }
 
+#[cfg(target_os = "windows")]
+fn whisper_dll_dir() -> PathBuf {
+    if let Some(dir) = platform::windows::bundled_frameworks_dir() {
+        return dir;
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../whisper-build/bin/Release")
+}
+
 /// Resolve a data file path: use S3-downloaded cache if available, otherwise
 /// fall back to the language trait path (local dev layout).
 fn cached_or_trait(cached: &std::path::Path, trait_path: PathBuf) -> PathBuf {
@@ -1453,6 +1462,8 @@ struct ContextApp {
     whisper_mode: u8,
     /// Receiver for lazy-loaded whisper engines
     whisper_load_rx: Option<std::sync::mpsc::Receiver<WhisperLoadItem>>,
+    /// Background download progress for Whisper model files before lazy-load.
+    whisper_download: Option<downloader::SharedProgress>,
     /// True while whisper models are being loaded
     whisper_loading: bool,
     /// Status message during whisper model loading
@@ -2184,6 +2195,7 @@ impl ContextApp {
             improve_running: false,
             whisper_mode: saved_settings.whisper_mode,
             whisper_load_rx: None,
+            whisper_download: None,
             whisper_loading: false,
             whisper_load_status: String::new(),
             whisper_pending_record: false,
@@ -2217,6 +2229,149 @@ impl ContextApp {
             prolog_rules,
             prolog_dir,
         )
+    }
+
+    fn clear_whisper_load_errors(&mut self) {
+        self.load_errors.retain(|e| !e.starts_with("Whisper"));
+    }
+
+    fn start_recording_with_loaded_whisper(&mut self) {
+        let Some(final_eng) = self.whisper_engine.as_ref().cloned() else {
+            return;
+        };
+        let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
+        let auto_final = cfg!(target_os = "macos");
+        match stt::start_recording(
+            final_eng,
+            stream_eng,
+            auto_final,
+            self.language.ui_no_audio_captured().to_string(),
+        ) {
+            Ok(handle) => {
+                log!("Microphone recording started");
+                self.mic_handle = Some(handle);
+                self.mic_result_text = None;
+            }
+            Err(e) => log!("Microphone error: {}", e),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn start_windows_whisper_download_or_load(&mut self) {
+        if self.whisper_download.is_some() || self.whisper_load_rx.is_some() {
+            return;
+        }
+
+        self.clear_whisper_load_errors();
+        self.whisper_loading = true;
+        self.whisper_pending_record = true;
+        self.whisper_load_status = self.language.ui_loading_speech_model().to_string();
+
+        let lang_code = self.language.code().to_string();
+        if downloader::whisper_cached(&lang_code, self.whisper_mode) {
+            self.start_windows_whisper_load();
+            return;
+        }
+
+        let progress = downloader::download_missing(downloader::whisper_files(&lang_code, self.whisper_mode));
+        if downloader::all_done(&progress) {
+            self.start_windows_whisper_load();
+        } else {
+            log!("Whisper: downloading missing model files (mode={})", self.whisper_mode);
+            self.whisper_download = Some(progress);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn start_windows_whisper_load(&mut self) {
+        if self.whisper_load_rx.is_some() {
+            return;
+        }
+
+        self.whisper_loading = true;
+        let (fast_model, streaming_model, final_model) = self.language.whisper_model_names();
+        self.whisper_load_status = if self.whisper_mode == 0 {
+            self.language.ui_loading(self.language.whisper_fast_model_label())
+        } else {
+            self.language.ui_loading(self.language.whisper_best_model_label())
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.whisper_load_rx = Some(rx);
+        let mode = self.whisper_mode;
+        let lang_code = self.language.code().to_string();
+        let dll_dir = whisper_dll_dir().to_string_lossy().to_string();
+
+        if mode == 0 {
+            let lang0 = self.language.clone();
+            let model_path = downloader::whisper_model_path(&lang_code, fast_model)
+                .to_string_lossy()
+                .to_string();
+            std::thread::spawn(move || {
+                let _ = tx.send(WhisperLoadItem::Final(
+                    stt::WhisperEngine::load(&dll_dir, &model_path, &*lang0)
+                        .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                ));
+            });
+        } else {
+            let tx2 = tx.clone();
+            let dll2 = dll_dir.clone();
+            let lang1 = self.language.clone();
+            let lang2 = self.language.clone();
+            let streaming_path = downloader::whisper_model_path(&lang_code, streaming_model)
+                .to_string_lossy()
+                .to_string();
+            let final_path = downloader::whisper_model_path(&lang_code, final_model)
+                .to_string_lossy()
+                .to_string();
+            std::thread::spawn(move || {
+                let _ = tx2.send(WhisperLoadItem::Streaming(
+                    stt::WhisperEngine::load(&dll2, &streaming_path, &*lang1)
+                        .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                ));
+            });
+            std::thread::spawn(move || {
+                let _ = tx.send(WhisperLoadItem::Final(
+                    stt::WhisperEngine::load(&dll_dir, &final_path, &*lang2)
+                        .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                ));
+            });
+        }
+        log!("Whisper: lazy-loading models (mode={})", mode);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_windows_whisper_download(&mut self, ctx: &egui::Context) {
+        let Some(progress) = self.whisper_download.clone() else {
+            return;
+        };
+
+        if let Some(error) = downloader::any_error(&progress) {
+            log!("Whisper model download failed: {}", error);
+            self.load_errors.push(format!("Whisper download: {}", error));
+            self.whisper_download = None;
+            self.whisper_loading = false;
+            self.whisper_pending_record = false;
+            return;
+        }
+
+        if downloader::all_done(&progress) {
+            log!("Whisper: model downloads complete");
+            self.whisper_download = None;
+            self.start_windows_whisper_load();
+            return;
+        }
+
+        if let Ok(rows) = progress.lock() {
+            if let Some(row) = rows.iter().find(|row| !row.done) {
+                self.whisper_load_status = if row.total > 0 {
+                    let pct = (row.downloaded as f32 / row.total as f32 * 100.0).clamp(0.0, 100.0);
+                    self.language.ui_loading(&format!("{} {:.0}%", row.label, pct))
+                } else {
+                    self.language.ui_loading(&row.label)
+                };
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 
     fn load_completer(
@@ -6448,6 +6603,9 @@ impl eframe::App for ContextApp {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        self.poll_windows_whisper_download(ctx);
+
         // Whisper lazy-load: check if models finished loading
         if let Some(rx) = &self.whisper_load_rx {
             let mut done_count = 0;
@@ -6488,19 +6646,7 @@ impl eframe::App for ContextApp {
                 // Auto-start recording if user pressed mic while loading
                 if self.whisper_pending_record {
                     self.whisper_pending_record = false;
-                    if self.whisper_engine.is_some() {
-                        let final_eng = self.whisper_engine.as_ref().unwrap().clone();
-                        let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-                        let auto_final = cfg!(target_os = "macos");
-                        match stt::start_recording(final_eng, stream_eng, auto_final, self.language.ui_no_audio_captured().to_string()) {
-                            Ok(handle) => {
-                                log!("Microphone recording auto-started after load");
-                                self.mic_handle = Some(handle);
-                                self.mic_result_text = None;
-                            }
-                            Err(e) => log!("Microphone error: {}", e),
-                        }
-                    }
+                    self.start_recording_with_loaded_whisper();
                 }
             }
         }
@@ -7667,17 +7813,7 @@ impl eframe::App for ContextApp {
                     ).clicked() {
                             if whisper_ready {
                                 // Models already loaded — start recording immediately
-                                let final_eng = self.whisper_engine.as_ref().unwrap().clone();
-                                let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-                                let auto_final = cfg!(target_os = "macos");
-                                match stt::start_recording(final_eng, stream_eng, auto_final, self.language.ui_no_audio_captured().to_string()) {
-                                    Ok(handle) => {
-                                        log!("Microphone recording started");
-                                        self.mic_handle = Some(handle);
-                                        self.mic_result_text = None;
-                                    }
-                                    Err(e) => log!("Microphone error: {}", e),
-                                }
+                                self.start_recording_with_loaded_whisper();
                             } else {
                                 #[cfg(target_os = "macos")]
                                 {
@@ -7693,55 +7829,7 @@ impl eframe::App for ContextApp {
                                 }
                                 #[cfg(target_os = "windows")]
                                 {
-                                    // Windows: lazy-load Whisper models, then auto-start recording
-                                    self.whisper_loading = true;
-                                    self.whisper_pending_record = true;
-                                    let (fast_model, streaming_model, final_model) = self.language.whisper_model_names();
-                                    self.whisper_load_status = if self.whisper_mode == 0 {
-                                        self.language.ui_loading(self.language.whisper_fast_model_label())
-                                    } else {
-                                        self.language.ui_loading(self.language.whisper_best_model_label())
-                                    };
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    self.whisper_load_rx = Some(rx);
-                                    let mode = self.whisper_mode;
-                                    let dll_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                        .join("../../whisper-build/bin/Release")
-                                        .to_string_lossy().to_string();
-                                    if mode == 0 {
-                                        let dll = dll_dir.clone();
-                                        let lang0 = self.language.clone();
-                                        std::thread::spawn(move || {
-                                            let model_path = data_dir()
-                                                .join(fast_model)
-                                                .to_string_lossy().to_string();
-                                            let _ = tx.send(WhisperLoadItem::Final(
-                                                stt::WhisperEngine::load(&dll, &model_path, &*lang0).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
-                                            ));
-                                        });
-                                    } else {
-                                        let tx2 = tx.clone();
-                                        let dll2 = dll_dir.clone();
-                                        let lang1 = self.language.clone();
-                                        let lang2 = self.language.clone();
-                                        std::thread::spawn(move || {
-                                            let model_path = data_dir()
-                                                .join(streaming_model)
-                                                .to_string_lossy().to_string();
-                                            let _ = tx2.send(WhisperLoadItem::Streaming(
-                                                stt::WhisperEngine::load(&dll2, &model_path, &*lang1).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
-                                            ));
-                                        });
-                                        std::thread::spawn(move || {
-                                            let model_path = data_dir()
-                                                .join(final_model)
-                                                .to_string_lossy().to_string();
-                                            let _ = tx.send(WhisperLoadItem::Final(
-                                                stt::WhisperEngine::load(&dll_dir, &model_path, &*lang2).map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
-                                            ));
-                                        });
-                                    }
-                                    log!("Whisper: lazy-loading models (mode={})", mode);
+                                    self.start_windows_whisper_download_or_load();
                                 }
                             }
                         }
@@ -10621,6 +10709,8 @@ fn run_download_window(lang_code: &str) {
     // Append Piper TTS files (model + FST + espeak-ng for English).
     // For "en" this performs a synchronous manifest fetch (~100 ms).
     items.extend(downloader::piper_files(lang_code));
+    let whisper_mode = load_settings().whisper_mode;
+    items.extend(downloader::whisper_files(lang_code, whisper_mode));
     let progress = downloader::download_missing(items.clone());
 
     // If nothing to download, return immediately
