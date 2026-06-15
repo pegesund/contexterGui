@@ -422,6 +422,32 @@ fn whisper_dll_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../whisper-build/bin/Release")
 }
 
+fn spell_window_icon() -> Option<Arc<egui::IconData>> {
+    static ICON: std::sync::OnceLock<Option<Arc<egui::IconData>>> = std::sync::OnceLock::new();
+
+    ICON.get_or_init(|| {
+        let image = image::load_from_memory(include_bytes!("../assets/Spell-1024.png"))
+            .ok()?
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        Some(Arc::new(egui::IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
+        }))
+    })
+    .clone()
+}
+
+fn spell_viewport_builder() -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default();
+    if let Some(icon) = spell_window_icon() {
+        builder.with_icon(icon)
+    } else {
+        builder
+    }
+}
+
 /// Resolve a data file path: use S3-downloaded cache if available, otherwise
 /// fall back to the language trait path (local dev layout).
 fn cached_or_trait(cached: &std::path::Path, trait_path: PathBuf) -> PathBuf {
@@ -8777,7 +8803,7 @@ impl eframe::App for ContextApp {
 
                     ctx.show_viewport_immediate(
                         egui::ViewportId::from_hash_of("suggestion_viewport"),
-                        egui::ViewportBuilder::default()
+                        spell_viewport_builder()
                             .with_title(lang_for_vp.ui_suggestions_for(&word_clone))
                             .with_inner_size([win_w, win_h])
                             .with_position(screen_center)
@@ -8889,7 +8915,7 @@ impl eframe::App for ContextApp {
 
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("rule_info_viewport"),
-                    egui::ViewportBuilder::default()
+                    spell_viewport_builder()
                         .with_title(lang_for_rule.ui_rule_info())
                         .with_inner_size([win_w, win_h])
                         .with_position(screen_center)
@@ -9298,7 +9324,7 @@ impl eframe::App for ContextApp {
 
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("whisper_result_viewport"),
-                    egui::ViewportBuilder::default()
+                    spell_viewport_builder()
                         .with_title(lang_for_stt.ui_speech_recognition())
                         .with_inner_size([win_w, win_h])
                         .with_position(screen_center)
@@ -9529,7 +9555,7 @@ impl eframe::App for ContextApp {
             let main_is_dark = self.theme == 3;
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings_window"),
-                egui::ViewportBuilder::default()
+                spell_viewport_builder()
                     .with_title(lang_for_settings.ui_settings())
                     .with_inner_size([500.0, 600.0])
                     .with_decorations(true),
@@ -10035,7 +10061,7 @@ impl eframe::App for ContextApp {
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("userdict_editor"),
-                egui::ViewportBuilder::default()
+                spell_viewport_builder()
                     .with_title(lang_for_dict.ui_user_dict())
                     .with_inner_size([350.0 * scale, 400.0 * scale])
                     .with_decorations(true),
@@ -10147,7 +10173,7 @@ impl eframe::App for ContextApp {
             let lang_for_ocr = self.language.clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("ocr_prompt"),
-                egui::ViewportBuilder::default()
+                spell_viewport_builder()
                     .with_title(lang_for_ocr.ui_screenshot_detected())
                     .with_inner_size([win_w, win_h])
                     .with_position(screen_center)
@@ -10452,7 +10478,7 @@ fn run_word_addin_wizard() -> bool {
     let dismissed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: spell_viewport_builder()
             .with_inner_size([520.0, 480.0])
             .with_decorations(true)
             .with_title("Spell — Word-integrasjon"),
@@ -10611,7 +10637,7 @@ fn run_language_picker() -> Option<String> {
     let chosen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: spell_viewport_builder()
             .with_inner_size([400.0, 340.0])
             .with_decorations(true)
             .with_title("Spell — Velg språk"),
@@ -10736,7 +10762,7 @@ fn run_download_window(lang_code: &str) {
 
     let prog = std::sync::Arc::clone(&progress);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: spell_viewport_builder()
             .with_inner_size([720.0, 560.0])
             .with_decorations(true)
             .with_title(&win_title),
@@ -11314,67 +11340,13 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
         }
     }
 
-    fn make_pen_icon(size: u32) -> egui::IconData {
-        let mut rgba = vec![0u8; (size * size * 4) as usize];
-        let s = size as f32;
-
-        for y in 0..size {
-            for x in 0..size {
-                let fx = x as f32 / s;
-                let fy = y as f32 / s;
-                let idx = ((y * size + x) * 4) as usize;
-
-                // Pen body: rotated rectangle from top-right to bottom-left
-                // Line from (0.75, 0.1) to (0.2, 0.85) with thickness
-                let px = fx - 0.475;
-                let py = fy - 0.475;
-                // Rotate 45 degrees
-                let cos = 0.7071;
-                let sin = 0.7071;
-                let rx = px * cos + py * sin;
-                let ry = -px * sin + py * cos;
-
-                // Pen body (elongated rectangle — wide and long)
-                let in_body = rx.abs() < 0.14 && ry > -0.48 && ry < 0.28;
-                // Pen tip (triangle narrowing to point)
-                let tip_width = 0.14 * (1.0 - (ry - 0.28) / 0.20).max(0.0);
-                let in_tip = ry >= 0.28 && ry < 0.48 && rx.abs() < tip_width;
-                // Pen top (slightly wider grip area)
-                let in_grip = rx.abs() < 0.17 && ry > -0.48 && ry < -0.35;
-
-                if in_tip {
-                    // Gold/brass nib
-                    rgba[idx] = 200;
-                    rgba[idx + 1] = 160;
-                    rgba[idx + 2] = 40;
-                    rgba[idx + 3] = 255;
-                } else if in_grip {
-                    // Dark grip
-                    rgba[idx] = 60;
-                    rgba[idx + 1] = 60;
-                    rgba[idx + 2] = 80;
-                    rgba[idx + 3] = 255;
-                } else if in_body {
-                    // Blue pen body (Spell blue)
-                    rgba[idx] = 0;
-                    rgba[idx + 1] = 70;
-                    rgba[idx + 2] = 160;
-                    rgba[idx + 3] = 255;
-                }
-            }
-        }
-        egui::IconData { rgba, width: size, height: size }
-    }
-
-    let pen_icon = make_pen_icon(64);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: spell_viewport_builder()
             .with_inner_size([420.0, 250.0])
             .with_always_on_top()
             .with_decorations(false)
             .with_title("Spell")
-            .with_close_button(false)  // prevent Alt+F4 and system close
-            .with_icon(std::sync::Arc::new(pen_icon)),
+            .with_close_button(false),  // prevent Alt+F4 and system close
         ..Default::default()
     };
 

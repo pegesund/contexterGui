@@ -6,17 +6,22 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
     }
 
-    // Embed assets/Spell.ico as a Win32 icon resource so Explorer, the
-    // taskbar, and Alt+Tab show our brand icon for acatts-rust.exe instead
-    // of the generic blank-page placeholder Windows uses for icon-less
-    // executables. Velopack picks the same icon up when generating
-    // Setup.exe (matches Concentrate's ApplicationIcon flow on .NET).
+    // Embed the Spell identity in the Win32 version resource. Windows uses
+    // FileDescription/ProductName in Explorer, Task Manager, error dialogs,
+    // taskbar grouping, and other shell UI, so do not let it fall back to the
+    // Rust package name (`acatts-rust`).
     #[cfg(target_os = "windows")]
     {
         let mut res = winresource::WindowsResource::new();
-        res.set_icon("assets/Spell.ico");
+        res.set_icon("assets/Spell.ico")
+            .set("FileDescription", "Spell")
+            .set("ProductName", "Spell")
+            .set("InternalName", "Spell")
+            .set("OriginalFilename", "Spell.exe")
+            .set("CompanyName", "Cognio AS")
+            .set("LegalCopyright", "Copyright (C) Cognio AS");
         if let Err(e) = res.compile() {
-            // Don't fail the build if rc.exe isn't available locally — just
+            // Don't fail the build if rc.exe isn't available locally - just
             // warn. CI runners always have it; dev WSL/cross builds may not.
             println!("cargo:warning=winresource: failed to embed icon: {}", e);
         }
