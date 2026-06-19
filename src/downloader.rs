@@ -537,8 +537,10 @@ pub fn data_dir() -> PathBuf {
 
 // ── Language definitions ──
 
-/// Files needed for a language.
-pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
+/// Files needed for a language. `model_size` selects between NorBERT4 base
+/// (default, highest accuracy) and small (~3x faster, ~0.5pp quality drop on
+/// dyslexia tests). Only affects Norwegian — English uses ModernBERT.
+pub fn language_files(lang_code: &str, model_size: &str) -> Vec<DownloadItem> {
     let base = data_dir();
 
     let mut items = Vec::new();
@@ -559,17 +561,40 @@ pub fn language_files(lang_code: &str) -> Vec<DownloadItem> {
             });
         }
         _ => {
-            // Norwegian (nb/nn) shares NorBERT4
+            // Norwegian (nb/nn) shares NorBERT4 — base or small per user choice.
+            let (onnx_stem, ov_stem, label) = if model_size == "small" {
+                ("norbert4_small_patched_int8", "norbert4_small_patched_int8", "Språkmodell (rask)")
+            } else {
+                ("norbert4_base_int8", "norbert4_patched_int8", "Språkmodell")
+            };
             items.push(DownloadItem {
-                s3_key: "models/bert/norbert4_base_int8.onnx".into(),
-                local_path: bert_dir.join("norbert4_base_int8.onnx"),
-                label: "Språkmodell".into(),
+                s3_key: format!("models/bert/{}.onnx", onnx_stem),
+                local_path: bert_dir.join(format!("{}.onnx", onnx_stem)),
+                label: label.into(),
             });
             items.push(DownloadItem {
                 s3_key: "models/bert/tokenizer.json".into(),
                 local_path: bert_dir.join("tokenizer.json"),
                 label: "Tokenizer".into(),
             });
+
+            // OpenVINO INT8 — Windows-only Intel CPU acceleration. The model.rs
+            // try_openvino() looks for these files at <models>/openvino_onnx/.
+            // Safe to download for all Windows users (AMD just ignores them).
+            #[cfg(target_os = "windows")]
+            {
+                let ov_dir = base.join("models/openvino_onnx");
+                items.push(DownloadItem {
+                    s3_key: format!("models/openvino_onnx/{}.xml", ov_stem),
+                    local_path: ov_dir.join(format!("{}.xml", ov_stem)),
+                    label: "OpenVINO-modell".into(),
+                });
+                items.push(DownloadItem {
+                    s3_key: format!("models/openvino_onnx/{}.bin", ov_stem),
+                    local_path: ov_dir.join(format!("{}.bin", ov_stem)),
+                    label: "OpenVINO-vekter".into(),
+                });
+            }
         }
     }
 
@@ -952,6 +977,6 @@ pub fn any_error(progress: &SharedProgress) -> Option<String> {
 }
 
 /// Returns true if all files for a language are already cached locally.
-pub fn language_cached(lang_code: &str) -> bool {
-    language_files(lang_code).iter().all(|item| is_cached(item))
+pub fn language_cached(lang_code: &str, model_size: &str) -> bool {
+    language_files(lang_code, model_size).iter().all(|item| is_cached(item))
 }

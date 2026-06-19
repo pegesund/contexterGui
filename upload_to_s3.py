@@ -19,6 +19,15 @@ FILES = [
     (f"{DYSLEX}/contexter-repo/training-data/onnx/norbert4_base_int8.onnx", "models/bert/norbert4_base_int8.onnx"),
     (f"{DYSLEX}/contexter-repo/training-data/onnx/tokenizer.json",          "models/bert/tokenizer.json"),
 
+    # OpenVINO INT8 (Intel CPU acceleration, Windows only — 2x faster than ORT)
+    (f"{DYSLEX}/contexter-repo/training-data/openvino_onnx/norbert4_patched_int8.xml", "models/openvino_onnx/norbert4_patched_int8.xml"),
+    (f"{DYSLEX}/contexter-repo/training-data/openvino_onnx/norbert4_patched_int8.bin", "models/openvino_onnx/norbert4_patched_int8.bin"),
+
+    # NorBERT4-small INT8 patched — "rask" model option (3.2x faster, 0.5pp quality drop)
+    (f"{DYSLEX}/contexter-repo/training-data/onnx/norbert4_small_patched_int8.onnx",          "models/bert/norbert4_small_patched_int8.onnx"),
+    (f"{DYSLEX}/contexter-repo/training-data/openvino_onnx/norbert4_small_patched_int8.xml", "models/openvino_onnx/norbert4_small_patched_int8.xml"),
+    (f"{DYSLEX}/contexter-repo/training-data/openvino_onnx/norbert4_small_patched_int8.bin", "models/openvino_onnx/norbert4_small_patched_int8.bin"),
+
     # Bokmal (nb)
     (f"{DYSLEX}/rustSpell/mtag-rs/data/fullform_bm.mfst",                   "lang/nb/fullform_bm.mfst"),
     (f"{DYSLEX}/contexter-repo/training-data/wordfreq_bm.tsv",              "lang/nb/wordfreq_bm.tsv"),

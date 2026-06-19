@@ -72,12 +72,19 @@ struct UserSettings {
     /// for a release that's already been seen.
     #[serde(default)]
     last_notified_update_version: String,
+    /// NorBERT4 model size: "base" (default, most accurate) or "small"
+    /// (~3x faster on batch inference, ~0.5pp quality drop on dyslexia tests,
+    /// recommended for older/slower machines). Norwegian only — English uses
+    /// ModernBERT regardless.
+    #[serde(default = "default_model_size")]
+    model_size: String,
 }
 
 fn default_true() -> bool { true }
 
 fn default_language() -> String { "nb".into() }
 fn default_hover_zoom() -> bool { true }
+fn default_model_size() -> String { "base".into() }
 
 impl Default for UserSettings {
     fn default() -> Self {
@@ -94,6 +101,7 @@ impl Default for UserSettings {
             show_completions: true,
             show_grammar: true,
             last_notified_update_version: String::new(),
+            model_size: "base".into(),
         }
     }
 }
@@ -465,17 +473,25 @@ struct ResolvedPaths {
     prolog_dir: PathBuf,
 }
 
-fn resolve_paths(lang: &dyn language::LanguageBundle) -> ResolvedPaths {
+fn resolve_paths(lang: &dyn language::LanguageBundle, model_size: &str) -> ResolvedPaths {
     let cache = downloader::data_dir();
     let code = lang.code(); // "nb" or "nn"
     let lang_dir = cache.join(format!("lang/{}", code));
     let bert_dir = cache.join("models/bert");
 
+    // NorBERT4 size variant — base (default, accurate) or small (~3x faster).
+    // English (ModernBERT) ignores model_size; only Norwegian has a small variant.
+    let nor_onnx = if model_size == "small" {
+        "norbert4_small_patched_int8.onnx"
+    } else {
+        "norbert4_base_int8.onnx"
+    };
+
     // Per-language file names in cache
     let (fst_name, wf_name, onnx_name, tok_name) = match code {
-        "nn" => ("fullform_nn.mfst", "wordfreq_nn.tsv", "norbert4_base_int8.onnx", "tokenizer.json"),
+        "nn" => ("fullform_nn.mfst", "wordfreq_nn.tsv", nor_onnx, "tokenizer.json"),
         "en" => ("fullform_en.mfst", "wordfreq_en.tsv", "modernbert_base_int8.onnx", "tokenizer_en.json"),
-        _    => ("fullform_bm.mfst", "wordfreq_bm.tsv", "norbert4_base_int8.onnx", "tokenizer.json"),
+        _    => ("fullform_bm.mfst", "wordfreq_bm.tsv", nor_onnx, "tokenizer.json"),
     };
 
     let mtag_fst = cached_or_trait(&lang_dir.join(fst_name), lang.mtag_fst_path());
@@ -7569,13 +7585,18 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // Always-on-top should drop to Normal whenever Settings is open, so the
+        // lookup popup doesn't cover the config viewport. This used to be nested
+        // inside the follow_cursor block, which meant non-follow modes kept the
+        // main window pinned above Settings.
+        if self.show_settings_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+        } else if self.follow_cursor && self.goto_freeze_until.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+        }
+
         let mut next_outer_pos = None;
         if self.follow_cursor && self.goto_freeze_until.is_none() {
-            if self.show_settings_window {
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-            }
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
                 let slack_positioning = slack_layout;
@@ -9543,6 +9564,7 @@ impl eframe::App for ContextApp {
             let mut selected_voice: Option<String> = None;
             let voice_list = tts::available_voices();
             let mut switch_to_language: Option<String> = None;
+            let mut switch_to_model_size: Option<String> = None;
             let current_lang_code = self.language.code().to_string();
             let lang_for_settings = self.language.clone();
 
@@ -9816,9 +9838,10 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new("Språk").size(heading).strong().color(label_color));
                             ui.add_space(6.0);
 
+                            let cur_model_size = load_settings().model_size;
                             for lang in AVAILABLE_LANGUAGES {
                                 let is_active = lang.code == current_lang_code;
-                                let is_cached = downloader::language_cached(lang.code);
+                                let is_cached = downloader::language_cached(lang.code, &cur_model_size);
 
                                 ui.horizontal(|ui| {
                                     // Flag + name
@@ -9854,6 +9877,40 @@ impl eframe::App for ContextApp {
                                     }
                                 });
                                 ui.add_space(4.0);
+                            }
+
+                            // -- Model size (Norwegian only — ModernBERT has one size for English) --
+                            if current_lang_code == "nb" || current_lang_code == "nn" {
+                                ui.add_space(14.0);
+                                ui.separator();
+                                ui.add_space(10.0);
+                                ui.label(egui::RichText::new("Språkmodell").size(heading).strong().color(label_color));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("«Rask» bruker en mindre modell — ~3× raskere svar, litt svakere prediksjoner. «Mest presis» bruker hovedmodellen. Bytte krever omstart.")
+                                    .size(13.0 * s).color(off_color));
+                                ui.add_space(8.0);
+
+                                for (code, name) in [
+                                    ("base",  "Mest presis (base, ~190 MB)"),
+                                    ("small", "Rask (small, ~75 MB)"),
+                                ] {
+                                    let is_active = cur_model_size == code;
+                                    ui.horizontal(|ui| {
+                                        let color = if is_active { on_color } else { active_color };
+                                        ui.label(egui::RichText::new(name).size(body).color(color));
+                                        ui.add_space(8.0);
+                                        if is_active {
+                                            ui.label(egui::RichText::new("(aktiv)").size(14.0 * s).color(on_color));
+                                        } else {
+                                            if ui.add(egui::Button::new(
+                                                egui::RichText::new("Bytt og start på nytt").size(15.0 * s)
+                                            )).clicked() {
+                                                switch_to_model_size = Some(code.to_string());
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
                             }
                             } // end Språk tab
 
@@ -10040,6 +10097,19 @@ impl eframe::App for ContextApp {
                 let exe = std::env::current_exe().unwrap();
                 let mut cmd = std::process::Command::new(exe);
                 cmd.arg("--language").arg(&new_lang);
+                let _ = cmd.spawn();
+                std::process::exit(0);
+            }
+            if let Some(new_model_size) = switch_to_model_size {
+                // Persist the new model size and restart. The startup flow
+                // calls language_cached() with the new size; if the model
+                // files for that size aren't on disk yet, run_download_window()
+                // will fetch them before the GUI comes up.
+                let cur = load_settings();
+                save_settings(&UserSettings { model_size: new_model_size, ..cur });
+                let exe = std::env::current_exe().unwrap();
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg("--language").arg(self.language.code());
                 let _ = cmd.spawn();
                 std::process::exit(0);
             }
@@ -10728,10 +10798,108 @@ fn run_language_picker() -> Option<String> {
     chosen.lock().ok().and_then(|c| c.clone())
 }
 
+// ── Model-size picker: shown on first run after language picker ──
+//
+// Returns "base" or "small". Defaults to "base" if the user closes the window.
+fn run_model_size_picker() -> String {
+    let chosen: Arc<Mutex<String>> = Arc::new(Mutex::new("base".into()));
+
+    let options = eframe::NativeOptions {
+        viewport: spell_viewport_builder()
+            .with_inner_size([520.0, 430.0])
+            .with_decorations(true)
+            .with_title("Spell — Velg modell"),
+        ..Default::default()
+    };
+
+    struct PickerApp {
+        chosen: Arc<Mutex<String>>,
+    }
+
+    impl eframe::App for PickerApp {
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            ctx.set_visuals(egui::Visuals::light());
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(28.0))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Velg språkmodell")
+                            .size(24.0).strong().color(egui::Color32::from_rgb(40, 40, 40)));
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Du kan endre dette senere i innstillinger.")
+                            .size(14.0).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.add_space(20.0);
+
+                        // Two option cards
+                        for (code, title, desc) in [
+                            ("base",
+                             "Mest presis",
+                             "Anbefalt for nyere maskiner.\nBeste kvalitet på forslag og grammatikk.\n(~190 MB nedlasting)"),
+                            ("small",
+                             "Rask",
+                             "Anbefalt for eldre/trege maskiner.\n~3× raskere svar, litt svakere prediksjoner.\n(~75 MB nedlasting)"),
+                        ] {
+                            let card_rect = ui.allocate_exact_size(
+                                egui::vec2(440.0, 100.0), egui::Sense::click()
+                            );
+                            let rect = card_rect.0;
+                            let response = card_rect.1;
+                            let bg = if response.hovered() {
+                                egui::Color32::from_rgb(230, 240, 250)
+                            } else {
+                                egui::Color32::from_rgb(247, 247, 247)
+                            };
+                            ui.painter().rect_filled(rect, 10.0, bg);
+                            ui.painter().rect_stroke(rect, 10.0,
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 200, 200)),
+                                egui::StrokeKind::Outside);
+                            ui.painter().text(
+                                egui::pos2(rect.min.x + 20.0, rect.min.y + 22.0),
+                                egui::Align2::LEFT_TOP,
+                                title,
+                                egui::FontId::proportional(20.0),
+                                egui::Color32::from_rgb(30, 30, 30),
+                            );
+                            ui.painter().text(
+                                egui::pos2(rect.min.x + 20.0, rect.min.y + 48.0),
+                                egui::Align2::LEFT_TOP,
+                                desc,
+                                egui::FontId::proportional(13.5),
+                                egui::Color32::from_rgb(95, 95, 95),
+                            );
+
+                            if response.clicked() {
+                                if let Ok(mut c) = self.chosen.lock() {
+                                    *c = code.to_string();
+                                }
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            ui.add_space(12.0);
+                        }
+                    });
+                });
+        }
+    }
+
+    let chosen_clone = Arc::clone(&chosen);
+    let _ = eframe::run_native(
+        "Spell — Velg modell",
+        options,
+        Box::new(move |_cc| {
+            Ok(Box::new(PickerApp { chosen: chosen_clone }) as Box<dyn eframe::App>)
+        }),
+    );
+
+    chosen.lock().map(|s| s.clone()).unwrap_or_else(|_| "base".into())
+}
+
 // ── Download window: shown when language data is missing ──
 
 fn run_download_window(lang_code: &str) {
-    let mut items = downloader::language_files(lang_code);
+    let model_size = load_settings().model_size;
+    let mut items = downloader::language_files(lang_code, &model_size);
     // Append Piper TTS files (model + FST + espeak-ng for English).
     // For "en" this performs a synchronous manifest fetch (~100 ms).
     items.extend(downloader::piper_files(lang_code));
@@ -11129,7 +11297,7 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
         eprintln!("=== Spelling test mode ===");
         let test_language: std::sync::Arc<dyn language::LanguageBundle> =
             std::sync::Arc::new(language::BokmalLanguage);
-        let test_paths = resolve_paths(&*test_language);
+        let test_paths = resolve_paths(&*test_language, "base");
         let mut app = ContextApp::new(test_language, true, 2, false, UserSettings::default(), test_paths);
         // Wait for startup (BERT model loading) to complete
         if let Some(rx) = app.startup_rx.take() {
@@ -11247,8 +11415,8 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
             })
     };
 
-    // ── First-run: language picker + download ──
-    let lang_code = if !downloader::language_cached(&lang_code) {
+    // ── First-run: language picker + model picker + download ──
+    let lang_code = if !downloader::language_cached(&lang_code, &saved.model_size) {
         // No cached data — show language picker first (unless CLI forced a language)
         let cli_forced = std::env::args().any(|a| a == "--language");
         let picked = if cli_forced {
@@ -11262,7 +11430,20 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
                 }
             }
         };
-        eprintln!("Downloading language data for '{}'...", picked);
+        // Show model-size picker on first launch (Norwegian only; ModernBERT
+        // is one-size for English). Skip if the user already has a non-default
+        // choice from a prior session — they've already decided.
+        if (picked == "nb" || picked == "nn") && saved.model_size == "base" {
+            let cli_size = std::env::args()
+                .position(|a| a == "--model-size")
+                .and_then(|i| std::env::args().nth(i + 1));
+            let size = cli_size.unwrap_or_else(run_model_size_picker);
+            if size != saved.model_size {
+                saved.model_size = size;
+                save_settings(&saved);
+            }
+        }
+        eprintln!("Downloading language data for '{}' (model={})...", picked, saved.model_size);
         run_download_window(&picked);
         picked
     } else if !downloader::piper_cached(&lang_code) {
@@ -11389,7 +11570,7 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
                 } else {
                     eprintln!("Warning: Open Sans font not found at {}", font_path);
                 }
-                let paths = resolve_paths(&*language_for_app);
+                let paths = resolve_paths(&*language_for_app, &saved.model_size);
                 let app = ContextApp::new(language_for_app.clone(), grammar_completion, quality, show_debug_tab, saved, paths);
                 // Start HTTP /errors endpoint for integration tests
                 let errors_json = app.shared_errors_json.clone();
