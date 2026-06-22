@@ -4854,9 +4854,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
                 }
-                let has_underlined_errors = self.writing_errors.iter()
-                    .any(|e| e.paragraph_id == p.paragraph_id && e.underlined);
-                if orphan_word_removed || (cursor_just_finished_word && has_underlined_errors) {
+                if orphan_word_removed {
                     self.manager.clear_paragraph_underlines(&p.paragraph_id);
                     for e in &mut self.writing_errors {
                         if e.paragraph_id == p.paragraph_id {
@@ -4864,8 +4862,8 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                         }
                     }
                     underline_refresh_needed = true;
-                    log!("  Refreshed Word underline formatting for para={} orphan={} word_boundary={}",
-                        trunc(&p.paragraph_id, 10), orphan_word_removed, cursor_just_finished_word);
+                    log!("  Refreshed Word underline formatting for para={} orphan={}",
+                        trunc(&p.paragraph_id, 10), orphan_word_removed);
                 }
 
                 // Check each sentence: skip if already processed (hash unchanged)
@@ -7712,7 +7710,11 @@ impl eframe::App for ContextApp {
                 let below_top = ly + caret_offset;
                 let available_below = (screen_h - below_top).max(0.0);
                 let available_above = (ly - above_gap).max(0.0);
-                let place_above = desired_win_h > available_below && available_above >= available_below;
+                let place_above = if slack_positioning {
+                    true
+                } else {
+                    desired_win_h > available_below && available_above >= available_below
+                };
                 let side_available = if place_above { available_above } else { available_below };
                 if side_available > 0.0 && desired_win_h > side_available {
                     // If the caret is near the bottom of the screen/document,

@@ -466,7 +466,7 @@ function doReplace(expected, replacement, paragraphId) {
     fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
         body: JSON.stringify({msg: "REPLACE START: '" + expected + "' → '" + replacement + "' para=" + (paragraphId ? paragraphId.substring(0,10) : "none")})
     }).catch(function(){});
-    enqueueWordRun(function () {
+    enqueueWordRunUrgent(function () {
         var t1 = Date.now();
         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
             body: JSON.stringify({msg: "REPLACE enqueue→run delay: " + (t1 - t0) + "ms"})
@@ -531,7 +531,18 @@ var wordRunQueue = [];
 var wordRunBusy = false;
 
 function enqueueWordRun(fn) {
+    fn.spellPriority = fn.spellPriority || 0;
     wordRunQueue.push(fn);
+    if (!wordRunBusy) drainWordRunQueue();
+}
+
+function enqueueWordRunUrgent(fn) {
+    fn.spellPriority = 1;
+    var insertAt = 0;
+    while (insertAt < wordRunQueue.length && wordRunQueue[insertAt].spellPriority === 1) {
+        insertAt++;
+    }
+    wordRunQueue.splice(insertAt, 0, fn);
     if (!wordRunBusy) drainWordRunQueue();
 }
 
@@ -596,7 +607,7 @@ function doCursorAtEndOfWord(word, paragraphId) {
     // Called after a fix when Word has focus. Find the last occurrence of `word`
     // inside the given paragraph and select the END of that range. The caret
     // lands just after the word, ready for typing.
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    enqueueWordRunUrgent(function () { return Word.run(function (ctx) {
         var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
         var results = para.search(word, { matchCase: false });
         results.load("items");
