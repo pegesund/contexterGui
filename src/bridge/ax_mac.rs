@@ -283,9 +283,12 @@ unsafe fn set_selected_range(elem: AXUIElementRef, start: usize, len: usize) -> 
     err == 0
 }
 
-fn paste_text_over_selection(text: &str) -> bool {
+fn paste_text_over_selection(pid: u32, text: &str) -> bool {
     let saved_clip = pbpaste();
     pbcopy(text);
+    // Slack/Electron accepts AXSelectedTextRange but keeps keyboard paste at
+    // the old caret unless the editor is made frontmost after the range set.
+    bring_app_to_front(pid);
     send_cmd_v_to(0);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -296,7 +299,7 @@ fn paste_text_over_selection(text: &str) -> bool {
 
 unsafe fn replace_in_text_element_at(
     elem: AXUIElementRef,
-    _pid: u32,
+    pid: u32,
     find: &str,
     replace: &str,
     preferred_offset: usize,
@@ -313,7 +316,7 @@ unsafe fn replace_in_text_element_at(
         return false;
     }
     crate::log!("ax_mac direct replace: paste over selection off={} '{}' → '{}'", char_offset, find, replace);
-    paste_text_over_selection(replace)
+    paste_text_over_selection(pid, replace)
 }
 
 unsafe fn replace_in_attr_element(
