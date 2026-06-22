@@ -7695,7 +7695,7 @@ impl eframe::App for ContextApp {
         if self.follow_cursor && self.goto_freeze_until.is_none() {
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
-                let slack_positioning = slack_layout;
+                let slack_positioning = cfg!(target_os = "macos") && slack_layout;
                 let (lx, ly) = self
                     .platform
                     .caret_position_to_logical((x, y), ctx.pixels_per_point());
@@ -7734,15 +7734,11 @@ impl eframe::App for ContextApp {
                     below_top.min(max_y)
                 };
                 let pos_x = if slack_positioning && place_above {
-                    let right_side = lx + 260.0;
-                    let left_side = lx - win_w - 260.0;
-                    if right_side + win_w <= screen_w {
-                        right_side
-                    } else if left_side >= 0.0 {
-                        left_side
-                    } else {
-                        lx + self.platform.caret_offset_right()
-                    }
+                    // macOS Slack exposes unreliable caret bounds, so we use the
+                    // AX text-field estimate and center the popup over that point.
+                    // The old side offset pushed the panel far to the right of
+                    // the compose box on narrower Slack windows.
+                    lx - (win_w * 0.5)
                 } else {
                     lx + self.platform.caret_offset_right()
                 }.min((screen_w - win_w).max(0.0)).max(0.0);

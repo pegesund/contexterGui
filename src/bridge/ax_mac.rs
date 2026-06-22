@@ -148,16 +148,13 @@ unsafe fn text_from_range(elem: AXUIElementRef) -> Option<(String, usize)> {
         0
     };
     if total <= 0 {
-        return None;
+        return Some((String::new(), 0));
     }
 
     let text = read_string_for_range(
         elem,
         core_foundation::base::CFRange { location: 0, length: total },
     )?;
-    if text.trim().is_empty() {
-        return None;
-    }
     Some((text, cursor.min(total as usize)))
 }
 
@@ -178,9 +175,6 @@ unsafe fn text_from_value(elem: AXUIElementRef) -> Option<(String, usize)> {
         return None;
     }
     let text = CFString::wrap_under_create_rule(value_ref as _).to_string();
-    if text.trim().is_empty() {
-        return None;
-    }
     let cursor = selected_cursor(elem, text.chars().count());
     Some((text, cursor))
 }
@@ -202,9 +196,6 @@ fn paragraph_window_from_text(
     base_char_offset: usize,
     max_chars: usize,
 ) -> Option<(String, String, usize)> {
-    if text.trim().is_empty() {
-        return None;
-    }
     let cursor_char = cursor_char.min(text.chars().count());
     let cursor_byte = byte_index_for_char(text, cursor_char);
     let para_start_byte = text[..cursor_byte]
@@ -234,9 +225,6 @@ fn paragraph_window_from_text(
     let start_byte = byte_index_for_char(text, start_char);
     let end_byte = byte_index_for_char(text, end_char);
     let para_text = text[start_byte..end_byte].to_string();
-    if para_text.trim().is_empty() {
-        return None;
-    }
     let absolute_start = base_char_offset + start_char;
     Some((format!("ax:{}", absolute_start), para_text, absolute_start))
 }
@@ -643,6 +631,9 @@ unsafe fn paragraph_from_element(elem: AXUIElementRef) -> Option<(String, String
             } else {
                 0
             };
+            if total == 0 {
+                return Some(("ax:0".to_string(), String::new(), 0));
+            }
             if total > 0 {
                 let max_chars = 6000usize;
                 let half = max_chars / 2;
@@ -1140,7 +1131,16 @@ unsafe fn try_read_via_text_range(elem: AXUIElementRef) -> Option<CursorContext>
         let n = core_foundation::number::CFNumber::wrap_under_create_rule(count_val as _);
         n.to_i64().unwrap_or(0) as isize
     } else { 0 };
-    if total <= 0 { return None; }
+    if total <= 0 {
+        let caret_pos = unsafe { estimate_caret_from_text(elem, "") }
+            .or_else(|| unsafe { element_frame_bottom_left(elem) });
+        let mut ctx = build_context(
+            &RawCursorText { before: String::new(), after: String::new() },
+            caret_pos,
+        );
+        ctx.cursor_doc_offset = Some(0);
+        return Some(ctx);
+    }
 
     // 300 chars either side of cursor — enough for sentence context without
     // dragging huge web pages.
@@ -1156,8 +1156,6 @@ unsafe fn try_read_via_text_range(elem: AXUIElementRef) -> Option<CursorContext>
         elem,
         core_foundation::base::CFRange { location: cursor, length: (win_end - cursor).max(0) },
     ).unwrap_or_default();
-
-    if before.is_empty() && after.is_empty() { return None; }
 
     // Tier 1: real caret bounds via AXBoundsForRange (Cocoa, Safari inputs).
     // Tier 2: focused-element frame (Electron apps like Teams/Slack/VSCode
@@ -1450,7 +1448,6 @@ unsafe fn try_read_via_value(elem: AXUIElementRef) -> Option<CursorContext> {
         return None;
     }
     let s = CFString::wrap_under_create_rule(value as _).to_string();
-    if s.trim().is_empty() { return None; }
     let cursor_chars = s.chars().count();
     let mut ctx = build_context(
         &RawCursorText { before: s, after: String::new() },
