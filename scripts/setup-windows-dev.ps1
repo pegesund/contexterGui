@@ -95,4 +95,4 @@ if (-not $SkipSwipl) {
 Write-Host ""
 Write-Host "Windows dev runtime setup complete."
 Write-Host "Run from contexterGui:"
-Write-Host "  cargo run --bin acatts-rust"
+Write-Host "  cargo run --bin spell"

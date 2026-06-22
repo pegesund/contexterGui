@@ -164,7 +164,7 @@ impl MacPlatform {
             let trusted = AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as _);
             {
                 use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/acatts_accessibility.log") {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/spell-accessibility.log") {
                     let _ = writeln!(f, "Accessibility: trusted={}", trusted);
                 }
             }
@@ -963,7 +963,7 @@ fn read_selected_text_for_app(pid: u32, _app_name: &str) -> Option<String> {
     }
 }
 
-/// Debug wrapper that logs each step to acatts-speak.log
+/// Debug wrapper that logs each step to spell-speak.log
 fn read_selected_text_system_wide_debug(app_name: &str) -> Option<String> {
     use accessibility_sys::*;
     use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
@@ -971,7 +971,7 @@ fn read_selected_text_system_wide_debug(app_name: &str) -> Option<String> {
 
     let log = |msg: &str| {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open(std::env::temp_dir().join("acatts-speak.log")) {
+            .open(std::env::temp_dir().join("spell-speak.log")) {
             use std::io::Write;
             let _ = writeln!(f, "[{}] {}", app_name, msg);
         }

@@ -1136,6 +1136,39 @@ impl BridgeManager {
         }
     }
 
+    fn bridge_for_paragraph_id(&self, paragraph_id: &str) -> Option<&dyn TextBridge> {
+        #[cfg(target_os = "windows")]
+        {
+            if !paragraph_id.is_empty()
+                && paragraph_id.chars().all(|c| c.is_ascii_digit())
+            {
+                return self.bridges
+                    .iter()
+                    .find(|b| b.name() == "Word COM")
+                    .map(|b| b.as_ref());
+            }
+            if paragraph_id.starts_with("uia:") {
+                return self.bridges
+                    .iter()
+                    .find(|b| b.name() == "Accessibility")
+                    .map(|b| b.as_ref());
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if paragraph_id.starts_with("ax:") {
+                return self.bridges
+                    .iter()
+                    .find(|b| b.name() == "Accessibility (macOS)")
+                    .map(|b| b.as_ref());
+            }
+        }
+
+        let _ = paragraph_id;
+        None
+    }
+
     fn restore_last_external_target(&self) {
         #[cfg(target_os = "macos")]
         {
@@ -1167,11 +1200,26 @@ impl BridgeManager {
 
     fn find_and_replace_in_paragraph(&self, find: &str, replace: &str, paragraph_id: &str, context: &str, char_offset: usize) -> bool {
         self.restore_last_external_target();
-        self.effective_bridge().map(|b| b.find_and_replace_in_paragraph(find, replace, paragraph_id, context, char_offset)).unwrap_or(false)
+        let bridge = self
+            .bridge_for_paragraph_id(paragraph_id)
+            .or_else(|| self.effective_bridge());
+        bridge.map(|b| {
+            log!(
+                "find_and_replace_in_paragraph('{}'→'{}') via bridge '{}' para='{}'",
+                trunc(find, 40),
+                trunc(replace, 40),
+                b.name(),
+                trunc(paragraph_id, 12)
+            );
+            b.find_and_replace_in_paragraph(find, replace, paragraph_id, context, char_offset)
+        }).unwrap_or(false)
     }
 
     fn place_cursor_at_end_of_word(&self, word: &str, paragraph_id: &str) -> bool {
-        self.effective_bridge().map(|b| b.place_cursor_at_end_of_word(word, paragraph_id)).unwrap_or(false)
+        let bridge = self
+            .bridge_for_paragraph_id(paragraph_id)
+            .or_else(|| self.effective_bridge());
+        bridge.map(|b| b.place_cursor_at_end_of_word(word, paragraph_id)).unwrap_or(false)
     }
 
     fn read_document_context(&self) -> Option<String> {
@@ -6504,29 +6552,31 @@ impl eframe::App for ContextApp {
                 self.last_completed_prefix.clear();
                 self.last_dispatched_sentence.clear();
                 self.dispatched_key.clear();
-                // Kick off the focus-then-cursor flow: verify we have a Word PID,
-                // spawn a thread to activate Word via osascript, and queue a
-                // pending_cursor_place state. The main update loop will poll the
-                // OS foreground PID each frame; once it matches the target PID,
-                // it sends the cursorEnd command to the add-in.
+                // On macOS Word add-in corrections need a follow-up cursorEnd
+                // command after Word is foreground again. Windows Word COM moves
+                // the caret directly inside find_and_replace_in_paragraph, so
+                // queuing this delayed command there can move the caret again.
                 let word_pid = self.manager.last_user_pid;
                 log!("CURSOR: fix ok, target Word pid={} (replacement='{}' para='{}')",
                     word_pid, replace, trunc(&paragraph_id, 10));
-                if word_pid > 0 && !paragraph_id.is_empty() {
-                    let pid_copy = word_pid;
-                    std::thread::spawn(move || {
-                        let _ = std::process::Command::new("osascript").arg("-e")
-                            .arg(format!(r#"tell application "System Events"
-                                set frontProcess to first application process whose unix id is {}
-                                set frontmost of frontProcess to true
-                            end tell"#, pid_copy)).output();
-                    });
-                    self.pending_cursor_place = Some((
-                        replace.clone(),
-                        paragraph_id.clone(),
-                        word_pid,
-                        Instant::now(),
-                    ));
+                #[cfg(target_os = "macos")]
+                {
+                    if word_pid > 0 && !paragraph_id.is_empty() {
+                        let pid_copy = word_pid;
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new("osascript").arg("-e")
+                                .arg(format!(r#"tell application "System Events"
+                                    set frontProcess to first application process whose unix id is {}
+                                    set frontmost of frontProcess to true
+                                end tell"#, pid_copy)).output();
+                        });
+                        self.pending_cursor_place = Some((
+                            replace.clone(),
+                            paragraph_id.clone(),
+                            word_pid,
+                            Instant::now(),
+                        ));
+                    }
                 }
                 // Update cached text by applying replacement locally
                 // (don't re-read COM — Word returns stale text immediately after replace)

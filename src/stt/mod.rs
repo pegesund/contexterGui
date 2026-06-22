@@ -299,7 +299,7 @@ pub fn improve_with_final_model(
 /// Log to the shared log file
 fn mic_log(msg: &str) {
     use std::io::Write;
-    let path = std::env::temp_dir().join("acatts-rust.log");
+    let path = std::env::temp_dir().join("spell.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{}", msg);
     }

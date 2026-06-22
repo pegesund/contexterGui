@@ -119,6 +119,14 @@ features = [
 winresource = "0.1"
 
 [[bin]]
+name = "spell"
+path = "src/main.rs"
+
+[[bin]]
+name = "acatts-rust"
+path = "src/main.rs"
+
+[[bin]]
 name = "native_bridge"
 path = "src/bin/native_bridge.rs"
 

@@ -251,7 +251,7 @@ fn temp_wav_path() -> Option<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    Some(dir.join(format!("acatts-piper-{}-{}.wav", pid, nanos)))
+    Some(dir.join(format!("spell-piper-{}-{}.wav", pid, nanos)))
 }
 
 #[cfg(target_os = "windows")]

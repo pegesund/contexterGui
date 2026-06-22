@@ -433,6 +433,70 @@ impl WordComBridge {
             fg_pid == word_pid
         }
     }
+
+    fn word_span_near_offset(
+        text: &str,
+        find_text: &str,
+        preferred_offset: Option<usize>,
+    ) -> Option<(usize, usize)> {
+        let find_lower = find_text.to_lowercase();
+        let find_len = find_lower.chars().count();
+        if find_len == 0 {
+            return None;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() < find_len {
+            return None;
+        }
+
+        let mut best: Option<(usize, usize, usize)> = None;
+        for i in 0..=chars.len() - find_len {
+            if i > 0 && chars[i - 1].is_alphanumeric() {
+                continue;
+            }
+            let end = i + find_len;
+            if end < chars.len() && chars[end].is_alphanumeric() {
+                continue;
+            }
+            let candidate: String = chars[i..end].iter().collect();
+            if candidate.to_lowercase() != find_lower {
+                continue;
+            }
+
+            let distance = preferred_offset
+                .map(|offset| i.abs_diff(offset))
+                .unwrap_or(0);
+            match best {
+                Some((_, _, best_distance)) if best_distance <= distance => {}
+                _ => best = Some((i, end, distance)),
+            }
+        }
+
+        best.map(|(start, end, _)| (start, end))
+    }
+
+    fn paragraph_by_id(
+        doc: &Dispatch,
+        paragraph_id: i32,
+    ) -> Result<Option<(Dispatch, i32, String)>> {
+        let paragraphs = doc.get_dispatch("Paragraphs")?;
+        let count = unsafe { extract_i32(&paragraphs.get("Count")?)? };
+        for para_index in 1..=count {
+            let para_v = paragraphs.call("Item", &[make_i4(para_index)])?;
+            let para = unsafe { extract_dispatch(&para_v)? };
+            let para_id = unsafe { extract_i32(&para.get("ParaID")?)? };
+            if para_id != paragraph_id {
+                continue;
+            }
+
+            let para_range = para.get_dispatch("Range")?;
+            let para_start = unsafe { extract_i32(&para_range.get("Start")?)? };
+            let para_text = para_range.get_string("Text")?;
+            return Ok(Some((para_range, para_start, para_text)));
+        }
+        Ok(None)
+    }
 }
 
 impl TextBridge for WordComBridge {
@@ -794,6 +858,112 @@ impl TextBridge for WordComBridge {
         .unwrap_or(false)
     }
 
+    fn find_and_replace_in_paragraph(
+        &self,
+        find_text: &str,
+        replace_text: &str,
+        paragraph_id: &str,
+        sentence_context: &str,
+        char_offset: usize,
+    ) -> bool {
+        let target_para_id = match paragraph_id.parse::<i32>() {
+            Ok(id) => id,
+            Err(_) => {
+                return self.find_and_replace_in_context_at(
+                    find_text,
+                    replace_text,
+                    sentence_context,
+                    char_offset,
+                );
+            }
+        };
+
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let Some((_para_range, para_start, para_text)) =
+                Self::paragraph_by_id(&doc, target_para_id)?
+            else {
+                crate::log!(
+                    "Word COM paragraph replace miss: para={} not found",
+                    paragraph_id
+                );
+                return Ok(false);
+            };
+
+            let preferred_offset = char_offset.checked_sub(para_start as usize);
+            let Some((start, end)) =
+                Self::word_span_near_offset(&para_text, find_text, preferred_offset)
+            else {
+                crate::log!(
+                    "Word COM paragraph replace miss: '{}' not found in para={}",
+                    find_text,
+                    paragraph_id
+                );
+                return Ok(false);
+            };
+
+            let word_start = para_start + start as i32;
+            let word_end = para_start + end as i32;
+            let word_range_v = doc.call("Range", &[make_i4(word_start), make_i4(word_end)])?;
+            let word_range = unsafe { extract_dispatch(&word_range_v)? };
+            word_range.put("Text", make_bstr(replace_text))?;
+
+            let new_end = word_start + replace_text.chars().count() as i32;
+            let _ = app.call("Activate", &[]);
+            if let Ok(replacement_range_v) = doc.call("Range", &[make_i4(word_start), make_i4(new_end)]) {
+                if let Ok(replacement_range) = unsafe { extract_dispatch(&replacement_range_v) } {
+                    if let Ok(font) = replacement_range.get_dispatch("Font") {
+                        let _ = font.put("Underline", make_i4(WD_UNDERLINE_NONE));
+                    }
+                }
+            }
+            if let Ok(cursor_v) = doc.call("Range", &[make_i4(new_end), make_i4(new_end)]) {
+                if let Ok(cursor_range) = unsafe { extract_dispatch(&cursor_v) } {
+                    let _ = cursor_range.call("Select", &[]);
+                }
+            }
+
+            crate::log!(
+                "Word COM paragraph replace: '{}' → '{}' para={} at {}",
+                find_text,
+                replace_text,
+                paragraph_id,
+                word_start
+            );
+            Ok(true)
+        })()
+        .unwrap_or(false)
+    }
+
+    fn place_cursor_at_end_of_word(&self, word: &str, paragraph_id: &str) -> bool {
+        let target_para_id = match paragraph_id.parse::<i32>() {
+            Ok(id) => id,
+            Err(_) => return false,
+        };
+
+        (|| -> Result<bool> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let Some((_para_range, para_start, para_text)) =
+                Self::paragraph_by_id(&doc, target_para_id)?
+            else {
+                return Ok(false);
+            };
+
+            let Some((_start, end)) = Self::word_span_near_offset(&para_text, word, None) else {
+                return Ok(false);
+            };
+            let cursor_pos = para_start + end as i32;
+            let _ = app.call("Activate", &[]);
+            let cursor_v = doc.call("Range", &[make_i4(cursor_pos), make_i4(cursor_pos)])?;
+            let cursor_range = unsafe { extract_dispatch(&cursor_v)? };
+            cursor_range.call("Select", &[])?;
+            Ok(true)
+        })()
+        .unwrap_or(false)
+    }
+
     fn mark_error_underline(&self, char_start: usize, char_end: usize, color: super::ErrorUnderlineColor) -> bool {
         (|| -> Result<bool> {
             let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
@@ -836,4 +1006,3 @@ impl TextBridge for WordComBridge {
         })().unwrap_or(false)
     }
 }
-

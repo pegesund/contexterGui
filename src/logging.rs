@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Mutex;
 
 pub static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
-    let path = std::env::temp_dir().join("acatts-rust.log");
+    let path = std::env::temp_dir().join("spell.log");
     eprintln!("Logging to: {}", path.display());
     let f = std::fs::OpenOptions::new()
         .create(true).write(true).truncate(true)

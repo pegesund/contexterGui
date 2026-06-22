@@ -10,7 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 fn bridge_log(msg: &str) {
-    let path = std::env::temp_dir().join("acatts-bridge.log");
+    let path = std::env::temp_dir().join("spell-bridge.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true).append(true).open(&path)
     {

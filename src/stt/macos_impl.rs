@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 fn stt_log(msg: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/acatts-stt.log") {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/spell-stt.log") {
         let _ = writeln!(f, "{}", msg);
     }
 }
@@ -18,7 +18,7 @@ impl MacSttEngine {
 
 impl SttEngine for MacSttEngine {
     fn transcribe(&self, audio: &[f32]) -> String {
-        let wav_path = std::env::temp_dir().join("acatts_stt_input.wav");
+        let wav_path = std::env::temp_dir().join("spell_stt_input.wav");
         if write_wav(&wav_path, audio, 16000).is_err() { return String::new(); }
         let result = transcribe_file(&wav_path).unwrap_or_default();
         let _ = std::fs::remove_file(&wav_path);

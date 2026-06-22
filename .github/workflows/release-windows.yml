@@ -224,7 +224,7 @@ jobs:
       - name: Cargo build (release)
         shell: pwsh
         run: |
-          cargo build --release --bin acatts-rust --target x86_64-pc-windows-msvc
+          cargo build --release --bin spell --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Also build the browser-companion native messaging host. The
           # desktop's src/native_host.rs auto-registration looks for
@@ -268,7 +268,7 @@ jobs:
           New-Item -Force -ItemType Directory -Path "$bundleDir\Resources\word-addin" | Out-Null
 
           # Binary
-          Copy-Item "target\x86_64-pc-windows-msvc\release\acatts-rust.exe" "$bundleDir\Spell.exe"
+          Copy-Item "target\x86_64-pc-windows-msvc\release\spell.exe" "$bundleDir\Spell.exe"
 
           # Browser-companion native messaging host. Must sit as a
           # sibling of Spell.exe so native_host::find_native_bridge_path

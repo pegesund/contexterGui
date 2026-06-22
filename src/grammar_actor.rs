@@ -129,7 +129,7 @@ pub fn grammar_batch_via_sender(sender: &mpsc::Sender<ActorMessage>, sentences: 
     {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open(std::env::temp_dir().join("acatts-rust.log")) {
+            .open(std::env::temp_dir().join("spell.log")) {
             let _ = writeln!(f, "ACTOR BATCH SEND: {} sentences", sentences.len());
         }
     }

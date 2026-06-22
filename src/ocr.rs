@@ -229,7 +229,7 @@ close access fileRef"#,
             self.pending_image = false;
 
             // Save clipboard image to temp file
-            let tmp_path = std::env::temp_dir().join("acatts_ocr_clipboard.png");
+            let tmp_path = std::env::temp_dir().join("spell_ocr_clipboard.png");
             let save_script = format!(
                 r#"set imgData to the clipboard as «class PNGf»
 set filePath to POSIX file "{}"

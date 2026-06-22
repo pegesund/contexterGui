@@ -225,7 +225,7 @@ fn worker_loop(
                 {
                     use std::io::Write;
                     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                        .open(std::env::temp_dir().join("acatts-bert.log")) {
+                        .open(std::env::temp_dir().join("spell-bert.log")) {
                         let _ = writeln!(f, "OLD Completion: prefix='{}' matches={}", prefix_lower, matches.len());
                     }
                 }
@@ -302,7 +302,7 @@ fn worker_loop(
                 {
                     use std::io::Write;
                     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                        .open(std::env::temp_dir().join("acatts-bert.log")) {
+                        .open(std::env::temp_dir().join("spell-bert.log")) {
                         let _ = writeln!(f, "CompleteWord: ctx='{}' prefix='{}' wf={} analyzer={} pi={} top_n={} max_steps={}",
                             &context, prefix,
                             wordfreq_shared.is_some(), analyzer.is_some(), prefix_index.len(), top_n, max_steps);
@@ -392,7 +392,7 @@ fn worker_loop(
                     {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                            .open(std::env::temp_dir().join("acatts-bert.log")) {
+                            .open(std::env::temp_dir().join("spell-bert.log")) {
                             let _ = writeln!(f, "complete_word(prefix='{}', top_n={}, max_steps={}) → {} results in {:?}",
                                 prefix, top_n, max_steps, left.len(), t_cw.elapsed());
                         }
@@ -411,7 +411,7 @@ fn worker_loop(
                         {
                             use std::io::Write;
                             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                .open(std::env::temp_dir().join("spell-bert.log")) {
                                 let _ = writeln!(f, "CompleteWord preview: prefix='{}' left={} left_ms={} total_ms={}",
                                     prefix, preview_left.len(), left_ms, preview_total);
                             }
@@ -455,7 +455,7 @@ fn worker_loop(
                     {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                            .open(std::env::temp_dir().join("acatts-bert.log")) {
+                            .open(std::env::temp_dir().join("spell-bert.log")) {
                             let _ = writeln!(f, "complete_word(prefix='', right) → {} results in {:?}",
                                 right.len(), t_cw.elapsed());
                         }
@@ -510,7 +510,7 @@ fn worker_loop(
                         {
                             use std::io::Write;
                             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                .open(std::env::temp_dir().join("acatts-bert.log")) {
+                                .open(std::env::temp_dir().join("spell-bert.log")) {
                                 let _ = writeln!(f, "CompleteWord final: prefix='{}' left={} right={} left_ms={} right_ms={} dict_ms={} grammar_ms={} total_ms={}",
                                     prefix, left_filtered.len(), right_filtered.len(), left_ms, right_ms, dict_ms, grammar_ms, total_ms);
                             }

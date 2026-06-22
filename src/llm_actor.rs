@@ -103,7 +103,7 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
     {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open(std::env::temp_dir().join("acatts-rust.log")) {
+            .open(std::env::temp_dir().join("spell.log")) {
             let _ = writeln!(f, "LLM SEND: {} sentences", req.sentences.len());
         }
     }
@@ -147,7 +147,7 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
     {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open(std::env::temp_dir().join("acatts-rust.log")) {
+            .open(std::env::temp_dir().join("spell.log")) {
             let _ = writeln!(f, "LLM usage: {} sentences, prompt={}tok completion={}tok total={}tok cost=${:.6}",
                 req.sentences.len(), prompt_tokens, completion_tokens, total_tokens, cost);
         }
@@ -206,7 +206,7 @@ fn process_batch(req: &LlmRequest) -> Vec<LlmCorrection> {
         {
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                .open(std::env::temp_dir().join("acatts-rust.log")) {
+                .open(std::env::temp_dir().join("spell.log")) {
                 let _ = writeln!(f, "LLM correction: '{}' → '{}'", original, corrected);
             }
         }
