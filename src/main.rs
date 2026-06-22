@@ -7754,7 +7754,7 @@ impl eframe::App for ContextApp {
         if self.follow_cursor && self.goto_freeze_until.is_none() {
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
-                let slack_positioning = cfg!(target_os = "macos") && slack_layout;
+                let slack_positioning = slack_layout;
                 let (lx, ly) = self
                     .platform
                     .caret_position_to_logical((x, y), ctx.pixels_per_point());
@@ -10580,10 +10580,12 @@ fn ax_close_icon(
 }
 
 fn response_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
-    resp.clicked()
-        || (use_press_event
-            && resp.hovered()
-            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+    if use_press_event {
+        resp.hovered()
+            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+    } else {
+        resp.clicked()
+    }
 }
 
 fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {

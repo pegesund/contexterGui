@@ -531,6 +531,28 @@ impl AccessibilityBridge {
         }
     }
 
+    fn try_get_document_range(element: &IUIAutomationElement) -> Option<IUIAutomationTextRange> {
+        unsafe {
+            if let Ok(pattern2) =
+                element.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
+            {
+                if let Ok(range) = pattern2.DocumentRange() {
+                    return Some(range);
+                }
+            }
+
+            if let Ok(pattern1) =
+                element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            {
+                if let Ok(range) = pattern1.DocumentRange() {
+                    return Some(range);
+                }
+            }
+
+            None
+        }
+    }
+
     /// Get a TextPattern2 from any reachable element — tries focused, then HWND fallback
     fn get_text_pattern(&self) -> Option<IUIAutomationTextPattern2> {
         unsafe {
@@ -585,6 +607,54 @@ impl AccessibilityBridge {
         }
     }
 
+    fn get_document_range(&self) -> Option<IUIAutomationTextRange> {
+        unsafe {
+            let saved = self.saved_element.borrow().clone();
+            if let Some(ref element) = saved {
+                if let Some(range) = Self::try_get_document_range(element) {
+                    bridge_log("get_document_range: saved element");
+                    return Some(range);
+                }
+            }
+
+            let uia = crate::platform::windows::cached_uia()?;
+
+            if let Ok(focused) = uia.GetFocusedElement() {
+                if let Some(range) = Self::try_get_document_range(&focused) {
+                    bridge_log("get_document_range: focused element");
+                    return Some(range);
+                }
+            }
+
+            let hwnd_val = self.target_hwnd.get();
+            if hwnd_val == 0 {
+                return None;
+            }
+
+            let root = uia.ElementFromHandle(HWND(hwnd_val as *mut _)).ok()?;
+            if let Some(range) = Self::try_get_document_range(&root) {
+                bridge_log("get_document_range: hwnd root");
+                return Some(range);
+            }
+
+            let condition = uia.CreateTrueCondition().ok()?;
+            let descendants = root.FindAll(TreeScope_Descendants, &condition).ok()?;
+            let count = descendants.Length().unwrap_or(0);
+            bridge_log(&format!("get_document_range: {} descendants", count));
+            for i in 0..count.min(100) {
+                if let Ok(desc) = descendants.GetElement(i) {
+                    if let Some(range) = Self::try_get_document_range(&desc) {
+                        let name = desc.CurrentName().unwrap_or_default().to_string();
+                        bridge_log(&format!("get_document_range: descendant {} name='{}'", i, name));
+                        return Some(range);
+                    }
+                }
+            }
+
+            None
+        }
+    }
+
     /// Find text in document and replace via UIA
     fn find_replace_via_uia(&self, find: &str, replace: &str, context: &str) -> bool {
         bridge_log(&format!("=== find_replace_via_uia ==="));
@@ -596,22 +666,15 @@ impl AccessibilityBridge {
         // the user clicked a grammar fix suggestion.
         self.restore_target_foreground();
         unsafe {
-            let pattern = match self.get_text_pattern() {
-                Some(p) => p,
-                None => { bridge_log("FAILED: no TextPattern"); return false; }
-            };
-
-            let doc_range = match pattern.DocumentRange() {
-                Ok(r) => r,
-                Err(e) => { bridge_log(&format!("FAILED: DocumentRange: {:?}", e)); return false; }
+            let doc_range = match self.get_document_range() {
+                Some(r) => r,
+                None => { bridge_log("FAILED: no TextPattern document range"); return false; }
             };
 
             // Log full document text BEFORE change
             let doc_before = doc_range.GetText(-1).unwrap_or_default().to_string();
             bridge_log(&format!("DOC BEFORE ({} chars):\n{}", doc_before.len(), doc_before));
 
-            // Re-get doc range for FindText (GetText may have consumed it)
-            let doc_range = pattern.DocumentRange().unwrap();
             let find_bstr = windows::core::BSTR::from(find);
             match doc_range.FindText(&find_bstr, false, false) {
                 Ok(found_range) => {
@@ -654,21 +717,17 @@ impl AccessibilityBridge {
                     };
                     bridge_log(&format!("target_hwnd={} edit_hwnd={}", hwnd_val, edit.0 as isize));
 
-                    // Select the text via UIA (needed so EM_REPLACESEL knows what to replace)
-                    let doc_range2 = pattern.DocumentRange().unwrap();
-                    let found_range2 = doc_range2.FindText(&windows::core::BSTR::from(find), false, false);
-                    match found_range2 {
-                        Ok(fr) => {
-                            let sel_result = fr.Select();
-                            bridge_log(&format!("Select result: {:?}", sel_result));
-                        }
-                        Err(e) => {
-                            bridge_log(&format!("Re-FindText failed: {:?}", e));
-                            return false;
-                        }
+                    // Select the text via UIA. Native Edit/RichEdit controls can
+                    // then use EM_REPLACESEL. Electron/Slack exposes TextPattern
+                    // but has no edit child, so SendInput types over the selected
+                    // range in the foreground composer.
+                    let sel_result = found_range.Select();
+                    bridge_log(&format!("Select result: {:?}", sel_result));
+                    if sel_result.is_err() {
+                        return false;
                     }
 
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    std::thread::sleep(std::time::Duration::from_millis(35));
                     bridge_log(&format!("Sending replacement: '{}' ({} chars)", replace, replace.len()));
 
                     if edit.0 as isize != 0 {
@@ -941,55 +1000,52 @@ fn select_word_keyboard() {
 /// Recursively find the edit control inside a window (e.g., Notepad's RichEditD2DPT).
 /// Windows 11 Notepad nests the edit control several levels deep.
 fn find_edit_child(parent: HWND) -> HWND {
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetClassNameW};
-        let none = HWND(std::ptr::null_mut());
+    let none = HWND(std::ptr::null_mut());
 
-        fn search_recursive(parent: HWND, depth: u32) -> Option<HWND> {
-            if depth > 10 { return None; }
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetClassNameW};
-                let none = HWND(std::ptr::null_mut());
-                let edit_classes = ["RichEditD2DPT", "Edit", "RichEdit20W", "RICHEDIT50W"];
+    fn search_recursive(parent: HWND, depth: u32) -> Option<HWND> {
+        if depth > 10 { return None; }
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
+            let none = HWND(std::ptr::null_mut());
+            let edit_classes = ["RichEditD2DPT", "Edit", "RichEdit20W", "RICHEDIT50W"];
 
-                // Check direct children for edit classes
-                for class in &edit_classes {
-                    let class_wide: Vec<u16> = class.encode_utf16().chain(std::iter::once(0)).collect();
-                    if let Ok(child) = FindWindowExW(Some(parent), Some(none),
-                        windows::core::PCWSTR(class_wide.as_ptr()), windows::core::PCWSTR(std::ptr::null()))
-                    {
-                        if child.0 as isize != 0 {
-                            bridge_log(&format!("Found edit child: class='{}' hwnd={:?} depth={}", class, child, depth));
-                            return Some(child);
-                        }
+            // Check direct children for edit classes
+            for class in &edit_classes {
+                let class_wide: Vec<u16> = class.encode_utf16().chain(std::iter::once(0)).collect();
+                if let Ok(child) = FindWindowExW(Some(parent), Some(none),
+                    windows::core::PCWSTR(class_wide.as_ptr()), windows::core::PCWSTR(std::ptr::null()))
+                {
+                    if child.0 as isize != 0 {
+                        bridge_log(&format!("Found edit child: class='{}' hwnd={:?} depth={}", class, child, depth));
+                        return Some(child);
                     }
                 }
-
-                // Recurse into all children
-                let mut prev = none;
-                loop {
-                    match FindWindowExW(Some(parent), Some(prev),
-                        windows::core::PCWSTR(std::ptr::null()), windows::core::PCWSTR(std::ptr::null()))
-                    {
-                        Ok(child) if child.0 as isize != 0 => {
-                            if let Some(found) = search_recursive(child, depth + 1) {
-                                return Some(found);
-                            }
-                            prev = child;
-                        }
-                        _ => break,
-                    }
-                }
-                None
             }
-        }
 
-        if let Some(edit) = search_recursive(parent, 0) {
-            return edit;
+            // Recurse into all children
+            let mut prev = none;
+            loop {
+                match FindWindowExW(Some(parent), Some(prev),
+                    windows::core::PCWSTR(std::ptr::null()), windows::core::PCWSTR(std::ptr::null()))
+                {
+                    Ok(child) if child.0 as isize != 0 => {
+                        if let Some(found) = search_recursive(child, depth + 1) {
+                            return Some(found);
+                        }
+                        prev = child;
+                    }
+                    _ => break,
+                }
+            }
+            None
         }
-        bridge_log("No edit child found, using parent window");
-        parent
     }
+
+    if let Some(edit) = search_recursive(parent, 0) {
+        return edit;
+    }
+    bridge_log("No edit child found");
+    none
 }
 
 /// Replace the current selection in an edit control using EM_REPLACESEL.
