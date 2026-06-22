@@ -8037,7 +8037,7 @@ impl eframe::App for ContextApp {
 
                 // --- Right side: drag area, 📌 ⚙ – ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = (104.0 * s).max(92.0); // 📌 + ⚙ + – + ✕ with stable hitboxes
+                let right_w = (112.0 * s).max(100.0); // 📌 + ⚙ + – + ✕ + right padding
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
                     egui::pos2(remaining.max.x - right_w, remaining.max.y),
@@ -8112,12 +8112,13 @@ impl eframe::App for ContextApp {
                 }
 
                 // ✕ Close
-                if ax_icon(ui,
-                    "\u{2715}", 16.0 * s, egui::Color32::from_rgb(120, 120, 120),
+                if ax_close_icon(ui,
+                    16.0 * s, egui::Color32::from_rgb(120, 120, 120),
                     self.language.ui_close(),
                 ).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
+                ui.add_space(5.0 * s);
             }).response;
             // Drag the window by dragging anywhere on the toolbar (when unpinned)
             if !self.follow_cursor {
@@ -10423,6 +10424,42 @@ fn ax_icon(
         icon,
         egui::FontId::proportional(icon_size),
         color,
+    );
+    resp
+}
+
+fn ax_close_icon(
+    ui: &mut egui::Ui,
+    icon_size: f32,
+    color: egui::Color32,
+    label: &str,
+) -> egui::Response {
+    let side = (icon_size + 7.0).max(18.0);
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(side, side),
+        egui::Sense::click() | egui::Sense::hover(),
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let resp = resp.on_hover_text(label);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let stroke_color = if resp.hovered() {
+        egui::Color32::from_rgb(220, 50, 50)
+    } else {
+        color
+    };
+    let center = rect.center();
+    let cross_sz = (icon_size * 0.32).max(4.5);
+    let stroke = egui::Stroke::new((icon_size * 0.10).max(1.4), stroke_color);
+    ui.painter().line_segment(
+        [center + egui::vec2(-cross_sz, -cross_sz), center + egui::vec2(cross_sz, cross_sz)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [center + egui::vec2(cross_sz, -cross_sz), center + egui::vec2(-cross_sz, cross_sz)],
+        stroke,
     );
     resp
 }

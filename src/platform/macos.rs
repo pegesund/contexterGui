@@ -430,6 +430,33 @@ impl PlatformServices for MacPlatform {
         let ext_app = self.last_external_fg.lock().map(|l| l.clone()).unwrap_or_default();
         let ext_pid = ext_app.pid;
         unsafe {
+            let system_focused_for_pid = |pid: u32| -> Option<AXUIElementRef> {
+                if pid == 0 {
+                    return None;
+                }
+                let system = AXUIElementCreateSystemWide();
+                if system.is_null() {
+                    return None;
+                }
+                let key = CFString::new("AXFocusedUIElement");
+                let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
+                let err = AXUIElementCopyAttributeValue(system, key.as_concrete_TypeRef(), &mut focused);
+                CFRelease(system as _);
+                if err != 0 || focused.is_null() {
+                    return None;
+                }
+
+                let elem = focused as AXUIElementRef;
+                let mut focused_pid: i32 = 0;
+                let pid_err = AXUIElementGetPid(elem, &mut focused_pid);
+                if pid_err == 0 && focused_pid == pid as i32 {
+                    Some(elem)
+                } else {
+                    CFRelease(focused);
+                    None
+                }
+            };
+
             let read_once = || -> Result<(i32, i32), String> {
                 let root = if ext_pid > 0 {
                     AXUIElementCreateApplication(ext_pid as i32)
@@ -441,7 +468,11 @@ impl PlatformServices for MacPlatform {
                 let err = AXUIElementCopyAttributeValue(root, key.as_concrete_TypeRef(), &mut focused);
                 CFRelease(root as _);
                 if err != 0 || focused.is_null() {
-                    return Err(format!("step=focus err={} null={}", err, focused.is_null()));
+                    if let Some(system_focused) = system_focused_for_pid(ext_pid) {
+                        focused = system_focused as _;
+                    } else {
+                        return Err(format!("step=focus err={} null={}", err, focused.is_null()));
+                    }
                 }
 
                 let range_key = CFString::new("AXSelectedTextRange");

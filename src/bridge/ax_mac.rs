@@ -70,6 +70,42 @@ unsafe fn is_ax_focused(elem: AXUIElementRef) -> bool {
     focused
 }
 
+/// Some Electron apps (notably Slack on macOS) can return -25212 for
+/// app-scoped AXFocusedUIElement even while the global focused element is
+/// valid. Ask the system-wide object, then verify the element belongs to the
+/// target app before using it.
+unsafe fn system_focused_element_for_pid(pid: i32) -> Option<AXUIElementRef> {
+    if pid <= 0 {
+        return None;
+    }
+
+    let system = AXUIElementCreateSystemWide();
+    if system.is_null() {
+        return None;
+    }
+
+    let mut focused: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        system,
+        CFString::new("AXFocusedUIElement").as_concrete_TypeRef(),
+        &mut focused,
+    );
+    CFRelease(system as _);
+    if err != 0 || focused.is_null() {
+        return None;
+    }
+
+    let elem = focused as AXUIElementRef;
+    let mut focused_pid: i32 = 0;
+    let pid_err = AXUIElementGetPid(elem, &mut focused_pid);
+    if pid_err == 0 && focused_pid == pid {
+        Some(elem)
+    } else {
+        CFRelease(focused);
+        None
+    }
+}
+
 unsafe fn selected_cursor(elem: AXUIElementRef, fallback: usize) -> usize {
     let mut range_val: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(
@@ -868,6 +904,24 @@ impl TextBridge for AxMacBridge {
             }
 
             if ctx.is_none() {
+                if let Some(system_focused) = system_focused_element_for_pid(pid) {
+                    let elem = system_focused as AXUIElementRef;
+                    let focused_role = role_of(elem);
+                    role = format!("system>{}", focused_role);
+                    if let Some((found_role, found_via, found_ctx)) = find_readable_context(elem, 0, 8) {
+                        role = if found_role == focused_role {
+                            format!("system>{}", focused_role)
+                        } else {
+                            format!("system>{}>{}", focused_role, found_role)
+                        };
+                        via = found_via;
+                        ctx = Some(found_ctx);
+                    }
+                    CFRelease(system_focused as _);
+                }
+            }
+
+            if ctx.is_none() {
                 if let Some((found_role, found_via, found_ctx)) = find_context_in_app_window(app) {
                     role = format!("window>{}", found_role);
                     via = found_via;
@@ -964,6 +1018,12 @@ impl TextBridge for AxMacBridge {
             if err == 0 && !focused.is_null() {
                 paragraph = find_readable_paragraph(focused as AXUIElementRef, 0, 6);
                 CFRelease(focused);
+            }
+            if paragraph.is_none() {
+                if let Some(system_focused) = system_focused_element_for_pid(pid) {
+                    paragraph = find_readable_paragraph(system_focused as AXUIElementRef, 0, 8);
+                    CFRelease(system_focused as _);
+                }
             }
             if paragraph.is_none() {
                 paragraph = find_paragraph_in_app_window(app);
