@@ -514,9 +514,95 @@ fn resolve_paths(lang: &dyn language::LanguageBundle, model_size: &str) -> Resol
 
 fn language_model_label(lang: &dyn language::LanguageBundle) -> &'static str {
     match lang.code() {
-        "en" => "ModernBERT",
-        "nb" | "nn" | "no" => "NorBERT4",
+        "nb" | "nn" | "no" => "Språkmodell",
         _ => "Language model",
+    }
+}
+
+fn is_norwegian_lang_code(lang_code: &str) -> bool {
+    matches!(lang_code, "nb" | "nn" | "no")
+}
+
+fn performance_level_from_settings(quality: u8, model_size: &str, lang_code: &str) -> u8 {
+    if !is_norwegian_lang_code(lang_code) {
+        return match quality {
+            0 => 0,
+            1 => 2,
+            _ => 3,
+        };
+    }
+
+    match (model_size, quality) {
+        ("small", 0) => 0,
+        ("small", _) => 1,
+        (_, 0 | 1) => 2,
+        _ => 3,
+    }
+}
+
+fn performance_settings_for_level(level: u8, lang_code: &str) -> (u8, String) {
+    let norwegian = is_norwegian_lang_code(lang_code);
+    match level {
+        0 => (0, if norwegian { "small" } else { "base" }.to_string()),
+        1 => (1, if norwegian { "small" } else { "base" }.to_string()),
+        2 => (1, "base".to_string()),
+        _ => (2, "base".to_string()),
+    }
+}
+
+fn performance_level_label(lang_code: &str, level: u8) -> &'static str {
+    let norwegian = is_norwegian_lang_code(lang_code);
+    match (norwegian, level) {
+        (true, 0) => "Raskest",
+        (true, 1) => "Rask",
+        (true, 2) => "Balansert",
+        (true, _) => "Best kvalitet",
+        (false, 0) => "Fastest",
+        (false, 1) => "Fast",
+        (false, 2) => "Balanced",
+        (false, _) => "Best quality",
+    }
+}
+
+fn performance_level_description(lang_code: &str, level: u8) -> &'static str {
+    let norwegian = is_norwegian_lang_code(lang_code);
+    match (norwegian, level) {
+        (true, 0) => "For eldre PC-er. Prioriterer kort ventetid.",
+        (true, 1) => "Rask respons med god kvalitet.",
+        (true, 2) => "Anbefalt. God balanse mellom fart og presisjon.",
+        (true, _) => "Mest grundig. Kan være tregere på eldre maskiner.",
+        (false, 0) => "For older PCs. Prioritizes short wait time.",
+        (false, 1) => "Fast response with good quality.",
+        (false, 2) => "Recommended. Good balance between speed and accuracy.",
+        (false, _) => "Most thorough. Can be slower on older machines.",
+    }
+}
+
+fn performance_level_count(lang_code: &str) -> usize {
+    if is_norwegian_lang_code(lang_code) { 4 } else { 3 }
+}
+
+fn performance_level_for_index(lang_code: &str, index: usize) -> u8 {
+    if is_norwegian_lang_code(lang_code) {
+        index.min(3) as u8
+    } else {
+        match index {
+            0 => 0,
+            1 => 2,
+            _ => 3,
+        }
+    }
+}
+
+fn performance_index_from_level(lang_code: &str, level: u8) -> usize {
+    if is_norwegian_lang_code(lang_code) {
+        level.min(3) as usize
+    } else {
+        match level {
+            0 => 0,
+            3 => 2,
+            _ => 1,
+        }
     }
 }
 
@@ -2069,11 +2155,11 @@ impl ContextApp {
                 Ok(parts) => parts,
                 Err(panic_payload) => {
                     let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        format!("BERT load panic: {}", s)
+                        format!("Language model load panic: {}", s)
                     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        format!("BERT load panic: {}", s)
+                        format!("Language model load panic: {}", s)
                     } else {
-                        "BERT load panic: <non-string payload>".to_string()
+                        "Language model load panic: <non-string payload>".to_string()
                     };
                     log!("Startup: {}", msg);
                     (None, None, None, None, None, vec![msg])
@@ -2085,7 +2171,7 @@ impl ContextApp {
             if errors.is_empty() && model_opt.is_none() {
                 // Defensive: if we got Ok but everything is None, surface
                 // that as an explicit error so the UI knows.
-                errors.push("BERT model loaded as None without explicit error".to_string());
+                errors.push("Language model loaded as None without explicit error".to_string());
             }
             let _ = tx2.send(StartupItem::Completer {
                 model_label,
@@ -7951,7 +8037,7 @@ impl eframe::App for ContextApp {
 
                 // --- Right side: drag area, 📌 ⚙ – ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = 80.0 * s; // 📌 + ⚙ + – + ✕ (scaled)
+                let right_w = (104.0 * s).max(92.0); // 📌 + ⚙ + – + ✕ with stable hitboxes
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
                     egui::pos2(remaining.max.x - right_w, remaining.max.y),
@@ -8025,26 +8111,11 @@ impl eframe::App for ContextApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
-                // ✕ Close button (painter-drawn; no widget info by default,
-                // so add one explicitly for screen readers)
-                let close_resp = ui.allocate_rect(
-                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(18.0 * s, 18.0 * s)),
-                    egui::Sense::click() | egui::Sense::hover(),
-                );
-                let close_label = self.language.ui_close();
-                close_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, close_label));
-                let close_resp = close_resp.on_hover_text(close_label);
-                let color = if close_resp.hovered() {
-                    egui::Color32::from_rgb(220, 50, 50)
-                } else {
-                    egui::Color32::from_rgb(120, 120, 120)
-                };
-                let center = close_resp.rect.center();
-                let cross_sz = 4.5 * s;
-                let stroke = egui::Stroke::new(1.5 * s, color);
-                ui.painter().line_segment([center + egui::vec2(-cross_sz, -cross_sz), center + egui::vec2(cross_sz, cross_sz)], stroke);
-                ui.painter().line_segment([center + egui::vec2(cross_sz, -cross_sz), center + egui::vec2(-cross_sz, cross_sz)], stroke);
-                if close_resp.clicked() {
+                // ✕ Close
+                if ax_icon(ui,
+                    "\u{2715}", 16.0 * s, egui::Color32::from_rgb(120, 120, 120),
+                    self.language.ui_close(),
+                ).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }).response;
@@ -9564,8 +9635,12 @@ impl eframe::App for ContextApp {
             let mut selected_voice: Option<String> = None;
             let voice_list = tts::available_voices();
             let mut switch_to_language: Option<String> = None;
-            let mut switch_to_model_size: Option<String> = None;
             let current_lang_code = self.language.code().to_string();
+            let current_model_size = load_settings().model_size;
+            let current_performance_level =
+                performance_level_from_settings(quality, &current_model_size, &current_lang_code);
+            let mut new_performance_level = current_performance_level;
+            let mut new_model_size = current_model_size.clone();
             let lang_for_settings = self.language.clone();
 
             // Capture the active theme so the settings viewport can match it.
@@ -9640,23 +9715,31 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(lang_for_settings.ui_quality()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             {
-                                let quality_label = match new_quality {
-                                    0 => lang_for_settings.ui_faster(),
-                                    1 => lang_for_settings.ui_normal_quality(),
-                                    _ => lang_for_settings.ui_highest_quality(),
-                                };
-                                let mut selected = new_quality as usize;
-                                egui::ComboBox::from_id_salt("settings_quality_combo")
+                                let quality_label =
+                                    performance_level_label(&current_lang_code, new_performance_level);
+                                let mut selected =
+                                    performance_index_from_level(&current_lang_code, new_performance_level);
+                                egui::ComboBox::from_id_salt("settings_performance_combo")
                                     .selected_text(egui::RichText::new(quality_label).size(body))
-                                    .width(220.0)
-                                    .show_index(ui, &mut selected, 3, |i| {
-                                        match i {
-                                            0 => lang_for_settings.ui_faster(),
-                                            1 => lang_for_settings.ui_normal_quality(),
-                                            _ => lang_for_settings.ui_highest_quality(),
-                                        }.to_string()
+                                    .width(260.0)
+                                    .show_index(ui, &mut selected, performance_level_count(&current_lang_code), |i| {
+                                        let level = performance_level_for_index(&current_lang_code, i);
+                                        performance_level_label(&current_lang_code, level).to_string()
                                     });
-                                new_quality = selected as u8;
+                                new_performance_level =
+                                    performance_level_for_index(&current_lang_code, selected);
+                                let mapped = performance_settings_for_level(new_performance_level, &current_lang_code);
+                                new_quality = mapped.0;
+                                new_model_size = mapped.1;
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(performance_level_description(
+                                        &current_lang_code,
+                                        new_performance_level,
+                                    ))
+                                    .size(13.0 * s)
+                                    .color(off_color),
+                                );
                             }
 
                             ui.add_space(16.0);
@@ -9838,10 +9921,9 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new("Språk").size(heading).strong().color(label_color));
                             ui.add_space(6.0);
 
-                            let cur_model_size = load_settings().model_size;
                             for lang in AVAILABLE_LANGUAGES {
                                 let is_active = lang.code == current_lang_code;
-                                let is_cached = downloader::language_cached(lang.code, &cur_model_size);
+                                let is_cached = downloader::language_cached(lang.code, &new_model_size);
 
                                 ui.horizontal(|ui| {
                                     // Flag + name
@@ -9877,40 +9959,6 @@ impl eframe::App for ContextApp {
                                     }
                                 });
                                 ui.add_space(4.0);
-                            }
-
-                            // -- Model size (Norwegian only — ModernBERT has one size for English) --
-                            if current_lang_code == "nb" || current_lang_code == "nn" {
-                                ui.add_space(14.0);
-                                ui.separator();
-                                ui.add_space(10.0);
-                                ui.label(egui::RichText::new("Språkmodell").size(heading).strong().color(label_color));
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("«Rask» bruker en mindre modell — ~3× raskere svar, litt svakere prediksjoner. «Mest presis» bruker hovedmodellen. Bytte krever omstart.")
-                                    .size(13.0 * s).color(off_color));
-                                ui.add_space(8.0);
-
-                                for (code, name) in [
-                                    ("base",  "Mest presis (base, ~190 MB)"),
-                                    ("small", "Rask (small, ~75 MB)"),
-                                ] {
-                                    let is_active = cur_model_size == code;
-                                    ui.horizontal(|ui| {
-                                        let color = if is_active { on_color } else { active_color };
-                                        ui.label(egui::RichText::new(name).size(body).color(color));
-                                        ui.add_space(8.0);
-                                        if is_active {
-                                            ui.label(egui::RichText::new("(aktiv)").size(14.0 * s).color(on_color));
-                                        } else {
-                                            if ui.add(egui::Button::new(
-                                                egui::RichText::new("Bytt og start på nytt").size(15.0 * s)
-                                            )).clicked() {
-                                                switch_to_model_size = Some(code.to_string());
-                                            }
-                                        }
-                                    });
-                                    ui.add_space(4.0);
-                                }
                             }
                             } // end Språk tab
 
@@ -10038,6 +10086,7 @@ impl eframe::App for ContextApp {
             if (new_ui_scale - self.ui_scale).abs() > 0.01 {
                 self.ui_scale = new_ui_scale;
             }
+            let model_size_changed = new_model_size != current_model_size;
             if let Some(ref voice) = selected_voice {
                 tts::set_voice(voice);
                 tts::speak_word(&tts::available_voices().iter()
@@ -10053,6 +10102,7 @@ impl eframe::App for ContextApp {
                     language: self.language.code().to_string(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
+                    model_size: new_model_size.clone(),
                     // Preserve any fields not explicitly set above (e.g.
                     // word_addin_wizard_dismissed) by loading current values.
                     ..load_settings()
@@ -10066,6 +10116,7 @@ impl eframe::App for ContextApp {
                 || new_speak_on_space != speak_on_space
                 || new_hover_zoom != hover_zoom_prev
                 || new_theme != theme_prev
+                || model_size_changed
                 || (new_ui_scale - ui_scale).abs() > 0.01
             {
                 save_settings(&UserSettings {
@@ -10077,6 +10128,7 @@ impl eframe::App for ContextApp {
                     language: self.language.code().to_string(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
+                    model_size: new_model_size.clone(),
                     ..load_settings()
                 });
             }
@@ -10091,6 +10143,7 @@ impl eframe::App for ContextApp {
                     language: new_lang.clone(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
+                    model_size: new_model_size.clone(),
                     ..load_settings()
                 });
                 // Restart the process with the new language
@@ -10100,13 +10153,10 @@ impl eframe::App for ContextApp {
                 let _ = cmd.spawn();
                 std::process::exit(0);
             }
-            if let Some(new_model_size) = switch_to_model_size {
-                // Persist the new model size and restart. The startup flow
-                // calls language_cached() with the new size; if the model
-                // files for that size aren't on disk yet, run_download_window()
-                // will fetch them before the GUI comes up.
-                let cur = load_settings();
-                save_settings(&UserSettings { model_size: new_model_size, ..cur });
+            if model_size_changed {
+                // Restart after performance changes that switch the local
+                // downloaded asset. Startup will fetch anything missing before
+                // the GUI comes back.
                 let exe = std::env::current_exe().unwrap();
                 let mut cmd = std::process::Command::new(exe);
                 cmd.arg("--language").arg(self.language.code());
@@ -10798,22 +10848,25 @@ fn run_language_picker() -> Option<String> {
     chosen.lock().ok().and_then(|c| c.clone())
 }
 
-// ── Model-size picker: shown on first run after language picker ──
+// ── Performance picker: shown on first run after language picker ──
 //
-// Returns "base" or "small". Defaults to "base" if the user closes the window.
-fn run_model_size_picker() -> String {
-    let chosen: Arc<Mutex<String>> = Arc::new(Mutex::new("base".into()));
+// Returns the internal quality/model-size pair. Defaults to Balanced if the
+// user closes the window.
+fn run_performance_picker(lang_code: &str) -> (u8, String) {
+    let chosen: Arc<Mutex<Option<u8>>> = Arc::new(Mutex::new(None));
+    let picker_lang = lang_code.to_string();
 
     let options = eframe::NativeOptions {
         viewport: spell_viewport_builder()
-            .with_inner_size([520.0, 430.0])
+            .with_inner_size([560.0, 560.0])
             .with_decorations(true)
-            .with_title("Spell — Velg modell"),
+            .with_title("Spell — Velg kvalitet"),
         ..Default::default()
     };
 
     struct PickerApp {
-        chosen: Arc<Mutex<String>>,
+        chosen: Arc<Mutex<Option<u8>>>,
+        lang_code: String,
     }
 
     impl eframe::App for PickerApp {
@@ -10825,24 +10878,19 @@ fn run_model_size_picker() -> String {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Velg språkmodell")
+                        ui.label(egui::RichText::new("Velg kvalitet")
                             .size(24.0).strong().color(egui::Color32::from_rgb(40, 40, 40)));
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new("Du kan endre dette senere i innstillinger.")
                             .size(14.0).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.add_space(20.0);
 
-                        // Two option cards
-                        for (code, title, desc) in [
-                            ("base",
-                             "Mest presis",
-                             "Anbefalt for nyere maskiner.\nBeste kvalitet på forslag og grammatikk.\n(~190 MB nedlasting)"),
-                            ("small",
-                             "Rask",
-                             "Anbefalt for eldre/trege maskiner.\n~3× raskere svar, litt svakere prediksjoner.\n(~75 MB nedlasting)"),
-                        ] {
+                        for i in 0..performance_level_count(&self.lang_code) {
+                            let level = performance_level_for_index(&self.lang_code, i);
+                            let title = performance_level_label(&self.lang_code, level);
+                            let desc = performance_level_description(&self.lang_code, level);
                             let card_rect = ui.allocate_exact_size(
-                                egui::vec2(440.0, 100.0), egui::Sense::click()
+                                egui::vec2(470.0, 76.0), egui::Sense::click()
                             );
                             let rect = card_rect.0;
                             let response = card_rect.1;
@@ -10872,7 +10920,7 @@ fn run_model_size_picker() -> String {
 
                             if response.clicked() {
                                 if let Ok(mut c) = self.chosen.lock() {
-                                    *c = code.to_string();
+                                    *c = Some(level);
                                 }
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
@@ -10885,14 +10933,18 @@ fn run_model_size_picker() -> String {
 
     let chosen_clone = Arc::clone(&chosen);
     let _ = eframe::run_native(
-        "Spell — Velg modell",
+        "Spell — Velg kvalitet",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(PickerApp { chosen: chosen_clone }) as Box<dyn eframe::App>)
+            Ok(Box::new(PickerApp {
+                chosen: chosen_clone,
+                lang_code: picker_lang,
+            }) as Box<dyn eframe::App>)
         }),
     );
 
-    chosen.lock().map(|s| s.clone()).unwrap_or_else(|_| "base".into())
+    let level = chosen.lock().ok().and_then(|level| *level).unwrap_or(2);
+    performance_settings_for_level(level, lang_code)
 }
 
 // ── Download window: shown when language data is missing ──
@@ -11394,8 +11446,9 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
     let mut saved = load_settings();
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
     let show_debug_tab = std::env::args().any(|a| a == "--debug");
-    let quality: u8 = {
-        let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
+    let cli_quality_forced = args.iter().any(|a| a == "--quality");
+    let mut quality: u8 = {
         args.iter()
             .position(|a| a == "--quality")
             .and_then(|i| args.get(i + 1))
@@ -11405,7 +11458,6 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
 
     // Language: CLI flag overrides saved setting
     let lang_code: String = {
-        let args: Vec<String> = std::env::args().collect();
         args.iter()
             .position(|a| a == "--language")
             .and_then(|i| args.get(i + 1).cloned())
@@ -11415,10 +11467,10 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
             })
     };
 
-    // ── First-run: language picker + model picker + download ──
+    // ── First-run: language picker + performance picker + download ──
     let lang_code = if !downloader::language_cached(&lang_code, &saved.model_size) {
         // No cached data — show language picker first (unless CLI forced a language)
-        let cli_forced = std::env::args().any(|a| a == "--language");
+        let cli_forced = args.iter().any(|a| a == "--language");
         let picked = if cli_forced {
             lang_code.clone()
         } else {
@@ -11430,16 +11482,25 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
                 }
             }
         };
-        // Show model-size picker on first launch (Norwegian only; ModernBERT
-        // is one-size for English). Skip if the user already has a non-default
-        // choice from a prior session — they've already decided.
-        if (picked == "nb" || picked == "nn") && saved.model_size == "base" {
-            let cli_size = std::env::args()
+        // Show the unified performance picker on first Norwegian launch.
+        // English has a single downloaded text model today, so the regular
+        // Settings quality control is enough there.
+        if is_norwegian_lang_code(&picked) && saved.model_size == "base" {
+            let cli_size = args.iter()
                 .position(|a| a == "--model-size")
-                .and_then(|i| std::env::args().nth(i + 1));
-            let size = cli_size.unwrap_or_else(run_model_size_picker);
-            if size != saved.model_size {
-                saved.model_size = size;
+                .and_then(|i| args.get(i + 1).cloned());
+            if let Some(size) = cli_size {
+                if size != saved.model_size {
+                    saved.model_size = size;
+                    save_settings(&saved);
+                }
+            } else {
+                let (picked_quality, picked_model_size) = run_performance_picker(&picked);
+                if !cli_quality_forced {
+                    quality = picked_quality;
+                    saved.quality = picked_quality;
+                }
+                saved.model_size = picked_model_size;
                 save_settings(&saved);
             }
         }
@@ -11526,8 +11587,10 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
             .with_inner_size([420.0, 250.0])
             .with_always_on_top()
             .with_decorations(false)
+            .with_taskbar(true)
             .with_title("Spell")
-            .with_close_button(false),  // prevent Alt+F4 and system close
+            .with_close_button(true)
+            .with_minimize_button(true),
         ..Default::default()
     };
 

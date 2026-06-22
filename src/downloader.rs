@@ -562,10 +562,16 @@ pub fn language_files(lang_code: &str, model_size: &str) -> Vec<DownloadItem> {
         }
         _ => {
             // Norwegian (nb/nn) shares NorBERT4 — base or small per user choice.
-            let (onnx_stem, ov_stem, label) = if model_size == "small" {
-                ("norbert4_small_patched_int8", "norbert4_small_patched_int8", "Språkmodell (rask)")
+            let (onnx_stem, label) = if model_size == "small" {
+                ("norbert4_small_patched_int8", "Språkmodell")
             } else {
-                ("norbert4_base_int8", "norbert4_patched_int8", "Språkmodell")
+                ("norbert4_base_int8", "Språkmodell")
+            };
+            #[cfg(target_os = "windows")]
+            let ov_stem = if model_size == "small" {
+                "norbert4_small_patched_int8"
+            } else {
+                "norbert4_patched_int8"
             };
             items.push(DownloadItem {
                 s3_key: format!("models/bert/{}.onnx", onnx_stem),
@@ -587,12 +593,12 @@ pub fn language_files(lang_code: &str, model_size: &str) -> Vec<DownloadItem> {
                 items.push(DownloadItem {
                     s3_key: format!("models/openvino_onnx/{}.xml", ov_stem),
                     local_path: ov_dir.join(format!("{}.xml", ov_stem)),
-                    label: "OpenVINO-modell".into(),
+                    label: "Ytelsesdata".into(),
                 });
                 items.push(DownloadItem {
                     s3_key: format!("models/openvino_onnx/{}.bin", ov_stem),
                     local_path: ov_dir.join(format!("{}.bin", ov_stem)),
-                    label: "OpenVINO-vekter".into(),
+                    label: "Ytelsesdata".into(),
                 });
             }
         }
