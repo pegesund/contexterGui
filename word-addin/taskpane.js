@@ -709,7 +709,7 @@ function doReplaceAtCursor(prefix, replacement) {
     }).catch(function(){});
     if (!prefix) {
         // No prefix — insert at cursor using paragraph rewrite (same as non-empty prefix path)
-        enqueueWordRun(function () { return Word.run(function (ctx) {
+        enqueueWordRunUrgent(function () { return Word.run(function (ctx) {
             var para = ctx.document.getSelection().paragraphs.getFirst();
             para.load("text");
             return ctx.sync().then(function () {
@@ -749,7 +749,7 @@ function doReplaceAtCursor(prefix, replacement) {
     // Find prefix in paragraph text and replace it
     var cursorPos = lastCursorInPara || 0;
 
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    enqueueWordRunUrgent(function () { return Word.run(function (ctx) {
         var para = ctx.document.getSelection().paragraphs.getFirst();
         para.load("text");
         return ctx.sync().then(function () {
@@ -809,7 +809,7 @@ function doReplaceAtCursor(prefix, replacement) {
 }
 
 function doReplaceCurrentWord(replacement) {
-    enqueueWordRun(function () { return Word.run(function (ctx) {
+    enqueueWordRunUrgent(function () { return Word.run(function (ctx) {
         var sel = ctx.document.getSelection();
         var wordRange = sel.getRange("Whole");
         wordRange.insertText(replacement, "Replace");

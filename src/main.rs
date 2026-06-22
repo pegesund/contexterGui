@@ -5965,7 +5965,9 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp.on_hover_text(hover).clicked()
+    let clicked = response_clicked(ui, &resp, true);
+    resp.on_hover_text(hover);
+    clicked
 }
 
 /// Returns (category, description, examples_wrong, examples_right) for a grammar rule.
@@ -7933,11 +7935,12 @@ impl eframe::App for ContextApp {
                             egui::RichText::new("⏳").size(13.0 * s)
                         )).on_hover_text(self.language.ui_transcribing());
                     } else {
-                        if ui.add(egui::Button::new(
+                        let stop_resp = ui.add(egui::Button::new(
                             egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                         ).fill(egui::Color32::from_rgb(200, 40, 40))
                          .min_size(egui::vec2(22.0, 16.0))
-                        ).on_hover_text(self.language.ui_stop_recording()).clicked() {
+                        ).on_hover_text(self.language.ui_stop_recording());
+                        if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                             if let Some(handle) = &self.mic_handle {
                                 handle.stop();
                                 self.mic_transcribing = true;
@@ -7983,11 +7986,12 @@ impl eframe::App for ContextApp {
 
                 // ▶ Speak selection (same group as 🎤)
                 if tts_speaking || ocr_is_busy {
-                    if ui.add(egui::Button::new(
+                    let stop_resp = ui.add(egui::Button::new(
                         egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
                      .min_size(egui::vec2(22.0, 16.0))
-                    ).on_hover_text(self.language.ui_stop_reading()).clicked() {
+                    ).on_hover_text(self.language.ui_stop_reading());
+                    if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                         tts::stop_speaking();
                         self.ocr_text = None;
                     }
@@ -8199,7 +8203,7 @@ impl eframe::App for ContextApp {
                                         ],
                                         stroke,
                                     );
-                                    if close.clicked() {
+                                    if response_clicked(ui, &close, true) {
                                         close_clicked = true;
                                     }
                                 },
@@ -8207,9 +8211,12 @@ impl eframe::App for ContextApp {
                         });
                         if close_clicked {
                             self.update_toast = None;
-                        } else if resp.response.interact(egui::Sense::click()).clicked() {
-                            self.update_toast = None;
-                            self.show_settings_window = true;
+                        } else {
+                            let toast_resp = resp.response.interact(egui::Sense::click());
+                            if response_clicked(ui, &toast_resp, true) {
+                                self.update_toast = None;
+                                self.show_settings_window = true;
+                            }
                         }
                     });
                 // Force a quick repaint so the deadline-based dismiss
@@ -8328,7 +8335,7 @@ impl eframe::App for ContextApp {
                             ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(9.0 * s), icon_fg);
 
                             // Check if click was in the icon area
-                            if resp.clicked() {
+                            if response_clicked(ui, &resp, toolbar_mouse_down_click) {
                                 if let Some(pos) = resp.interact_pointer_pos() {
                                     if pos.x < rect.min.x + icon_w {
                                         tts::speak_word(&comp.word);
@@ -8348,7 +8355,7 @@ impl eframe::App for ContextApp {
                         let text_y = rect.center().y;
                         ui.painter().text(egui::pos2(text_x, text_y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(font_size), fg);
                         if hovered { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
-                        (resp.clicked() && !spoke, spoke)
+                        (response_clicked(ui, &resp, toolbar_mouse_down_click) && !spoke, spoke)
                     };
 
                     if has_dual {
@@ -8404,7 +8411,6 @@ impl eframe::App for ContextApp {
                         let word_pid = self.manager.last_user_pid;
                         if word_pid > 0 {
                             std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_millis(100));
                                 let _ = std::process::Command::new("osascript").arg("-e")
                                     .arg(format!(r#"tell application "System Events"
                                         set frontProcess to first application process whose unix id is {}
@@ -8637,7 +8643,7 @@ impl eframe::App for ContextApp {
                                     if alt_resp.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
-                                    if alt_resp.clicked() {
+                                    if response_clicked(ui, &alt_resp, toolbar_mouse_down_click) {
                                         action = Some((alt_idx, "fix"));
                                     }
                                 }
@@ -8666,7 +8672,7 @@ impl eframe::App for ContextApp {
                                     if err_speak_resp.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
-                                    if err_speak_resp.clicked() {
+                                    if response_clicked(ui, &err_speak_resp, toolbar_mouse_down_click) {
                                         tts::speak_word(&err_word);
                                     }
                                     ui.label(
@@ -8715,7 +8721,7 @@ impl eframe::App for ContextApp {
                                         if speak_resp.hovered() {
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                         }
-                                        if speak_resp.clicked() {
+                                        if response_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
                                             tts::speak_word(&best);
                                         }
                                         let best_for_hover = best.clone();
@@ -8737,7 +8743,7 @@ impl eframe::App for ContextApp {
                                                     .color(theme.ok));
                                             })
                                         } else { best_resp };
-                                        if best_resp.clicked() {
+                                        if response_clicked(ui, &best_resp, toolbar_mouse_down_click) {
                                             clicked_candidate = Some((idx, best.clone()));
                                         }
                                     });
@@ -10518,13 +10524,15 @@ fn ax_close_icon(
     resp
 }
 
+fn response_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
+    resp.clicked()
+        || (use_press_event
+            && resp.hovered()
+            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+}
+
 fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
-    if use_press_event {
-        resp.hovered()
-            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
-    } else {
-        resp.clicked()
-    }
+    response_clicked(ui, resp, use_press_event)
 }
 
 /// Paint a small Norwegian flag at the given position.
