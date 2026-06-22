@@ -8160,6 +8160,7 @@ impl eframe::App for ContextApp {
                             .inner_margin(egui::Margin::symmetric(10, 6)),
                     )
                     .show(ctx, |ui| {
+                        let mut close_clicked = false;
                         let resp = ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
@@ -8172,18 +8173,41 @@ impl eframe::App for ContextApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let close = ui.add(egui::Label::new(
-                                        egui::RichText::new("✕")
-                                            .size(11.0 * s)
-                                            .color(egui::Color32::from_rgb(220, 220, 230)),
-                                    ).sense(egui::Sense::click()));
+                                    let side = 14.0 * s;
+                                    let (rect, close) = ui.allocate_exact_size(
+                                        egui::vec2(side, side),
+                                        egui::Sense::click() | egui::Sense::hover(),
+                                    );
+                                    let close = close.on_hover_text("Lukk");
+                                    if close.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    let color = egui::Color32::from_rgb(220, 220, 230);
+                                    let stroke = egui::Stroke::new((1.5 * s).max(1.0), color);
+                                    let pad = 4.0 * s;
+                                    ui.painter().line_segment(
+                                        [
+                                            rect.left_top() + egui::vec2(pad, pad),
+                                            rect.right_bottom() - egui::vec2(pad, pad),
+                                        ],
+                                        stroke,
+                                    );
+                                    ui.painter().line_segment(
+                                        [
+                                            rect.right_top() + egui::vec2(-pad, pad),
+                                            rect.left_bottom() + egui::vec2(pad, -pad),
+                                        ],
+                                        stroke,
+                                    );
                                     if close.clicked() {
-                                        self.update_toast = None;
+                                        close_clicked = true;
                                     }
                                 },
                             );
                         });
-                        if resp.response.interact(egui::Sense::click()).clicked() {
+                        if close_clicked {
+                            self.update_toast = None;
+                        } else if resp.response.interact(egui::Sense::click()).clicked() {
                             self.update_toast = None;
                             self.show_settings_window = true;
                         }

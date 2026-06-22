@@ -332,7 +332,7 @@ impl TextBridge for WordAddinBridge {
             r#"{{"action":"replaceWord","text":"{}"}}"#,
             escape_json(new_text)
         );
-        self.push_reply(json);
+        self.push_reply_urgent(&json);
         true
     }
 
@@ -342,7 +342,7 @@ impl TextBridge for WordAddinBridge {
             escape_json(find),
             escape_json(replace)
         );
-        self.push_reply(json);
+        self.push_reply_urgent(&json);
         true
     }
 
@@ -363,7 +363,7 @@ impl TextBridge for WordAddinBridge {
             escape_json(replace),
             char_offset
         );
-        self.push_reply(json);
+        self.push_reply_urgent(&json);
         true
     }
 
@@ -384,7 +384,7 @@ impl TextBridge for WordAddinBridge {
             escape_json(paragraph_id),
             char_offset
         );
-        self.push_reply(json);
+        self.push_reply_urgent(&json);
         true
     }
 
@@ -394,7 +394,7 @@ impl TextBridge for WordAddinBridge {
             escape_json(word),
             escape_json(paragraph_id)
         );
-        self.push_reply(json);
+        self.push_reply_urgent(&json);
         true
     }
 
@@ -535,9 +535,15 @@ impl TextBridge for WordAddinBridge {
 
     fn push_reply_urgent(&self, json: &str) {
         let doc = self.current_doc_name.lock().map(|d| d.clone()).unwrap_or_default();
-        log_to_file(&format!("PUSH URGENT to queue[{}]: {}", doc, json));
+        let json = mark_reply_urgent(json);
         if let Ok(mut q) = self.reply_queue.lock() {
-            q.entry(doc).or_insert_with(Vec::new).insert(0, json.to_string());
+            let queue = q.entry(doc.clone()).or_insert_with(Vec::new);
+            let insert_at = queue
+                .iter()
+                .position(|queued| !is_urgent_reply(queued))
+                .unwrap_or(queue.len());
+            log_to_file(&format!("PUSH URGENT to queue[{}]@{}: {}", doc, insert_at, json));
+            queue.insert(insert_at, json);
         }
     }
 }
@@ -701,16 +707,27 @@ fn handle_request_rw<S: Read + Write>(
             }
             let json = if let Ok(mut q) = reply_queue.lock() {
                 let keys: Vec<String> = q.keys().cloned().collect();
-                if let Some(doc_queue) = q.get_mut(&req_doc) {
+                let exact = q.get_mut(&req_doc).and_then(|doc_queue| {
                     if doc_queue.is_empty() {
-                        "{}".to_string()
+                        None
                     } else {
                         let j = doc_queue.remove(0);
-                        log_to_file(&format!("REPLY [{}] sending: {}", req_doc, j));
-                        j
+                        Some(j)
                     }
+                });
+                if let Some(j) = exact {
+                    log_to_file(&format!("REPLY [{}] sending: {}", req_doc, j));
+                    j
+                } else if let Some((fallback_doc, j)) = pop_only_pending_reply(&mut q, &req_doc) {
+                    log_to_file(&format!(
+                        "REPLY fallback req='{}' using queue='{}': {}",
+                        req_doc, fallback_doc, j
+                    ));
+                    j
                 } else if !keys.is_empty() {
-                    log_to_file(&format!("POLL miss: req='{}' queues={:?}", req_doc, keys));
+                    if q.values().any(|queue| !queue.is_empty()) {
+                        log_to_file(&format!("POLL miss: req='{}' queues={:?}", req_doc, keys));
+                    }
                     "{}".to_string()
                 } else {
                     "{}".to_string()
@@ -1156,6 +1173,45 @@ fn parse_deleted_json(body: &str) -> Option<Vec<String>> {
     }
 
     if results.is_empty() { None } else { Some(results) }
+}
+
+fn pop_only_pending_reply(
+    queues: &mut std::collections::HashMap<String, Vec<String>>,
+    req_doc: &str,
+) -> Option<(String, String)> {
+    let pending_docs: Vec<String> = queues
+        .iter()
+        .filter(|(doc, queue)| doc.as_str() != req_doc && !queue.is_empty())
+        .map(|(doc, _)| doc.clone())
+        .take(2)
+        .collect();
+    if pending_docs.len() != 1 {
+        return None;
+    }
+    let doc = pending_docs.into_iter().next()?;
+    let reply = queues.get_mut(&doc)?.remove(0);
+    Some((doc, reply))
+}
+
+fn mark_reply_urgent(json: &str) -> String {
+    let trimmed = json.trim_start();
+    let leading_ws_len = json.len() - trimmed.len();
+    if let Some(rest) = trimmed.strip_prefix('{') {
+        let mut marked = String::with_capacity(json.len() + 16);
+        marked.push_str(&json[..leading_ws_len]);
+        marked.push_str(r#"{"_urgent":true"#);
+        if !rest.trim_start().starts_with('}') {
+            marked.push(',');
+        }
+        marked.push_str(rest);
+        marked
+    } else {
+        json.to_string()
+    }
+}
+
+fn is_urgent_reply(json: &str) -> bool {
+    json.contains(r#""_urgent":true"#)
 }
 
 fn log_to_file(msg: &str) {
