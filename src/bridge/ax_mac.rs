@@ -283,16 +283,6 @@ unsafe fn set_selected_range(elem: AXUIElementRef, start: usize, len: usize) -> 
     err == 0
 }
 
-unsafe fn set_selected_text(elem: AXUIElementRef, text: &str) -> bool {
-    let replacement = CFString::new(text);
-    let err = AXUIElementSetAttributeValue(
-        elem,
-        CFString::new("AXSelectedText").as_concrete_TypeRef(),
-        replacement.as_concrete_TypeRef() as CFTypeRef,
-    );
-    err == 0
-}
-
 fn paste_text_into_frontmost(pid: u32, text: &str) -> bool {
     let saved_clip = pbpaste();
     pbcopy(text);
@@ -323,12 +313,7 @@ unsafe fn replace_in_text_element_at(
         crate::log!("ax_mac direct replace: failed to select range off={} len={}", char_offset, find_len);
         return false;
     }
-    if set_selected_text(elem, replace) {
-        crate::log!("ax_mac direct replace: AXSelectedText off={} '{}' → '{}'", char_offset, find, replace);
-        return true;
-    }
-
-    crate::log!("ax_mac direct replace: AXSelectedText failed, falling back to paste over selection");
+    crate::log!("ax_mac direct replace: paste over selection off={} '{}' → '{}'", char_offset, find, replace);
     paste_text_into_frontmost(pid, replace)
 }
 
