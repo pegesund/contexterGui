@@ -1163,6 +1163,12 @@ impl BridgeManager {
                     .find(|b| b.name() == "Accessibility (macOS)")
                     .map(|b| b.as_ref());
             }
+            if !paragraph_id.is_empty() {
+                return self.bridges
+                    .iter()
+                    .find(|b| b.name() == "Word Add-in")
+                    .map(|b| b.as_ref());
+            }
         }
 
         let _ = paragraph_id;
