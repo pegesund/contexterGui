@@ -1371,6 +1371,10 @@ struct ContextApp {
     poll_interval: Duration,
     follow_cursor: bool,
     last_caret_pos: Option<(i32, i32)>,
+    /// Last non-Spell writing surface. Used for layout while the user clicks
+    /// Spell's floating toolbar, because the OS foreground becomes OurApp
+    /// before the click finishes.
+    last_external_layout_app: platform::ForegroundApp,
     /// After goto, freeze window position for a few seconds so it doesn't jump back
     goto_freeze_until: Option<Instant>,
     /// Anchor position during Cmd+scroll zoom — forced back every frame
@@ -2197,6 +2201,7 @@ impl ContextApp {
             zoom_anchor: None,
             last_content_height: 150.0,
             last_caret_pos: None,
+            last_external_layout_app: platform::ForegroundApp::default(),
             checker: None,
             analyzer,
             compound_fst,
@@ -6074,6 +6079,10 @@ impl eframe::App for ContextApp {
             let now_word = kind == platform::AppKind::Word;
             let now_our_app = kind == platform::AppKind::OurApp;
 
+            if !now_our_app && (now_browser || self.platform.is_writing_app(&fg)) {
+                self.last_external_layout_app = fg.clone();
+            }
+
             // Cross-app switch: clear the visible document state immediately.
             // Errors and suggestions belong to the app/document that produced
             // them; keeping them while Slack/Notes/Word focus changes makes
@@ -7564,8 +7573,19 @@ impl eframe::App for ContextApp {
         // The bulb/pencil icons in the toolbar remain manual mute toggles
         // for users who want to suppress a panel even when it has content.
         let has_completions = !self.completions.is_empty() || !self.open_completions.is_empty();
-        let fg_for_layout = self.platform.foreground_app();
+        let current_fg_for_layout = self.platform.foreground_app();
+        let current_fg_kind_for_layout = self.platform.classify_app(&current_fg_for_layout);
+        let fg_for_layout = if current_fg_kind_for_layout == platform::AppKind::OurApp
+            && self.last_external_layout_app.pid != 0
+        {
+            self.last_external_layout_app.clone()
+        } else {
+            current_fg_for_layout.clone()
+        };
+        let fg_for_layout_kind = self.platform.classify_app(&fg_for_layout);
         let slack_layout = fg_for_layout.exe_name.contains("slack");
+        let toolbar_mouse_down_click =
+            current_fg_kind_for_layout == platform::AppKind::OurApp || slack_layout;
         let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
 
         // No tab auto-switch. The pencil icon's red dot already serves as
@@ -7862,7 +7882,7 @@ impl eframe::App for ContextApp {
                     "\u{1F4A1}", 16.0 * s, bulb_color,
                     self.language.ui_suggestions(),
                 );
-                if toolbar_clicked(ui, &bulb_resp, slack_layout) {
+                if toolbar_clicked(ui, &bulb_resp, toolbar_mouse_down_click) {
                     if self.selected_tab == 0 {
                         self.show_completions = !self.show_completions;
                     } else {
@@ -7896,7 +7916,7 @@ impl eframe::App for ContextApp {
                     "\u{270F}", 16.0 * s, pen_color,
                     self.language.ui_grammar(),
                 );
-                if toolbar_clicked(ui, &pen_resp, slack_layout) {
+                if toolbar_clicked(ui, &pen_resp, toolbar_mouse_down_click) {
                     if self.selected_tab == 1 {
                         self.show_grammar = !self.show_grammar;
                     } else {
@@ -7940,33 +7960,34 @@ impl eframe::App for ContextApp {
                 } else {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
-                    if ax_icon(ui,
+                    let mic_resp = ax_icon(ui,
                         "\u{1F3A4}", 13.0 * s, mic_color,
                         self.language.ui_speech_recognition(),
-                    ).clicked() {
-                            if whisper_ready {
-                                // Models already loaded — start recording immediately
-                                self.start_recording_with_loaded_whisper();
-                            } else {
-                                #[cfg(target_os = "macos")]
-                                {
-                                    // macOS: live streaming with Apple SFSpeechRecognizer
-                                    match stt::start_recording_live() {
-                                        Ok(handle) => {
-                                            log!("Microphone recording started (Apple STT)");
-                                            self.mic_handle = Some(handle);
-                                            self.mic_result_text = None;
-                                        }
-                                        Err(e) => log!("Microphone error: {}", e),
+                    );
+                    if toolbar_clicked(ui, &mic_resp, toolbar_mouse_down_click) {
+                        if whisper_ready {
+                            // Models already loaded — start recording immediately
+                            self.start_recording_with_loaded_whisper();
+                        } else {
+                            #[cfg(target_os = "macos")]
+                            {
+                                // macOS: live streaming with Apple SFSpeechRecognizer
+                                match stt::start_recording_live() {
+                                    Ok(handle) => {
+                                        log!("Microphone recording started (Apple STT)");
+                                        self.mic_handle = Some(handle);
+                                        self.mic_result_text = None;
                                     }
+                                    Err(e) => log!("Microphone error: {}", e),
                                 }
-                                #[cfg(target_os = "windows")]
-                                {
-                                    self.start_windows_whisper_download_or_load();
-                                }
+                            }
+                            #[cfg(target_os = "windows")]
+                            {
+                                self.start_windows_whisper_download_or_load();
                             }
                         }
                     }
+                }
 
                 // ▶ Speak selection (same group as 🎤)
                 if tts_speaking || ocr_is_busy {
@@ -7979,10 +8000,11 @@ impl eframe::App for ContextApp {
                         self.ocr_text = None;
                     }
                 } else {
-                    if ax_icon(ui,
+                    let speak_resp = ax_icon(ui,
                         "▶", 14.0 * s, inactive,
                         self.language.ui_read_selected_text(),
-                    ).clicked() {
+                    );
+                    if toolbar_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
                         log!("Speak button clicked!");
                         match self.manager.read_selected_text().or_else(|| self.platform.read_selected_text()) {
                             Some(text) => {
@@ -8004,10 +8026,7 @@ impl eframe::App for ContextApp {
                 // Gate the badge on fg=Word too. writing_errors persists across
                 // app switches (so they reappear when the user returns), but
                 // they aren't relevant to display while in Slack/Safari/Terminal.
-                let badge_in_word = {
-                    let fg = self.platform.foreground_app();
-                    self.platform.classify_app(&fg) == platform::AppKind::Word
-                };
+                let badge_in_word = fg_for_layout_kind == platform::AppKind::Word;
                 if self.show_grammar && badge_in_word {
                     let err_count = self.writing_errors.iter()
                         .filter(|e| !e.ignored && e.rule_name != "llm_correction")
@@ -8017,10 +8036,11 @@ impl eframe::App for ContextApp {
                         ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                         if !self.llm_waiting {
-                            if ax_icon(ui,
+                            let fix_all_resp = ax_icon(ui,
                                 "✨", 14.0 * s, egui::Color32::from_rgb(0, 120, 220),
                                 self.language.ui_ai_fix_all(),
-                            ).clicked() {
+                            );
+                            if toolbar_clicked(ui, &fix_all_resp, toolbar_mouse_down_click) {
                                 // Apply local suggestions for every active
                                 // error via the find-and-replace queue. No
                                 // LLM dependency — works even when no AI
@@ -8060,10 +8080,11 @@ impl eframe::App for ContextApp {
                 } else {
                     self.language.ui_pin_cursor_off()
                 };
-                if ax_icon(ui,
+                let pin_resp = ax_icon(ui,
                     "\u{1F4CC}", 14.0 * s, pin_color,
                     pin_tooltip,
-                ).clicked() {
+                );
+                if toolbar_clicked(ui, &pin_resp, toolbar_mouse_down_click) {
                     self.follow_cursor = !self.follow_cursor;
                 }
 
@@ -8099,23 +8120,25 @@ impl eframe::App for ContextApp {
                         egui::Color32::from_rgb(220, 50, 50),
                     );
                 }
-                if gear_resp.clicked() {
+                if toolbar_clicked(ui, &gear_resp, toolbar_mouse_down_click) {
                     self.show_settings_window = !self.show_settings_window;
                 }
 
                 // ▁ Minimize
-                if ax_icon(ui,
+                let minimize_resp = ax_icon(ui,
                     "–", 14.0 * s, inactive,
                     self.language.ui_minimize(),
-                ).clicked() {
+                );
+                if toolbar_clicked(ui, &minimize_resp, toolbar_mouse_down_click) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
                 // ✕ Close
-                if ax_close_icon(ui,
+                let close_resp = ax_close_icon(ui,
                     16.0 * s, egui::Color32::from_rgb(120, 120, 120),
                     self.language.ui_close(),
-                ).clicked() {
+                );
+                if toolbar_clicked(ui, &close_resp, toolbar_mouse_down_click) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 ui.add_space(5.0 * s);
