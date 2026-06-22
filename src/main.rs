@@ -1549,11 +1549,6 @@ struct ContextApp {
     /// target_pid, we send `cursorEnd` to the add-in and clear this state.
     /// Times out after 3s.
     pending_cursor_place: Option<(String, String, u32, Instant)>,
-    /// Paragraphs that need a full underline resync on the NEXT grammar response.
-    /// Set when a user manually corrects a misspelled word (retain removes the
-    /// error but Word's wave underline is orphaned on the new text). Cleared
-    /// once the paragraph is re-underlined from current writing_errors.
-    paragraphs_need_underline_resync: std::collections::HashSet<String>,
     /// Pending consonant confusion candidates — validated with grammar checker after check_spelling
     pending_consonant_checks: Vec<WritingError>,
     /// Pending async BERT scoring for spelling re-ranking
@@ -2301,7 +2296,6 @@ impl ContextApp {
             pending_fix: None,
             fix_queue: std::collections::VecDeque::new(),
             pending_cursor_place: None,
-            paragraphs_need_underline_resync: std::collections::HashSet::new(),
             pending_consonant_checks: Vec::new(),
             pending_spelling_bert: Vec::new(),
             pending_grammar_bert: Vec::new(),
@@ -4728,6 +4722,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
 
         let mut completion_context_refreshed = false;
+        let mut underline_refresh_needed = false;
 
         // Drain from all bridges that support it
         for bridge in &self.manager.bridges {
@@ -4789,6 +4784,14 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 let clean_text: String = p.text.chars()
                     .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
                     .collect();
+                let cursor_just_finished_word = match p.cursor_start {
+                    Some(c) if c > 0 => {
+                        clean_text.chars().nth(c - 1) == Some(' ')
+                            || clean_text.chars().nth(c - 1) == Some('\t')
+                    }
+                    Some(_) => false,
+                    None => true,
+                };
 
                 // Extract email parts to skip in spelling checks
                 let email_skip_words: std::collections::HashSet<String> = if clean_text.contains('@') {
@@ -4829,10 +4832,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 // no longer in the paragraph text (user manually corrected it).
                 // In that case the old underline in Word is ORPHANED — the word
                 // it was attached to is gone, but Word's wave formatting may
-                // remain on whatever text now occupies that range. We can't
-                // clear it with clear_underline_word (search for the gone word
-                // returns nothing). Remember to do a paragraph-level clear +
-                // resync on the NEXT grammar response for this paragraph.
+                // remain on whatever text now occupies that range.
                 let mut orphan_word_removed = false;
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
@@ -4853,10 +4853,19 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 });
                 if self.writing_errors.len() < before_count {
                     log!("  Cleared {} stale errors for para={}", before_count - self.writing_errors.len(), trunc(&p.paragraph_id, 10));
-                    if orphan_word_removed {
-                        self.paragraphs_need_underline_resync.insert(p.paragraph_id.clone());
-                        log!("  Marked para={} for underline resync (manual word correction)", trunc(&p.paragraph_id, 10));
+                }
+                let has_underlined_errors = self.writing_errors.iter()
+                    .any(|e| e.paragraph_id == p.paragraph_id && e.underlined);
+                if orphan_word_removed || (cursor_just_finished_word && has_underlined_errors) {
+                    self.manager.clear_paragraph_underlines(&p.paragraph_id);
+                    for e in &mut self.writing_errors {
+                        if e.paragraph_id == p.paragraph_id {
+                            e.underlined = false;
+                        }
                     }
+                    underline_refresh_needed = true;
+                    log!("  Refreshed Word underline formatting for para={} orphan={} word_boundary={}",
+                        trunc(&p.paragraph_id, 10), orphan_word_removed, cursor_just_finished_word);
                 }
 
                 // Check each sentence: skip if already processed (hash unchanged)
@@ -4871,14 +4880,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     //   - cursor just past a space/tab → user pressed space
                     //   - cursor_start = None         → cursor left this paragraph, user
                     //                                   is no longer mid-word here
-                    let just_finished_word = match p.cursor_start {
-                        Some(c) if c > 0 => {
-                            clean_text.chars().nth(c - 1) == Some(' ')
-                                || clean_text.chars().nth(c - 1) == Some('\t')
-                        }
-                        Some(_) => false, // cursor at position 0 — just opened para
-                        None => true,     // cursor moved away — safe to check
-                    };
+                    let just_finished_word = cursor_just_finished_word;
 
                     if self.processed_sentence_hashes.contains(&sent_h) {
                         log!("  SKIP processed: '{}'", trunc(sentence_text, 50));
@@ -4975,6 +4977,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 .unwrap_or_else(Instant::now);
             self.completion_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        if underline_refresh_needed {
+            self.sync_error_underlines();
         }
 
         // Prune errors whose word is no longer in the document (e.g., after cut)
@@ -5217,25 +5223,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             log!("Grammar response: sentence='{}' errors={} unknown={} para='{}'",
                 trunc(&resp.sentence, 40), resp.errors.len(), resp.unknown_words.len(),
                 trunc(&resp.paragraph_id, 10));
-            // If this paragraph had a manual correction earlier (word removed
-            // from text but Word's wave underline is orphaned), clear the whole
-            // paragraph's underlines now and mark remaining errors for re-apply.
-            // Runs only on grammar responses (space/punctuation boundary), so it
-            // doesn't flood the add-in queue on every keystroke.
-            if !resp.paragraph_id.is_empty()
-                && self.paragraphs_need_underline_resync.remove(&resp.paragraph_id)
-            {
-                log!("  Underline resync: clearing para={} and re-applying for remaining errors",
-                    trunc(&resp.paragraph_id, 10));
-                self.manager.clear_paragraph_underlines(&resp.paragraph_id);
-                for e in &mut self.writing_errors {
-                    if e.paragraph_id == resp.paragraph_id {
-                        e.underlined = false;
-                    }
-                }
-                // sync_error_underlines (called in the main poll block) will
-                // re-apply underlines for the errors still in writing_errors.
-            }
             let sent_h = if resp.paragraph_id.is_empty() {
                 hash_str(&resp.sentence)
             } else {
@@ -5977,6 +5964,9 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
         .stroke(egui::Stroke::new(1.0, stroke_col));
     let resp = ui.add(btn);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hover));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     resp.on_hover_text(hover).clicked()
 }
 
@@ -8612,12 +8602,16 @@ impl eframe::App for ContextApp {
                                 // the details popup to keep the card minimal.
                                 for &alt_idx in &alternatives {
                                     let alt = &self.writing_errors[alt_idx];
-                                    if ui.add(egui::Label::new(
+                                    let alt_resp = ui.add(egui::Label::new(
                                         egui::RichText::new(&alt.suggestion)
                                             .size(11.0 * s)
                                             .strong()
                                             .color(theme.ok),
-                                    ).sense(egui::Sense::click())).clicked() {
+                                    ).sense(egui::Sense::click()));
+                                    if alt_resp.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if alt_resp.clicked() {
                                         action = Some((alt_idx, "fix"));
                                     }
                                 }
@@ -8639,10 +8633,14 @@ impl eframe::App for ContextApp {
                                 let err_word = error.word.clone();
                                 ui.horizontal(|ui| {
                                     // Left: 🔊 + red misspelled word
-                                    if ui.add(egui::Label::new(
+                                    let err_speak_resp = ui.add(egui::Label::new(
                                         egui::RichText::new("🔊").size(9.0 * s)
                                             .color(theme.muted)
-                                    ).sense(egui::Sense::click())).clicked() {
+                                    ).sense(egui::Sense::click()));
+                                    if err_speak_resp.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if err_speak_resp.clicked() {
                                         tts::speak_word(&err_word);
                                     }
                                     ui.label(
@@ -8684,10 +8682,14 @@ impl eframe::App for ContextApp {
                                 if !error.suggestion.is_empty() {
                                     let best = error.suggestion.clone();
                                     ui.horizontal(|ui| {
-                                        if ui.add(egui::Label::new(
+                                        let speak_resp = ui.add(egui::Label::new(
                                             egui::RichText::new("🔊").size(9.0 * s)
                                                 .color(theme.ok)
-                                        ).sense(egui::Sense::click())).clicked() {
+                                        ).sense(egui::Sense::click()));
+                                        if speak_resp.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if speak_resp.clicked() {
                                             tts::speak_word(&best);
                                         }
                                         let best_for_hover = best.clone();
@@ -8697,6 +8699,9 @@ impl eframe::App for ContextApp {
                                                 .strong()
                                                 .color(theme.ok)
                                         ).sense(egui::Sense::click()));
+                                        if best_resp.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
                                         let best_resp = if hover_zoom {
                                             best_resp.on_hover_ui(|ui| {
                                                 ui.set_max_width(600.0);

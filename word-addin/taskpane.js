@@ -487,6 +487,10 @@ function doReplace(expected, replacement, paragraphId) {
                 }).catch(function(){});
                 if (results.items.length > 0) {
                     var newRange = results.items[0].insertText(replacement, "Replace");
+                    // Replacement ranges can inherit Spell's wavy underline on
+                    // macOS Word. Clear it before placing the cursor at the end,
+                    // otherwise new typing may continue with the underline style.
+                    newRange.font.underline = "None";
                     // Collapse selection to the end of the replacement so the cursor
                     // lands after the new word (ready for the user to keep typing).
                     newRange.select("End");
@@ -541,8 +545,16 @@ function drainWordRunQueue() {
 // Guard for event-driven Word.run calls — skip if queue is busy
 function isWordBusy() { return wordRunBusy || wordRunQueue.length > 0; }
 
-function doUnderlineInScope(word, searchScope, color) {
-    return Word.run(function (ctx) {
+function getUnderlineScope(ctx, paragraphId) {
+    if (paragraphId) {
+        return ctx.document.getParagraphByUniqueLocalId(paragraphId);
+    }
+    return ctx.document.body;
+}
+
+function doUnderline(word, paragraphId, color) {
+    enqueueWordRun(function () { return Word.run(function (ctx) {
+        var searchScope = getUnderlineScope(ctx, paragraphId);
         var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
         results.load("items/font");
         return ctx.sync().then(function () {
@@ -550,58 +562,34 @@ function doUnderlineInScope(word, searchScope, color) {
                 results.items[0].font.underline = "Wave";
                 try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
                 fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                    body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
+                    body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length + " para=" + (paragraphId || "body")})
                 }).catch(function(){});
             } else {
                 fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                    body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' not found"})
+                    body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' not found para=" + (paragraphId || "body")})
                 }).catch(function(){});
             }
             return ctx.sync();
         });
-    });
-}
-
-function doUnderline(word, paragraphId, color) {
-    // Run directly — don't queue, underlines are fast and shouldn't wait behind rescans
-    Word.run(function (ctx) {
-            var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
-            results.load("items/font");
-            return ctx.sync().then(function () {
-                if (results.items.length > 0) {
-                    results.items[0].font.underline = "Wave";
-                    try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
-                    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                        body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length})
-                    }).catch(function(){});
-                } else {
-                    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                        body: JSON.stringify({msg: "UNDERLINE MISS: '" + word + "' not found in body"})
-                    }).catch(function(){});
-                }
-                return ctx.sync();
-            });
-        }).catch(function (e) {
-            fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
-                body: JSON.stringify({msg: "UNDERLINE ERROR: '" + word + "' " + e})
-            }).catch(function(){});
-    });
+    }).catch(function (e) {
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "UNDERLINE ERROR: '" + word + "' para=" + (paragraphId || "body") + " " + e})
+        }).catch(function(){});
+    }); });
 }
 
 function doClearParagraphUnderlines(paragraphId) {
     if (!paragraphId) return;
-    Word.run(function (ctx) {
-        var para;
-        try { para = ctx.document.getParagraphByUniqueLocalId(paragraphId); } catch(e) { return ctx.sync(); }
+    enqueueWordRun(function () { return Word.run(function (ctx) {
+        var para = ctx.document.getParagraphByUniqueLocalId(paragraphId);
         var range = para.getRange("Whole");
-        range.load("font");
-        return ctx.sync().then(function () {
-            if (range.font.underline === "Wave" || range.font.underline === "Mixed") {
-                range.font.underline = "None";
-            }
-            return ctx.sync();
-        });
-    }).catch(function () {});
+        range.font.underline = "None";
+        return ctx.sync();
+    }).catch(function (e) {
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "CLEAR PARA UNDERLINE ERROR: para=" + paragraphId.substring(0,10) + " " + e})
+        }).catch(function(){});
+    }); });
 }
 
 function doCursorAtEndOfWord(word, paragraphId) {
@@ -636,8 +624,9 @@ function doCursorAtEndOfWord(word, paragraphId) {
 }
 
 function doClearUnderline(word, paragraphId) {
-    Word.run(function (ctx) {
-        var results = ctx.document.body.search(word, { matchCase: false, matchWholeWord: true });
+    enqueueWordRun(function () { return Word.run(function (ctx) {
+        var searchScope = getUnderlineScope(ctx, paragraphId);
+        var results = searchScope.search(word, { matchCase: false, matchWholeWord: true });
         results.load("items/font");
         return ctx.sync().then(function () {
             for (var i = 0; i < results.items.length; i++) {
@@ -645,7 +634,11 @@ function doClearUnderline(word, paragraphId) {
             }
             return ctx.sync();
         });
-    }).catch(function () {});
+    }).catch(function (e) {
+        fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({msg: "CLEAR UNDERLINE ERROR: '" + word + "' para=" + (paragraphId || "body") + " " + e})
+        }).catch(function(){});
+    }); });
 }
 
 function doAppendParagraph(text) {
