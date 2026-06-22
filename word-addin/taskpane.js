@@ -704,17 +704,18 @@ function doClearAllUnderlines() {
 }
 
 function doReplaceAtCursor(prefix, replacement) {
+    var t0 = Date.now();
     fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
         body: JSON.stringify({msg: "doReplaceAtCursor ENTER: prefix='" + prefix + "' replacement='" + replacement + "' paraId=" + lastCursorParaId + " cursor=" + lastCursorInPara})
     }).catch(function(){});
     if (!prefix) {
         // No prefix — insert at cursor using paragraph rewrite (same as non-empty prefix path)
         enqueueWordRunUrgent(function () { return Word.run(function (ctx) {
-            var para = ctx.document.getSelection().paragraphs.getFirst();
+            var para = lastCursorParaId ? ctx.document.getParagraphByUniqueLocalId(lastCursorParaId) : ctx.document.getSelection().paragraphs.getFirst();
             para.load("text");
             return ctx.sync().then(function () {
                 var text = para.text;
-                var pos = (cursorPos !== undefined && cursorPos <= text.length) ? cursorPos : text.length;
+                var pos = (lastCursorInPara !== undefined && lastCursorInPara <= text.length) ? lastCursorInPara : text.length;
                 var before = text.substring(0, pos);
                 var after = text.substring(pos);
                 var space = (after.length === 0 || (after[0] !== " " && after[0] !== "." && after[0] !== ",")) ? " " : "";
@@ -724,9 +725,9 @@ function doReplaceAtCursor(prefix, replacement) {
                 }).catch(function(){});
                 var cursorTarget = before.length + replacement.length + space.length;
                 var inserted = para.insertText(newText, "Replace");
+                inserted.select("End");
                 para.load("uniqueLocalId");
                 return ctx.sync().then(function () {
-                    inserted.select("End");
                     var paraId = para.uniqueLocalId || "";
                     paragraphMap[paraId] = hashString(newText);
                     lastCursorInPara = cursorTarget;
@@ -736,7 +737,9 @@ function doReplaceAtCursor(prefix, replacement) {
                     lastSentWord = "";
                     lastSelStart = -1;
                     setTimeout(onSelectionChanged, 200);
-                    return ctx.sync();
+                    fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                        body: JSON.stringify({msg: "doReplaceAtCursor done: " + (Date.now() - t0) + "ms"})
+                    }).catch(function(){});
                 });
             });
         }).catch(function (e) {
@@ -750,7 +753,7 @@ function doReplaceAtCursor(prefix, replacement) {
     var cursorPos = lastCursorInPara || 0;
 
     enqueueWordRunUrgent(function () { return Word.run(function (ctx) {
-        var para = ctx.document.getSelection().paragraphs.getFirst();
+        var para = lastCursorParaId ? ctx.document.getParagraphByUniqueLocalId(lastCursorParaId) : ctx.document.getSelection().paragraphs.getFirst();
         para.load("text");
         return ctx.sync().then(function () {
             var text = para.text;
@@ -785,9 +788,9 @@ function doReplaceAtCursor(prefix, replacement) {
             }).catch(function(){});
             var cursorTarget = before.length + replacement.length + space.length;
             var inserted = para.insertText(newText, "Replace");
+            inserted.select("End");
             para.load("uniqueLocalId");
             return ctx.sync().then(function () {
-                inserted.select("End");
                 var paraId = para.uniqueLocalId || "";
                 paragraphMap[paraId] = hashString(newText);
                 lastCursorInPara = cursorTarget;
@@ -798,7 +801,9 @@ function doReplaceAtCursor(prefix, replacement) {
                 lastSentWord = "";
                 lastSelStart = -1;
                 setTimeout(onSelectionChanged, 200);
-                return ctx.sync();
+                fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({msg: "doReplaceAtCursor done: " + (Date.now() - t0) + "ms"})
+                }).catch(function(){});
             });
         });
     }).catch(function (e) {
