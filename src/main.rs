@@ -6567,7 +6567,10 @@ impl eframe::App for ContextApp {
                     word_pid, replace, trunc(&paragraph_id, 10));
                 #[cfg(target_os = "macos")]
                 {
-                    if word_pid > 0 && !paragraph_id.is_empty() {
+                    if word_pid > 0
+                        && !paragraph_id.is_empty()
+                        && !paragraph_id.starts_with("ax:")
+                    {
                         let pid_copy = word_pid;
                         std::thread::spawn(move || {
                             let _ = std::process::Command::new("osascript").arg("-e")

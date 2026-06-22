@@ -418,6 +418,36 @@ unsafe fn replace_in_app_window(app: AXUIElementRef, pid: u32, find: &str, repla
     ok
 }
 
+unsafe fn replace_in_app_focused_element(
+    app: AXUIElementRef,
+    pid: u32,
+    find: &str,
+    replace: &str,
+    preferred_offset: usize,
+) -> bool {
+    let mut focused_ref: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(
+        app,
+        CFString::new("AXFocusedUIElement").as_concrete_TypeRef(),
+        &mut focused_ref,
+    );
+    if err != 0 || focused_ref.is_null() {
+        return false;
+    }
+
+    let ok = replace_in_readable_text(
+        focused_ref as AXUIElementRef,
+        0,
+        8,
+        pid,
+        find,
+        replace,
+        preferred_offset,
+    );
+    CFRelease(focused_ref);
+    ok
+}
+
 unsafe fn replace_in_app_windows(app: AXUIElementRef, pid: u32, find: &str, replace: &str, preferred_offset: usize) -> bool {
     let mut windows: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(
@@ -1087,12 +1117,27 @@ impl AxMacBridge {
             return false;
         }
         let pid_u32 = pid as u32;
+        bring_app_to_front(pid_u32);
         unsafe {
             let app = AXUIElementCreateApplication(pid as i32);
             if app.is_null() {
                 return false;
             }
-            let ok = replace_in_app_window(app, pid_u32, find, replace, char_offset)
+            let ok = replace_in_app_focused_element(app, pid_u32, find, replace, char_offset)
+                || system_focused_element_for_pid(pid as i32).map_or(false, |focused| {
+                    let replaced = replace_in_readable_text(
+                        focused,
+                        0,
+                        8,
+                        pid_u32,
+                        find,
+                        replace,
+                        char_offset,
+                    );
+                    CFRelease(focused as _);
+                    replaced
+                })
+                || replace_in_app_window(app, pid_u32, find, replace, char_offset)
                 || replace_in_app_windows(app, pid_u32, find, replace, char_offset);
             CFRelease(app as _);
             ok
