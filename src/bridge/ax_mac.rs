@@ -283,10 +283,9 @@ unsafe fn set_selected_range(elem: AXUIElementRef, start: usize, len: usize) -> 
     err == 0
 }
 
-fn paste_text_into_frontmost(pid: u32, text: &str) -> bool {
+fn paste_text_over_selection(text: &str) -> bool {
     let saved_clip = pbpaste();
     pbcopy(text);
-    bring_app_to_front(pid);
     send_cmd_v_to(0);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -297,7 +296,7 @@ fn paste_text_into_frontmost(pid: u32, text: &str) -> bool {
 
 unsafe fn replace_in_text_element_at(
     elem: AXUIElementRef,
-    pid: u32,
+    _pid: u32,
     find: &str,
     replace: &str,
     preferred_offset: usize,
@@ -314,7 +313,7 @@ unsafe fn replace_in_text_element_at(
         return false;
     }
     crate::log!("ax_mac direct replace: paste over selection off={} '{}' → '{}'", char_offset, find, replace);
-    paste_text_into_frontmost(pid, replace)
+    paste_text_over_selection(replace)
 }
 
 unsafe fn replace_in_attr_element(
@@ -1421,9 +1420,26 @@ fn send_cmd_v_to(pid: u32) {
     post_key_to_pid(pid, KEY_V, false, FLAG_CMD);
 }
 
-/// Bring an app to frontmost via `osascript` — required so our synthesized
-/// keystrokes land on the target app rather than our egui window.
+/// Bring an app to frontmost so synthesized keystrokes land on the target app.
 fn bring_app_to_front(pid: u32) {
+    unsafe {
+        let app = AXUIElementCreateApplication(pid as i32);
+        if !app.is_null() {
+            let val = CFBoolean::true_value();
+            let key = CFString::new("AXFrontmost");
+            let err = AXUIElementSetAttributeValue(
+                app,
+                key.as_concrete_TypeRef(),
+                val.as_CFTypeRef(),
+            );
+            CFRelease(app as _);
+            if err == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                return;
+            }
+        }
+    }
+
     let script = format!(
         r#"tell application "System Events"
             set frontProcess to first application process whose unix id is {}
@@ -1440,23 +1456,66 @@ fn bring_app_to_front(pid: u32) {
 }
 
 fn pbpaste() -> String {
-    std::process::Command::new("pbpaste")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
+    use objc::runtime::{Class, Object};
+    use objc::*;
+    use std::ffi::CStr;
+
+    unsafe {
+        let Some(cls) = Class::get("NSPasteboard") else {
+            return String::new();
+        };
+        let pb: *mut Object = msg_send![cls, generalPasteboard];
+        if pb.is_null() {
+            return String::new();
+        }
+
+        let string_type: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: b"public.utf8-plain-text\0".as_ptr()
+        ];
+        let value: *mut Object = msg_send![pb, stringForType: string_type];
+        if value.is_null() {
+            return String::new();
+        }
+
+        let c_value: *const std::ffi::c_char = msg_send![value, UTF8String];
+        if c_value.is_null() {
+            return String::new();
+        }
+        CStr::from_ptr(c_value).to_string_lossy().into_owned()
+    }
 }
 
 fn pbcopy(text: &str) {
-    use std::io::Write;
-    if let Ok(mut child) = std::process::Command::new("pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(text.as_bytes());
+    use objc::runtime::{Class, Object};
+    use objc::*;
+    use std::ffi::CString;
+
+    let clean_text = text.replace('\0', "");
+    let Ok(c_text) = CString::new(clean_text) else {
+        return;
+    };
+
+    unsafe {
+        let Some(cls) = Class::get("NSPasteboard") else {
+            return;
+        };
+        let pb: *mut Object = msg_send![cls, generalPasteboard];
+        if pb.is_null() {
+            return;
         }
-        let _ = child.wait();
+
+        let string_type: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: b"public.utf8-plain-text\0".as_ptr()
+        ];
+        let value: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c_text.as_ptr()
+        ];
+
+        let _: isize = msg_send![pb, clearContents];
+        let _: bool = msg_send![pb, setString: value forType: string_type];
     }
 }
 
