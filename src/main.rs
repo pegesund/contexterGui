@@ -1695,6 +1695,11 @@ struct ContextApp {
     /// version (recorded in `last_notified_update_version`), don't show
     /// it again until a *newer* version appears.
     update_toast: Option<(String, Instant)>,
+    /// Last `WindowLevel` we sent to the viewport. `Some(true)` = AlwaysOnTop,
+    /// `Some(false)` = Normal. We dedupe per-frame ViewportCommand::WindowLevel
+    /// because Windows kept hiding the taskbar icon when SetWindowPos(HWND_TOPMOST)
+    /// was reapplied to a freshly minimised window every frame.
+    last_window_always_on_top: Option<bool>,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -2400,6 +2405,7 @@ impl ContextApp {
             },
             last_notified_update_version: saved_settings.last_notified_update_version.clone(),
             update_toast: None,
+            last_window_always_on_top: None,
         }
     }
 
@@ -3643,7 +3649,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             ortho_scored.iter().take(5).collect::<Vec<_>>());
 
         // ── Phase 4: Dictionary filter (walk up to 100 by ortho score) ──
-        // Grammar filter skipped (checker moved to actor). Dictionary check via analyzer.
         let mut passing: Vec<(String, f32)> = Vec::new();
         {
             let analyzer = match &self.analyzer {
@@ -3675,6 +3680,39 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
                 checked += 1;
                 passing.push((candidate.clone(), *score));
+            }
+        }
+
+        // ── Phase 4b: Grammar filter via actor batch ──
+        // Drop candidates that introduce a grammar error when substituted into
+        // the sentence. "Dette er Petter som skriver en tekstrf" with candidate
+        // "teksta" → "Dette er Petter som skriver en teksta", which trips
+        // `ubestemt_artikkel_bestemt_substantiv`. Without this check the
+        // dictionary-valid-but-contextually-wrong "teksta" survives because
+        // mtag accepts it as a definite feminine noun.
+        if let Some(actor) = &self.grammar_actor {
+            if !passing.is_empty() {
+                let test_sentences: Vec<String> = passing
+                    .iter()
+                    .map(|(c, _)| replace_word_at_position(sentence_ctx, word, c))
+                    .collect();
+                let errs_per = actor.check_sentences_batch(&test_sentences);
+                let before = passing.len();
+                passing = passing
+                    .into_iter()
+                    .zip(errs_per.into_iter())
+                    .filter(|((cand, _), errs)| {
+                        // Keep candidate if no error is *about* this candidate.
+                        // Pre-existing sentence errors elsewhere shouldn't drop it.
+                        let cand_lower = cand.to_lowercase();
+                        !errs.iter().any(|e| e.word.to_lowercase() == cand_lower)
+                    })
+                    .map(|((c, s), _)| (c, s))
+                    .collect();
+                log!(
+                    "find_spelling_suggestions: grammar batch filter {} -> {} for '{}'",
+                    before, passing.len(), word_lower
+                );
             }
         }
 
@@ -5706,11 +5744,55 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
         };
 
-        // Grammar filter skipped (checker moved to actor, check_sentence not available)
-        if let Some((results, _ctx, bert_ms)) = raw_results {
+        if let Some((results, ctx, bert_ms)) = raw_results {
             if self.grammar_completion {
-                // Grammar filtering not possible without checker; pass completions through
-                self.completions = results.into_iter().take(5).collect();
+                // Filter BERT candidates through the grammar actor's
+                // `check_sentences_batch` (a single round-trip). When the actor
+                // existed but this call was missing, candidates like "teksta"
+                // (definite feminine noun after "en") slipped past — the rule
+                // `ubestemt_artikkel_bestemt_substantiv` fires in standalone
+                // tests but never got a chance to filter completions.
+                if let Some(actor) = &self.grammar_actor {
+                    let last_sent_start = ctx
+                        .rfind(|c: char| ".!?".contains(c))
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    let last_fragment = ctx[last_sent_start..].trim().to_string();
+
+                    let test_sentences: Vec<String> = results
+                        .iter()
+                        .map(|c| format!("{} {}.", last_fragment, c.word))
+                        .collect();
+                    let errors_per = actor.check_sentences_batch(&test_sentences);
+
+                    // Use the existing grammar_filter helper for its
+                    // suggestion-injection logic ("trener" → "trene" after
+                    // "å"). We back its FnMut with the precomputed batch
+                    // results, falling back to fresh sync calls for the
+                    // small number of suggestion rechecks.
+                    let mut batch_idx = 0;
+                    let actor_ref = actor;
+                    let last_fragment_for_check = last_fragment.clone();
+                    let mut check_fn = move |sentence: &str| -> GrammarCheckResult {
+                        let errs = if batch_idx < test_sentences.len()
+                            && test_sentences[batch_idx] == sentence
+                        {
+                            let e = errors_per[batch_idx].clone();
+                            batch_idx += 1;
+                            e
+                        } else {
+                            actor_ref.check_sentence_sync(sentence)
+                        };
+                        let _ = &last_fragment_for_check;
+                        GrammarCheckResult {
+                            ok: errs.is_empty(),
+                            suggestions: errs.into_iter().map(|e| e.suggestion).collect(),
+                        }
+                    };
+                    self.completions = grammar_filter(&results, &ctx, prefix, &mut check_fn, 5);
+                } else {
+                    self.completions = results.into_iter().take(5).collect();
+                }
             } else {
                 let total_ms = t_total.elapsed().as_millis();
                 eprintln!("complete '...{}' bert={}ms total={}ms -> {}",
@@ -6289,6 +6371,10 @@ impl eframe::App for ContextApp {
                             "Foreground '{}' is non-writing — minimising Spell",
                             fg.exe_name
                         );
+                        // Same fix as the X-button path: clear AlwaysOnTop
+                        // before iconising so Windows leaves a taskbar entry.
+                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+                        self.last_window_always_on_top = Some(false);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     } else if self.prev_was_writing_app == Some(false) {
                         log!(
@@ -7740,14 +7826,32 @@ impl eframe::App for ContextApp {
             }
         }
 
+        // While the popup is minimised, we must NOT push any
+        // WindowLevel/InnerSize/OuterPosition commands. On Windows our
+        // borderless WS_POPUP window relies on the OS minimise animation to
+        // create the taskbar entry, and the slightest SetWindowPos() before
+        // that finishes causes Windows to silently restore the window
+        // off-screen with no taskbar icon (so the user has no way to bring
+        // it back).
+        let is_minimised = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+
         // Always-on-top should drop to Normal whenever Settings is open, so the
         // lookup popup doesn't cover the config viewport. This used to be nested
         // inside the follow_cursor block, which meant non-follow modes kept the
-        // main window pinned above Settings.
-        if self.show_settings_window {
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-        } else if self.follow_cursor && self.goto_freeze_until.is_none() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+        // main window pinned above Settings. We dedupe transitions because
+        // sending SetWindowPos(HWND_TOPMOST) every frame on Windows kept hiding
+        // the taskbar entry the moment the user clicked minimise.
+        let want_always_on_top = !self.show_settings_window
+            && self.follow_cursor
+            && self.goto_freeze_until.is_none();
+        if !is_minimised && self.last_window_always_on_top != Some(want_always_on_top) {
+            let level = if want_always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+            self.last_window_always_on_top = Some(want_always_on_top);
         }
 
         let mut next_outer_pos = None;
@@ -7807,9 +7911,12 @@ impl eframe::App for ContextApp {
         }
 
         // Always update window size (even when unpinned, so Cmd+scroll works)
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-        if let Some(pos) = next_outer_pos {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        // — but never while minimised, see is_minimised note above.
+        if !is_minimised {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+            if let Some(pos) = next_outer_pos {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            }
         }
 
         // Repaint at 200ms interval — fast enough for responsive UI, avoids burning CPU.
@@ -8181,6 +8288,11 @@ impl eframe::App for ContextApp {
                     self.language.ui_minimize(),
                 );
                 if toolbar_clicked(ui, &minimize_resp, toolbar_mouse_down_click) {
+                    // Drop AlwaysOnTop FIRST, otherwise Windows iconises a
+                    // borderless WS_EX_TOPMOST popup without leaving a taskbar
+                    // entry — the user has no way to bring the window back.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+                    self.last_window_always_on_top = Some(false);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
@@ -8194,13 +8306,12 @@ impl eframe::App for ContextApp {
                 }
                 ui.add_space(5.0 * s);
             }).response;
-            // Drag the window by dragging anywhere on the toolbar (when unpinned)
-            if !self.follow_cursor {
-                let header_drag = header_resp.interact(egui::Sense::drag());
-                if header_drag.drag_started() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-            }
+            // Drag is handled by the left-side drag_rect above, which
+            // intentionally stops before the icon strip (right_w). Adding a
+            // second Sense::drag() to the full header_resp overlapped the
+            // pin/gear/min/X hit-rects and ate clicks once the popup was
+            // unpinned, breaking the close/minimise/pin buttons.
+            let _ = header_resp;
         });
 
         // Update toast — anchored at the bottom of the main popup. Renders
