@@ -1372,6 +1372,21 @@ struct PendingSpellingBert {
     error_idx_word: String,       // word to match in writing_errors
     error_doc_offset: usize,
     candidates: Vec<(String, f32)>, // (candidate, ortho_sim)
+    /// When Some(...), the WritingError doesn't exist yet and should be
+    /// pushed once BERT ranks the candidates. Lets us defer underline +
+    /// suggestion display until the result is ranked, so the user never
+    /// sees an ortho-first guess that flips to the BERT-best one.
+    deferred_push: Option<DeferredSpellingPush>,
+}
+
+#[derive(Clone)]
+struct DeferredSpellingPush {
+    word: String,
+    sentence: String,
+    paragraph_id: String,
+    doc_offset: usize,
+    position: usize,
+    explanation: String,
 }
 
 /// Pending grammar correction BERT ranking
@@ -3166,17 +3181,12 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
             }
         }
-        // Request repaint so new results are rendered.
-        // Always schedule periodic repaints — egui may sleep when our window
-        // is not focused (e.g. user is typing in Word), but we still need to
-        // poll for BERT responses and update the UI.
-        if !self.pending_spelling_bert.is_empty()
-            || !self.pending_grammar_bert.is_empty()
-            || !self.pending_consonant_bert.is_empty()
-            || !self.completions.is_empty()
-            || !self.open_completions.is_empty()
-        {
-        }
+        // Intentionally NO periodic repaint here. BERT results either land
+        // before the user looks at the popup (the common case) or the next
+        // user interaction (hover, click, focus) triggers a render naturally.
+        // We refactored to *only* push a WritingError once BERT has ranked
+        // its candidates, so there is no transient ortho-first guess to
+        // refresh stale state for.
     }
 
     /// Handle BERT spelling score response for spelling re-ranking.
@@ -3200,30 +3210,77 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             .collect();
         rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Update the matching writing error's suggestion
-        if let Some((best, _)) = rescored.first() {
-            for e in &mut self.writing_errors {
-                if matches!(e.category, ErrorCategory::Spelling)
-                    && e.word.to_lowercase() == pending.error_idx_word
+        let Some((best, _)) = rescored.first() else { return };
+
+        // Capitalize helper: matches the sentence-start / originally-upper logic
+        // we used before splitting into deferred-vs-update paths.
+        let capitalize = |raw: &str, sentence_ctx: &str, word: &str| -> String {
+            let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
+            if s.is_empty() { return s; }
+            let word_lower = word.to_lowercase();
+            let at_sentence_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
+            let is_upper = sentence_ctx.to_lowercase().find(&word_lower)
+                .and_then(|pos| sentence_ctx[pos..].chars().next())
+                .map_or(false, |c| c.is_uppercase());
+            if at_sentence_start || is_upper {
+                let mut chars = s.chars();
+                s = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+            }
+            s
+        };
+
+        if let Some(deferred) = &pending.deferred_push {
+            // Path A: this BERT request was deferred from the grammar-actor
+            // unknown_words handler. We held off pushing the WritingError so
+            // the user never saw an ortho-first guess. Push it now with the
+            // properly ranked suggestion and draw the underline.
+            let already = self.writing_errors.iter().any(|e| {
+                e.word.to_lowercase() == deferred.word.to_lowercase()
                     && !e.ignored
-                {
-                    if e.suggestion != *best {
-                        // Capitalize if at sentence start or originally capitalized
-                        let mut suggestion = best.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-                        let word_lower = e.word.to_lowercase();
-                        let at_sentence_start = e.sentence_context.to_lowercase().starts_with(&word_lower);
-                        let is_upper = e.sentence_context.to_lowercase().find(&word_lower)
-                            .and_then(|pos| e.sentence_context[pos..].chars().next())
-                            .map_or(false, |c| c.is_uppercase());
-                        if at_sentence_start || is_upper {
-                            let mut chars = suggestion.chars();
-                            suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
-                        }
-                        log!("spelling BERT upgrade: '{}' → '{}' (was '{}')", e.word, suggestion, e.suggestion);
-                        e.suggestion = suggestion;
-                    }
-                    break;
+                    && (e.paragraph_id == deferred.paragraph_id
+                        || (!deferred.sentence.is_empty() && e.sentence_context == deferred.sentence))
+            });
+            if already { return; }
+
+            let suggestion = capitalize(best, &deferred.sentence, &deferred.word);
+            // Top 5 alternates = next 4 BERT-ranked candidates (excluding the best pick).
+            let top5: Vec<String> = rescored.iter().skip(1).take(5)
+                .map(|(c, _)| c.clone()).collect();
+            log!("spelling deferred push: '{}' → '{}' (BERT-ranked)", deferred.word, suggestion);
+            self.writing_errors.push(WritingError {
+                category: ErrorCategory::Spelling,
+                word: deferred.word.clone(),
+                suggestion,
+                explanation: deferred.explanation.clone(),
+                rule_name: "stavefeil_bert".to_string(),
+                sentence_context: deferred.sentence.clone(),
+                doc_offset: deferred.doc_offset,
+                position: deferred.position,
+                ignored: false,
+                word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                paragraph_id: deferred.paragraph_id.clone(),
+                error_word: String::new(),
+                top_candidates: top5,
+            });
+            for b in &self.manager.bridges {
+                b.underline_word(&deferred.word, &deferred.paragraph_id, "#FF0000");
+            }
+            return;
+        }
+
+        // Path B: a WritingError already exists (e.g. from check_spelling),
+        // just refresh its suggestion to the BERT-best.
+        for e in &mut self.writing_errors {
+            if matches!(e.category, ErrorCategory::Spelling)
+                && e.word.to_lowercase() == pending.error_idx_word
+                && !e.ignored
+            {
+                if e.suggestion != *best {
+                    let suggestion = capitalize(best, &e.sentence_context, &e.word);
+                    log!("spelling BERT upgrade: '{}' → '{}' (was '{}')", e.word, suggestion, e.suggestion);
+                    e.suggestion = suggestion;
                 }
+                break;
             }
         }
     }
@@ -3739,6 +3796,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     error_idx_word: word_lower.clone(),
                     error_doc_offset: 0, // will be set by caller
                     candidates: passing.iter().take(30).cloned().collect(),
+                    deferred_push: None,
                 });
                 log!("  sent {} candidates for BERT spelling score (id={})", passing.len().min(30), request_id);
             }
@@ -5299,6 +5357,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             None => return,
         };
 
+        // Collected during the while-loop (where `self` is immutably borrowed
+        // via `actor`), processed after it ends so we can call &mut self
+        // methods like find_spelling_suggestions.
+        let mut unknown_words_to_rank: Vec<(DeferredSpellingPush, Vec<String>)> = Vec::new();
+
         while let Some(resp) = actor.try_recv() {
             // Always process responses — they belong to the Word doc the user
             // tabbed away from. The paragraph_sentence_hashes stale check
@@ -5421,7 +5484,17 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
             }
 
-            // Handle unknown words (spelling errors) — from check_sentence_full
+            // Handle unknown words (spelling errors) — from check_sentence_full.
+            //
+            // We deliberately do NOT push the WritingError here. Pushing the
+            // grammar-checker's fuzzy-only suggestion would let the user see
+            // "fiska" for "Jeg liker å spise fiskk" until the async BERT
+            // response upgrades it to "fisk". Per user feedback we wait with
+            // paint until the result is BERT-ranked. The `actor` borrow keeps
+            // `self` immutable for the duration of the while-loop, so we
+            // queue the deferred work here and process it after the loop
+            // ends (where we can call &mut self methods like
+            // `find_spelling_suggestions`).
             for unk in resp.unknown_words.iter()
                 .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
                 .filter(|u| !self.analyzer.as_ref().map_or(false, |a| a.has_word(&u.word)))
@@ -5430,103 +5503,101 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     freq >= 1000 // Only skip high-frequency words — low-freq entries may be junk
                 }))
             {
-                let mut best = unk.spelling_suggestions.first().cloned().unwrap_or_default()
+                let unk_word_lower = unk.word.to_lowercase();
+                let already_displayed = self.writing_errors.iter().any(|e| {
+                    e.word.to_lowercase() == unk_word_lower
+                        && !e.ignored
+                        && (e.paragraph_id == resp.paragraph_id
+                            || (!resp.sentence.is_empty() && e.sentence_context == resp.sentence))
+                });
+                let already_pending = self.pending_spelling_bert.iter().any(|p| {
+                    p.deferred_push.as_ref().map_or(false, |d| {
+                        d.word.to_lowercase() == unk_word_lower
+                            && (d.paragraph_id == resp.paragraph_id
+                                || (!resp.sentence.is_empty() && d.sentence == resp.sentence))
+                    })
+                });
+                let already_in_queue = unknown_words_to_rank.iter().any(|(d, _): &(DeferredSpellingPush, _)| {
+                    d.word.to_lowercase() == unk_word_lower
+                        && (d.paragraph_id == resp.paragraph_id
+                            || (!resp.sentence.is_empty() && d.sentence == resp.sentence))
+                });
+                if already_displayed || already_pending || already_in_queue {
+                    continue;
+                }
+
+                let explanation = self.language.ui_word_not_in_dict(&unk.word);
+                let deferred = DeferredSpellingPush {
+                    word: unk.word.clone(),
+                    sentence: resp.sentence.to_string(),
+                    paragraph_id: resp.paragraph_id.clone(),
+                    doc_offset: resp.doc_offset,
+                    position: unk.position,
+                    explanation,
+                };
+                let fuzzy_fallback: Vec<String> = unk.spelling_suggestions.clone();
+                unknown_words_to_rank.push((deferred, fuzzy_fallback));
+            }
+
+            // Stale underlines from previous sessions are cleared at app startup
+            // via AppleScript (set underline of font to underline none).
+        }
+
+        // Now the actor borrow is released — fire BERT requests for each
+        // queued unknown word, deferring the WritingError push until the
+        // response lands. If BERT isn't available we fall back to the
+        // grammar checker's fuzzy suggestion so the user still sees an
+        // underline immediately.
+        for (deferred, fuzzy_fallback) in unknown_words_to_rank {
+            let pending_before = self.pending_spelling_bert.len();
+            if self.bert_ready {
+                let _ = self.find_spelling_suggestions(&deferred.word, &deferred.sentence);
+            }
+            if self.pending_spelling_bert.len() > pending_before {
+                let new_idx = self.pending_spelling_bert.len() - 1;
+                self.pending_spelling_bert[new_idx].error_doc_offset = deferred.doc_offset;
+                self.pending_spelling_bert[new_idx].deferred_push = Some(deferred.clone());
+                log!("  deferred spelling push: '{}' (waiting for BERT rank)", deferred.word);
+            } else {
+                let unk_word_lower = deferred.word.to_lowercase();
+                let mut best = fuzzy_fallback.first().cloned().unwrap_or_default()
                     .trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-                // Capitalize suggestion if word is at start of sentence or originally capitalized
                 if !best.is_empty() {
-                    let word_lower = unk.word.to_lowercase();
-                    let at_sentence_start = resp.sentence.to_lowercase().starts_with(&word_lower);
-                    let is_upper_in_original = resp.sentence.to_lowercase()
-                        .find(&word_lower)
-                        .and_then(|pos| resp.sentence[pos..].chars().next())
+                    let at_sentence_start = deferred.sentence.to_lowercase().starts_with(&unk_word_lower);
+                    let is_upper_in_original = deferred.sentence.to_lowercase()
+                        .find(&unk_word_lower)
+                        .and_then(|pos| deferred.sentence[pos..].chars().next())
                         .map_or(false, |c| c.is_uppercase());
                     if at_sentence_start || is_upper_in_original {
                         let mut chars = best.chars();
                         best = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
                     }
                 }
-                if best.is_empty() && unk.split_suggestions.is_empty() {
-                    // No suggestions at all — still flag as unknown
-                    log!("  Unknown word: '{}' (no suggestions)", unk.word);
-                } else {
-                    log!("  Spelling: '{}' → '{}' (from grammar checker)", unk.word, best);
-                }
-                // Only add if not already in writing_errors for this
-                // paragraph OR sentence-context. Matches the relaxed dedup
-                // applied at check_spelling (lines ~2208 / ~2244): a strict
-                // paragraph_id-only match misses duplicates when Word
-                // rotates uniqueLocalId on save/refocus.
-                let already_exists = self.writing_errors.iter().any(|e| {
-                    e.word.to_lowercase() == unk.word.to_lowercase()
-                    && !e.ignored
-                    && (e.paragraph_id == resp.paragraph_id
-                        || (!resp.sentence.is_empty() && e.sentence_context == resp.sentence))
+                let top5: Vec<String> = fuzzy_fallback.iter().skip(1).take(5).cloned().collect();
+                log!("  Spelling (no BERT): '{}' → '{}'", deferred.word, best);
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Spelling,
+                    word: deferred.word.clone(),
+                    suggestion: best,
+                    explanation: deferred.explanation.clone(),
+                    rule_name: "stavefeil".to_string(),
+                    sentence_context: deferred.sentence.clone(),
+                    doc_offset: deferred.doc_offset,
+                    position: deferred.position,
+                    ignored: false,
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    paragraph_id: deferred.paragraph_id.clone(),
+                    error_word: String::new(),
+                    top_candidates: top5,
                 });
-                if !already_exists {
-                    // Collect top 5 alternative candidates (excluding the best pick)
-                    let top5: Vec<String> = unk.spelling_suggestions.iter()
-                        .skip(1)
-                        .take(5)
-                        .cloned()
-                        .collect();
-                    self.writing_errors.push(WritingError {
-                        category: ErrorCategory::Spelling,
-                        word: unk.word.clone(),
-                        suggestion: best,
-                        explanation: self.language.ui_word_not_in_dict(&unk.word),
-                        rule_name: "stavefeil".to_string(),
-                        sentence_context: resp.sentence.to_string(),
-                        doc_offset: resp.doc_offset,
-                        position: unk.position,
-                        ignored: false,
-                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: String::new(), top_candidates: top5,
-                    });
-                    for b in &self.manager.bridges {
-                        b.underline_word(&unk.word, &resp.paragraph_id, "#FF0000");
-                    }
+                for b in &self.manager.bridges {
+                    b.underline_word(&deferred.word, &deferred.paragraph_id, "#FF0000");
                 }
             }
-
-            // Stale underlines from previous sessions are cleared at app startup
-            // via AppleScript (set underline of font to underline none).
         }
+
         if t_poll_start.elapsed().as_millis() > 5 {
             log!("poll_grammar_responses took {:?}", t_poll_start.elapsed());
-        }
-
-        // BERT re-rank spelling suggestions from grammar checker
-        if self.bert_ready {
-            let to_rerank: Vec<(usize, String, String)> = self.writing_errors.iter().enumerate()
-                .filter(|(_, e)| {
-                    matches!(e.category, ErrorCategory::Spelling)
-                        && !e.ignored
-                        && e.rule_name == "stavefeil"
-                        && !e.sentence_context.is_empty()
-                })
-                .map(|(i, e)| (i, e.word.clone(), e.sentence_context.clone()))
-                .collect();
-            for (idx, word, sentence_ctx) in to_rerank {
-                // Always BERT re-rank — the grammar actor's edit-distance-1 fix can be
-                // grammatically wrong (e.g. "som publisert" vs "som publiserer").
-                let t_spell = Instant::now();
-                let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
-                log!("find_spelling_suggestions('{}') took {:?}, {} candidates", word, t_spell.elapsed(), suggestions.len());
-                // Pick best ortho+dict candidate (grammar filtering happens async in BERT worker)
-                if let Some((best, score)) = suggestions.first().cloned() {
-                    if !best.is_empty() {
-                        let mut suggestion = best.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-                        let word_lower = word.to_lowercase();
-                        let at_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
-                        if at_start {
-                            let mut chars = suggestion.chars();
-                            suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
-                        }
-                        log!("Grammar spell rerank: '{}' → '{}' (score={:.2}, grammar-checked)", word, suggestion, score);
-                        self.writing_errors[idx].suggestion = suggestion;
-                    }
-                }
-                self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
-            }
         }
     }
 
