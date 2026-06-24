@@ -1695,11 +1695,6 @@ struct ContextApp {
     /// version (recorded in `last_notified_update_version`), don't show
     /// it again until a *newer* version appears.
     update_toast: Option<(String, Instant)>,
-    /// Last `WindowLevel` we sent to the viewport. `Some(true)` = AlwaysOnTop,
-    /// `Some(false)` = Normal. We dedupe per-frame ViewportCommand::WindowLevel
-    /// because Windows kept hiding the taskbar icon when SetWindowPos(HWND_TOPMOST)
-    /// was reapplied to a freshly minimised window every frame.
-    last_window_always_on_top: Option<bool>,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -2405,7 +2400,6 @@ impl ContextApp {
             },
             last_notified_update_version: saved_settings.last_notified_update_version.clone(),
             update_toast: None,
-            last_window_always_on_top: None,
         }
     }
 
@@ -6374,7 +6368,6 @@ impl eframe::App for ContextApp {
                         // Same fix as the X-button path: clear AlwaysOnTop
                         // before iconising so Windows leaves a taskbar entry.
                         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-                        self.last_window_always_on_top = Some(false);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     } else if self.prev_was_writing_app == Some(false) {
                         log!(
@@ -7830,28 +7823,29 @@ impl eframe::App for ContextApp {
         // WindowLevel/InnerSize/OuterPosition commands. On Windows our
         // borderless WS_POPUP window relies on the OS minimise animation to
         // create the taskbar entry, and the slightest SetWindowPos() before
-        // that finishes causes Windows to silently restore the window
-        // off-screen with no taskbar icon (so the user has no way to bring
-        // it back).
+        // that finishes silently restores the window off-screen with no
+        // taskbar icon.
         let is_minimised = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
 
-        // Always-on-top should drop to Normal whenever Settings is open, so the
-        // lookup popup doesn't cover the config viewport. This used to be nested
-        // inside the follow_cursor block, which meant non-follow modes kept the
-        // main window pinned above Settings. We dedupe transitions because
-        // sending SetWindowPos(HWND_TOPMOST) every frame on Windows kept hiding
-        // the taskbar entry the moment the user clicked minimise.
-        let want_always_on_top = !self.show_settings_window
-            && self.follow_cursor
-            && self.goto_freeze_until.is_none();
-        if !is_minimised && self.last_window_always_on_top != Some(want_always_on_top) {
+        // Re-assert the desired WindowLevel every frame (Normal when Settings
+        // is open so the popup doesn't cover the config viewport; AlwaysOnTop
+        // otherwise so Spell stays above Word/Slack/...). A previous version
+        // of this code only sent the command on *transitions*, but anything
+        // that briefly stole topmost (a modal Word dialog, a UAC prompt,
+        // another topmost app) then left the popup permanently behind Word
+        // because we never re-asserted. SetWindowPos(HWND_TOPMOST) every 200 ms
+        // is cheap; the real bug we were trying to dodge (taskbar entry
+        // vanishing on minimise) is solved by the `is_minimised` gate above.
+        if !is_minimised {
+            let want_always_on_top = !self.show_settings_window
+                && self.follow_cursor
+                && self.goto_freeze_until.is_none();
             let level = if want_always_on_top {
                 egui::WindowLevel::AlwaysOnTop
             } else {
                 egui::WindowLevel::Normal
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
-            self.last_window_always_on_top = Some(want_always_on_top);
         }
 
         let mut next_outer_pos = None;
@@ -8290,9 +8284,10 @@ impl eframe::App for ContextApp {
                 if toolbar_clicked(ui, &minimize_resp, toolbar_mouse_down_click) {
                     // Drop AlwaysOnTop FIRST, otherwise Windows iconises a
                     // borderless WS_EX_TOPMOST popup without leaving a taskbar
-                    // entry — the user has no way to bring the window back.
+                    // entry. The next update() frame will see is_minimised=true
+                    // and skip the WindowLevel re-assert, so AlwaysOnTop stays
+                    // off until the window is restored.
                     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-                    self.last_window_always_on_top = Some(false);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
