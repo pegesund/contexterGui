@@ -1710,6 +1710,12 @@ struct ContextApp {
     /// version (recorded in `last_notified_update_version`), don't show
     /// it again until a *newer* version appears.
     update_toast: Option<(String, Instant)>,
+    /// Tracks the last AlwaysOnTop state we explicitly told the OS about,
+    /// so we can keep re-asserting topmost every frame (cheap; recovers
+    /// from topmost theft) but only send the WindowLevel(Normal) command
+    /// on a real transition (per-frame Normal raised the popup above its
+    /// own Settings window because HWND_NOTOPMOST also re-orders).
+    last_window_always_on_top: Option<bool>,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -2415,6 +2421,7 @@ impl ContextApp {
             },
             last_notified_update_version: saved_settings.last_notified_update_version.clone(),
             update_toast: None,
+            last_window_always_on_top: None,
         }
     }
 
@@ -6480,6 +6487,16 @@ impl eframe::App for ContextApp {
                         log!("TAB SELECT: '{}' col={} for prefix '{}'", word, col, prefix);
                         // JS paragraph rewrite via bridge
                         self.manager.replace_word(&format!("{}|{}", prefix, word));
+                        // Return focus to the writing app — see the mouse-click
+                        // path further down for the matching osascript branch.
+                        #[cfg(target_os = "windows")]
+                        if let Some(handle) = self.app_handle {
+                            std::thread::spawn(move || unsafe {
+                                use windows::Win32::Foundation::HWND;
+                                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                                let _ = SetForegroundWindow(HWND(handle as *mut _));
+                            });
+                        }
                         self.selection_mode = false;
                         self.platform.set_tab_intercept(false);
                         self.selected_completion = None;
@@ -7898,25 +7915,22 @@ impl eframe::App for ContextApp {
         // taskbar icon.
         let is_minimised = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
 
-        // Re-assert the desired WindowLevel every frame (Normal when Settings
-        // is open so the popup doesn't cover the config viewport; AlwaysOnTop
-        // otherwise so Spell stays above Word/Slack/...). A previous version
-        // of this code only sent the command on *transitions*, but anything
-        // that briefly stole topmost (a modal Word dialog, a UAC prompt,
-        // another topmost app) then left the popup permanently behind Word
-        // because we never re-asserted. SetWindowPos(HWND_TOPMOST) every 200 ms
-        // is cheap; the real bug we were trying to dodge (taskbar entry
-        // vanishing on minimise) is solved by the `is_minimised` gate above.
-        if !is_minimised {
-            let want_always_on_top = !self.show_settings_window
-                && self.follow_cursor
-                && self.goto_freeze_until.is_none();
-            let level = if want_always_on_top {
-                egui::WindowLevel::AlwaysOnTop
-            } else {
-                egui::WindowLevel::Normal
-            };
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        // Re-assert AlwaysOnTop every frame so the popup stays above Word
+        // and recovers from any topmost theft (Word dialog, UAC prompt,
+        // foreign topmost app). Cheap on Windows. We don't gate on
+        // show_settings_window because the Settings viewport itself is
+        // created with .with_always_on_top() — both windows live in the
+        // same WS_EX_TOPMOST tier and focus determines z-order, so the
+        // freshly-clicked Settings window naturally lands above the popup
+        // without us having to flip the popup to Normal (which had the
+        // perverse side effect of SetWindowPos(HWND_NOTOPMOST) raising
+        // the popup above other non-topmost windows including Settings).
+        if !is_minimised
+            && self.follow_cursor
+            && self.goto_freeze_until.is_none()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+            self.last_window_always_on_top = Some(true);
         }
 
         let mut next_outer_pos = None;
@@ -8639,7 +8653,10 @@ impl eframe::App for ContextApp {
                         log!("CLICKED word: '{}' col={} replacing '{}'", word, col, prefix);
                         // JS paragraph rewrite via bridge
                         self.manager.replace_word(&format!("{}|{}", prefix, word));
-                        // Return focus to Word
+                        // Return focus to the writing app so the caret keeps
+                        // blinking in Word/Slack/Notes. macOS uses the PID via
+                        // System Events; Windows uses HWND via SetForegroundWindow.
+                        // Both dispatched off-thread so the main loop never blocks.
                         let word_pid = self.manager.last_user_pid;
                         if word_pid > 0 {
                             std::thread::spawn(move || {
@@ -8648,6 +8665,14 @@ impl eframe::App for ContextApp {
                                         set frontProcess to first application process whose unix id is {}
                                         set frontmost of frontProcess to true
                                     end tell"#, word_pid)).output();
+                            });
+                        }
+                        #[cfg(target_os = "windows")]
+                        if let Some(handle) = self.app_handle {
+                            std::thread::spawn(move || unsafe {
+                                use windows::Win32::Foundation::HWND;
+                                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                                let _ = SetForegroundWindow(HWND(handle as *mut _));
                             });
                         }
                         self.completions.clear();
@@ -9948,7 +9973,14 @@ impl eframe::App for ContextApp {
                 spell_viewport_builder()
                     .with_title(lang_for_settings.ui_settings())
                     .with_inner_size([500.0, 600.0])
-                    .with_decorations(true),
+                    .with_decorations(true)
+                    // Match the main popup's WS_EX_TOPMOST so the Settings
+                    // window is in the same topmost tier — focus determines
+                    // z-order, and Settings just got the click so it lands
+                    // above the popup. If Settings was Normal-level, the
+                    // popup's WS_EX_TOPMOST kept it permanently above
+                    // Settings regardless of focus.
+                    .with_always_on_top(),
                 |vp_ctx, _class| {
                     vp_ctx.set_visuals(if main_is_dark {
                         egui::Visuals::dark()
