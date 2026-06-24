@@ -316,14 +316,24 @@ pub fn find_sentence_around_cursor(before: &str, after: &str) -> String {
 /// Result: context with word replaced by `<mask>`.
 pub fn build_masked_sentence(raw: &RawCursorText, word: &str) -> Option<String> {
     if word.is_empty() {
-        // No word at cursor (e.g. just pressed space) — place mask at cursor position
+        // No word at cursor (e.g. just pressed space) — place mask at cursor position.
+        //
+        // CRITICAL: no space between the previous word and `<mask>`. NorBERT4 BPE
+        // tokenises a glued mask as "this position completes the word", which
+        // gives semantically grounded continuations (matches the python demo's
+        // `f"{ctx}{mask} ."` pattern). With a leading space, the mask becomes
+        // its own word-initial token and the model favours generic short
+        // fillers ("med", "min", "men") instead of contextual choices. See the
+        // "Fotball er en interessant sport for nybegynnere" regression that
+        // triggered this fix — same code path, autocomplete after pressing
+        // space.
         let before = raw.before.trim_end();
         if before.is_empty() {
             return None;
         }
         let after = raw.after.trim_start();
         let after_part = if after.is_empty() { ".".to_string() } else { after.to_string() };
-        return Some(format!("{} <mask> {}", before, after_part));
+        return Some(format!("{}<mask> {}", before, after_part));
     }
     // Strip the word from before text (it's the suffix being typed)
     let before_trimmed = if raw.before.ends_with(word) {
@@ -385,7 +395,7 @@ pub fn build_context(raw: &RawCursorText, caret_pos: Option<(i32, i32)>) -> Curs
 
 #[cfg(test)]
 mod tests {
-    use super::extract_previous_word_before_cursor;
+    use super::{extract_previous_word_before_cursor, build_masked_sentence, RawCursorText};
 
     #[test]
     fn previous_word_skips_space_and_punctuation() {
@@ -398,5 +408,39 @@ mod tests {
     #[test]
     fn previous_word_uses_cursor_prefix_not_sentence_end() {
         assert_eq!(extract_previous_word_before_cursor("first middle "), "middle");
+    }
+
+    /// NorBERT4 favours short generic fillers when `<mask>` is preceded by a
+    /// space (the mask becomes a word-initial Ġ-token). Both branches of
+    /// build_masked_sentence must glue the mask to the preceding token.
+    #[test]
+    fn masked_sentence_glues_mask_to_previous_word_when_empty_word() {
+        let raw = RawCursorText {
+            before: "Fotball er en interessant sport for nybegynnere ".to_string(),
+            after: String::new(),
+        };
+        let m = build_masked_sentence(&raw, "").expect("masked");
+        assert!(
+            m.contains("nybegynnere<mask>"),
+            "expected glued mask, got: {m:?}",
+        );
+        assert!(
+            !m.contains("nybegynnere <mask>"),
+            "space before <mask> regressed: {m:?}",
+        );
+    }
+
+    #[test]
+    fn masked_sentence_glues_mask_to_previous_word_when_typing_a_word() {
+        let raw = RawCursorText {
+            before: "Jeg liker å spise fisk".to_string(),
+            after: String::new(),
+        };
+        let m = build_masked_sentence(&raw, "fisk").expect("masked");
+        assert!(
+            m.contains("spise<mask>"),
+            "expected mask glued to previous word, got: {m:?}",
+        );
+        assert!(!m.contains("spise <mask>"));
     }
 }
