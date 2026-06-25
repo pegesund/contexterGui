@@ -324,11 +324,17 @@ pub fn generate_spelling_candidates(
     }
     ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Phase 4: Dictionary filter (top 15)
+    // Phase 4: Dictionary filter (top 30)
+    //
+    // We need a generous pool so that for typos where competitors share a
+    // common prefix (e.g. "sykell" matches the entire "syk*" inflection
+    // family) the actually-intended word ("sykkel") still survives ortho
+    // sorting and reaches BERT. BERT re-ranks the top 30 fast (~24ms) so
+    // the extra candidates are cheap.
     let mut passing: Vec<(String, f32)> = Vec::new();
     let mut checked = 0;
     for (candidate, score) in &ortho_scored {
-        if checked >= 15 { break; }
+        if checked >= 30 { break; }
         if !word_lower.contains('-') && candidate.contains('-') { continue; }
         let words: Vec<&str> = candidate.split_whitespace().collect();
         if words.iter().any(|w| {

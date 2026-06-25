@@ -80,6 +80,8 @@ fn main() {
         ("Det var et gott år.", "gott", "godt"),              // silent d: tt→dt
         ("Jeg vil lare meg norsk.", "lare", "lære"),          // a→æ
         ("Hun herte ikke.", "herte", "hørte"),                // e→ø
+        // Regression: sykell should suggest sykkel (bicycle), NOT skrell (peel)
+        ("Jeg kjøpte en sykell forrige uke.", "sykell", "sykkel"),
     ];
 
     let mut pass = 0;
