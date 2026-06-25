@@ -2648,6 +2648,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libloading 0.8.9",
+ "log",
  "mtag-rs",
  "ndarray 0.16.1",
  "openvino",

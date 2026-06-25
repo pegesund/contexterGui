@@ -70,6 +70,18 @@ pub fn try_split_function_word(word: &str, analyzer: &mtag::Analyzer, lang: &dyn
 }
 
 /// Compute boost multiplier for document-frequency and user-dictionary.
+///
+/// Previously this returned a flat 1.0 for any candidate not in the
+/// document/user dictionary, so a rare-but-valid dictionary entry like
+/// "blakr" tied with a far more common word like "blåbær" and the
+/// BERT contextual score was the only tiebreaker. For sentences where
+/// the rare word also looks contextually plausible (BERT 14.8 vs 14.2)
+/// the wrong candidate would win.
+///
+/// We now apply a smooth log10-based wordfreq boost (capped at +25 % for
+/// the most common words) on top of the existing in-doc / in-user
+/// multipliers. Candidates absent from wordfreq still score 1.0, so
+/// fabricated junk that happens to be in the dictionary gets no boost.
 pub fn compute_boost(
     word: &str,
     doc_word_counts: &HashMap<String, u16>,
@@ -77,18 +89,19 @@ pub fn compute_boost(
     wordfreq: Option<&HashMap<String, u64>>,
 ) -> f32 {
     let lower = word.to_lowercase();
-    const COMMON_THRESHOLD: u64 = 40_000;
-    if wordfreq.and_then(|wf| wf.get(&lower)).map_or(false, |&f| f >= COMMON_THRESHOLD) {
-        return 1.0;
-    }
+    let freq = wordfreq.and_then(|wf| wf.get(&lower)).copied().unwrap_or(0);
+    let wf_boost = 1.0 + ((freq as f32 + 1.0).log10() * 0.10).min(0.25);
+
     let in_doc = doc_word_counts.get(&lower).copied().unwrap_or(0) >= 2;
     let in_user = user_dict_words.iter().any(|uw| uw.eq_ignore_ascii_case(&lower));
-    match (in_doc, in_user) {
+    let ctx_mult = match (in_doc, in_user) {
         (true, true)   => 1.6,
         (false, true)  => 1.3,
         (true, false)  => 1.25,
         (false, false) => 1.0,
-    }
+    };
+
+    wf_boost * ctx_mult
 }
 
 /// Phase 1: Generate spelling candidates, ortho-score them, and dictionary-filter.

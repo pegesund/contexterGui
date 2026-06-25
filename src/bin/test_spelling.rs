@@ -82,6 +82,15 @@ fn main() {
         ("Hun herte ikke.", "herte", "hørte"),                // e→ø
         // Regression: sykell should suggest sykkel (bicycle), NOT skrell (peel)
         ("Jeg kjøpte en sykell forrige uke.", "sykell", "sykkel"),
+        // Feedback: missing a↔å / o↔ø substitutions for dyslexic users
+        ("Han bor pa landet.", "pa", "på"),                    // a → å
+        ("Jeg skal kjore til Oslo.", "kjore", "kjøre"),        // o → ø
+        ("Jeg liker blabar.", "blabar", "blåbær"),             // two-step a→å + a→æ
+        // Feedback: wordfreq-boost so common words beat rare valid forms
+        // ("lege" lemma is semantically equivalent to "legen" def-sg here)
+        ("Etter ulykken måtte jeg besøke lgn.", "lgn", "lege|legen"),
+        // Feedback: Bergeen (capital) should find bergen
+        ("Vi skal reise til Bergeen neste uke.", "bergeen", "bergen"),
     ];
 
     let mut pass = 0;

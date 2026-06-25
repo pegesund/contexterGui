@@ -2692,9 +2692,25 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return;
         }
 
-        // Skip capitalized words — likely proper nouns (Tekna, Oslo, etc.)
+        // Capitalized words: in-dict proper nouns (Oslo, Bergen, Mari) are silently
+        // skipped. Unknown capitalized words used to be skipped too, which meant
+        // typos of place names ("Bergeen", "Tronheim") got no spelling help at all.
+        // Now we still skip unknown uppercase words unless there's a *strong*
+        // single-edit fuzzy match — that catches obvious typos while keeping
+        // company/product names (Tekna, etc.) silent because they don't sit
+        // edit-distance 1 from any dictionary word.
         if word.trim().chars().next().map_or(false, |c| c.is_uppercase()) {
-            return;
+            let analyzer_opt = self.analyzer.as_ref();
+            let in_dict = analyzer_opt.map_or(false, |a| a.has_word(&clean));
+            if in_dict {
+                return;
+            }
+            let has_close_match = analyzer_opt
+                .map(|a| a.fuzzy_lookup(&clean, 1).iter().any(|(_, dist)| *dist <= 1))
+                .unwrap_or(false);
+            if !has_close_match {
+                return;
+            }
         }
         // Skip words with apostrophe/symbol + Norwegian ending (api'er, pdf'en)
         {
