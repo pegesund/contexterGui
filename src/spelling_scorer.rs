@@ -309,6 +309,73 @@ pub fn generate_spelling_candidates(
         }
     }
 
+    // Skeleton-match candidates from Source 13 (vowel insertion). These are
+    // tracked so the ortho phase can give them the same boost as a top-tier
+    // wordfreq word would get — without this lift the skeleton hit ("benken")
+    // sits at 1.00 while every commonly-typed short word competitor ("banken",
+    // "bank", "barn") rides the wf-boost cap to 1.25 and crowds it out.
+    let mut vowel_inserted: HashSet<String> = HashSet::new();
+
+    // Source 13: Vowel insertion for short consonant skeletons.
+    // Users sometimes type abbreviations by dropping every vowel: "lgn" for
+    // "legen", "skgn" for "skogen", "bnkn" for "benken". Pure-consonant inputs
+    // sit at edit-distance 2-3 from their target so fuzzy_lookup (dist 2) either
+    // misses them or buries them under hundreds of dist-1 single-vowel words.
+    //
+    // The gate is intentionally narrow — only fires for ≤ 4 char inputs with no
+    // vowel at all — so it can't affect normal typos like "fiskk" (has 'i') or
+    // "sykell" (has 'y') which already have vowels and shouldn't generate more
+    // candidates from this source.
+    //
+    // We record every candidate at edit_distance = 1 even when it took two
+    // insertions to find. The "consonant skeleton matches exactly in order" is
+    // a much stronger signal than the raw edit distance suggests, and without
+    // this lift the right answer (benken at ortho 0.80) gets crowded out of
+    // the top-30 dict filter by hundreds of dist-1 single-vowel siblings of
+    // the misspelling (banken, bokn, bak, bank, barn — all 1.000).
+    {
+        const VOWELS: &[char] = &['a', 'e', 'i', 'o', 'u', 'y', 'å', 'ø', 'æ'];
+        let chars: Vec<char> = word_lower.chars().collect();
+        let alphabetic = chars.iter().filter(|c| c.is_alphabetic()).count();
+        let has_vowel = chars.iter().any(|c| VOWELS.contains(c));
+        if alphabetic >= 2 && alphabetic <= 4 && !has_vowel {
+            for pos in 0..=chars.len() {
+                for &v in VOWELS {
+                    let mut new_chars = chars.clone();
+                    new_chars.insert(pos, v);
+                    let cand: String = new_chars.iter().collect();
+                    if analyzer.has_word(&cand) {
+                        vowel_inserted.insert(cand.clone());
+                        edit_distances.insert(cand.clone(), 1);
+                        if seen.insert(cand.clone()) {
+                            candidates.push(cand);
+                        }
+                    }
+                }
+            }
+            for pos1 in 0..=chars.len() {
+                for &v1 in VOWELS {
+                    let mut after1 = chars.clone();
+                    after1.insert(pos1, v1);
+                    for pos2 in 0..=after1.len() {
+                        for &v2 in VOWELS {
+                            let mut after2 = after1.clone();
+                            after2.insert(pos2, v2);
+                            let cand: String = after2.iter().collect();
+                            if analyzer.has_word(&cand) {
+                                vowel_inserted.insert(cand.clone());
+                                edit_distances.insert(cand.clone(), 1);
+                                if seen.insert(cand.clone()) {
+                                    candidates.push(cand);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Phase 2: Ortho score
     let mut ortho_scored: Vec<(String, f32)> = Vec::new();
     for w in &candidates {
@@ -332,7 +399,12 @@ pub fn generate_spelling_candidates(
         if w.chars().next() == Some(word_first) {
             ortho_sim += 0.15;
         }
-        ortho_sim *= compute_boost(w, doc_word_counts, user_dict_words, wordfreq);
+        let boost = compute_boost(w, doc_word_counts, user_dict_words, wordfreq);
+        // Skeleton matches (vowel-insertion source) must not be penalized for
+        // being absent from wordfreq — the consonant skeleton matching exactly
+        // is already a strong signal, so floor the boost at the wf-cap.
+        let effective_boost = if vowel_inserted.contains(w) { boost.max(1.25) } else { boost };
+        ortho_sim *= effective_boost;
         ortho_scored.push((w.clone(), ortho_sim));
     }
     ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

@@ -89,6 +89,9 @@ fn main() {
         // Feedback: wordfreq-boost so common words beat rare valid forms
         // ("lege" lemma is semantically equivalent to "legen" def-sg here)
         ("Etter ulykken måtte jeg besøke lgn.", "lgn", "lege|legen"),
+        // Feedback: vowel-insertion source for consonant skeletons
+        ("Jeg så flere rådyr mens jeg gikk gjennom skgn.", "skgn", "skogen"),
+        ("Bestefaren satt alene på bnkn utenfor stasjonen.", "bnkn", "benken"),
         // Feedback: Bergeen (capital) should find bergen
         ("Vi skal reise til Bergeen neste uke.", "bergeen", "bergen"),
     ];
