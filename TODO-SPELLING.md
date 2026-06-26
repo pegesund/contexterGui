@@ -32,19 +32,36 @@ all keep their pass count.
 **Symptom.** "brode" → suggests "brodne" (valid word, contextually
 plausible) instead of "bordet" (what the user meant).
 
-**Why current pipeline misses it.** "brode" → "bordet" needs one
-transposition (r ↔ o) plus one insertion (t). Edit distance 2, but fuzzy
-gives lots of dist-2 candidates with much closer trigrams, and the
-transposition pattern isn't a first-class signal anywhere.
+**Why current pipeline misses it.** "brode" → "bordet" is Damerau
+distance 2 (one transposition r↔o + one insertion t) but plain
+Levenshtein distance 3 (r→o sub + o→r sub + insert t). Our active fuzzy
+backend, `mtag-rs::Analyzer::fuzzy_lookup`, uses `fst::automaton::
+Levenshtein` — plain Levenshtein, no transposition handling — and the
+default cap is dist 2, so "bordet" is never produced as a candidate.
 
-**Fix shape.** Add an explicit transposition source — for each pair of
-adjacent characters, swap them and check the dictionary. Combine with
-1-char insertion so we catch cases like "brode" → "borde" → "bordet".
+**Code already in the repo (but unwired).**
+`rustSpell/spellcheck/src/lib.rs:45-50` implements Damerau-Levenshtein
+distance correctly. It is only used by the standalone `cg3-spell-*`
+bins and the `dyslex-ios-ffi` crate. Nothing in acatts-rust or
+nostos-cognio pulls it in. The README of that crate explicitly
+advertises "Edit distance (Levenshtein with Damerau transpositions)"
+— we lost the wiring at some point and never noticed.
+
+**Fix shape, ranked.**
+1. Cheapest: add an explicit transposition candidate source to
+   `spelling_scorer.rs` — for each adjacent pair, swap them and check
+   the dictionary. Mirror Source 13's pattern with a vowel-insert-style
+   boost. Combine with the existing fuzzy/prefix sources to catch
+   "brode" → "borde" → "bordet" via the chain.
+2. More invasive: replace `fst::Levenshtein` in `mtag-rs::Analyzer`
+   with a Damerau-Levenshtein FST automaton (or fall back to the
+   length-bucketed Damerau in the spellcheck crate). Brings the
+   benefit to every caller automatically but is a bigger change.
 
 **Risk.** Generates many extra candidates for typical typos. The dict
-filter cap might saturate and push out fuzzy hits. May need to bump cap
-or give transposition candidates the same skeleton-style boost the
-vowel-insertion source uses.
+filter cap might saturate and push out fuzzy hits. May need to bump
+cap or give transposition candidates the same skeleton-style boost
+the vowel-insertion source uses.
 
 ## 3. Verify earlier feedback claims are actually fixed in v0.1.42
 
