@@ -200,6 +200,9 @@ fn main() {
         ("frastart", Some("fra start")),
         ("vedsiden", Some("ved siden")),
         ("løpsakte", Some("løp sakte")),
+        // Two real-content-word split (not just function-word prefix)
+        ("spillerfotball", Some("spiller fotball")),
+        ("fotballbane", None),                // valid compound — leave alone
     ];
 
     for (word, expected_split) in &split_tests {
