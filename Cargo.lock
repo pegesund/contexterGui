@@ -2647,6 +2647,8 @@ name = "nostos-cognio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fst",
+ "language-rs",
  "libloading 0.8.9",
  "log",
  "mtag-rs",
