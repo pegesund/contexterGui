@@ -161,21 +161,6 @@ pub fn compute_boost(
     }
 }
 
-fn levenshtein_distance(a: &str, b: &str) -> u32 {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let (m, n) = (a.len(), b.len());
-    let mut dp = vec![vec![0u32; n + 1]; m + 1];
-    for i in 0..=m { dp[i][0] = i as u32; }
-    for j in 0..=n { dp[0][j] = j as u32; }
-    for i in 1..=m {
-        for j in 1..=n {
-            let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
-            dp[i][j] = (dp[i-1][j] + 1).min(dp[i][j-1] + 1).min(dp[i-1][j-1] + cost);
-        }
-    }
-    dp[m][n]
-}
-
 fn trunc(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }
     let mut end = max;
@@ -3398,7 +3383,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             // keep it — BERT can't score multi-token compound words properly
             let original = &self.writing_errors[idx].suggestion;
             if word.len() >= 10 && !original.is_empty() && original.len() >= 8 {
-                let dist = levenshtein_distance(&word.to_lowercase(), &original.to_lowercase());
+                let dist = spelling_scorer::levenshtein_distance(&word.to_lowercase(), &original.to_lowercase());
                 if dist <= 2 {
                     self.writing_errors[idx].rule_name = "stavefeil_bert".to_string();
                     return;
@@ -3722,16 +3707,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
         log!("  Grammar correction (first valid): '{}'", valid_candidates[0].0);
         vec![(valid_candidates[0].0.clone(), valid_candidates[0].1.clone(), valid_candidates[0].2.clone(), 1.0)]
-    }
-
-    fn trigrams(word: &str) -> Vec<String> {
-        let chars: Vec<char> = word.chars().collect();
-        if chars.len() < 3 {
-            return vec![word.to_string()];
-        }
-        (0..chars.len() - 2)
-            .map(|i| chars[i..i+3].iter().collect())
-            .collect()
     }
 
     /// Update last_doc_text, rejecting stale reads that still contain a just-replaced word.
@@ -5636,48 +5611,6 @@ fn find_diff_word(original: &str, corrected: &str) -> String {
         }
     }
     original.split_whitespace().next().unwrap_or(original).to_string()
-}
-
-fn try_split_function_word(
-    word: &str,
-    analyzer: &mtag::Analyzer,
-    function_words: &[&str],
-) -> Option<String> {
-    // Function words come from the active language's `LanguageSpelling`
-    // trait — see `BokmalLanguage::function_words` (and future
-    // `NynorskLanguage`/`EnglishLanguage` impls). The caller passes
-    // `self.language.function_words()`.
-
-    let lower = word.to_lowercase();
-
-    // Phase 1: Try known function word prefixes (high confidence)
-    for prefix in function_words {
-        if lower.len() <= prefix.len() + 1 { continue; } // remainder must be ≥2 chars
-        if !lower.starts_with(prefix) { continue; }
-        let remainder = &lower[prefix.len()..];
-        if remainder.len() < 2 { continue; }
-        if analyzer.has_word(remainder) {
-            return Some(format!("{} {}", prefix, remainder));
-        }
-    }
-
-    // Phase 2: General split — try all positions where both parts are dictionary words.
-    // Catches "løpsakte" → "løp sakte", "huserstore" → "huser store", etc.
-    // Both parts must be ≥3 chars to avoid spurious splits on short prefixes.
-    let chars: Vec<char> = lower.chars().collect();
-    let mut best_split: Option<(String, usize)> = None;
-    for split_at in 3..=(chars.len().saturating_sub(3)) {
-        let left: String = chars[..split_at].iter().collect();
-        let right: String = chars[split_at..].iter().collect();
-        if analyzer.has_word(&left) && analyzer.has_word(&right) {
-            // Prefer the most balanced split (both parts as long as possible)
-            let balance = left.len().min(right.len());
-            if best_split.as_ref().map(|(_, b)| balance > *b).unwrap_or(true) {
-                best_split = Some((format!("{} {}", left, right), balance));
-            }
-        }
-    }
-    best_split.map(|(s, _)| s)
 }
 
 /// Generate single↔double consonant variants of a word.
