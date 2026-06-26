@@ -7,7 +7,8 @@ use nostos_cognio::grammar::swipl_checker::SwiGrammarChecker;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use acatts_rust::spelling_scorer::{generate_spelling_candidates, score_and_rerank};
+use acatts_rust::spelling_scorer::{find_candidates_pipeline, score_and_rerank};
+use acatts_rust::compound_walker::load_fst_from_mfst;
 use language::LanguageSpelling as _;
 
 fn main() {
@@ -46,6 +47,12 @@ fn main() {
     println!("Loading analyzer...");
     let analyzer = mtag::Analyzer::new(dict_path.to_str().unwrap())
         .expect("Failed to load analyzer");
+
+    // BM/NN require the compound FST — find_candidates_pipeline funnels all
+    // fuzzy matching for these languages through the compound walker.
+    println!("Loading compound FST...");
+    let compound_fst = load_fst_from_mfst(dict_path.to_str().unwrap())
+        .expect("Failed to load compound FST");
 
     println!("Loading SWI grammar checker...");
     let mut checker = SwiGrammarChecker::new(
@@ -104,16 +111,16 @@ fn main() {
         println!("Test: '{}' → expected '{}'", misspelled, expected);
         println!("Sentence: '{}'", sentence);
 
-        // Phase 1: Generate candidates (same code as app)
-        let candidates = generate_spelling_candidates(
+        // Phase 1: Generate candidates — EXACT SAME function the GUI uses.
+        let candidates = find_candidates_pipeline(
             &analyzer,
+            Some(&compound_fst),
             Some(&wf),
             &empty_user,
             &empty_doc,
             misspelled,
             sentence,
             &language::BokmalLanguage,
-            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

@@ -18,7 +18,8 @@ use nostos_cognio::grammar::swipl_checker::SwiGrammarChecker;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use acatts_rust::spelling_scorer::{generate_spelling_candidates, score_and_rerank};
+use acatts_rust::spelling_scorer::{find_candidates_pipeline, score_and_rerank};
+use acatts_rust::compound_walker::load_fst_from_mfst;
 
 fn main() {
     // Set ORT_DYLIB_PATH if not already set — mirrors the idiom used by
@@ -90,6 +91,12 @@ fn main() {
     ).expect("Failed to load SWI grammar checker");
     println!("Ready.\n");
 
+    // NN uses_compound_lookup() == true — load the compound FST so the
+    // pipeline can drive fuzzy lookup through the compound walker.
+    println!("Loading NN compound FST...");
+    let compound_fst = load_fst_from_mfst(dict_path.to_str().unwrap())
+        .expect("Failed to load NN compound FST");
+
     // Nynorsk wordfreq
     let wf_path = training.join("wordfreq_nn.tsv");
     println!("Loading NN wordfreq from {}", wf_path.display());
@@ -141,16 +148,16 @@ fn main() {
         println!("Test: '{}' → expected '{}'", misspelled, expected);
         println!("Sentence: '{}'", sentence);
 
-        // Phase 1: Generate candidates (same code as app)
-        let candidates = generate_spelling_candidates(
+        // Phase 1: Generate candidates — EXACT SAME function the GUI uses.
+        let candidates = find_candidates_pipeline(
             &analyzer,
+            Some(&compound_fst),
             Some(&wf),
             &empty_user,
             &empty_doc,
             misspelled,
             sentence,
             &language::NynorskLanguage,
-            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

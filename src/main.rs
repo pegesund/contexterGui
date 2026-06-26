@@ -3437,274 +3437,40 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
 
         let word_lower = word.to_lowercase();
-        let word_trigrams = Self::trigrams(&word_lower);
-        let word_first = word_lower.chars().next().unwrap_or(' ');
 
-        // ── Phase 1: Collect candidates from all sources (immutable checker) ──
-        let mut candidates: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut edit_distances: HashMap<String, u32> = HashMap::new();
+        // ── Phase 1+2+4: Candidate generation + ortho + dict filter ──
+        //
+        // ALL candidate generation and ortho scoring is done by the shared
+        // pipeline in spelling_scorer.rs. Do NOT inline candidate sources
+        // here — see the file-level docstring of spelling_scorer.rs and
+        // `feedback_spelling_pipeline_duplicated.md`. Duplicating sources
+        // here split GUI behaviour from `test_spelling.rs` and shipped
+        // unfixed bugs in v0.1.42.
+        //
+        // Language dispatch (BM/NN → compound walker only, others → plain
+        // fuzzy) lives inside the pipeline behind `lang.uses_compound_lookup()`.
+        let analyzer = match &self.analyzer {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let user_dict_words: Vec<String> = self.user_dict.as_ref()
+            .map(|ud| ud.list_words()).unwrap_or_default();
+        let mut passing = spelling_scorer::find_candidates_pipeline(
+            analyzer,
+            self.compound_fst.as_deref(),
+            self.wordfreq.as_deref(),
+            &user_dict_words,
+            &self.doc_word_counts,
+            &word_lower,
+            sentence_ctx,
+            &*self.language,
+        );
+        log!("find_spelling_suggestions: {} candidates from shared pipeline for '{}'",
+             passing.len(), word_lower);
 
-        {
-            let analyzer = match &self.analyzer {
-                Some(a) => a,
-                None => return Vec::new(),
-            };
-
-            let _t = Instant::now();
-            // Source 1: Fuzzy Levenshtein matches (distance 2)
-            for (w, dist) in analyzer.fuzzy_lookup(&word_lower, 2) {
-                let wl = w.to_lowercase();
-                if wl == word_lower || wl.len() < 2 { continue; }
-                edit_distances.insert(wl.clone(), dist);
-                if seen.insert(wl.clone()) { candidates.push(wl); }
-            }
-
-            // Source 2: Prefix lookup (missing-letter typos: "fotbal" → "fotball")
-            for w in analyzer.prefix_lookup(&word_lower, 20) {
-                let wl = w.to_lowercase();
-                let extra = wl.len() as i32 - word_lower.len() as i32;
-                if extra >= 1 && extra <= 3 {
-                    edit_distances.entry(wl.clone()).or_insert(extra as u32);
-                    if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
-                        candidates.push(wl);
-                    }
-                }
-            }
-
-            // Source 3: Prefix with last char removed (typo in final position)
-            let char_count = word_lower.chars().count();
-            if char_count >= 3 {
-                let end_byte = word_lower.char_indices().rev().next().map(|(i, _)| i).unwrap_or(0);
-                let shorter = &word_lower[..end_byte];
-                for w in analyzer.prefix_lookup(shorter, 20) {
-                    let wl = w.to_lowercase();
-                    let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
-                    edit_distances.entry(wl.clone()).or_insert(diff);
-                    if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
-                        candidates.push(wl);
-                    }
-                }
-            }
-
-            // Source 4: Truncated fuzzy (strip 1-2 trailing chars then fuzzy)
-            for strip in 1..=2u32 {
-                let chars: Vec<char> = word_lower.chars().collect();
-                if chars.len() <= 3 + strip as usize { continue; }
-                let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
-                for (w, dist) in analyzer.fuzzy_lookup(&truncated, 2) {
-                    let wl = w.to_lowercase();
-                    edit_distances.entry(wl.clone()).or_insert(dist + strip);
-                    if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
-                        candidates.push(wl);
-                    }
-                }
-            }
-
-            // Source 5: Compound suggestion (skipped — only available on SWI checker, not on Analyzer)
-
-            // Source 6: Split function word ("tilbutikken" → "til butikken")
-            if let Some(split) = try_split_function_word(
-                &word_lower,
-                analyzer,
-                self.language.function_words(),
-            ) {
-                let sl = split.to_lowercase();
-                if seen.insert(sl.clone()) { candidates.push(sl); }
-            }
-        } // analyzer borrow dropped
-
-        // Source 7: Wordfreq — common words with trigram overlap. This map is
-        // large, so use it only as a fallback when dictionary sources did not
-        // already produce enough candidates.
-        if candidates.len() < 30 {
-            if let Some(wf) = &self.wordfreq {
-                let target_len = word_lower.chars().count() as isize;
-                let mut added = 0usize;
-                for (w, _freq) in wf.iter() {
-                    if added >= 50 { break; }
-                    let wl = w.to_lowercase();
-                    if wl == word_lower || seen.contains(&wl) { continue; }
-                    if wl.chars().next().unwrap_or(' ') != word_first { continue; }
-                    let wl_len = wl.chars().count() as isize;
-                    if (wl_len - target_len).unsigned_abs() > 3 { continue; }
-                    let w_trigrams = Self::trigrams(&wl);
-                    let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-                    if common >= 2 && seen.insert(wl.clone()) {
-                        candidates.push(wl);
-                        added += 1;
-                    }
-                }
-            }
-        }
-
-        // Source 8: User dictionary — words within edit distance 2
-        if let Some(ud) = &self.user_dict {
-            for uw in ud.list_words() {
-                if uw == word_lower || seen.contains(&uw) { continue; }
-                let dist = levenshtein_distance(&word_lower, &uw);
-                if dist <= 2 {
-                    edit_distances.entry(uw.clone()).or_insert(dist);
-                    if seen.insert(uw.clone()) {
-                        candidates.push(uw);
-                    }
-                }
-            }
-        }
-
-        // Source 9: Long word truncation (>= 10 chars) — strip 1-2 chars from start/end
-        // Catches typos on compound words (e.g. "PKarrierekompasset" → "karrierekompasset")
-        if word_lower.len() >= 10 {
-            if let (Some(analyzer), Some(fst)) = (&self.analyzer, &self.compound_fst) {
-                let is_known_or_compound = |w: &str| -> bool {
-                    if analyzer.has_word(w) { return true; }
-                    let results = compound_walker::compound_fuzzy_walk(
-                        fst, w, &*self.language,
-                        self.wordfreq.as_ref().map(|wf| wf.as_ref()),
-                        None, None,
-                    );
-                    results.iter().any(|r| r.total_edits == 0)
-                };
-                for strip in 1..=2usize {
-                    if word_lower.is_char_boundary(strip) {
-                        let trimmed = &word_lower[strip..];
-                        if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
-                            edit_distances.insert(trimmed.to_string(), strip as u32);
-                            candidates.push(trimmed.to_string());
-                        }
-                    }
-                    let end = word_lower.len() - strip;
-                    if word_lower.is_char_boundary(end) {
-                        let trimmed = &word_lower[..end];
-                        if trimmed.len() >= 5 && is_known_or_compound(trimmed) && seen.insert(trimmed.to_string()) {
-                            edit_distances.insert(trimmed.to_string(), strip as u32);
-                            candidates.push(trimmed.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Source 10: First-character swap — try replacing first char with every letter
-        // Catches "sjøkken" → "kjøkken" where first char is wrong but rest is correct
-        if word_lower.len() >= 3 {
-            if let Some(analyzer) = &self.analyzer {
-                let rest = &word_lower[word_first.len_utf8()..];
-                for c in "abcdefghijklmnopqrstuvwxyzæøå".chars() {
-                    if c == word_first { continue; }
-                    let candidate = format!("{}{}", c, rest);
-                    if analyzer.has_word(&candidate) && seen.insert(candidate.clone()) {
-                        edit_distances.insert(candidate.clone(), 1);
-                        candidates.push(candidate);
-                    }
-                }
-            }
-        }
-
-        // Source 11: Inflected forms of candidates — for each candidate lemma,
-        // add its inflections so BERT can pick the grammatically correct form.
-        // "kjøkken" → also adds "kjøkkenet", "kjøkkenene" etc.
-        {
-            use mtag::types::{Pos, Tag};
-            if let Some(analyzer) = &self.analyzer {
-                let base_candidates: Vec<String> = candidates.clone();
-                for base in &base_candidates {
-                    if let Some(readings) = analyzer.dict_lookup(base) {
-                        for r in &readings {
-                            if !matches!(r.pos, Pos::Subst) { continue; }
-                            // Add definite and plural forms
-                            for tag in &[Tag::Be, Tag::Fl] {
-                                let forms = analyzer.forms_for_lemma(&r.lemma, &Pos::Subst, tag);
-                                for form in forms {
-                                    let fl = form.to_lowercase();
-                                    if fl != word_lower && fl.len() >= 2 && seen.insert(fl.clone()) {
-                                        let dist = levenshtein_distance(&word_lower, &fl);
-                                        if dist <= 4 {
-                                            edit_distances.insert(fl.clone(), dist);
-                                            candidates.push(fl);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Source 13: Compound walker — decompose misspelled compound words
-        // Only for words ≥ 7 chars (compounds are long)
-        let mut compound_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if word_lower.len() >= 7 {
-            if let (Some(fst), Some(analyzer)) = (&self.compound_fst, &self.analyzer) {
-                let word_check = |w: &str| -> bool {
-                    analyzer.dict_lookup(w).map_or(false, |rs|
-                        rs.iter().any(|r| r.pos != mtag::types::Pos::Prop))
-                };
-                let noun_check = |w: &str| -> bool {
-                    analyzer.dict_lookup(w).map_or(false, |rs| {
-                        let n = rs.iter().filter(|r| r.pos == mtag::types::Pos::Subst).count();
-                        let a = rs.iter().filter(|r| r.pos == mtag::types::Pos::Adj).count();
-                        n > 0 && n >= a
-                    })
-                };
-                let results = compound_walker::compound_fuzzy_walk(
-                    fst, &word_lower,
-                    &*self.language,
-                    self.wordfreq.as_deref(),
-                    Some(&word_check), Some(&noun_check),
-                );
-                for r in results.iter().take(10) {
-                    let cw = r.compound_word.to_lowercase();
-                    if seen.insert(cw.clone()) {
-                        edit_distances.insert(cw.clone(), r.total_edits);
-                        compound_candidates.insert(cw.clone());
-                        candidates.push(cw);
-                    }
-                }
-            }
-        }
-
-        log!("find_spelling_suggestions: {} raw candidates for '{}'", candidates.len(), word_lower);
-
-        // ── Phase 2: Ortho score all candidates ──
-        let mut ortho_scored: Vec<(String, f32)> = Vec::new();
-        for w in &candidates {
-            let w_trigrams = Self::trigrams(w);
-            let common = word_trigrams.iter().filter(|t| w_trigrams.contains(t)).count();
-            let max_t = word_trigrams.len().max(w_trigrams.len()).max(1);
-            let trigram_sim = common as f32 / max_t as f32;
-
-            let prefix_len = word_lower.chars().zip(w.chars())
-                .take_while(|(a, b)| a == b).count();
-            let max_len = word_lower.chars().count().max(w.chars().count()).max(1);
-            let prefix_sim = prefix_len as f32 / max_len as f32;
-
-            let edit_sim = match edit_distances.get(w.as_str()) {
-                Some(1) => 0.85,
-                Some(2) => 0.65,
-                Some(3) => 0.45,
-                _ => 0.0,
-            };
-            let mut ortho_sim = trigram_sim.max(edit_sim).max(prefix_sim);
-            // First-char bonus: misspellings usually preserve the initial letter
-            if w.chars().next() == Some(word_first) {
-                ortho_sim += 0.15;
-            }
-            // Boost words found in document or user dictionary (TF-IDF style)
-            ortho_sim *= compute_boost(w, &self.doc_word_counts,
-                self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
-            ortho_scored.push((w.clone(), ortho_sim));
-        }
-        ortho_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // ── Phase 3: MLM fallback via BERT worker (async) ──
-        // MLM forward is sent to the worker. If Phase 4 finds no grammar-valid candidates,
-        // Phase 5 will use the MLM predictions when they arrive. For now, we skip MLM
-        // fallback in the synchronous path — it's handled async via pending_spelling_bert.
-        let mut mlm_fallback_candidates: Vec<(String, f32)> = Vec::new();
-
-        // Send MlmForward request to worker if available (results handled async)
+        // Fire MLM forward to the BERT worker — its result lands async via
+        // `poll_bert_responses` and is used as a fallback if Phase 4b leaves
+        // us with nothing usable.
         if let Some(worker) = &mut self.bert_worker {
             let masked_context = if let Some(pos) = sentence_ctx.to_lowercase().find(&word_lower) {
                 let before = &sentence_ctx[..pos];
@@ -3716,54 +3482,9 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             let _mlm_id = worker.send(|id| bert_worker::BertRequest::MlmForward {
                 id, masked_text: masked_context, top_k: 100,
             });
-            // MLM results will be picked up in poll_bert_responses() if needed
-        }
-
-        log!("find_spelling_suggestions: top 5 ortho for '{}': {:?}", word_lower,
-            ortho_scored.iter().take(5).collect::<Vec<_>>());
-
-        // ── Phase 4: Dictionary filter (walk up to 100 by ortho score) ──
-        let mut passing: Vec<(String, f32)> = Vec::new();
-        {
-            let analyzer = match &self.analyzer {
-                Some(a) => a,
-                None => return ortho_scored, // no analyzer available, return unfiltered
-            };
-
-            let mut checked = 0;
-            for (candidate, score) in &ortho_scored {
-                if checked >= 15 { break; }
-
-                // Skip hyphenated candidates when misspelled word has no hyphen
-                if !word_lower.contains('-') && candidate.contains('-') {
-                    continue;
-                }
-
-                // Dictionary check: every word must exist in standard or user dict
-                // Compound walker candidates are NOT exempt — compound_walker validates
-                // decomposition (spill+flir), but that doesn't mean the compound is a
-                // real word. Only dictionary-confirmed words are valid suggestions.
-                let ud = &self.user_dict;
-                let words: Vec<&str> = candidate.split_whitespace().collect();
-                if words.iter().any(|w| {
-                    !analyzer.has_word(w)
-                    && !ud.as_ref().map_or(false, |u| u.has_word(w))
-                }) {
-                    continue;
-                }
-
-                checked += 1;
-                passing.push((candidate.clone(), *score));
-            }
         }
 
         // ── Phase 4b: Grammar filter via actor batch ──
-        // Drop candidates that introduce a grammar error when substituted into
-        // the sentence. "Dette er Petter som skriver en tekstrf" with candidate
-        // "teksta" → "Dette er Petter som skriver en teksta", which trips
-        // `ubestemt_artikkel_bestemt_substantiv`. Without this check the
-        // dictionary-valid-but-contextually-wrong "teksta" survives because
-        // mtag accepts it as a definite feminine noun.
         if let Some(actor) = &self.grammar_actor {
             if !passing.is_empty() {
                 let test_sentences: Vec<String> = passing
@@ -3776,8 +3497,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     .into_iter()
                     .zip(errs_per.into_iter())
                     .filter(|((cand, _), errs)| {
-                        // Keep candidate if no error is *about* this candidate.
-                        // Pre-existing sentence errors elsewhere shouldn't drop it.
                         let cand_lower = cand.to_lowercase();
                         !errs.iter().any(|e| e.word.to_lowercase() == cand_lower)
                     })
@@ -3790,44 +3509,42 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
         }
 
-        // ── Phase 6: Send async BERT sentence re-ranking (results come via poll_bert_responses) ──
-        // Return first grammar-valid candidate immediately. BERT worker will re-rank async.
+        // ── Phase 6: Send async BERT sentence re-ranking ──
         if passing.len() > 1 {
             if let Some(worker) = &mut self.bert_worker {
                 let sentence_lower = sentence_ctx.to_lowercase();
                 let word_pos = sentence_lower.find(&word_lower);
                 let (context_before, context_after) = if let Some(pos) = word_pos {
-                    (sentence_lower[..pos].trim_end().to_string(), sentence_lower[pos + word_lower.len()..].trim_start().to_string())
+                    (sentence_lower[..pos].trim_end().to_string(),
+                     sentence_lower[pos + word_lower.len()..].trim_start().to_string())
                 } else {
                     (sentence_lower.clone(), String::new())
                 };
                 let candidates: Vec<String> = passing.iter().take(30).map(|(c, _)| c.clone()).collect();
-                // If the user is at a word boundary (pressed space or end-of-
-                // sentence), context_after is empty/whitespace — which breaks
-                // score_and_rerank's word-position extraction. Append sentinel
-                // "." to BOTH context_after and sentence so the word extraction
-                // inside the scorer hits the else branch and correctly strips
-                // the trailing punctuation to recover the misspelled word.
                 let (context_after, sentence) = if context_after.trim().is_empty() {
                     (".".to_string(), format!("{}.", sentence_ctx))
                 } else {
                     (context_after, sentence_ctx.to_string())
                 };
-                let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore { id, context_before, context_after, candidates, sentence });
+                let request_id = worker.send(|id| bert_worker::BertRequest::SpellingScore {
+                    id, context_before, context_after, candidates, sentence,
+                });
                 self.pending_spelling_bert.push(PendingSpellingBert {
                     request_id,
                     error_idx_word: word_lower.clone(),
-                    error_doc_offset: 0, // will be set by caller
+                    error_doc_offset: 0,
                     candidates: passing.iter().take(30).cloned().collect(),
                     deferred_push: None,
                 });
-                log!("  sent {} candidates for BERT spelling score (id={})", passing.len().min(30), request_id);
+                log!("  sent {} candidates for BERT spelling score (id={})",
+                     passing.len().min(30), request_id);
             }
         }
 
         log!("find_spelling_suggestions: {} grammar-valid for '{}'", passing.len(), word_lower);
-        passing
+        return passing;
     }
+
 
     fn is_code_like_spelling_token(word: &str) -> bool {
         let char_count = word.chars().count();

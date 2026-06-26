@@ -14,7 +14,7 @@ use nostos_cognio::model::Model;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use acatts_rust::spelling_scorer::{generate_spelling_candidates, score_and_rerank};
+use acatts_rust::spelling_scorer::{find_candidates_pipeline, score_and_rerank};
 
 fn main() {
     // Set ORT_DYLIB_PATH
@@ -92,16 +92,16 @@ fn main() {
         println!("Sentence: '{}'", sentence);
         println!("({})", desc);
 
-        // Phase 1: Generate candidates
-        let candidates = generate_spelling_candidates(
+        // Phase 1: Generate candidates — English uses plain fuzzy (no compound walker)
+        let candidates = find_candidates_pipeline(
             &analyzer,
+            None, // English: uses_compound_lookup() == false, so compound_fst is ignored
             None, // no wordfreq for English yet
             &empty_user,
             &empty_doc,
             misspelled,
             sentence,
             &language::EnglishLanguage,
-            None,
         );
         println!("  Phase 1: {} candidates", candidates.len());
 

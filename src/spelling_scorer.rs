@@ -1,7 +1,26 @@
 //! Shared spelling suggestion pipeline.
-//! Used by both the app (main.rs + bert_worker.rs) and tests (test_spelling.rs).
 //!
-//! Phase 1: `generate_spelling_candidates` — candidate generation + ortho scoring + dict filter
+//! There is **one** candidate-generation function: `find_candidates_pipeline`.
+//! Both `main.rs::find_spelling_suggestions` (the GUI path) and
+//! `test_spelling.rs` (the regression test) MUST call this function. Test
+//! coverage that bypasses it is a lie — if the GUI runs different code than
+//! the test, "X/Y passed" tells you nothing about user-visible behaviour.
+//! See `feedback_spelling_pipeline_duplicated.md` for the incident this
+//! arrangement was created to prevent.
+//!
+//! Language dispatch for fuzzy matching lives inside this function:
+//!   - `lang.uses_compound_lookup() == true` (Bokmål, Nynorsk): the compound
+//!     walker is the ONLY source of fuzzy-distance candidates. It handles
+//!     single-word matches AND multi-part decompositions with Damerau
+//!     transposition and UTF-8 vowel swaps. We do NOT also call
+//!     `analyzer.fuzzy_lookup` — that loses transposition and dyslexic
+//!     vowel-swap handling.
+//!   - `lang.uses_compound_lookup() == false` (English, future others):
+//!     `analyzer.fuzzy_lookup` is the only fuzzy source. We do NOT call
+//!     the compound walker — those languages don't form productive
+//!     compounds and the walker would just generate junk.
+//!
+//! Phase 1: `find_candidates_pipeline` — candidate generation + ortho scoring + dict filter
 //! Phase 2: `score_and_rerank` — BERT boundary scoring + grammar correction + hybrid sentence re-ranking
 
 use std::collections::{HashMap, HashSet};
@@ -105,17 +124,39 @@ pub fn compute_boost(
 }
 
 /// Phase 1: Generate spelling candidates, ortho-score them, and dictionary-filter.
-/// Returns ortho-scored, dictionary-valid candidates sorted best-first.
-pub fn generate_spelling_candidates(
+///
+/// THIS IS THE ONLY CANDIDATE-GENERATION ENTRY POINT. Both the GUI path
+/// (`main.rs::find_spelling_suggestions`) and the regression test
+/// (`test_spelling.rs`) call this function. Do not create a parallel
+/// pipeline in main.rs or anywhere else — see the file-level docstring.
+///
+/// Language dispatch for fuzzy matching:
+///   - `lang.uses_compound_lookup()` → compound walker via `compound_fst`
+///     (Bokmål, Nynorsk).
+///   - Otherwise → `analyzer.fuzzy_lookup` (English, others).
+///
+/// `compound_fst` must be `Some` whenever `uses_compound_lookup()` is true
+/// or no fuzzy candidates will be produced. Conversely, `compound_fst` is
+/// ignored when `uses_compound_lookup()` is false.
+pub fn find_candidates_pipeline(
     analyzer: &mtag::Analyzer,
+    compound_fst: Option<&fst::raw::Fst<Vec<u8>>>,
     wordfreq: Option<&HashMap<String, u64>>,
     user_dict_words: &[String],
     doc_word_counts: &HashMap<String, u16>,
     word: &str,
     _sentence_ctx: &str,
     lang: &dyn language::LanguageSpelling,
-    is_compound: Option<&dyn Fn(&str) -> bool>,
 ) -> Vec<(String, f32)> {
+    // Sabotage probe — set `SPELLING_PIPELINE_SABOTAGE=1` and run anything
+    // that should produce spelling suggestions. If suggestions still appear
+    // somewhere, that caller is bypassing this function and is a duplicated
+    // pipeline that must be deleted. Verified 2026-06-26: test_spelling
+    // returns 0 candidates under the probe (so test_spelling reaches here),
+    // and the GUI also reaches here via main.rs::find_spelling_suggestions.
+    if std::env::var("SPELLING_PIPELINE_SABOTAGE").is_ok() {
+        return Vec::new();
+    }
     let word_lower = word.to_lowercase();
     let word_trigrams = trigrams(&word_lower);
     let word_first = word_lower.chars().next().unwrap_or(' ');
@@ -123,16 +164,75 @@ pub fn generate_spelling_candidates(
     let mut candidates: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     let mut edit_distances: HashMap<String, u32> = HashMap::new();
+    // Single-word matches discovered by the compound walker (1-part results).
+    // Kept separate from the multi-part `compound_candidates` set so callers
+    // that distinguish "this is a real compound" from "this is a fuzzy
+    // single-word hit" still can.
+    let mut compound_candidates: HashSet<String> = HashSet::new();
 
-    // Source 1: Fuzzy Levenshtein (distance 2)
-    for (w, dist) in analyzer.fuzzy_lookup(&word_lower, 2) {
-        let wl = w.to_lowercase();
-        if wl == word_lower || wl.len() < 2 { continue; }
-        edit_distances.insert(wl.clone(), dist);
-        if seen.insert(wl.clone()) { candidates.push(wl); }
+    let uses_compound = lang.uses_compound_lookup();
+
+    // ── Fuzzy lookup — language-dispatched ──────────────────────────────
+    // BM/NN: compound walker handles BOTH single-word fuzzy AND multi-part
+    // decompositions, with Damerau transposition + free vowel swaps for
+    // dyslexic substitutions. Plain `analyzer.fuzzy_lookup` does NOT have
+    // those, so we intentionally skip it for these languages. Mixing the
+    // two created the duplicated-pipeline bug logged in memory.
+    //
+    // Other languages: plain `analyzer.fuzzy_lookup` is the source. The
+    // compound walker is skipped — English (and most languages) don't form
+    // productive compounds the way Norwegian does, and running the walker
+    // would generate junk multi-part suggestions.
+    if uses_compound {
+        if let Some(fst) = compound_fst {
+            // Allow the walker to fire on any length so it can replace the
+            // plain fuzzy_lookup for short words too. The walker's own
+            // edit-budget (MAX_EDITS_PER_PART = 2, MAX_TOTAL_EDITS = 4)
+            // keeps the candidate count bounded.
+            let word_check = |w: &str| -> bool {
+                analyzer.dict_lookup(w).map_or(false, |rs|
+                    rs.iter().any(|r| r.pos != mtag::types::Pos::Prop))
+            };
+            let results = crate::compound_walker::compound_fuzzy_walk(
+                fst, &word_lower, lang, wordfreq,
+                Some(&word_check), None,
+            );
+            for r in results.iter().take(30) {
+                let cw = r.compound_word.to_lowercase();
+                if cw == word_lower || cw.len() < 2 { continue; }
+                if seen.insert(cw.clone()) {
+                    edit_distances.insert(cw.clone(), r.total_edits.max(1));
+                    compound_candidates.insert(cw.clone());
+                    candidates.push(cw);
+                }
+            }
+        }
+    } else {
+        // Source 1: Fuzzy Levenshtein (distance 2)
+        for (w, dist) in analyzer.fuzzy_lookup(&word_lower, 2) {
+            let wl = w.to_lowercase();
+            if wl == word_lower || wl.len() < 2 { continue; }
+            edit_distances.insert(wl.clone(), dist);
+            if seen.insert(wl.clone()) { candidates.push(wl); }
+        }
+
+        // Source 4: Truncated fuzzy (strip 1-2 trailing chars then fuzzy)
+        for strip in 1..=2u32 {
+            let chars: Vec<char> = word_lower.chars().collect();
+            if chars.len() <= 3 + strip as usize { continue; }
+            let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
+            for (w, dist) in analyzer.fuzzy_lookup(&truncated, 2) {
+                let wl = w.to_lowercase();
+                edit_distances.entry(wl.clone()).or_insert(dist + strip);
+                if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                    candidates.push(wl);
+                }
+            }
+        }
     }
 
     // Source 2: Prefix lookup (missing-letter typos)
+    // Applies to all languages — it's a targeted source, not a fuzzy lookup.
     for w in analyzer.prefix_lookup(&word_lower, 20) {
         let wl = w.to_lowercase();
         let extra = wl.len() as i32 - word_lower.len() as i32;
@@ -153,20 +253,6 @@ pub fn generate_spelling_candidates(
             let wl = w.to_lowercase();
             let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
             edit_distances.entry(wl.clone()).or_insert(diff);
-            if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
-                candidates.push(wl);
-            }
-        }
-    }
-
-    // Source 4: Truncated fuzzy (strip 1-2 trailing chars then fuzzy)
-    for strip in 1..=2u32 {
-        let chars: Vec<char> = word_lower.chars().collect();
-        if chars.len() <= 3 + strip as usize { continue; }
-        let truncated: String = chars[..chars.len() - strip as usize].iter().collect();
-        for (w, dist) in analyzer.fuzzy_lookup(&truncated, 2) {
-            let wl = w.to_lowercase();
-            edit_distances.entry(wl.clone()).or_insert(dist + strip);
             if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
                 candidates.push(wl);
             }
@@ -204,11 +290,21 @@ pub fn generate_spelling_candidates(
         }
     }
 
-    // Source 9: Long word truncation (>= 10 chars)
+    // Source 9: Long word truncation (>= 10 chars).
+    // The "is this word real" check accepts either a direct dict hit OR a
+    // 0-edit compound decomposition (BM/NN). For non-compound languages the
+    // compound_fst is None so only the dict hit applies.
     if word_lower.len() >= 10 {
         let is_known = |w: &str| -> bool {
             if analyzer.has_word(w) { return true; }
-            if let Some(check) = &is_compound { return check(w); }
+            if uses_compound {
+                if let Some(fst) = compound_fst {
+                    let r = crate::compound_walker::compound_fuzzy_walk(
+                        fst, w, lang, wordfreq, None, None,
+                    );
+                    return r.iter().any(|c| c.total_edits == 0);
+                }
+            }
             false
         };
         for strip in 1..=2usize {
@@ -270,8 +366,13 @@ pub fn generate_spelling_candidates(
     }
 
     // Source 12: Phonetic substitutions for dyslexic users
-    // Language-specific sound confusions from the LanguageSpelling trait
-    {
+    // Language-specific sound confusions from the LanguageSpelling trait.
+    // For BM/NN the compound walker's built-in free_vowel_swaps already
+    // covers the dyslexic substitutions (e↔ø, o↔å, a↔æ), so we skip this
+    // pass to avoid duplicating that work — and to keep all fuzzy-style
+    // candidate generation funneled through the compound walker per the
+    // language dispatch rule above.
+    if !uses_compound {
         let phonetic_subs = lang.phonetic_substitutions();
 
         // Single substitution pass
@@ -309,73 +410,6 @@ pub fn generate_spelling_candidates(
         }
     }
 
-    // Skeleton-match candidates from Source 13 (vowel insertion). These are
-    // tracked so the ortho phase can give them the same boost as a top-tier
-    // wordfreq word would get — without this lift the skeleton hit ("benken")
-    // sits at 1.00 while every commonly-typed short word competitor ("banken",
-    // "bank", "barn") rides the wf-boost cap to 1.25 and crowds it out.
-    let mut vowel_inserted: HashSet<String> = HashSet::new();
-
-    // Source 13: Vowel insertion for short consonant skeletons.
-    // Users sometimes type abbreviations by dropping every vowel: "lgn" for
-    // "legen", "skgn" for "skogen", "bnkn" for "benken". Pure-consonant inputs
-    // sit at edit-distance 2-3 from their target so fuzzy_lookup (dist 2) either
-    // misses them or buries them under hundreds of dist-1 single-vowel words.
-    //
-    // The gate is intentionally narrow — only fires for ≤ 4 char inputs with no
-    // vowel at all — so it can't affect normal typos like "fiskk" (has 'i') or
-    // "sykell" (has 'y') which already have vowels and shouldn't generate more
-    // candidates from this source.
-    //
-    // We record every candidate at edit_distance = 1 even when it took two
-    // insertions to find. The "consonant skeleton matches exactly in order" is
-    // a much stronger signal than the raw edit distance suggests, and without
-    // this lift the right answer (benken at ortho 0.80) gets crowded out of
-    // the top-30 dict filter by hundreds of dist-1 single-vowel siblings of
-    // the misspelling (banken, bokn, bak, bank, barn — all 1.000).
-    {
-        const VOWELS: &[char] = &['a', 'e', 'i', 'o', 'u', 'y', 'å', 'ø', 'æ'];
-        let chars: Vec<char> = word_lower.chars().collect();
-        let alphabetic = chars.iter().filter(|c| c.is_alphabetic()).count();
-        let has_vowel = chars.iter().any(|c| VOWELS.contains(c));
-        if alphabetic >= 2 && alphabetic <= 4 && !has_vowel {
-            for pos in 0..=chars.len() {
-                for &v in VOWELS {
-                    let mut new_chars = chars.clone();
-                    new_chars.insert(pos, v);
-                    let cand: String = new_chars.iter().collect();
-                    if analyzer.has_word(&cand) {
-                        vowel_inserted.insert(cand.clone());
-                        edit_distances.insert(cand.clone(), 1);
-                        if seen.insert(cand.clone()) {
-                            candidates.push(cand);
-                        }
-                    }
-                }
-            }
-            for pos1 in 0..=chars.len() {
-                for &v1 in VOWELS {
-                    let mut after1 = chars.clone();
-                    after1.insert(pos1, v1);
-                    for pos2 in 0..=after1.len() {
-                        for &v2 in VOWELS {
-                            let mut after2 = after1.clone();
-                            after2.insert(pos2, v2);
-                            let cand: String = after2.iter().collect();
-                            if analyzer.has_word(&cand) {
-                                vowel_inserted.insert(cand.clone());
-                                edit_distances.insert(cand.clone(), 1);
-                                if seen.insert(cand.clone()) {
-                                    candidates.push(cand);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // Phase 2: Ortho score
     let mut ortho_scored: Vec<(String, f32)> = Vec::new();
     for w in &candidates {
@@ -400,10 +434,12 @@ pub fn generate_spelling_candidates(
             ortho_sim += 0.15;
         }
         let boost = compute_boost(w, doc_word_counts, user_dict_words, wordfreq);
-        // Skeleton matches (vowel-insertion source) must not be penalized for
-        // being absent from wordfreq — the consonant skeleton matching exactly
-        // is already a strong signal, so floor the boost at the wf-cap.
-        let effective_boost = if vowel_inserted.contains(w) { boost.max(1.25) } else { boost };
+        // Compound-walker single-word matches must not be penalized for being
+        // absent from wordfreq. The walker only emits dict-real words within
+        // its strict edit budget, so the match itself is a strong signal;
+        // floor the boost at the wf-cap so a rare-but-walker-confirmed hit
+        // can compete with common siblings of the misspelling.
+        let effective_boost = if compound_candidates.contains(w) { boost.max(1.25) } else { boost };
         ortho_sim *= effective_boost;
         ortho_scored.push((w.clone(), ortho_sim));
     }
