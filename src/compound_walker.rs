@@ -566,7 +566,15 @@ pub fn compound_fuzzy_walk<D: AsRef<[u8]>>(
         std::mem::swap(&mut current_states, &mut next_states);
         next_states.clear();
 
-        if results.len() >= 200 { break; } // enough results
+        // Result cap. Previously 200 was set as "enough results" but this
+        // bit us on misspellings whose 2-part fuzzy decompositions are
+        // cheap (e.g. "bossller" → "boss" + "leer" at 1 edit) but where
+        // the user actually meant a single-word fix that requires the
+        // walker's full edit budget ("bossller" → "boller" at 2 edits).
+        // The 2-part hits flood the cap before the 1-part path is reached.
+        // 2000 is generous enough that the 1-part hit makes it through,
+        // and the downstream dict-filter / BERT scorer drop the noise.
+        if results.len() >= 2000 { break; }
     }
 
     // Sort by (total_edits, part_count, -min_frequency)

@@ -197,7 +197,16 @@ pub fn find_candidates_pipeline(
                 fst, &word_lower, lang, wordfreq,
                 Some(&word_check), None,
             );
-            for r in results.iter().take(30) {
+            // Do NOT cap with `take(N)` here. The walker returns its hits
+            // sorted by edit count ascending, so a small cap (was take(30))
+            // drops every edits=2 match the moment there are 30+ edits=1
+            // single-vowel siblings of the misspelling. For consonant-only
+            // input like "lgn" that's exactly what happens: 30+ dist-1
+            // variants (lån, len, lon, lin, lyn …) crowd out "lege" at
+            // dist=2 and "lege" never reaches the ortho phase. Ortho +
+            // dict-filter further down already cap the pool the BERT
+            // scorer sees, so adding all walker hits here is free.
+            for r in &results {
                 let cw = r.compound_word.to_lowercase();
                 if cw == word_lower || cw.len() < 2 { continue; }
                 if seen.insert(cw.clone()) {
@@ -344,6 +353,16 @@ pub fn find_candidates_pipeline(
         use mtag::types::{Pos, Tag};
         let base_candidates: Vec<String> = candidates.clone();
         for base in &base_candidates {
+            // Skeleton-match heritage: an inflected form derived from a
+            // walker-confirmed lemma should ride the same wf-cap floor as
+            // the lemma itself. Without this, "skog" wins ortho 1.000 via
+            // its compound_candidates flag while "skogen" (added here from
+            // skog's Be inflection) sits at 0.998 and gets crowded out of
+            // the dict filter by the 100+ siblings of the misspelling that
+            // also hit the cap. For consonant-skeleton typos this is the
+            // exact failure mode the test exercises (skgn→skogen,
+            // bnkn→benken, lgn→legen).
+            let base_is_compound_hit = compound_candidates.contains(base);
             if let Some(readings) = analyzer.dict_lookup(base) {
                 for r in &readings {
                     if !matches!(r.pos, Pos::Subst) { continue; }
@@ -355,6 +374,9 @@ pub fn find_candidates_pipeline(
                                 let dist = levenshtein_distance(&word_lower, &fl);
                                 if dist <= 4 {
                                     edit_distances.insert(fl.clone(), dist);
+                                    if base_is_compound_hit {
+                                        compound_candidates.insert(fl.clone());
+                                    }
                                     candidates.push(fl);
                                 }
                             }
@@ -411,6 +433,27 @@ pub fn find_candidates_pipeline(
     }
 
     // Phase 2: Ortho score
+    //
+    // Skeleton heuristic: if the misspelled word is short and contains no
+    // vowels, the user almost certainly typed an abbreviation (lgn for
+    // legen, skgn for skogen, bnkn for benken). Candidates whose consonant
+    // skeleton matches the input letter-for-letter are far more likely
+    // intentions than dist-1 single-vowel siblings of the misspelling.
+    // Without this lift, "legen" sits at ortho 1.00 while 100+ short
+    // siblings (lån, len, lin, lon, lyn, løgn, lign, lun …) all hit the
+    // same cap and crowd it out of the top-30 dict filter.
+    fn consonant_skeleton(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_alphabetic() && !matches!(c,
+                'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'å' | 'ø' | 'æ'))
+            .collect()
+    }
+    let input_skel = consonant_skeleton(&word_lower);
+    let input_is_skeleton = !input_skel.is_empty()
+        && word_lower.chars().count() <= 5
+        && !word_lower.chars().any(|c|
+            matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'å' | 'ø' | 'æ'));
+
     let mut ortho_scored: Vec<(String, f32)> = Vec::new();
     for w in &candidates {
         let w_tri = trigrams(w);
@@ -439,7 +482,18 @@ pub fn find_candidates_pipeline(
         // its strict edit budget, so the match itself is a strong signal;
         // floor the boost at the wf-cap so a rare-but-walker-confirmed hit
         // can compete with common siblings of the misspelling.
-        let effective_boost = if compound_candidates.contains(w) { boost.max(1.25) } else { boost };
+        let mut effective_boost = if compound_candidates.contains(w) { boost.max(1.25) } else { boost };
+
+        // Skeleton-match lift: see Phase 2 docstring above. Compares the
+        // misspelling's consonant skeleton with the candidate's, and lifts
+        // ortho by a factor that puts skeleton hits above all the dist-1
+        // single-vowel siblings of the input. 1.5 was chosen empirically:
+        // 1.25 was not enough to clear the cap, 2.0 dragged junk skeleton
+        // matches above legitimate dist-1 fixes for non-skeleton inputs
+        // (but the gate above prevents that branch entirely for those).
+        if input_is_skeleton && consonant_skeleton(w) == input_skel {
+            effective_boost = effective_boost.max(1.5);
+        }
         ortho_sim *= effective_boost;
         ortho_scored.push((w.clone(), ortho_sim));
     }
