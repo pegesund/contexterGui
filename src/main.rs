@@ -7699,8 +7699,12 @@ let keep_word_errors = from_word || to_word;
         };
         let fg_for_layout_kind = self.platform.classify_app(&fg_for_layout);
         let slack_layout = fg_for_layout.exe_name.contains("slack");
+        // Windows often spends the first click on activating our topmost
+        // borderless popup. Count mouse-down as the action trigger there so
+        // completion rows, quick-fix labels, and toolbar icons work with a
+        // single click even while Word/Chrome/etc. has focus.
         let toolbar_mouse_down_click =
-            current_fg_kind_for_layout == platform::AppKind::OurApp || slack_layout;
+            cfg!(target_os = "windows") || current_fg_kind_for_layout == platform::AppKind::OurApp || slack_layout;
         let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
 
         // No tab auto-switch. The pencil icon's red dot already serves as
