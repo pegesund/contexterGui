@@ -34,6 +34,60 @@ pub fn idle_millis() -> u32 {
     }
 }
 
+/// Re-assert Spell's main overlay as a native Windows topmost window.
+///
+/// `egui::ViewportCommand::WindowLevel(AlwaysOnTop)` is enough for the normal
+/// creation path, but on Windows the borderless popup can be demoted by
+/// minimize/restore and focus changes. Calling SetWindowPos directly keeps the
+/// floating overlay above normal app windows without stealing keyboard focus.
+pub fn keep_main_overlay_topmost() {
+    unsafe extern "system" fn enum_window(hwnd: windows::Win32::Foundation::HWND, _lparam: windows::Win32::Foundation::LPARAM) -> windows::core::BOOL {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsWindowVisible, SetWindowPos,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
+        if pid != std::process::id() {
+            return windows::core::BOOL(1);
+        }
+
+        let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+        if !visible {
+            return windows::core::BOOL(1);
+        }
+
+        let mut title_buf = [0u16; 128];
+        let len = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
+        let title = String::from_utf16_lossy(&title_buf[..len.max(0) as usize]);
+        if title == "Spell" {
+            let _ = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
+        }
+
+        windows::core::BOOL(1)
+    }
+
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::EnumWindows(
+            Some(enum_window),
+            windows::Win32::Foundation::LPARAM(0),
+        );
+    }
+}
+
 /// When running from a packaged Spell-windows-x64 zip extraction, return the
 /// absolute path to the bundled `Frameworks` directory. Returns `None`
 /// outside a packaged install.

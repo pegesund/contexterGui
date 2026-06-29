@@ -1690,6 +1690,11 @@ struct ContextApp {
     /// apps. 0 = uninitialised. Updated only for non-OurApp foregrounds so
     /// briefly clicking on Spell's own window doesn't reset the tracker.
     prev_fg_pid: u32,
+    /// Whether the previous foreground EXTERNAL app was a writing surface
+    /// (browser, Word, or any app Spell can write with). This prevents a
+    /// transient Word -> Explorer/Spell -> Word bounce from clearing Word's
+    /// active errors when focus returns.
+    prev_fg_was_writing_surface: Option<bool>,
     /// True when the foreground app is a browser this frame. Set at the
     /// top of every update() so grammar/BERT pollers can gate on it.
     suppress_errors: bool,
@@ -2416,6 +2421,7 @@ impl ContextApp {
             prev_fg_was_browser: false,
             prev_word_title: String::new(),
             prev_fg_pid: 0,
+            prev_fg_was_writing_surface: None,
             suppress_errors: false,
             prev_was_writing_app: None,
             update_service: {
@@ -6230,13 +6236,15 @@ impl eframe::App for ContextApp {
                 // "fixed this several times" — this is the structural
                 // root cause.
                 //
-                // New rule: clear on ANY cross-pid transition between
+                // New rule: clear on cross-pid transitions between two
                 // writing surfaces (browser OR a writing-app exe). Word
                 // state is re-derivable via request_word_rescan() below;
                 // Browser state re-derives from /tmp/spell-browser.json
                 // on the next extension write.
                 let entering_writing_surface = !now_our_app
                     && (now_browser || self.platform.is_writing_app(&fg));
+                let switching_between_writing_surfaces =
+                    self.prev_fg_was_writing_surface == Some(true) && entering_writing_surface;
                 // Skip the clear entirely when there's nothing to clear. The
                 // log line was spamming chrome://extensions-style noise on
                 // every app-switch even though the operation was a no-op,
@@ -6244,7 +6252,7 @@ impl eframe::App for ContextApp {
                 let has_state_to_clear = !self.writing_errors.is_empty()
                     || !self.paragraph_texts.is_empty()
                     || !self.last_doc_text.is_empty();
-                if entering_writing_surface && has_state_to_clear {
+                if switching_between_writing_surfaces && has_state_to_clear {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
                         self.prev_fg_pid, fg.pid,
                         self.writing_errors.len(), self.paragraph_texts.len());
@@ -6305,6 +6313,8 @@ self.grammar_queue.clear();
             // switch wouldn't be detected (Spell.pid would equal Spell.pid).
             if !now_our_app {
                 self.prev_fg_pid = fg.pid;
+                self.prev_fg_was_writing_surface =
+                    Some(now_browser || self.platform.is_writing_app(&fg));
             }
 
             self.suppress_errors = now_browser;
@@ -6333,6 +6343,7 @@ self.grammar_queue.clear();
                         // Same fix as the X-button path: clear AlwaysOnTop
                         // before iconising so Windows leaves a taskbar entry.
                         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+                        self.last_window_always_on_top = Some(false);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     } else if self.prev_was_writing_app == Some(false) {
                         log!(
@@ -6340,6 +6351,8 @@ self.grammar_queue.clear();
                             fg.exe_name
                         );
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+                        self.last_window_always_on_top = Some(true);
                     }
                     self.prev_was_writing_app = Some(is_writing);
                 }
@@ -7816,12 +7829,18 @@ let keep_word_errors = from_word || to_word;
         // without us having to flip the popup to Normal (which had the
         // perverse side effect of SetWindowPos(HWND_NOTOPMOST) raising
         // the popup above other non-topmost windows including Settings).
-        if !is_minimised
-            && self.follow_cursor
-            && self.goto_freeze_until.is_none()
-        {
+        if !is_minimised {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             self.last_window_always_on_top = Some(true);
+            let spell_dialog_open = self.show_settings_window
+                || self.show_userdict_window
+                || self.suggestion_window.is_some()
+                || self.rule_info_window.is_some()
+                || self.show_voice_window;
+            #[cfg(target_os = "windows")]
+            if !spell_dialog_open {
+                platform::windows::keep_main_overlay_topmost();
+            }
         }
 
         let mut next_outer_pos = None;
@@ -8264,6 +8283,7 @@ let keep_word_errors = from_word || to_word;
                     // and skip the WindowLevel re-assert, so AlwaysOnTop stays
                     // off until the window is restored.
                     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+                    self.last_window_always_on_top = Some(false);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
