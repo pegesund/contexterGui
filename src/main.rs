@@ -6319,20 +6319,15 @@ self.grammar_queue.clear();
 
             self.suppress_errors = now_browser;
 
-            // Auto-minimise when the foreground is a code editor / terminal /
-            // system utility — Spell isn't useful there and the popup just
-            // covers the user's text. Restore on transition back to a writing
-            // app. Skip when our own window is foreground (clicks on Spell
-            // would otherwise toggle minimised state). Emit the viewport
-            // command only on the boundary so we don't fight the user if they
-            // manually un-minimise.
+            // Optional legacy auto-minimise when the foreground is a code
+            // editor / terminal / system utility. Keep this opt-in only:
+            // Spell's primary contract is to remain a floating, visible helper
+            // unless the user manually minimises it.
             //
-            // SPELL_NO_MINIMISE=1 disables the auto-minimise entirely. Useful
-            // for debugging the browser bridge where the user needs to click
-            // a terminal to read logs/messages — the default behaviour would
-            // hide Spell every time, making suggestions invisible.
-            let no_minimise = std::env::var("SPELL_NO_MINIMISE").is_ok();
-            if !now_our_app && !no_minimise {
+            // SPELL_AUTO_MINIMISE=1 restores the old behaviour for debugging
+            // or demos where hiding over non-writing apps is preferable.
+            let auto_minimise = std::env::var("SPELL_AUTO_MINIMISE").is_ok();
+            if !now_our_app && auto_minimise {
                 let is_writing = self.platform.is_writing_app(&fg);
                 if self.prev_was_writing_app != Some(is_writing) {
                     if !is_writing {
