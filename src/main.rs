@@ -1382,6 +1382,23 @@ struct PendingGrammarBert {
     candidates: Vec<(String, String, String)>, // (corrected_sentence, explanation, rule_name)
 }
 
+/// Pending grammar-filter refinement after a SpellingFull BERT response.
+///
+/// The BERT worker can only do BERT — it must not block on SWI-Prolog.
+/// So we run BERT first (no grammar), push the WritingError with the
+/// raw BERT pick so the underline is visible immediately, then dispatch
+/// an AsyncBatch to the grammar actor. When the grammar response lands,
+/// `apply_grammar_filter` substitutes / penalises candidates and we
+/// upgrade the existing WritingError's suggestion if grammar disagrees
+/// with BERT's pick.
+struct PendingSpellingGrammar {
+    request_id: u64,
+    word: String,
+    paragraph_id: String,
+    sentence: String,
+    bert_ranked: Vec<(String, f32)>,
+}
+
 /// Pending consonant confusion BERT scoring
 struct PendingConsonantBert {
     request_id: bert_worker::RequestId,
@@ -1611,6 +1628,8 @@ struct ContextApp {
     pending_grammar_bert: Vec<PendingGrammarBert>,
     /// Pending async BERT scoring for consonant confusion
     pending_consonant_bert: Vec<PendingConsonantBert>,
+    /// Pending async grammar-filter refinement (post-BERT spelling)
+    pending_spelling_grammar: Vec<PendingSpellingGrammar>,
     /// Suggestion window: (misspelled_word, candidates)
     suggestion_window: Option<(String, Vec<(String, f32)>)>,
     suggestion_selection: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
@@ -2012,6 +2031,7 @@ impl ContextApp {
         self.context = Default::default();
         self.spelling_queue.clear();
         self.pending_spelling_bert.clear();
+        self.pending_spelling_grammar.clear();
         self.pending_grammar_bert.clear();
         self.pending_consonant_bert.clear();
         self.grammar_queue.clear();
@@ -2360,6 +2380,7 @@ impl ContextApp {
             pending_spelling_bert: Vec::new(),
             pending_grammar_bert: Vec::new(),
             pending_consonant_bert: Vec::new(),
+            pending_spelling_grammar: Vec::new(),
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rule_info_window: None,
@@ -3323,8 +3344,42 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             });
             // Sync_error_underlines (called from poll_bert_responses after this
             // handler) is the single source for applying underlines in Word.
-            // See empty-scored fallback above for why we removed the direct
-            // `b.underline_word` call here.
+
+            // Dispatch async grammar batch to refine the suggestion. We've
+            // already pushed the WritingError with BERT's pick — the grammar
+            // pass may upgrade it (e.g. "teksta" → "tekst" after "en") via
+            // `apply_grammar_filter`. Update lands when grammar_actor responds;
+            // until then the user sees BERT's pick. NO worker-thread blocking.
+            if let Some(actor) = &self.grammar_actor {
+                let bert_ranked: Vec<(String, f32)> = rescored.iter().take(10).cloned().collect();
+                let last_start = deferred.sentence.rfind(|c: char| ".!?".contains(c))
+                    .map(|i| i + 1).unwrap_or(0);
+                let word_pos_in_sentence = deferred.sentence[last_start..]
+                    .to_lowercase()
+                    .find(&deferred.word.to_lowercase());
+                if let Some(_) = word_pos_in_sentence {
+                    let (ctx_before, ctx_after) = {
+                        let sl = deferred.sentence.to_lowercase();
+                        let wl = deferred.word.to_lowercase();
+                        match sl.find(&wl) {
+                            Some(p) => (sl[..p].trim_end().to_string(),
+                                        sl[p + wl.len()..].trim_start().to_string()),
+                            None => (sl.clone(), String::new()),
+                        }
+                    };
+                    let test_sentences = spelling_scorer::build_grammar_test_sentences(
+                        &bert_ranked, &ctx_before, &ctx_after,
+                    );
+                    let req_id = actor.send_async_batch(test_sentences);
+                    self.pending_spelling_grammar.push(PendingSpellingGrammar {
+                        request_id: req_id,
+                        word: deferred.word.clone(),
+                        paragraph_id: deferred.paragraph_id.clone(),
+                        sentence: deferred.sentence.clone(),
+                        bert_ranked,
+                    });
+                }
+            }
             return;
         }
 
@@ -3342,6 +3397,49 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
                 break;
             }
+        }
+    }
+
+    /// Apply grammar-filter refinement to a previously-pushed spelling
+    /// WritingError. The original WritingError was created with the
+    /// raw BERT pick so the underline is visible immediately. Grammar
+    /// substitution / penalisation may upgrade it (e.g. "teksta" → "tekst"
+    /// after the article "en"). Update the existing WritingError in place;
+    /// don't push a new one or change the underline position.
+    fn apply_grammar_refinement(
+        &mut self,
+        pending: PendingSpellingGrammar,
+        grammar_results: Vec<Vec<nostos_cognio::grammar::types::GrammarError>>,
+    ) {
+        let filtered = spelling_scorer::apply_grammar_filter(&pending.bert_ranked, &grammar_results);
+        let Some((best_after, _)) = filtered.first() else { return; };
+        let word_lower = pending.word.to_lowercase();
+        // Capitalize like the original push did.
+        let suggestion = {
+            let mut s = best_after.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
+            if !s.is_empty() {
+                let at_start = pending.sentence.to_lowercase().starts_with(&word_lower);
+                let is_upper = pending.sentence.to_lowercase().find(&word_lower)
+                    .and_then(|pos| pending.sentence[pos..].chars().next())
+                    .map_or(false, |c| c.is_uppercase());
+                if at_start || is_upper {
+                    let mut chars = s.chars();
+                    s = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
+                }
+            }
+            s
+        };
+        for e in &mut self.writing_errors {
+            if !matches!(e.category, ErrorCategory::Spelling) { continue; }
+            if e.word.to_lowercase() != word_lower { continue; }
+            if e.paragraph_id != pending.paragraph_id { continue; }
+            if e.ignored { continue; }
+            if e.suggestion != suggestion {
+                log!("grammar refinement upgrade: '{}' → '{}' (was '{}')",
+                    e.word, suggestion, e.suggestion);
+                e.suggestion = suggestion;
+            }
+            return;
         }
     }
 
@@ -3866,6 +3964,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             self.grammar_queue.clear();
             self.spelling_queue.clear();
             self.pending_spelling_bert.clear();
+            self.pending_spelling_grammar.clear();
             self.pending_grammar_bert.clear();
             self.pending_consonant_bert.clear();
             return;
@@ -4066,18 +4165,24 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return;
         }
 
-        // Detect whether the user just FINISHED a word (typed space/punct after
-        // a letter). Word reports paragraph contents with trailing whitespace
-        // on every keystroke regardless, so a paragraph-level "ends with space"
-        // check fires on every keystroke and saturates the grammar actor with
-        // partial-word checks. Comparing whitespace-delimited token counts
-        // gives us the "user typed space" signal we actually want.
+        // Detect whether the user just FINISHED a word (typed any whitespace
+        // char). Comparing the COUNT of whitespace characters between the
+        // previous and new paragraph text catches both "started next word"
+        // (already had a space, just typed first letter — count unchanged) and
+        // "typed trailing space and stopped" (last word completed with space
+        // but no next letter yet — count goes up by one). The earlier
+        // `split_whitespace().count()` heuristic missed the second case so
+        // a final word "skriffxe " never got sent.
+        //
+        // Why count instead of `ends_with(' ')`: Word reports paragraphs with
+        // an unpredictable amount of trailing whitespace on every keystroke,
+        // so an absolute ends-with-space check fires per keystroke.
         let prev_text_for_words = self.paragraph_texts.get(&para_id).cloned();
-        let prev_word_count = prev_text_for_words.as_deref()
-            .map(|t| t.split_whitespace().count())
+        let prev_ws_count = prev_text_for_words.as_deref()
+            .map(|t| t.chars().filter(|c| c.is_whitespace()).count())
             .unwrap_or(0);
-        let new_word_count = clean_text.split_whitespace().count();
-        let user_finished_word = new_word_count > prev_word_count;
+        let new_ws_count = clean_text.chars().filter(|c| c.is_whitespace()).count();
+        let user_finished_word = new_ws_count > prev_ws_count;
         let para_first_seen = prev_text_for_words.is_none();
 
         log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
@@ -4252,8 +4357,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 old_sentence_count, new_sentence_count);
             self.manager.clear_all_error_underlines();
             self.writing_errors.clear();
+self.writing_errors.clear();
             self.spelling_queue.clear();
             self.pending_spelling_bert.clear();
+            self.pending_spelling_grammar.clear();
             self.grammar_queue.clear();
             self.grammar_queue_total = 0;
             ; self.processed_sentence_hashes.clear();
@@ -4630,9 +4737,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 self.llm_waiting = false;
                 self.spelling_queue.clear();
                 self.grammar_queue.clear();
+self.grammar_queue.clear();
                 self.grammar_scanning = false;
                 self.grammar_errors.clear();
                 self.pending_spelling_bert.clear();
+                self.pending_spelling_grammar.clear();
                 self.pending_grammar_bert.clear();
                 self.pending_consonant_bert.clear();
                 self.pending_consonant_checks.clear();
@@ -5135,6 +5244,24 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     /// Poll grammar actor for results and create WritingErrors.
     fn poll_grammar_responses(&mut self) {
         let t_poll_start = Instant::now();
+
+        // ── Async grammar-filter refinements (post-BERT spelling) ──────────
+        // Drain all AsyncBatch responses first. Take the actor reference in
+        // a narrow scope so the apply_grammar_refinement call (mut self)
+        // doesn't conflict with the long-lived `actor` borrow below.
+        let mut batch_refinements: Vec<(PendingSpellingGrammar, Vec<Vec<nostos_cognio::grammar::types::GrammarError>>)> = Vec::new();
+        if let Some(actor) = &self.grammar_actor {
+            while let Some(batch) = actor.try_recv_batch() {
+                if let Some(idx) = self.pending_spelling_grammar.iter().position(|p| p.request_id == batch.request_id) {
+                    let pending = self.pending_spelling_grammar.remove(idx);
+                    batch_refinements.push((pending, batch.results));
+                }
+            }
+        }
+        for (pending, grammar_results) in batch_refinements {
+            self.apply_grammar_refinement(pending, grammar_results);
+        }
+
         let actor = match &self.grammar_actor {
             Some(a) => a,
             None => return,
@@ -6128,10 +6255,12 @@ impl eframe::App for ContextApp {
                     self.processed_sentence_hashes.clear();
                     self.grammar_inflight.clear();
                     self.grammar_queue.clear();
+self.grammar_queue.clear();
                     self.grammar_queue_total = 0;
                     self.grammar_scanning = false;
                     self.spelling_queue.clear();
                     self.pending_spelling_bert.clear();
+                    self.pending_spelling_grammar.clear();
                     self.pending_grammar_bert.clear();
                     self.pending_consonant_bert.clear();
                     self.pending_consonant_checks.clear();
@@ -6884,11 +7013,13 @@ impl eframe::App for ContextApp {
                     // detour Word → Slack → Word doesn't drop them in the
                     // middle hop. The display layer hides them outside Word.
                     let keep_word_errors = from_word || to_word;
+let keep_word_errors = from_word || to_word;
                     log!("Bridge switched {} → {} — {} errors, {} spelling queue, {} pending BERT, {} grammar queue",
                         from, to, self.writing_errors.len(), self.spelling_queue.len(),
                         self.pending_spelling_bert.len(), self.grammar_queue.len());
                     self.spelling_queue.clear();
                     self.pending_spelling_bert.clear();
+                    self.pending_spelling_grammar.clear();
                     self.pending_grammar_bert.clear();
                     self.pending_consonant_bert.clear();
                     self.grammar_queue.clear();
@@ -11526,6 +11657,7 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
             app.pending_consonant_checks.clear();
             app.pending_consonant_bert.clear();
             app.pending_spelling_bert.clear();
+            app.pending_spelling_grammar.clear();
             app.check_spelling(word, sentence, "", 0);
             // Drain BERT worker responses (async consonant + spelling re-ranking)
             drain_bert_responses(&mut app);
