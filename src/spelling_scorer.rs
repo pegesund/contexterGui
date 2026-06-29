@@ -662,8 +662,160 @@ pub fn subword_score(model: &mut Model, sentence: &str, candidate: &str) -> f32 
     total / scored as f32
 }
 
+/// Phase 2a: BERT scoring only — no grammar.
+///
+/// The grammar batch used to live inside `score_and_rerank` and blocked the
+/// caller's thread for hundreds of ms (one SWI-Prolog call per candidate
+/// against a single-threaded actor). When the BERT worker called this
+/// synchronously, completion requests piled up behind every spelling check.
+///
+/// This function does only what BERT can do: boundary score the candidates
+/// in context, then hybrid sentence-rerank the top ones. Grammar filtering
+/// is now the caller's job and runs on the grammar actor in parallel.
+///
+/// Returns BERT-ranked candidates (best first), ortho-weighted, ready for a
+/// separate `apply_grammar_filter` pass.
+pub fn bert_score_only(
+    model: &mut Model,
+    candidates: &[(String, f32)],
+    context_before: &str,
+    context_after: &str,
+    sentence: &str,
+) -> Vec<(String, f32)> {
+    if candidates.is_empty() { return Vec::new(); }
+
+    let all_cands: Vec<String> = candidates.iter().take(30).map(|(c, _)| c.clone()).collect();
+
+    // Step 1: Boundary scoring
+    let scored: Vec<(String, f32)> = match spelling::score_spelling(model, context_before, context_after, &all_cands) {
+        Ok(result) => result.scored_candidates.into_iter()
+            .map(|(c, s)| (c.trim().to_string(), s))
+            .collect(),
+        Err(_) => return candidates.to_vec(),
+    };
+
+    let ortho_map: HashMap<String, f32> = candidates.iter().cloned().collect();
+
+    // Apply ortho weighting (sqrt) over BERT-scored
+    let mut weighted: Vec<(String, f32)> = scored.iter().map(|(c, bert_score)| {
+        let ct = c.trim().to_string();
+        let ortho = ortho_map.get(ct.as_str()).copied().unwrap_or(0.5);
+        (ct, bert_score * ortho.sqrt())
+    }).collect();
+    weighted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Step 4 (formerly Step 3 of score_and_rerank): hybrid sentence rerank
+    if weighted.len() > 1 {
+        let mut top_set: Vec<String> = Vec::new();
+        let mut top_seen = HashSet::new();
+        for (c, _) in weighted.iter().take(5) {
+            if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
+        }
+        for (c, _) in candidates.iter().take(15) {
+            if top_seen.insert(c.clone()) { top_set.push(c.clone()); }
+        }
+        let top_set: Vec<String> = top_set.into_iter().map(|c| c.trim().to_string()).collect();
+        let sentence_lower = sentence.to_lowercase();
+        let sentence_cased = sentence.to_string();
+        let ctx_before_lower = context_before.to_lowercase();
+        let ctx_after_lower = context_after.to_lowercase();
+        let word_lower = if let Some(pos) = sentence_lower.find(&ctx_before_lower) {
+            let after_before = pos + ctx_before_lower.len();
+            if let Some(apos) = sentence_lower[after_before..].find(&ctx_after_lower.trim_start()) {
+                sentence_lower[after_before..after_before + apos].trim().to_string()
+            } else {
+                sentence_lower[after_before..].trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace()).to_string()
+            }
+        } else {
+            all_cands.first().map(|c| c.to_lowercase()).unwrap_or_default()
+        };
+        let mut reranked: Vec<(String, f32)> = top_set.iter().map(|candidate| {
+            let corrected_sent = if let Some(pos) = sentence_cased.to_lowercase().find(&word_lower) {
+                format!("{}{}{}", &sentence_cased[..pos], candidate, &sentence_cased[pos + word_lower.len()..])
+            } else {
+                format!("{}{}{}", context_before, candidate, context_after)
+            };
+            let sent_score = subword_score(model, &corrected_sent, candidate);
+            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.5);
+            (candidate.clone(), sent_score * ortho.sqrt())
+        }).collect();
+        reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        reranked
+    } else {
+        weighted
+    }
+}
+
+/// Phase 2b: Apply grammar filter to BERT-ranked candidates.
+///
+/// Runs on the main thread (or wherever the grammar response lands).
+/// `grammar_results[i]` are the errors for candidate `bert_ranked[i]` after
+/// substitution into the sentence. Caller must pre-build the test sentences
+/// the same way `build_grammar_test_sentences` does so indices line up.
+///
+/// Behaviour matches the original score_and_rerank Step 2:
+///   - Candidate with no errors → keep at current score.
+///   - Candidate with error carrying a single-word suggestion → replace
+///     the candidate with the suggestion (so "teksta" becomes "tekst"
+///     after "en"). Original candidate kept at 0.8× score as fallback.
+///   - Candidate with error and no usable suggestion → demote to 0.8×.
+pub fn apply_grammar_filter(
+    bert_ranked: &[(String, f32)],
+    grammar_results: &[Vec<GrammarError>],
+) -> Vec<(String, f32)> {
+    if bert_ranked.is_empty() { return Vec::new(); }
+    let mut out: Vec<(String, f32)> = Vec::new();
+    let mut seen = HashSet::new();
+    for ((candidate, score), errs) in bert_ranked.iter().zip(grammar_results.iter()) {
+        if errs.is_empty() {
+            if seen.insert(candidate.clone()) {
+                out.push((candidate.clone(), *score));
+            }
+            continue;
+        }
+        for err in errs {
+            if !err.suggestion.is_empty() && err.suggestion != *candidate && !err.suggestion.contains('|') {
+                let sug = err.suggestion.to_lowercase();
+                if seen.insert(sug.clone()) {
+                    out.push((sug, *score));
+                }
+            }
+        }
+        if seen.insert(candidate.clone()) {
+            out.push((candidate.clone(), score * 0.8));
+        }
+    }
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// Build the test sentences `apply_grammar_filter` expects: one sentence
+/// per candidate with the candidate substituted in place of the misspelled
+/// word. The grammar actor batches these and returns per-sentence errors.
+pub fn build_grammar_test_sentences(
+    bert_ranked: &[(String, f32)],
+    context_before: &str,
+    context_after: &str,
+) -> Vec<String> {
+    let last_start = context_before.rfind(|c: char| ".!?".contains(c))
+        .map(|i| i + 1).unwrap_or(0);
+    let fragment = context_before[last_start..].trim();
+    bert_ranked.iter()
+        .map(|(c, _)| if context_after.is_empty() {
+            format!("{} {}.", fragment, c)
+        } else {
+            format!("{} {} {}", fragment, c, context_after.trim_start())
+        })
+        .collect()
+}
+
 /// Phase 2: BERT scoring + grammar correction + hybrid sentence re-ranking.
 /// `grammar_check` takes sentences and returns errors per sentence.
+///
+/// Kept as a synchronous wrapper for `test_spelling`, `dyslexia_tests`,
+/// and any caller that doesn't have the worker/actor async plumbing.
+/// Production GUI uses `bert_score_only` + `apply_grammar_filter` over
+/// the async grammar actor instead — see `feedback_*` memory.
 pub fn score_and_rerank(
     model: &mut Model,
     grammar_check: &mut dyn FnMut(&[String]) -> Vec<Vec<GrammarError>>,

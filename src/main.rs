@@ -3168,13 +3168,22 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
         }
         // Process non-completion responses
+        let mut spelling_pushed = false;
         for resp in other_responses {
             match resp {
                 bert_worker::BertResponse::Completion { .. } => unreachable!(),
                 bert_worker::BertResponse::SpellingScore { id, scored_candidates } => {
                     if let Some(idx) = self.pending_spelling_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_spelling_bert.remove(idx);
+                        let had_deferred = pending.deferred_push.is_some();
                         self.handle_spelling_bert_response(pending, &scored_candidates);
+                        // A deferred push creates a brand-new WritingError that
+                        // needs its doc-range computed and the underline applied
+                        // in Word. Without this, sync_error_underlines only runs
+                        // on paragraph clears and the new underline never paints.
+                        if had_deferred {
+                            spelling_pushed = true;
+                        }
                     } else if let Some(idx) = self.pending_grammar_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_grammar_bert.remove(idx);
                         self.handle_grammar_bert_response(pending, &scored_candidates);
@@ -3195,12 +3204,54 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // We refactored to *only* push a WritingError once BERT has ranked
         // its candidates, so there is no transient ortho-first guess to
         // refresh stale state for.
+        if spelling_pushed {
+            self.sync_error_underlines();
+        }
     }
 
     /// Handle BERT spelling score response for spelling re-ranking.
     fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scored_candidates: &[(String, f32)]) {
         if scored_candidates.is_empty() {
-            log!("spelling BERT response: empty scored_candidates");
+            // Worker couldn't produce any candidate (compound_walker found
+            // nothing for gibberish-like input, BERT returned -inf for all,
+            // etc.). Still surface the underline — the user benefits from
+            // seeing "this is misspelled" even if we have no suggestion.
+            // Without this fallback every unknown-but-unsuggestable word
+            // (asdffwh, sadffdsa, fasfwwf) silently disappears after the
+            // grammar response.
+            log!("spelling BERT response: empty scored_candidates — pushing underline without suggestion");
+            if let Some(deferred) = &pending.deferred_push {
+                let already = self.writing_errors.iter().any(|e| {
+                    e.word.to_lowercase() == deferred.word.to_lowercase()
+                        && e.paragraph_id == deferred.paragraph_id
+                });
+                if !already {
+                    self.writing_errors.push(WritingError {
+                        category: ErrorCategory::Spelling,
+                        word: deferred.word.clone(),
+                        suggestion: String::new(),
+                        explanation: deferred.explanation.clone(),
+                        rule_name: "stavefeil".to_string(),
+                        sentence_context: deferred.sentence.clone(),
+                        doc_offset: deferred.doc_offset,
+                        position: deferred.position,
+                        ignored: false,
+                        word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                        paragraph_id: deferred.paragraph_id.clone(),
+                        error_word: String::new(),
+                        top_candidates: Vec::new(),
+                    });
+                    // Underline is applied by `sync_error_underlines` after this
+                    // handler returns — see `poll_bert_responses` `spelling_pushed`
+                    // gate. We used to call `b.underline_word` directly here AND
+                    // then sync_error_underlines ran again via its COM range
+                    // fallback. The double-apply made Word's
+                    // `mark_error_underline` return `ok=false` on every
+                    // subsequent error in the same paragraph (only the first
+                    // underline visible). Removed the direct call so sync is
+                    // the single source of truth.
+                }
+            }
             return;
         }
         // scored_candidates is already sorted best-first by the worker
@@ -3270,9 +3321,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 error_word: String::new(),
                 top_candidates: top5,
             });
-            for b in &self.manager.bridges {
-                b.underline_word(&deferred.word, &deferred.paragraph_id, "#FF0000");
-            }
+            // Sync_error_underlines (called from poll_bert_responses after this
+            // handler) is the single source for applying underlines in Word.
+            // See empty-scored fallback above for why we removed the direct
+            // `b.underline_word` call here.
             return;
         }
 
@@ -4014,6 +4066,20 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return;
         }
 
+        // Detect whether the user just FINISHED a word (typed space/punct after
+        // a letter). Word reports paragraph contents with trailing whitespace
+        // on every keystroke regardless, so a paragraph-level "ends with space"
+        // check fires on every keystroke and saturates the grammar actor with
+        // partial-word checks. Comparing whitespace-delimited token counts
+        // gives us the "user typed space" signal we actually want.
+        let prev_text_for_words = self.paragraph_texts.get(&para_id).cloned();
+        let prev_word_count = prev_text_for_words.as_deref()
+            .map(|t| t.split_whitespace().count())
+            .unwrap_or(0);
+        let new_word_count = clean_text.split_whitespace().count();
+        let user_finished_word = new_word_count > prev_word_count;
+        let para_first_seen = prev_text_for_words.is_none();
+
         log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
         self.paragraph_texts.insert(para_id.clone(), clean_text.clone());
 
@@ -4062,12 +4128,14 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             self.manager.clear_error_underline(*start, *end);
         }
 
-        // Send new/changed sentences to grammar actor
-        // Compute per-sentence offsets within the paragraph
-        let para_ends_with_boundary = clean_text.ends_with(' ')
-            || clean_text.ends_with('.') || clean_text.ends_with('!')
-            || clean_text.ends_with('?') || clean_text.ends_with(':')
-            || clean_text.ends_with('\t');
+        // Send new/changed sentences to grammar actor.
+        // Per "vent på space" rule: only send when the user has finished a
+        // word (or the sentence ends with terminal punctuation, or this is
+        // the first time we've seen the paragraph). Word's trailing-space
+        // padding made the old `para_ends_with_boundary` check fire on every
+        // keystroke, saturating the SWI-Prolog actor and starving the
+        // completion path.
+        let _ = (para_first_seen, user_finished_word); // used below
         if let Some(actor) = &self.grammar_actor {
             let clean_lower = clean_text.to_lowercase();
             let mut search_from = 0usize;
@@ -4095,7 +4163,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
                 });
 
-                if is_complete || para_ends_with_boundary {
+                if is_complete || user_finished_word || para_first_seen {
                     let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                     actor.check_sentence_with_doc(sentence_text, doc_offset, &para_id, 0, &self.last_doc_text, &uw);
                     self.grammar_inflight.insert(sent_h);
@@ -5092,15 +5160,18 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             };
 
             // Guard: discard if the paragraph is no longer tracked (app switched and
-            // paragraph_sentence_hashes was cleared) OR if the sentence hash no longer
-            // matches the current paragraph content (user edited the text).
+            // paragraph_sentence_hashes was cleared). The sentence-hash-still-current
+            // check used to live here too but it threw away every response for a
+            // sentence the user had typed past — even though the unknown_words it
+            // carried were still valid typos in the paragraph. Trust
+            // `grammar_inflight`: if this hash was in_flight, the response is
+            // legitimately ours regardless of how much the user has typed since.
             if !resp.paragraph_id.is_empty() {
-                let is_stale = match self.paragraph_sentence_hashes.get(&resp.paragraph_id) {
-                    Some(current_hashes) => !current_hashes.contains(&sent_h),
-                    None => true, // paragraph cleared on app switch → stale
-                };
-                if is_stale {
-                    log!("Stale grammar response discarded: sentence no longer in para={}", trunc(&resp.paragraph_id, 10));
+                let paragraph_gone = !self.paragraph_sentence_hashes.contains_key(&resp.paragraph_id);
+                let was_in_flight = self.grammar_inflight.contains(&sent_h);
+                if paragraph_gone || !was_in_flight {
+                    log!("Stale grammar response discarded: paragraph gone={} in_flight={} para={}",
+                        paragraph_gone, was_in_flight, trunc(&resp.paragraph_id, 10));
                     self.grammar_inflight.remove(&sent_h);
                     continue;
                 }
@@ -5258,21 +5329,42 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             // via AppleScript (set underline of font to underline none).
         }
 
-        // Now the actor borrow is released — fire BERT requests for each
-        // queued unknown word, deferring the WritingError push until the
-        // response lands. If BERT isn't available we fall back to the
-        // grammar checker's fuzzy suggestion so the user still sees an
-        // underline immediately.
+        // Now the actor borrow is released — fire one SpellingFull request
+        // per unknown word to the BERT worker. The worker runs the full
+        // pipeline (candidate generation + grammar batch + BERT rerank)
+        // off the main thread, so this loop no longer blocks rendering.
+        // If BERT isn't ready we fall back to the grammar checker's fuzzy
+        // suggestion so the user still sees an underline immediately.
+        let user_dict_words_snapshot: Vec<String> = self.user_dict.as_ref()
+            .map(|ud| ud.list_words()).unwrap_or_default();
+        let doc_word_counts_snapshot = self.doc_word_counts.clone();
         for (deferred, fuzzy_fallback) in unknown_words_to_rank {
-            let pending_before = self.pending_spelling_bert.len();
+            let mut request_id_opt: Option<bert_worker::RequestId> = None;
             if self.bert_ready {
-                let _ = self.find_spelling_suggestions(&deferred.word, &deferred.sentence);
+                if let Some(worker) = &mut self.bert_worker {
+                    let id = worker.send(|id| bert_worker::BertRequest::SpellingFull {
+                        id,
+                        word: deferred.word.clone(),
+                        sentence: deferred.sentence.clone(),
+                        doc_word_counts: doc_word_counts_snapshot.clone(),
+                        user_dict_words: user_dict_words_snapshot.clone(),
+                    });
+                    request_id_opt = Some(id);
+                }
             }
-            if self.pending_spelling_bert.len() > pending_before {
-                let new_idx = self.pending_spelling_bert.len() - 1;
-                self.pending_spelling_bert[new_idx].error_doc_offset = deferred.doc_offset;
-                self.pending_spelling_bert[new_idx].deferred_push = Some(deferred.clone());
-                log!("  deferred spelling push: '{}' (waiting for BERT rank)", deferred.word);
+            if let Some(request_id) = request_id_opt {
+                self.pending_spelling_bert.push(PendingSpellingBert {
+                    request_id,
+                    error_idx_word: deferred.word.to_lowercase(),
+                    error_doc_offset: deferred.doc_offset,
+                    // Ortho scores are computed on the worker; main thread
+                    // doesn't see them. handle_spelling_bert_response only
+                    // uses the BERT-scored result so this is fine empty.
+                    candidates: Vec::new(),
+                    deferred_push: Some(deferred.clone()),
+                });
+                log!("  deferred spelling push: '{}' (waiting for BERT rank, id={})",
+                     deferred.word, request_id);
             } else {
                 let unk_word_lower = deferred.word.to_lowercase();
                 let mut best = fuzzy_fallback.first().cloned().unwrap_or_default()
@@ -6605,6 +6697,8 @@ impl eframe::App for ContextApp {
                                 self.embedding_store.clone(),
                                 self.analyzer.clone(),
                                 gs,
+                                self.compound_fst.clone(),
+                                self.language.clone().into(),
                             ));
                             self.bert_ready = true;
                         }
@@ -11397,6 +11491,8 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
                                 embedding_store.clone(),
                                 app.analyzer.clone(),
                                 None,
+                                app.compound_fst.clone(),
+                                app.language.clone().into(),
                             ));
                             app.bert_ready = true;
                             eprintln!("BERT worker spawned");

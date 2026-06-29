@@ -44,6 +44,22 @@ pub struct SyncBatchResponse {
     pub results: Vec<Vec<GrammarError>>,
 }
 
+/// Batch ASYNCHRONOUS check — results come back via the handle's batch
+/// receiver channel rather than a per-request reply channel. Avoids the
+/// caller having to block their thread waiting on the actor.
+///
+/// Used by the BERT spelling pipeline so the BERT worker can hand off
+/// candidate-grammar filtering without blocking on SWI-Prolog.
+pub struct AsyncBatchRequest {
+    pub request_id: u64,
+    pub sentences: Vec<String>,
+}
+
+pub struct AsyncBatchResponse {
+    pub request_id: u64,
+    pub results: Vec<Vec<GrammarError>>,
+}
+
 /// Result sent back from the grammar actor — full check_sentence_full output.
 pub struct GrammarCheckResponse {
     pub sentence: String,
@@ -60,12 +76,15 @@ pub enum ActorMessage {
     Async(GrammarCheckRequest),
     Sync(SyncCheckRequest),
     SyncBatch(SyncBatchRequest),
+    AsyncBatch(AsyncBatchRequest),
 }
 
 /// Handle to communicate with the grammar actor
 pub struct GrammarActorHandle {
     sender: mpsc::Sender<ActorMessage>,
     receiver: mpsc::Receiver<GrammarCheckResponse>,
+    batch_receiver: mpsc::Receiver<AsyncBatchResponse>,
+    next_batch_id: std::cell::Cell<u64>,
 }
 
 impl GrammarActorHandle {
@@ -122,6 +141,27 @@ impl GrammarActorHandle {
     pub fn try_recv(&self) -> Option<GrammarCheckResponse> {
         self.receiver.try_recv().ok()
     }
+
+    /// Send a batch of sentences for asynchronous checking. Returns the
+    /// `request_id` the response will carry. Caller polls `try_recv_batch`
+    /// to retrieve results. Used by the spelling pipeline so the BERT
+    /// worker doesn't block on SWI-Prolog (`feedback_*` memory: BERT
+    /// worker must not call grammar synchronously).
+    pub fn send_async_batch(&self, sentences: Vec<String>) -> u64 {
+        let id = self.next_batch_id.get();
+        self.next_batch_id.set(id.wrapping_add(1));
+        crate::log!("ACTOR ASYNC BATCH SEND: id={} {} sentences", id, sentences.len());
+        let _ = self.sender.send(ActorMessage::AsyncBatch(AsyncBatchRequest {
+            request_id: id,
+            sentences,
+        }));
+        id
+    }
+
+    /// Non-blocking poll for async-batch results.
+    pub fn try_recv_batch(&self) -> Option<AsyncBatchResponse> {
+        self.batch_receiver.try_recv().ok()
+    }
 }
 
 /// Grammar batch check using a sender clone. Can be called from any thread.
@@ -159,6 +199,7 @@ pub fn spawn_grammar_actor_with_loader(
 ) -> GrammarActorHandle {
     let (req_tx, req_rx) = mpsc::channel::<ActorMessage>();
     let (resp_tx, resp_rx) = mpsc::channel::<GrammarCheckResponse>();
+    let (batch_tx, batch_rx) = mpsc::channel::<AsyncBatchResponse>();
 
     std::thread::Builder::new()
         .name("grammar-actor".into())
@@ -271,6 +312,16 @@ pub fn spawn_grammar_actor_with_loader(
                             .collect();
                         let _ = req.reply.send(SyncBatchResponse { results });
                     }
+                    ActorMessage::AsyncBatch(req) => {
+                        let results: Vec<Vec<GrammarError>> = req.sentences.iter()
+                            .map(|s| checker.check_sentence(s))
+                            .collect();
+                        let _ = batch_tx.send(AsyncBatchResponse {
+                            request_id: req.request_id,
+                            results,
+                        });
+                        repaint_ctx.request_repaint();
+                    }
                 }
             }
             std::mem::forget(checker);
@@ -281,5 +332,7 @@ pub fn spawn_grammar_actor_with_loader(
     GrammarActorHandle {
         sender: req_tx,
         receiver: resp_rx,
+        batch_receiver: batch_rx,
+        next_batch_id: std::cell::Cell::new(1),
     }
 }

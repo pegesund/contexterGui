@@ -63,6 +63,28 @@ pub enum BertRequest {
         top_k: usize,
     },
 
+    /// Full spelling pipeline — runs `find_candidates_pipeline` (compound
+    /// walker + prefix/wordfreq/user-dict/inflected sources + ortho score +
+    /// dict-filter), then grammar-batch filter, then `score_and_rerank`
+    /// (BERT boundary + sentence-level hybrid). Sends back the same
+    /// `SpellingScore` response shape.
+    ///
+    /// Why this exists: `poll_grammar_responses` on the main thread used
+    /// to call `find_spelling_suggestions` for every unknown word in a
+    /// grammar response, which blocked the UI for hundreds of ms (mostly
+    /// in the synchronous `actor.check_sentences_batch` call). The worker
+    /// thread can run the same work without freezing rendering.
+    ///
+    /// `doc_word_counts` and `user_dict_words` are snapshots so the worker
+    /// doesn't need to share mutable state with the main thread.
+    SpellingFull {
+        id: RequestId,
+        word: String,
+        sentence: String,
+        doc_word_counts: HashMap<String, u16>,
+        user_dict_words: Vec<String>,
+    },
+
     /// Full word completion via complete_word() — the original working pipeline.
     CompleteWord {
         id: RequestId,
@@ -153,6 +175,12 @@ pub fn spawn_bert_worker(
     embedding_store: Option<Arc<EmbeddingStore>>,
     analyzer: Option<Arc<mtag::Analyzer>>,
     grammar_sender: Option<mpsc::Sender<crate::grammar_actor::ActorMessage>>,
+    // SpellingFull request needs the compound FST and the active language
+    // trait object to drive `find_candidates_pipeline`. Optional so callers
+    // that haven't loaded the compound FST yet still get a working worker
+    // (SpellingFull just produces an empty result in that case).
+    compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>>,
+    language: Arc<dyn language::LanguageBundle>,
 ) -> BertWorkerHandle {
     let (req_tx, req_rx) = mpsc::channel::<BertRequest>();
     let (resp_tx, resp_rx) = mpsc::channel::<BertResponse>();
@@ -161,7 +189,8 @@ pub fn spawn_bert_worker(
         .name("bert-worker".to_string())
         .spawn(move || {
             worker_loop(model, repaint_ctx, req_rx, resp_tx, build_bpe, build_mtag, build_right,
-                prefix_index, baselines, wordfreq_shared, embedding_store, analyzer, grammar_sender);
+                prefix_index, baselines, wordfreq_shared, embedding_store, analyzer, grammar_sender,
+                compound_fst, language);
         })
         .expect("Failed to spawn BERT worker thread");
 
@@ -186,12 +215,29 @@ fn worker_loop(
     embedding_store: Option<Arc<EmbeddingStore>>,
     analyzer: Option<Arc<mtag::Analyzer>>,
     grammar_sender: Option<mpsc::Sender<crate::grammar_actor::ActorMessage>>,
+    compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>>,
+    language: Arc<dyn language::LanguageBundle>,
 ) {
     use std::ops::Deref;
     let mask_tok = model.mask_token_str();
-    while let Ok(req) = rx.recv() {
-        // Drain stale completion requests: if newer CompleteWord is queued, skip to it.
-        // Never skip non-completion requests (SpellingScore, MlmForward).
+    // Local pending queue for different-type requests that come in while
+    // we're draining stale completions. The old code dropped them on the
+    // floor — see the TODO from 2026-04 — which silently lost every
+    // SpellingFull request that arrived between two CompleteWord requests.
+    let mut pending: std::collections::VecDeque<BertRequest> = std::collections::VecDeque::new();
+    loop {
+        let req = if let Some(r) = pending.pop_front() {
+            r
+        } else {
+            match rx.recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            }
+        };
+        // Drain stale completion requests: if newer CompleteWord/Completion
+        // of the SAME type is queued, replace the current one. Different-type
+        // requests (SpellingFull, SpellingScore, MlmForward) go on the local
+        // pending queue and run after the current one — never dropped.
         let req = {
             let mut current = req;
             loop {
@@ -205,10 +251,7 @@ fn worker_loop(
                         if same_type {
                             current = newer; // Skip older, keep newer
                         } else {
-                            // Different type — process current first, then newer next iteration
-                            // Can't put back into mpsc, so process current now and newer is lost
-                            // TODO: use a VecDeque if this becomes an issue
-                            break;
+                            pending.push_back(newer);
                         }
                     }
                     Err(_) => break, // Queue empty
@@ -264,21 +307,13 @@ fn worker_loop(
             BertRequest::SpellingScore { id, context_before, context_after, candidates, sentence } => {
                 // Build ortho-scored candidates for the shared scorer
                 let ortho_candidates: Vec<(String, f32)> = candidates.iter()
-                    .map(|c| (c.clone(), 0.5)) // default ortho — real scores come from main thread
+                    .map(|c| (c.clone(), 0.5))
                     .collect();
-                // sentence is passed directly from the caller — must be the
-                // full original sentence with the misspelled word still in
-                // it, NOT a concatenation of context_before + context_after.
-                // See the doc-comment on BertRequest::SpellingScore for why.
-                let mut grammar_check = |sentences: &[String]| -> Vec<Vec<nostos_cognio::grammar::types::GrammarError>> {
-                    if let Some(ref gs) = grammar_sender {
-                        crate::grammar_actor::grammar_batch_via_sender(gs, sentences)
-                    } else {
-                        sentences.iter().map(|_| Vec::new()).collect()
-                    }
-                };
-                let scored = crate::spelling_scorer::score_and_rerank(
-                    &mut model, &mut grammar_check, &ortho_candidates,
+                // No grammar call here — grammar runs on the grammar actor in
+                // parallel, dispatched by main thread after this response lands.
+                // See `feedback_*` memory: BERT worker must never block on SWI.
+                let scored = crate::spelling_scorer::bert_score_only(
+                    &mut model, &ortho_candidates,
                     &context_before, &context_after, &sentence,
                 );
                 let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
@@ -288,6 +323,51 @@ fn worker_loop(
             BertRequest::MlmForward { id, masked_text, top_k } => {
                 let predictions = mlm_forward_impl(&mut model, &masked_text, top_k);
                 let _ = tx.send(BertResponse::MlmForward { id, predictions });
+                repaint_ctx.request_repaint();
+            }
+
+            BertRequest::SpellingFull { id, word, sentence, doc_word_counts, user_dict_words } => {
+                // Full pipeline on the worker thread — replaces the main
+                // thread's `find_spelling_suggestions`. NO grammar call —
+                // grammar batch is dispatched async by main thread after
+                // this response lands (see `feedback_*` memory).
+                let analyzer_ref = match analyzer.as_deref() {
+                    Some(a) => a,
+                    None => {
+                        let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: Vec::new() });
+                        repaint_ctx.request_repaint();
+                        continue;
+                    }
+                };
+                let compound_fst_ref = compound_fst.as_deref();
+                let ortho_candidates = crate::spelling_scorer::find_candidates_pipeline(
+                    analyzer_ref,
+                    compound_fst_ref,
+                    wordfreq_shared.as_deref(),
+                    &user_dict_words,
+                    &doc_word_counts,
+                    &word,
+                    &sentence,
+                    &*language,
+                );
+                let word_lower = word.to_lowercase();
+                let sentence_lower = sentence.to_lowercase();
+                let (context_before, context_after) = if let Some(pos) = sentence_lower.find(&word_lower) {
+                    (sentence_lower[..pos].trim_end().to_string(),
+                     sentence_lower[pos + word_lower.len()..].trim_start().to_string())
+                } else {
+                    (sentence_lower.clone(), String::new())
+                };
+                let (context_after, rerank_sentence) = if context_after.trim().is_empty() {
+                    (".".to_string(), format!("{}.", sentence))
+                } else {
+                    (context_after, sentence.clone())
+                };
+                let scored = crate::spelling_scorer::bert_score_only(
+                    &mut model, &ortho_candidates,
+                    &context_before, &context_after, &rerank_sentence,
+                );
+                let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
                 repaint_ctx.request_repaint();
             }
 
