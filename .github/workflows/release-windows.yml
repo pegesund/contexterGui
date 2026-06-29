@@ -413,11 +413,13 @@ jobs:
               exit 1
           }
 
-          # ONNX Runtime and whisper.dll are built with MSVC. Clean Windows
-          # machines may not have the matching VC++ runtime installed, so copy
-          # the redistributable DLLs beside the native libraries. This keeps
-          # LoadLibraryExW from failing with ERROR_MOD_NOT_FOUND even when the
-          # top-level DLL itself is present.
+          # ONNX Runtime, whisper.dll, and the Rust MSVC build all depend on
+          # the VC++ runtime. Clean Windows machines may not have the matching
+          # redistributable installed, so deploy the runtime app-local:
+          #   - next to Spell.exe for process startup
+          #   - in Frameworks\ for native DLLs loaded from there
+          # Without the Spell.exe sibling copy, users can see
+          # "VCRUNTIME140.dll was not found" during first install/launch.
           $vcRequiredDeps = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
           $vcOptionalDeps = @("concrt140.dll", "msvcp140_1.dll")
           $vcSourceDirs = @(
@@ -429,14 +431,27 @@ jobs:
           )
 
           function Copy-VcRuntimeDep([string]$dep, [bool]$required) {
-              if (Test-Path "$bundleDir\Frameworks\$dep") { return }
+              $frameworkTarget = "$bundleDir\Frameworks\$dep"
+              $exeTarget = "$bundleDir\$dep"
+              if ((Test-Path $frameworkTarget) -and (Test-Path $exeTarget)) { return }
+              if ((Test-Path $frameworkTarget) -and -not (Test-Path $exeTarget)) {
+                  Write-Host "  copying $dep from Frameworks to Spell.exe directory"
+                  Copy-Item $frameworkTarget $exeTarget
+                  return
+              }
+              if ((Test-Path $exeTarget) -and -not (Test-Path $frameworkTarget)) {
+                  Write-Host "  copying $dep from Spell.exe directory to Frameworks"
+                  Copy-Item $exeTarget $frameworkTarget
+                  return
+              }
 
               foreach ($dir in $vcSourceDirs) {
                   if (-not (Test-Path $dir)) { continue }
                   $candidate = Join-Path $dir $dep
                   if (Test-Path $candidate) {
                       Write-Host "  copying $dep from $dir"
-                      Copy-Item $candidate "$bundleDir\Frameworks\"
+                      Copy-Item $candidate $frameworkTarget
+                      Copy-Item $candidate $exeTarget
                       return
                   }
 
@@ -445,7 +460,8 @@ jobs:
                       Select-Object -First 1 -ExpandProperty FullName
                   if ($hit) {
                       Write-Host "  copying $dep from $hit"
-                      Copy-Item $hit "$bundleDir\Frameworks\"
+                      Copy-Item $hit $frameworkTarget
+                      Copy-Item $hit $exeTarget
                       return
                   }
               }
@@ -459,6 +475,16 @@ jobs:
 
           foreach ($dep in $vcRequiredDeps) { Copy-VcRuntimeDep $dep $true }
           foreach ($dep in $vcOptionalDeps) { Copy-VcRuntimeDep $dep $false }
+
+          $vcMissing = @()
+          foreach ($dep in $vcRequiredDeps) {
+              if (-not (Test-Path "$bundleDir\$dep")) { $vcMissing += "$dep beside Spell.exe" }
+              if (-not (Test-Path "$bundleDir\Frameworks\$dep")) { $vcMissing += "$dep in Frameworks" }
+          }
+          if ($vcMissing.Count -gt 0) {
+              Write-Error "Missing required app-local MSVC runtime copy: $($vcMissing -join ', ')"
+              exit 1
+          }
 
           # Whisper native runtime. WHISPER_DLL may point directly to
           # whisper.dll; otherwise we look for the local developer/CI build
