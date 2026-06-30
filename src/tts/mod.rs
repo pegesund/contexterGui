@@ -180,6 +180,14 @@ pub fn available_voices() -> Vec<VoiceInfo> {
     ENGINE.get().map_or(Vec::new(), |e| e.available_voices())
 }
 
+pub fn voice_matches_language(name: &str, lang_code: &str) -> bool {
+    if name.starts_with("piper:") {
+        piper_engine::voice_matches_language(name, lang_code)
+    } else {
+        true
+    }
+}
+
 pub fn current_voice() -> String {
     ENGINE.get().map_or(String::new(), |e| e.current_voice())
 }

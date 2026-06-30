@@ -10025,7 +10025,10 @@ let keep_word_errors = from_word || to_word;
                             let current = tts::current_voice();
                             let piper_root = tts::piper_data_root();
                             let (piper_voices, system_voices): (Vec<_>, Vec<_>) =
-                                voice_list.iter().partition(|v| v.name.starts_with("piper:"));
+                                voice_list
+                                    .iter()
+                                    .filter(|v| tts::voice_matches_language(&v.name, &current_lang_code))
+                                    .partition(|v| v.name.starts_with("piper:"));
 
                             if !piper_voices.is_empty() {
                                 ui.label(egui::RichText::new("Piper").size(13.0).color(off_color));
@@ -11855,6 +11858,14 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
         let is_legacy_acapela = v == "Kari22k_NV" || v.contains("22k_") || v.ends_with("_NV");
         if is_legacy_acapela {
             log!("Dropping stale Acapela voice setting '{}', using engine default", v);
+        } else if !tts::voice_matches_language(v, selected_language.code()) {
+            log!(
+                "Dropping saved voice '{}' because it does not match language '{}'",
+                v,
+                selected_language.code()
+            );
+            saved.voice = tts::current_voice();
+            save_settings(&saved);
         } else {
             tts::set_voice(v);
         }

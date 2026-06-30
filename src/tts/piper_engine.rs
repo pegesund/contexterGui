@@ -35,6 +35,22 @@ const PIPER_VOICES: &[(&str, &str, &str)] = &[
     (VOICE_EN_GB_NORTHERN, "en_GB", "Hello, this is Northern English text to speech."),
 ];
 
+/// Whether a Piper voice is appropriate for the active writing language.
+///
+/// Voice choice must never change Spell's correction language, and the UI
+/// should not encourage cross-language pairings such as Bokmal correction with
+/// an English Piper voice. Nynorsk intentionally shares the Bokmal voice today.
+pub fn voice_matches_language(voice_id: &str, lang_code: &str) -> bool {
+    match lang_code {
+        "nb" | "nn" | "no" => voice_id == VOICE_NB_NO,
+        "en" => matches!(
+            voice_id,
+            VOICE_EN_US_LESSAC | VOICE_EN_US_AMY | VOICE_EN_GB_ALBA | VOICE_EN_GB_NORTHERN
+        ),
+        _ => false,
+    }
+}
+
 struct SpeakCmd {
     voice_id: String,
     text: String,
