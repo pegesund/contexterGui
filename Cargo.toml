@@ -1,7 +1,12 @@
 [package]
-name = "acatts-rust"
+name = "spell"
 version = "0.1.0"
 edition = "2024"
+default-run = "spell"
+
+[lib]
+name = "acatts_rust"
+path = "src/lib.rs"
 
 [dependencies]
 # accesskit feature deliberately disabled: on macOS 26.x, accesskit-macos
@@ -117,14 +122,6 @@ features = [
 # cfg).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
-
-[[bin]]
-name = "spell"
-path = "src/main.rs"
-
-[[bin]]
-name = "acatts-rust"
-path = "src/main.rs"
 
 [[bin]]
 name = "native_bridge"

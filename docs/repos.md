@@ -4,9 +4,9 @@ NorskTale is a Norwegian spelling and grammar checker for dyslexia users, built 
 
 ## Repositories
 
-### acatts-rust (this repo)
+### Spell desktop (this repo)
 - **GitHub**: pegesund/contexterGui
-- **Path**: `NorskTale/acatts-rust`
+- **Path**: `NorskTale/contexterGui`
 - **Purpose**: GUI application (eframe/egui), bridges to Word/Google Docs/accessibility, spelling/grammar error display, word completion UI
 - **Key files**: `src/main.rs` (app logic), `src/bert_worker.rs` (BERT inference thread), `src/bridge/` (Word COM, browser, accessibility bridges), `extension/` (Chrome extension for Google Docs)
 - **Dependencies**: nostos-cognio (NLP engine), mtag-rs (dictionary)
@@ -79,8 +79,8 @@ ln -s ~/dev/dyslex/contexter-repo ~/dev/contexter-repo
 From `contexterGui/`:
 
 ```bash
-cargo build --bin acatts-rust            # debug
-cargo build --release --bin acatts-rust  # release
+cargo build --bin spell            # debug
+cargo build --release --bin spell  # release
 ```
 
 The first build takes 5–10 min (large dependency tree: eframe, ort,
@@ -91,22 +91,22 @@ incremental and finish in seconds.
 
 ```bash
 # default: Bokmål
-./target/debug/acatts-rust &
+./target/debug/spell &
 
 # pick a language explicitly (only nb / no are registered today)
-./target/debug/acatts-rust --language nb &
+./target/debug/spell --language nb &
 
 # disable grammar checking
-./target/debug/acatts-rust --no-grammar &
+./target/debug/spell --no-grammar &
 
 # faster (lower-quality) BERT inference
-./target/debug/acatts-rust --quality 0 &
+./target/debug/spell --quality 0 &
 
 # show the debug tab in the UI
-./target/debug/acatts-rust --debug &
+./target/debug/spell --debug &
 
 # headless spelling test mode (no GUI, runs the same pipeline)
-./target/debug/acatts-rust --test-spelling
+./target/debug/spell --test-spelling
 ```
 
 The app opens a small always-on-top window that follows the cursor in
@@ -150,7 +150,7 @@ Chrome Extension (Google Docs)
          │ file: norsktale-browser.json
          v
 ┌─────────────────────────────────────────┐
-│  acatts-rust (GUI app)                  │
+│  Spell (GUI app)                        │
 │  ├── Word COM bridge (Microsoft Word)   │
 │  ├── Browser bridge (Google Docs)       │
 │  ├── Accessibility bridge (other apps)  │

@@ -15,7 +15,7 @@
 #      (different surrounding text → different BERT predictions).
 #
 # Requires:
-#   - Spell (`acatts-rust`) running, HTTPS port 3000
+#   - Spell (`spell`) running, HTTPS port 3000
 #   - Microsoft Word installed and a doc with errors typed in
 #   - `jq` for JSON parsing
 

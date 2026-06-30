@@ -195,12 +195,11 @@ impl MacPlatform {
                     if let Some(app) = query_foreground_app() {
                         let pid = app.pid;
                         // Pid match is authoritative; the string fallbacks cover
-                        // dev-mode binary names ("acatts-rust") and packaged builds
-                        // ("Spell" via CFBundleExecutable). Without the pid check,
+                        // dev/legacy binary names and packaged builds ("Spell"
+                        // via CFBundleExecutable). Without the pid check,
                         // walking AX into our own process triggers an accesskit-macos
                         // panic in is_selector_allowed → SIGABRT.
                         let is_our_app = pid == std::process::id()
-                            || app.exe_name == "acatts-rust"
                             || app.exe_name == "spell"
                             || app.exe_name == "norsktale"
                             || app.title == "NorskTale"

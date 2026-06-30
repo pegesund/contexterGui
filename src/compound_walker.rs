@@ -6,7 +6,7 @@
 //! the *exact same* candidate generation as the GUI — without that
 //! shared location the tests would inevitably drift from the GUI's
 //! behaviour again. The implementation moved to nostos-cognio in
-//! 2026-06; this module exists only so existing acatts-rust call sites
+//! 2026-06; this module exists only so existing Spell call sites
 //! (main.rs, grammar_actor.rs, the test_compound_* bins) keep
 //! compiling.
 

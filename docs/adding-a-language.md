@@ -249,8 +249,8 @@ fn onnx_path(&self) -> PathBuf {
 
 ```bash
 cd /Users/pegesund/dev/dyslex/contexterGui
-cargo check --bin acatts-rust
-./target/debug/acatts-rust --language nn
+cargo check --bin spell
+./target/debug/spell --language nn
 ```
 
 The startup banner should print `Language: Nynorsk (nn)` and the dictionary

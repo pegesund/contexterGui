@@ -9,7 +9,7 @@ fn main() {
     // Embed the Spell identity in the Win32 version resource. Windows uses
     // FileDescription/ProductName in Explorer, Task Manager, error dialogs,
     // taskbar grouping, and other shell UI, so do not let it fall back to the
-    // Rust package name (`acatts-rust`).
+    // Rust target metadata.
     #[cfg(target_os = "windows")]
     {
         let mut res = winresource::WindowsResource::new();

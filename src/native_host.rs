@@ -20,7 +20,7 @@ const EXTENSION_ID: &str = "dcnbinagicnahihcgjfnlhepckfcpgob";
 
 /// Locate the native_bridge executable. On a real install it sits next to
 /// the running Spell binary; in dev (cargo run) it's in the same target/
-/// dir as acatts-rust.
+/// dir as spell.
 fn find_native_bridge_path() -> Option<PathBuf> {
     let cur = std::env::current_exe().ok()?;
     let dir = cur.parent()?;

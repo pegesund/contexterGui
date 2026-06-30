@@ -1,5 +1,5 @@
 //! Integration test for Windows Word COM.
-//! Requires: Word open with a document, acatts-rust running.
+//! Requires: Word open with a document, Spell running.
 //!
 //! Tests typing text, waiting for error detection, and verifying results
 //! via the HTTP /errors endpoint on port 52580.
@@ -22,7 +22,7 @@ fn main() {
         }
         if start.elapsed() > Duration::from_secs(10) {
             eprintln!("FATAL: Could not connect to http://127.0.0.1:52580/errors");
-            eprintln!("       Make sure acatts-rust is running.");
+            eprintln!("       Make sure Spell is running.");
             std::process::exit(1);
         }
         thread::sleep(Duration::from_millis(500));
