@@ -18,6 +18,9 @@ const S3_SECRET_KEY: &str = "3f28f3941d0d20aaa829ef17c50fe4e7";
 const S3_REGION: &str = "eu2";
 const S3_HOST: &str = "eu2.contabostorage.com";
 const S3_NETLOC: &str = "eu2.contabostorage.com:443";
+const DOWNLOAD_MAX_ATTEMPTS: usize = 6;
+const DOWNLOAD_RETRY_BASE_MS: u64 = 750;
+const DOWNLOAD_RETRY_MAX_MS: u64 = 10_000;
 
 // ── Public types ──
 
@@ -250,6 +253,33 @@ fn should_try_doh_fallback(err_msg: &str) -> bool {
     }
 }
 
+fn is_retryable_download_error(err_msg: &str) -> bool {
+    err_msg.contains("NET_READ_FAILED")
+        || err_msg.contains("NET_TRUNCATED")
+        || err_msg.contains("NET_BODY_READ_FAILED")
+        || err_msg.contains("NET_IO_ERROR")
+        || err_msg.contains("NET_DNS_FAILED")
+        || err_msg.contains("NET_CONNECT_REFUSED")
+        || err_msg.contains("NET_PROXY_CONNECT_FAILED")
+        || err_msg.contains("HTTP_408_TIMEOUT")
+        || err_msg.contains("HTTP_429_RATE_LIMITED")
+        || err_msg.contains("HTTP_5XX_SERVER_ERROR")
+        || err_msg.contains("DNS_FALLBACK")
+}
+
+fn retry_delay(attempt: usize) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(5) as u32;
+    let ms = DOWNLOAD_RETRY_BASE_MS
+        .saturating_mul(1u64 << shift)
+        .min(DOWNLOAD_RETRY_MAX_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+fn parse_content_range_total(header: &str) -> Option<u64> {
+    header.rsplit_once('/')
+        .and_then(|(_, total)| total.parse::<u64>().ok())
+}
+
 fn format_socket_ips(addrs: &[SocketAddr]) -> String {
     addrs.iter()
         .map(|addr| addr.ip().to_string())
@@ -344,28 +374,54 @@ fn classify_ureq_err(e: ureq::Error) -> (&'static str, String) {
 
 /// Download a single file from S3 to a local path, reporting progress.
 fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize, total_items: usize) -> Result<(), String> {
-    match try_download_one(item, progress, index, None) {
-        Ok(()) => Ok(()),
-        Err(first_err) if should_try_doh_fallback(&first_err) => {
-            log_download_error(
-                index + 1,
-                total_items,
-                &item.s3_key,
-                &format!("standard DNS path failed ({}); trying Cloudflare DoH resolver override", first_err),
-            );
-            let addrs = doh_s3_addrs()
-                .map_err(|doh_err| format!(
-                    "DNS_FALLBACK_LOOKUP_FAILED standard_error={} doh_error={}",
-                    first_err, doh_err
-                ))?;
-            try_download_one(item, progress, index, Some(addrs))
-                .map_err(|fallback_err| format!(
-                    "DNS_FALLBACK_DOWNLOAD_FAILED standard_error={} fallback_error={}",
-                    first_err, fallback_err
-                ))
+    let mut override_addrs: Option<Vec<SocketAddr>> = None;
+    let mut last_err = String::new();
+
+    for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
+        match try_download_one(item, progress, index, override_addrs.clone()) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if override_addrs.is_none() && should_try_doh_fallback(&err) {
+                    log_download_error(
+                        index + 1,
+                        total_items,
+                        &item.s3_key,
+                        &format!("attempt {} failed ({}); switching to Cloudflare DoH resolver override", attempt, err),
+                    );
+                    override_addrs = Some(doh_s3_addrs()
+                        .map_err(|doh_err| format!(
+                            "DNS_FALLBACK_LOOKUP_FAILED standard_error={} doh_error={}",
+                            err, doh_err
+                        ))?);
+                }
+
+                last_err = err;
+                if attempt == DOWNLOAD_MAX_ATTEMPTS || !is_retryable_download_error(&last_err) {
+                    break;
+                }
+
+                log_download_error(
+                    index + 1,
+                    total_items,
+                    &item.s3_key,
+                    &format!(
+                        "attempt {}/{} failed ({}); retrying after {:?}",
+                        attempt,
+                        DOWNLOAD_MAX_ATTEMPTS,
+                        last_err,
+                        retry_delay(attempt)
+                    ),
+                );
+                std::thread::sleep(retry_delay(attempt));
+            }
         }
-        Err(e) => Err(e),
     }
+
+    Err(format!(
+        "DOWNLOAD_FAILED attempts={} last_error={}",
+        DOWNLOAD_MAX_ATTEMPTS,
+        last_err
+    ))
 }
 
 fn try_download_one(
@@ -377,16 +433,22 @@ fn try_download_one(
     use std::io::Read;
     let start = std::time::Instant::now();
 
-    if let Ok(mut p) = progress.lock() {
-        p[index].downloaded = 0;
-        p[index].total = 0;
-    }
-
     // Create parent directories
     if let Some(parent) = item.local_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("LOCAL_MKDIR_FAILED parent={} msg={}",
                 parent.display(), e))?;
+    }
+
+    let tmp_path = item.local_path.with_extension("download");
+    let resume_from = std::fs::metadata(&tmp_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    if let Ok(mut p) = progress.lock() {
+        p[index].downloaded = resume_from;
+        p[index].total = 0;
+        p[index].error = None;
     }
 
     let url = presign_url(&item.s3_key, 3600);
@@ -398,7 +460,11 @@ fn try_download_one(
     // error instead of hanging the entire language-pack flow.
     let using_doh_override = override_addrs.is_some();
     let agent = build_s3_agent(override_addrs);
-    let resp = match agent.get(&url).call() {
+    let mut request = agent.get(&url);
+    if resume_from > 0 {
+        request = request.set("Range", &format!("bytes={}-", resume_from));
+    }
+    let resp = match request.call() {
         Ok(r) => r,
         Err(e) => {
             let (tag, detail) = classify_ureq_err(e);
@@ -408,25 +474,42 @@ fn try_download_one(
     };
 
     let status = resp.status();
-    let total: u64 = resp.header("Content-Length")
+    let content_len: u64 = resp.header("Content-Length")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let resumed = resume_from > 0 && status == 206;
+    let mut downloaded = if resumed { resume_from } else { 0 };
+    let total = if resumed {
+        resp.header("Content-Range")
+            .and_then(parse_content_range_total)
+            .unwrap_or(resume_from.saturating_add(content_len))
+    } else {
+        content_len
+    };
     let server = resp.header("Server").unwrap_or("").to_string();
     let date_hdr = resp.header("Date").unwrap_or("").to_string();
 
     // Update total in progress
     if let Ok(mut p) = progress.lock() {
         p[index].total = total;
+        p[index].downloaded = downloaded;
     }
 
     let mut reader = resp.into_reader();
-    let tmp_path = item.local_path.with_extension("download");
-    let mut file = std::fs::File::create(&tmp_path)
-        .map_err(|e| format!("LOCAL_CREATE_FAILED path={} msg={}",
-            tmp_path.display(), e))?;
+    let mut file = if resumed {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("LOCAL_OPEN_APPEND_FAILED path={} resume_from={} msg={}",
+                tmp_path.display(), resume_from, e))?
+    } else {
+        std::fs::File::create(&tmp_path)
+            .map_err(|e| format!("LOCAL_CREATE_FAILED path={} msg={}",
+                tmp_path.display(), e))?
+    };
 
     let mut buf = [0u8; 65536];
-    let mut downloaded: u64 = 0;
 
     loop {
         let n = match reader.read(&mut buf) {
@@ -448,6 +531,14 @@ fn try_download_one(
         if let Ok(mut p) = progress.lock() {
             p[index].downloaded = downloaded;
         }
+    }
+
+    if total > 0 && downloaded < total {
+        return Err(format!(
+            "NET_TRUNCATED url={} status={} got={}/{} server={} date={} elapsed_ms={}",
+            safe_url, status, downloaded, total, server, date_hdr,
+            start.elapsed().as_millis()
+        ));
     }
 
     // Atomic rename
