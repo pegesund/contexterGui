@@ -2562,7 +2562,7 @@ impl ContextApp {
 
         if let Some(error) = downloader::any_error(&progress) {
             log!("Whisper model download failed: {}", error);
-            self.load_errors.push(format!("Whisper download: {}", error));
+            self.load_errors.push(user_facing_download_error("Whisper download", &error));
             self.whisper_download = None;
             self.whisper_loading = false;
             self.whisper_pending_record = false;
@@ -10206,7 +10206,8 @@ let keep_word_errors = from_word || to_word;
                                 ui.separator();
                                 ui.add_space(12.0);
                                 for err in &load_errors {
-                                    ui.label(egui::RichText::new(err).size(16.0 * s)
+                                    let err_text = settings_error_text(err);
+                                    ui.label(egui::RichText::new(err_text).size(16.0 * s)
                                         .color(egui::Color32::from_rgb(200, 50, 50)));
                                 }
                             }
@@ -11448,6 +11449,51 @@ fn run_download_window(lang_code: &str) {
 
 fn download_error_code(err: &str) -> &str {
     err.split_whitespace().next().unwrap_or("UNKNOWN_DOWNLOAD_ERROR")
+}
+
+fn user_facing_download_error(context: &str, err: &str) -> String {
+    let code = download_error_code(err);
+    match code {
+        "HTTP_404_KEY_NOT_FOUND" => {
+            if let Some(key) = s3_key_from_download_error(err) {
+                format!(
+                    "{}: missing file on the download server ({})",
+                    context, key
+                )
+            } else {
+                format!("{}: missing file on the download server", context)
+            }
+        }
+        "HTTP_403_FORBIDDEN_OR_SIG_INVALID" => {
+            format!("{}: download authorization failed", context)
+        }
+        "HTTP_408_TIMEOUT" => format!("{}: download timed out", context),
+        "HTTP_429_RATE_LIMITED" => format!("{}: download rate limited", context),
+        "HTTP_5XX_SERVER_ERROR" => format!("{}: download server error", context),
+        _ => format!("{} failed: {}", context, code),
+    }
+}
+
+fn settings_error_text(err: &str) -> String {
+    if err.contains("X-Amz-Signature=") || err.contains("body_first_500=") {
+        if let Some(rest) = err.strip_prefix("Whisper download: ") {
+            return user_facing_download_error("Whisper download", rest);
+        }
+        return user_facing_download_error("Download", err);
+    }
+    err.to_string()
+}
+
+fn s3_key_from_download_error(err: &str) -> Option<String> {
+    let marker = "url=https://eu2.contabostorage.com/spell/";
+    let rest = err.split(marker).nth(1)?;
+    let url_part = rest.split_whitespace().next().unwrap_or(rest);
+    let key = url_part.split('?').next().unwrap_or(url_part).trim_matches('/');
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }
 
 #[derive(Default)]
