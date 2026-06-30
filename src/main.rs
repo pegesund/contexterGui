@@ -408,7 +408,41 @@ fn data_dir() -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn whisper_dll_dir() -> PathBuf {
-    if let Some(dir) = platform::windows::bundled_frameworks_dir() {
+    fn dir_with_whisper_dll(dir: PathBuf) -> Option<PathBuf> {
+        dir.join("whisper.dll").is_file().then_some(dir)
+    }
+
+    if let Some(dir) = std::env::var_os("WHISPER_DIR").and_then(|p| dir_with_whisper_dll(PathBuf::from(p))) {
+        return dir;
+    }
+
+    if let Some(dir) = std::env::var_os("WHISPER_DLL")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .and_then(|p| p.parent().map(PathBuf::from))
+    {
+        return dir;
+    }
+
+    if let Some(dir) = platform::windows::bundled_frameworks_dir().and_then(dir_with_whisper_dll) {
+        return dir;
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            if let Some(dir) = dir_with_whisper_dll(exe_dir.join("Frameworks")) {
+                return dir;
+            }
+            if let Some(dir) = dir_with_whisper_dll(exe_dir.to_path_buf()) {
+                return dir;
+            }
+        }
+    }
+
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .and_then(|p| dir_with_whisper_dll(p.join("Spell").join("current").join("Frameworks")))
+    {
         return dir;
     }
 
@@ -1655,6 +1689,7 @@ struct ContextApp {
     mic_handle: Option<stt::MicHandle>,
     mic_transcribing: bool,
     mic_result_text: Option<String>,
+    whisper_error_text: Option<String>,
     /// Receiver for "Forbedre" re-transcription result (Windows only)
     improve_rx: Option<std::sync::mpsc::Receiver<String>>,
     improve_running: bool,
@@ -2404,6 +2439,7 @@ impl ContextApp {
             mic_handle: None,
             mic_transcribing: false,
             mic_result_text: None,
+            whisper_error_text: None,
             improve_rx: None,
             improve_running: false,
             whisper_mode: saved_settings.whisper_mode,
@@ -2448,10 +2484,13 @@ impl ContextApp {
 
     fn clear_whisper_load_errors(&mut self) {
         self.load_errors.retain(|e| !e.starts_with("Whisper"));
+        self.whisper_error_text = None;
     }
 
     fn start_recording_with_loaded_whisper(&mut self) {
         let Some(final_eng) = self.whisper_engine.as_ref().cloned() else {
+            self.whisper_error_text = Some("Speech recognition is not ready yet. Check Settings for details.".to_string());
+            self.whisper_pending_record = false;
             return;
         };
         let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
@@ -2466,8 +2505,12 @@ impl ContextApp {
                 log!("Microphone recording started");
                 self.mic_handle = Some(handle);
                 self.mic_result_text = None;
+                self.whisper_error_text = None;
             }
-            Err(e) => log!("Microphone error: {}", e),
+            Err(e) => {
+                log!("Microphone error: {}", e);
+                self.whisper_error_text = Some(format!("Microphone error: {}", e));
+            }
         }
     }
 
@@ -2515,6 +2558,7 @@ impl ContextApp {
         let mode = self.whisper_mode;
         let lang_code = self.language.code().to_string();
         let dll_dir = whisper_dll_dir().to_string_lossy().to_string();
+        log!("Whisper: using runtime dir {}", dll_dir);
 
         if mode == 0 {
             let lang0 = self.language.clone();
@@ -2562,7 +2606,9 @@ impl ContextApp {
 
         if let Some(error) = downloader::any_error(&progress) {
             log!("Whisper model download failed: {}", error);
-            self.load_errors.push(user_facing_download_error("Whisper download", &error));
+            let error = user_facing_download_error("Whisper download", &error);
+            self.whisper_error_text = Some(error.clone());
+            self.load_errors.push(error);
             self.whisper_download = None;
             self.whisper_loading = false;
             self.whisper_pending_record = false;
@@ -6858,8 +6904,6 @@ self.grammar_queue.clear();
 
         // Whisper lazy-load: check if models finished loading
         if let Some(rx) = &self.whisper_load_rx {
-            let mut done_count = 0;
-            let expected = if self.whisper_mode == 0 { 1 } else { 2 }; // tiny=1, beste=2
             while let Ok(item) = rx.try_recv() {
                 match item {
                     WhisperLoadItem::Final(Ok(engine)) => {
@@ -6871,7 +6915,9 @@ self.grammar_queue.clear();
                     }
                     WhisperLoadItem::Final(Err(e)) => {
                         log!("Whisper final model failed: {}", e);
-                        self.load_errors.push(format!("Whisper: {}", e));
+                        let error = format!("Whisper: {}", e);
+                        self.whisper_error_text = Some(format!("Speech recognition failed to load: {}", e));
+                        self.load_errors.push(error);
                     }
                     WhisperLoadItem::Streaming(Ok(engine)) => {
                         log!("Whisper: streaming model loaded");
@@ -6880,23 +6926,41 @@ self.grammar_queue.clear();
                     }
                     WhisperLoadItem::Streaming(Err(e)) => {
                         log!("Whisper streaming model failed: {}", e);
-                        self.load_errors.push(format!("Whisper-streaming: {}", e));
+                        let error = format!("Whisper-streaming: {}", e);
+                        self.whisper_error_text.get_or_insert_with(|| {
+                            format!("Speech recognition streaming failed to load: {}", e)
+                        });
+                        self.load_errors.push(error);
                     }
                 }
-                done_count += 1;
             }
-            // Check if all expected models are loaded (or failed)
-            let loaded = self.whisper_engine.is_some() as usize
-                + self.whisper_streaming.is_some() as usize
-                + self.load_errors.iter().filter(|e| e.starts_with("Whisper")).count();
-            if loaded >= expected || done_count >= expected {
+            let final_done = self.whisper_engine.is_some()
+                || self.load_errors.iter().any(|e| e.starts_with("Whisper: "));
+            let streaming_done = self.whisper_mode == 0
+                || self.whisper_streaming.is_some()
+                || self.load_errors.iter().any(|e| e.starts_with("Whisper-streaming: "));
+            let load_finished = final_done && streaming_done;
+            let can_record = self.whisper_engine.is_some();
+            if load_finished {
                 self.whisper_load_rx = None;
                 self.whisper_loading = false;
-                log!("Whisper: all models ready");
-                // Auto-start recording if user pressed mic while loading
-                if self.whisper_pending_record {
+                if can_record {
+                    if self.whisper_mode == 1 && self.whisper_streaming.is_none() {
+                        log!("Whisper: final model ready; streaming model unavailable, using final model fallback");
+                    } else {
+                        log!("Whisper: all models ready");
+                    }
+                    // Auto-start recording if user pressed mic while loading
+                    if self.whisper_pending_record {
+                        self.whisper_pending_record = false;
+                        self.start_recording_with_loaded_whisper();
+                    }
+                } else {
+                    log!("Whisper: model load failed");
                     self.whisper_pending_record = false;
-                    self.start_recording_with_loaded_whisper();
+                    self.whisper_error_text.get_or_insert_with(|| {
+                        "Speech recognition failed to load. Check Settings for details.".to_string()
+                    });
                 }
             }
         }
@@ -9625,13 +9689,21 @@ let keep_word_errors = from_word || to_word;
             let is_recording = stt::is_recording();
             let is_correcting = self.mic_transcribing && !is_recording;
             let is_streaming = is_recording || self.mic_transcribing;
-            let show_whisper_popup = self.mic_result_text.is_some() || is_correcting || is_recording || self.whisper_loading;
+            let whisper_error_text = self.whisper_error_text.clone();
+            let showing_whisper_error = self.mic_result_text.is_none() && whisper_error_text.is_some();
+            let show_whisper_popup = self.mic_result_text.is_some()
+                || showing_whisper_error
+                || is_correcting
+                || is_recording
+                || self.whisper_loading;
             if show_whisper_popup {
                 let mut do_close = false;
                 let mut do_copy = false;
                 let mut do_stop = false;
                 let mut do_improve = false;
-                let text_clone = self.mic_result_text.clone().unwrap_or_default();
+                let text_clone = self.mic_result_text.clone()
+                    .or(whisper_error_text)
+                    .unwrap_or_default();
                 let lang_for_stt = self.language.clone();
 
                 let win_w = 600.0_f32;
@@ -9705,8 +9777,13 @@ let keep_word_errors = from_word || to_word;
                                 egui::ScrollArea::vertical().max_height(scroll_height).show(ui, |ui| {
                                     ui.set_max_width(max_w - 16.0);
                                     ui.horizontal_wrapped(|ui| {
+                                        let text_color = if showing_whisper_error {
+                                            egui::Color32::from_rgb(190, 30, 30)
+                                        } else {
+                                            egui::Color32::from_rgb(30, 30, 30)
+                                        };
                                         ui.label(egui::RichText::new(&text_clone).size(20.0 * s)
-                                            .color(egui::Color32::from_rgb(30, 30, 30)));
+                                            .color(text_color));
                                         if is_recording {
                                             ui.label(egui::RichText::new(" ...").size(20.0 * s)
                                                 .color(egui::Color32::from_rgb(150, 150, 150)));
@@ -9726,7 +9803,7 @@ let keep_word_errors = from_word || to_word;
 
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
-                                    if !is_streaming {
+                                    if !is_streaming && !showing_whisper_error {
                                         if ui.button(egui::RichText::new(lang_for_stt.ui_copy()).size(14.0 * s)).clicked() {
                                             do_copy = true;
                                         }
@@ -9789,6 +9866,7 @@ let keep_word_errors = from_word || to_word;
                     stt::force_stop();
                     self.mic_transcribing = false;
                     self.mic_result_text = None;
+                    self.whisper_error_text = None;
                     self.whisper_loading = false;
                     self.whisper_pending_record = false;
                 }
