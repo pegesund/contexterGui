@@ -39,7 +39,12 @@ impl Drop for WhisperEngine {
 
 impl WhisperEngine {
     /// Load whisper.dll and the GGML model. Call once at startup.
-    pub fn load(dll_dir: &str, model_path: &str, lang: &dyn language::LanguageBundle) -> Result<Self, String> {
+    pub fn load(
+        dll_dir: &str,
+        model_path: &str,
+        model_lang: &dyn language::LanguageBundle,
+        ui_lang: &dyn language::LanguageBundle,
+    ) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
         unsafe {
             use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
@@ -50,7 +55,7 @@ impl WhisperEngine {
 
         let dll_path = format!("{}\\whisper.dll", dll_dir);
         let lib = unsafe { Library::new(&dll_path) }
-            .map_err(|e| lang.ui_whisper_dll_load_failed(&format!("{} ({})", dll_path, e)))?;
+            .map_err(|e| ui_lang.ui_whisper_dll_load_failed(&format!("{} ({})", dll_path, e)))?;
 
         unsafe {
             let fn_init: FnInit = *lib.get::<FnInit>(b"spell_whisper_init_from_file")
@@ -61,13 +66,19 @@ impl WhisperEngine {
             let fn_segment_text: FnSegmentText = *lib.get::<FnSegmentText>(b"spell_whisper_full_get_segment_text").unwrap();
 
             let model_c = CString::new(model_path)
-                .map_err(|_| "ugyldig modellsti".to_string())?;
+                .map_err(|_| {
+                    if ui_lang.code() == "en" {
+                        "invalid model path".to_string()
+                    } else {
+                        "ugyldig modellsti".to_string()
+                    }
+                })?;
 
             mic_log(&format!("Whisper: loading model from {}...", model_path));
             let start = std::time::Instant::now();
             let ctx = fn_init(model_c.as_ptr());
             if ctx.is_null() {
-                return Err(lang.ui_whisper_model_load_failed().into());
+                return Err(ui_lang.ui_whisper_model_load_failed().into());
             }
             mic_log(&format!("Whisper: model loaded in {:.1}s", start.elapsed().as_secs_f64()));
 
@@ -78,8 +89,8 @@ impl WhisperEngine {
                 fn_full,
                 fn_n_segments,
                 fn_segment_text,
-                stt_lang_code: CString::new(lang.stt_language_code()).unwrap_or_default(),
-                no_speech_msg: lang.ui_no_speech_recognized().to_string(),
+                stt_lang_code: CString::new(model_lang.stt_language_code()).unwrap_or_default(),
+                no_speech_msg: ui_lang.ui_no_speech_recognized().to_string(),
             })
         }
     }

@@ -47,6 +47,10 @@ struct UserSettings {
     voice: String,
     #[serde(default = "default_language")]
     language: String,
+    /// Interface language for app chrome. "auto" follows `language`; explicit
+    /// nb/nn/en keeps the UI stable while the writing model changes.
+    #[serde(default = "default_ui_language")]
+    ui_language: String,
     #[serde(default = "default_hover_zoom")]
     hover_zoom: bool,
     /// Color theme: 0=Krem (default), 1=Havblå, 2=Sval grå, 3=Mørk.
@@ -83,6 +87,7 @@ struct UserSettings {
 fn default_true() -> bool { true }
 
 fn default_language() -> String { "nb".into() }
+fn default_ui_language() -> String { "auto".into() }
 fn default_hover_zoom() -> bool { true }
 fn default_model_size() -> String { "base".into() }
 
@@ -95,6 +100,7 @@ impl Default for UserSettings {
             ui_scale: 1.0,
             voice: String::new(),
             language: "nb".into(),
+            ui_language: "auto".into(),
             hover_zoom: true,
             theme: 0,
             word_addin_wizard_dismissed: false,
@@ -604,10 +610,11 @@ fn resolve_paths(lang: &dyn language::LanguageBundle, model_size: &str) -> Resol
     ResolvedPaths { mtag_fst, onnx, tokenizer, wordfreq, prolog_rules, prolog_dir }
 }
 
-fn language_model_label(lang: &dyn language::LanguageBundle) -> &'static str {
-    match lang.code() {
-        "nb" | "nn" | "no" => "Språkmodell",
-        _ => "Language model",
+fn language_model_label_for_ui(ui: UiCopy) -> &'static str {
+    if ui.en() {
+        "Language model"
+    } else {
+        "Språkmodell"
     }
 }
 
@@ -667,6 +674,56 @@ fn performance_level_description(lang_code: &str, level: u8) -> &'static str {
         (false, 1) => "Fast response with good quality.",
         (false, 2) => "Recommended. Good balance between speed and accuracy.",
         (false, _) => "Most thorough. Can be slower on older machines.",
+    }
+}
+
+fn performance_level_label_for_ui(ui: UiCopy, level: u8) -> &'static str {
+    if ui.en() {
+        match level {
+            0 => "Fastest",
+            1 => "Fast",
+            2 => "Balanced",
+            _ => "Best quality",
+        }
+    } else if ui.nn() {
+        match level {
+            0 => "Raskast",
+            1 => "Rask",
+            2 => "Balansert",
+            _ => "Best kvalitet",
+        }
+    } else {
+        match level {
+            0 => "Raskest",
+            1 => "Rask",
+            2 => "Balansert",
+            _ => "Best kvalitet",
+        }
+    }
+}
+
+fn performance_level_description_for_ui(ui: UiCopy, level: u8) -> &'static str {
+    if ui.en() {
+        match level {
+            0 => "For older PCs. Prioritizes short wait time.",
+            1 => "Fast response with good quality.",
+            2 => "Recommended. Good balance between speed and accuracy.",
+            _ => "Most thorough. Can be slower on older machines.",
+        }
+    } else if ui.nn() {
+        match level {
+            0 => "For eldre PC-ar. Prioriterer kort ventetid.",
+            1 => "Rask respons med god kvalitet.",
+            2 => "Tilrådd. God balanse mellom fart og presisjon.",
+            _ => "Mest grundig. Kan vere tregare på eldre maskiner.",
+        }
+    } else {
+        match level {
+            0 => "For eldre PC-er. Prioriterer kort ventetid.",
+            1 => "Rask respons med god kvalitet.",
+            2 => "Anbefalt. God balanse mellom fart og presisjon.",
+            _ => "Mest grundig. Kan være tregere på eldre maskiner.",
+        }
     }
 }
 
@@ -1543,6 +1600,11 @@ struct ContextApp {
     /// needs language-specific data (FST path, Prolog rules, BERT model,
     /// UI strings, voice/STT/OCR codes, …).
     language: std::sync::Arc<dyn language::LanguageBundle>,
+    /// Runtime-selected interface language. This controls app chrome only;
+    /// `language` remains the writing/spelling/model language.
+    ui_language: std::sync::Arc<dyn language::LanguageBundle>,
+    /// Persisted UI language setting: "auto", "nb", "nn", or "en".
+    ui_language_setting: String,
     manager: BridgeManager,
     context: CursorContext,
     last_poll: Instant,
@@ -2299,6 +2361,8 @@ impl ContextApp {
             compound_walker::load_fst_from_mfst(paths.mtag_fst.to_str().unwrap())
                 .ok().map(|f| Arc::new(f));
         let foreign_analyzers = load_cross_language_analyzers(language.code());
+        let ui_language_setting = normalize_ui_language_setting(&saved_settings.ui_language);
+        let ui_language = resolve_ui_language_bundle(&ui_language_setting, &*language);
 
         // Spawn heavy model loading on background threads
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
@@ -2308,7 +2372,7 @@ impl ContextApp {
         let onnx_path = paths.onnx.clone();
         let tokenizer_path = paths.tokenizer.clone();
         let wordfreq_path = paths.wordfreq.clone();
-        let model_label = language_model_label(&*language).to_string();
+        let model_label = language_model_label_for_ui(ui_copy_for(ui_language.code())).to_string();
         let mask_token = language.mask_token().to_string();
         let baseline_preps: Vec<String> = language.baseline_prepositions().iter().map(|s| s.to_string()).collect();
         let baseline_frame = language.baseline_frame_template().to_string();
@@ -2383,6 +2447,8 @@ impl ContextApp {
 
         ContextApp {
             language: language.clone(),
+            ui_language,
+            ui_language_setting,
             manager: BridgeManager::new(platform::create_platform(), language.word_language_id()),
             context: CursorContext::default(),
             last_poll: Instant::now(),
@@ -2566,7 +2632,7 @@ impl ContextApp {
 
     fn start_recording_with_loaded_whisper(&mut self) {
         let Some(final_eng) = self.whisper_engine.as_ref().cloned() else {
-            self.whisper_error_text = Some("Speech recognition is not ready yet. Check Settings for details.".to_string());
+            self.whisper_error_text = Some(ui_copy_for(self.ui_language.code()).speech_not_ready().to_string());
             self.whisper_pending_record = false;
             return;
         };
@@ -2576,7 +2642,7 @@ impl ContextApp {
             final_eng,
             stream_eng,
             auto_final,
-            self.language.ui_no_audio_captured().to_string(),
+            self.ui_language.ui_no_audio_captured().to_string(),
         ) {
             Ok(handle) => {
                 log!("Microphone recording started");
@@ -2586,7 +2652,7 @@ impl ContextApp {
             }
             Err(e) => {
                 log!("Microphone error: {}", e);
-                self.whisper_error_text = Some(format!("Microphone error: {}", e));
+                self.whisper_error_text = Some(ui_copy_for(self.ui_language.code()).microphone_error(&e));
             }
         }
     }
@@ -2600,7 +2666,7 @@ impl ContextApp {
         self.clear_whisper_load_errors();
         self.whisper_loading = true;
         self.whisper_pending_record = true;
-        self.whisper_load_status = self.language.ui_loading_speech_model().to_string();
+        self.whisper_load_status = self.ui_language.ui_loading_speech_model().to_string();
 
         let lang_code = self.language.code().to_string();
         if downloader::whisper_cached(&lang_code, self.whisper_mode) {
@@ -2626,9 +2692,9 @@ impl ContextApp {
         self.whisper_loading = true;
         let (fast_model, streaming_model, final_model) = self.language.whisper_model_names();
         self.whisper_load_status = if self.whisper_mode == 0 {
-            self.language.ui_loading(self.language.whisper_fast_model_label())
+            self.ui_language.ui_loading(self.language.whisper_fast_model_label())
         } else {
-            self.language.ui_loading(self.language.whisper_best_model_label())
+            self.ui_language.ui_loading(self.language.whisper_best_model_label())
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.whisper_load_rx = Some(rx);
@@ -2639,12 +2705,13 @@ impl ContextApp {
 
         if mode == 0 {
             let lang0 = self.language.clone();
+            let ui_lang0 = self.ui_language.clone();
             let model_path = downloader::whisper_model_path(&lang_code, fast_model)
                 .to_string_lossy()
                 .to_string();
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
-                    stt::WhisperEngine::load(&dll_dir, &model_path, &*lang0)
+                    stt::WhisperEngine::load(&dll_dir, &model_path, &*lang0, &*ui_lang0)
                         .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                 ));
             });
@@ -2653,6 +2720,8 @@ impl ContextApp {
             let dll2 = dll_dir.clone();
             let lang1 = self.language.clone();
             let lang2 = self.language.clone();
+            let ui_lang1 = self.ui_language.clone();
+            let ui_lang2 = self.ui_language.clone();
             let streaming_path = downloader::whisper_model_path(&lang_code, streaming_model)
                 .to_string_lossy()
                 .to_string();
@@ -2661,13 +2730,13 @@ impl ContextApp {
                 .to_string();
             std::thread::spawn(move || {
                 let _ = tx2.send(WhisperLoadItem::Streaming(
-                    stt::WhisperEngine::load(&dll2, &streaming_path, &*lang1)
+                    stt::WhisperEngine::load(&dll2, &streaming_path, &*lang1, &*ui_lang1)
                         .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                 ));
             });
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
-                    stt::WhisperEngine::load(&dll_dir, &final_path, &*lang2)
+                    stt::WhisperEngine::load(&dll_dir, &final_path, &*lang2, &*ui_lang2)
                         .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
                 ));
             });
@@ -2683,7 +2752,8 @@ impl ContextApp {
 
         if let Some(error) = downloader::any_error(&progress) {
             log!("Whisper model download failed: {}", error);
-            let error = user_facing_download_error("Whisper download", &error);
+            let ui = ui_copy_for(self.ui_language.code());
+            let error = user_facing_download_error(ui.whisper_download_context(), &error, ui);
             self.whisper_error_text = Some(error.clone());
             self.load_errors.push(error);
             self.whisper_download = None;
@@ -2703,9 +2773,16 @@ impl ContextApp {
             if let Some(row) = rows.iter().find(|row| !row.done) {
                 self.whisper_load_status = if row.total > 0 {
                     let pct = (row.downloaded as f32 / row.total as f32 * 100.0).clamp(0.0, 100.0);
-                    self.language.ui_loading(&format!("{} {:.0}%", row.label, pct))
+                    self.ui_language.ui_loading(&format!(
+                        "{} {:.0}%",
+                        localized_download_label(&row.label, ui_copy_for(self.ui_language.code())),
+                        pct
+                    ))
                 } else {
-                    self.language.ui_loading(&row.label)
+                    self.ui_language.ui_loading(&localized_download_label(
+                        &row.label,
+                        ui_copy_for(self.ui_language.code()),
+                    ))
                 };
             }
         }
@@ -7080,25 +7157,25 @@ self.grammar_queue.clear();
                         log!("Whisper: final model loaded");
                         self.whisper_engine = Some(Arc::new(Mutex::new(engine)));
                         if self.whisper_mode == 1 {
-                            self.whisper_load_status = self.language.ui_whisper_large_loaded().into();
+                            self.whisper_load_status = self.ui_language.ui_whisper_large_loaded().into();
                         }
                     }
                     WhisperLoadItem::Final(Err(e)) => {
                         log!("Whisper final model failed: {}", e);
                         let error = format!("Whisper: {}", e);
-                        self.whisper_error_text = Some(format!("Speech recognition failed to load: {}", e));
+                        self.whisper_error_text = Some(ui_copy_for(self.ui_language.code()).speech_load_failed(&e));
                         self.load_errors.push(error);
                     }
                     WhisperLoadItem::Streaming(Ok(engine)) => {
                         log!("Whisper: streaming model loaded");
                         self.whisper_streaming = Some(Arc::new(Mutex::new(engine)));
-                        self.whisper_load_status = self.language.ui_whisper_fast_loaded().into();
+                        self.whisper_load_status = self.ui_language.ui_whisper_fast_loaded().into();
                     }
                     WhisperLoadItem::Streaming(Err(e)) => {
                         log!("Whisper streaming model failed: {}", e);
                         let error = format!("Whisper-streaming: {}", e);
                         self.whisper_error_text.get_or_insert_with(|| {
-                            format!("Speech recognition streaming failed to load: {}", e)
+                            ui_copy_for(self.ui_language.code()).speech_streaming_failed(&e)
                         });
                         self.load_errors.push(error);
                     }
@@ -7129,7 +7206,7 @@ self.grammar_queue.clear();
                     log!("Whisper: model load failed");
                     self.whisper_pending_record = false;
                     self.whisper_error_text.get_or_insert_with(|| {
-                        "Speech recognition failed to load. Check Settings for details.".to_string()
+                        ui_copy_for(self.ui_language.code()).speech_not_ready().to_string()
                     });
                 }
             }
@@ -8220,16 +8297,16 @@ let keep_word_errors = from_word || to_word;
                 ui.horizontal(|ui| {
                     ui.spinner();
                     let progress = self.startup_done.len() as f32 / self.startup_total as f32;
-                    let model_label = language_model_label(&*self.language);
+                    let model_label = language_model_label_for_ui(ui_copy_for(self.ui_language.code()));
                     let loading: Vec<&str> = [model_label]
                         .iter()
                         .filter(|s| !self.startup_done.iter().any(|d| d.starts_with(*s)))
                         .copied()
                         .collect();
                     let label = if loading.is_empty() {
-                        self.language.ui_ready().to_string()
+                        self.ui_language.ui_ready().to_string()
                     } else {
-                        self.language.ui_loading(&loading.join(", "))
+                        self.ui_language.ui_loading(&loading.join(", "))
                     };
                     ui.add(egui::ProgressBar::new(progress)
                         .text(label)
@@ -8258,7 +8335,7 @@ let keep_word_errors = from_word || to_word;
                 let bulb_color = if self.show_completions && self.selected_tab == 0 { active } else { inactive };
                 let bulb_resp = ax_icon(ui,
                     "\u{1F4A1}", 16.0 * s, bulb_color,
-                    self.language.ui_suggestions(),
+                    self.ui_language.ui_suggestions(),
                 );
                 if toolbar_clicked(ui, &bulb_resp, toolbar_mouse_down_click) {
                     if self.selected_tab == 0 {
@@ -8292,7 +8369,7 @@ let keep_word_errors = from_word || to_word;
                 };
                 let pen_resp = ax_icon(ui,
                     "\u{270F}", 16.0 * s, pen_color,
-                    self.language.ui_grammar(),
+                    self.ui_language.ui_grammar(),
                 );
                 if toolbar_clicked(ui, &pen_resp, toolbar_mouse_down_click) {
                     if self.selected_tab == 1 {
@@ -8317,13 +8394,13 @@ let keep_word_errors = from_word || to_word;
                     if self.mic_transcribing {
                         ui.add(egui::Label::new(
                             egui::RichText::new("⏳").size(13.0 * s)
-                        )).on_hover_text(self.language.ui_transcribing());
+                        )).on_hover_text(self.ui_language.ui_transcribing());
                     } else {
                         let stop_resp = ui.add(egui::Button::new(
                             egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                         ).fill(egui::Color32::from_rgb(200, 40, 40))
                          .min_size(egui::vec2(22.0, 16.0))
-                        ).on_hover_text(self.language.ui_stop_recording());
+                        ).on_hover_text(self.ui_language.ui_stop_recording());
                         if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                             if let Some(handle) = &self.mic_handle {
                                 handle.stop();
@@ -8334,14 +8411,14 @@ let keep_word_errors = from_word || to_word;
                 } else if self.whisper_loading {
                     ui.add(egui::Label::new(
                         egui::RichText::new("⏳").size(13.0 * s)
-                    )).on_hover_text(self.language.ui_loading_speech_model());
+                    )).on_hover_text(self.ui_language.ui_loading_speech_model());
                     ctx.request_repaint_after(Duration::from_millis(100));
                 } else {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     let mic_resp = ax_icon(ui,
                         "\u{1F3A4}", 13.0 * s, mic_color,
-                        self.language.ui_speech_recognition(),
+                        self.ui_language.ui_speech_recognition(),
                     );
                     if toolbar_clicked(ui, &mic_resp, toolbar_mouse_down_click) {
                         if whisper_ready {
@@ -8374,7 +8451,7 @@ let keep_word_errors = from_word || to_word;
                         egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
                      .min_size(egui::vec2(22.0, 16.0))
-                    ).on_hover_text(self.language.ui_stop_reading());
+                    ).on_hover_text(self.ui_language.ui_stop_reading());
                     if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                         tts::stop_speaking();
                         self.ocr_text = None;
@@ -8382,7 +8459,7 @@ let keep_word_errors = from_word || to_word;
                 } else {
                     let speak_resp = ax_icon(ui,
                         "▶", 14.0 * s, inactive,
-                        self.language.ui_read_selected_text(),
+                        self.ui_language.ui_read_selected_text(),
                     );
                     if toolbar_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
                         log!("Speak button clicked!");
@@ -8413,12 +8490,12 @@ let keep_word_errors = from_word || to_word;
                         .count();
                     if err_count > 0 {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(self.language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(self.ui_language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                         if !self.llm_waiting {
                             let fix_all_resp = ax_icon(ui,
                                 "✨", 14.0 * s, egui::Color32::from_rgb(0, 120, 220),
-                                self.language.ui_ai_fix_all(),
+                                self.ui_language.ui_ai_fix_all(),
                             );
                             if toolbar_clicked(ui, &fix_all_resp, toolbar_mouse_down_click) {
                                 // Apply local suggestions for every active
@@ -8456,9 +8533,9 @@ let keep_word_errors = from_word || to_word;
                 // Phase 14: UI strings come from the runtime-selected
                 // language stored on ContextApp.
                 let pin_tooltip = if self.follow_cursor {
-                    self.language.ui_pin_cursor_on()
+                    self.ui_language.ui_pin_cursor_on()
                 } else {
-                    self.language.ui_pin_cursor_off()
+                    self.ui_language.ui_pin_cursor_off()
                 };
                 let pin_resp = ax_icon(ui,
                     "\u{1F4CC}", 14.0 * s, pin_color,
@@ -8481,7 +8558,7 @@ let keep_word_errors = from_word || to_word;
                 let gear_resp = ax_icon(
                     ui,
                     "\u{2699}", 16.0 * s, settings_color,
-                    self.language.ui_settings(),
+                    self.ui_language.ui_settings(),
                 );
                 if update_available {
                     // Paint a small filled circle in the gear icon's
@@ -8507,7 +8584,7 @@ let keep_word_errors = from_word || to_word;
                 // ▁ Minimize
                 let minimize_resp = ax_icon(ui,
                     "–", 14.0 * s, inactive,
-                    self.language.ui_minimize(),
+                    self.ui_language.ui_minimize(),
                 );
                 if toolbar_clicked(ui, &minimize_resp, toolbar_mouse_down_click) {
                     // Drop AlwaysOnTop FIRST, otherwise Windows iconises a
@@ -8523,7 +8600,7 @@ let keep_word_errors = from_word || to_word;
                 // ✕ Close
                 let close_resp = ax_close_icon(ui,
                     16.0 * s, egui::Color32::from_rgb(120, 120, 120),
-                    self.language.ui_close(),
+                    self.ui_language.ui_close(),
                 );
                 if toolbar_clicked(ui, &close_resp, toolbar_mouse_down_click) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -8547,6 +8624,7 @@ let keep_word_errors = from_word || to_word;
             if Instant::now() >= deadline {
                 self.update_toast = None;
             } else {
+                let toast_copy = ui_copy_for(self.ui_language.code());
                 egui::TopBottomPanel::bottom("update_toast")
                     .frame(
                         egui::Frame::new()
@@ -8557,10 +8635,13 @@ let keep_word_errors = from_word || to_word;
                         let mut close_clicked = false;
                         let resp = ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "Ny versjon {} tilgjengelig — klikk ⚙ for å oppdatere",
-                                    toast_version
-                                ))
+                                egui::RichText::new(if toast_copy.en() {
+                                    format!("New version {} available - click Settings to update", toast_version)
+                                } else if toast_copy.nn() {
+                                    format!("Ny versjon {} tilgjengeleg - klikk Innstillingar for å oppdatere", toast_version)
+                                } else {
+                                    format!("Ny versjon {} tilgjengelig - klikk Innstillinger for å oppdatere", toast_version)
+                                })
                                 .size(11.0 * s)
                                 .color(egui::Color32::WHITE),
                             );
@@ -8572,7 +8653,7 @@ let keep_word_errors = from_word || to_word;
                                         egui::vec2(side, side),
                                         egui::Sense::click() | egui::Sense::hover(),
                                     );
-                                    let close = close.on_hover_text("Lukk");
+                                    let close = close.on_hover_text(toast_copy.close());
                                     if close.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
@@ -8642,12 +8723,12 @@ let keep_word_errors = from_word || to_word;
                 else if !has_sugg { self.platform.set_tab_intercept(false); self.selection_mode = false; }
 
                 if !has_sugg {
-                    let model_label = language_model_label(&*self.language);
+                    let model_label = language_model_label_for_ui(ui_copy_for(self.ui_language.code()));
                     if self.startup_rx.is_some() {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(
-                                egui::RichText::new(self.language.ui_loading(model_label))
+                                egui::RichText::new(self.ui_language.ui_loading(model_label))
                                     .size(11.0 * s)
                                     .color(theme.muted),
                             );
@@ -8904,7 +8985,7 @@ let keep_word_errors = from_word || to_word;
                                 egui::Color32::from_rgb(60, 160, 240)
                             };
                             ui.label(egui::RichText::new(phase).size(16.0 * s));
-                            ui.label(egui::RichText::new(self.language.ui_ai_correcting_seconds(elapsed))
+                            ui.label(egui::RichText::new(self.ui_language.ui_ai_correcting_seconds(elapsed))
                                 .size(12.0 * s).strong().color(pulse));
                             ctx.request_repaint_after(Duration::from_millis(500));
                         });
@@ -8945,21 +9026,21 @@ let keep_word_errors = from_word || to_word;
                                 // --- Sentence boundary suggestion ---
                                 let err_suggestion = error.suggestion.clone();
                                 ui.horizontal(|ui| {
-                                    if icon_button(ui, "👍", self.language.ui_insert_period()) {
+                                    if icon_button(ui, "👍", self.ui_language.ui_insert_period()) {
                                         action = Some((idx, "fix"));
                                     }
-                                    if icon_button(ui, "👎", self.language.ui_ignore()) {
+                                    if icon_button(ui, "👎", self.ui_language.ui_ignore()) {
                                         action = Some((idx, "ignore"));
                                     }
-                                    if icon_button(ui, "🔊", self.language.ui_read_aloud()) {
+                                    if icon_button(ui, "🔊", self.ui_language.ui_read_aloud()) {
                                         tts::speak_word(&err_suggestion);
                                     }
-                                    if icon_button(ui, "▶", self.language.ui_show_in_document()) {
+                                    if icon_button(ui, "▶", self.ui_language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
                                 ui.label(
-                                    egui::RichText::new(self.language.ui_missing_period())
+                                    egui::RichText::new(self.ui_language.ui_missing_period())
                                         .size(11.0 * s)
                                         .strong()
                                         .color(theme.info),
@@ -8998,13 +9079,13 @@ let keep_word_errors = from_word || to_word;
                                 let err_expl = error.explanation.clone();
                                 let err_ctx = error.sentence_context.clone();
                                 ui.horizontal(|ui| {
-                                    if icon_button(ui, "👎", self.language.ui_ignore()) {
+                                    if icon_button(ui, "👎", self.ui_language.ui_ignore()) {
                                         action = Some((idx, "ignore_group"));
                                     }
-                                    if icon_button(ui, "🔊", self.language.ui_read_aloud()) {
+                                    if icon_button(ui, "🔊", self.ui_language.ui_read_aloud()) {
                                         tts::speak_word(&first_suggestion);
                                     }
-                                    if icon_button(ui, "💡", self.language.ui_show_rule_info()) {
+                                    if icon_button(ui, "💡", self.ui_language.ui_show_rule_info()) {
                                         let fix_idx = first_alt.unwrap_or(idx);
                                         // Extract LLM changes if present
                                         self.rule_info_llm_changes = if err_expl.starts_with("LLM_CHANGES:") {
@@ -9026,7 +9107,7 @@ let keep_word_errors = from_word || to_word;
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                         self.rule_info_show_more = false;
                                     }
-                                    if icon_button(ui, "▶", self.language.ui_show_in_document()) {
+                                    if icon_button(ui, "▶", self.ui_language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
@@ -9087,16 +9168,16 @@ let keep_word_errors = from_word || to_word;
                                     // 0.5 cm right padding so buttons don't hug the edge.
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.add_space(19.0 * s);
-                                        if icon_button(ui, "▶", self.language.ui_show_in_document()) {
+                                        if icon_button(ui, "▶", self.ui_language.ui_show_in_document()) {
                                             action = Some((idx, "goto"));
                                         }
-                                        if icon_button(ui, "?", self.language.ui_more_suggestions()) {
+                                        if icon_button(ui, "?", self.ui_language.ui_more_suggestions()) {
                                             action = Some((idx, "suggest"));
                                         }
-                                        if icon_button(ui, "+", self.language.ui_add_to_dictionary()) {
+                                        if icon_button(ui, "+", self.ui_language.ui_add_to_dictionary()) {
                                             action = Some((idx, "add_to_dict"));
                                         }
-                                        if icon_button(ui, "👎", self.language.ui_ignore()) {
+                                        if icon_button(ui, "👎", self.ui_language.ui_ignore()) {
                                             action = Some((idx, "ignore"));
                                         }
                                     });
@@ -9322,7 +9403,7 @@ let keep_word_errors = from_word || to_word;
                 let (word, candidates) = self.suggestion_window.as_ref().unwrap();
                 let word_clone = word.clone();
                 let candidates_clone: Vec<(String, f32)> = candidates.clone();
-                let lang_for_vp = self.language.clone();
+                let lang_for_vp = self.ui_language.clone();
 
                 if let Some(idx) = prev_selection {
                     if idx < candidates_clone.len() {
@@ -9447,7 +9528,8 @@ let keep_word_errors = from_word || to_word;
                 // "Jeg liker å Jeg liker å spille fotball. fotball."
                 let corrected_sentence = suggestion.clone();
                 let (category, description, wrong, right) = rule_info(&rule_name);
-                let lang_for_rule = self.language.clone();
+                let lang_for_rule = self.ui_language.clone();
+                let ui_copy = ui_copy_for(lang_for_rule.code());
                 let popup_theme = theme;
 
                 // Center on screen using actual monitor size.
@@ -9599,7 +9681,7 @@ let keep_word_errors = from_word || to_word;
                                         // Toggle to reveal the old detailed view
                                         if ui.selectable_label(
                                             show_more,
-                                            egui::RichText::new(if show_more { "Skjul detaljer" } else { "Vis mer" })
+                                            egui::RichText::new(if show_more { ui_copy.hide_details() } else { ui_copy.show_more() })
                                                 .size(13.0 * s)
                                                 .color(egui::Color32::from_rgb(90, 120, 180)),
                                         ).clicked() {
@@ -9809,7 +9891,7 @@ let keep_word_errors = from_word || to_word;
                                         do_close = true;
                                     }
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(egui::RichText::new(format!("Regel: {}", rule_name)).size(11.0 * s).color(popup_theme.muted));
+                                        ui.label(egui::RichText::new(format!("{}: {}", ui_copy.rule_label(), rule_name)).size(11.0 * s).color(popup_theme.muted));
                                     });
                                 });
                             });
@@ -9874,7 +9956,7 @@ let keep_word_errors = from_word || to_word;
                 let text_clone = self.mic_result_text.clone()
                     .or(whisper_error_text)
                     .unwrap_or_default();
-                let lang_for_stt = self.language.clone();
+                let lang_for_stt = self.ui_language.clone();
 
                 let win_w = 600.0_f32;
                 let win_h = 400.0_f32;
@@ -10048,27 +10130,34 @@ let keep_word_errors = from_word || to_word;
             if self.selected_tab == 3 {
                 let grey = egui::Color32::from_rgb(100, 100, 100);
                 let dark = egui::Color32::from_rgb(50, 50, 50);
+                let debug_copy = ui_copy_for(self.ui_language.code());
+                let word_label = if debug_copy.en() { "Word" } else { "Ord" };
+                let sentence_label = if debug_copy.en() { "Sentence" } else { "Setning" };
+                let masked_label = if debug_copy.en() { "Masked" } else { "Maskert" };
+                let empty_word = if debug_copy.en() { "(empty)" } else { "(tomt)" };
+                let empty_sentence = if debug_copy.en() { "(empty)" } else { "(tom)" };
+                let no_mask = if debug_copy.en() { "(none)" } else { "(ingen)" };
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Bro:").size(11.0 * s).strong().color(grey));
+                    ui.label(egui::RichText::new(format!("{}:", debug_copy.bridge())).size(11.0 * s).strong().color(grey));
                     ui.label(egui::RichText::new(self.manager.active_bridge_name()).size(11.0 * s).color(dark));
                     ui.add_space(12.0);
-                    ui.label(egui::RichText::new("Ord:").size(11.0 * s).strong().color(grey));
+                    ui.label(egui::RichText::new(format!("{}:", word_label)).size(11.0 * s).strong().color(grey));
                     ui.label(
-                        egui::RichText::new(if self.context.word.is_empty() { "(tomt)" } else { &self.context.word })
+                        egui::RichText::new(if self.context.word.is_empty() { empty_word } else { &self.context.word })
                             .size(13.0 * s)
                             .color(egui::Color32::from_rgb(0, 70, 160)),
                     );
                 });
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("Setning:").size(11.0 * s).strong().color(grey));
+                ui.label(egui::RichText::new(format!("{}:", sentence_label)).size(11.0 * s).strong().color(grey));
                 ui.label(
-                    egui::RichText::new(if self.context.sentence.is_empty() { "(tom)" } else { &self.context.sentence })
+                    egui::RichText::new(if self.context.sentence.is_empty() { empty_sentence } else { &self.context.sentence })
                         .size(11.0 * s)
                         .color(dark),
                 );
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("Maskert:").size(11.0 * s).strong().color(grey));
-                let masked_text = self.context.masked_sentence.clone().unwrap_or_else(|| "(ingen)".to_string());
+                ui.label(egui::RichText::new(format!("{}:", masked_label)).size(11.0 * s).strong().color(grey));
+                let masked_text = self.context.masked_sentence.clone().unwrap_or_else(|| no_mask.to_string());
                 egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(&masked_text)
@@ -10077,10 +10166,11 @@ let keep_word_errors = from_word || to_word;
                     );
                 });
                 ui.add_space(4.0);
-                if ui.small_button("Kopier til utklippstavle").clicked() {
-                    let mut text = format!("Bro: {}\nOrd: {}\nSetning: {}", self.manager.active_bridge_name(), self.context.word, self.context.sentence);
+                let copy_debug = if debug_copy.en() { "Copy to clipboard" } else { "Kopier til utklippstavle" };
+                if ui.small_button(copy_debug).clicked() {
+                    let mut text = format!("{}: {}\n{}: {}\n{}: {}", debug_copy.bridge(), self.manager.active_bridge_name(), word_label, self.context.word, sentence_label, self.context.sentence);
                     if let Some(masked) = &self.context.masked_sentence {
-                        text.push_str(&format!("\nMaskert: {}", masked));
+                        text.push_str(&format!("\n{}: {}", masked_label, masked));
                     }
                     ctx.copy_text(text);
                 }
@@ -10107,6 +10197,8 @@ let keep_word_errors = from_word || to_word;
             let theme_prev = self.theme;
             let mut new_theme = theme_prev;
             let mut new_ui_scale = ui_scale;
+            let ui_language_setting_prev = self.ui_language_setting.clone();
+            let mut new_ui_language_setting = ui_language_setting_prev.clone();
             let mut open_userdict = false;
             let mut selected_voice: Option<String> = None;
             let voice_list = tts::available_voices();
@@ -10117,7 +10209,8 @@ let keep_word_errors = from_word || to_word;
                 performance_level_from_settings(quality, &current_model_size, &current_lang_code);
             let mut new_performance_level = current_performance_level;
             let mut new_model_size = current_model_size.clone();
-            let lang_for_settings = self.language.clone();
+            let lang_for_settings = self.ui_language.clone();
+            let settings_copy = ui_copy_for(lang_for_settings.code());
 
             // Capture the active theme so the settings viewport can match it.
             // Both viewports share the same egui::Context, so calling
@@ -10172,10 +10265,10 @@ let keep_word_errors = from_word || to_word;
                             let mut settings_tab = self.settings_tab;
                             ui.horizontal(|ui| {
                                 let tabs = [
-                                    (0u8, "Skriving"),
-                                    (1u8, "Tale"),
-                                    (2u8, "Visning"),
-                                    (3u8, "Språk"),
+                                    (0u8, settings_copy.settings_tab_writing()),
+                                    (1u8, settings_copy.settings_tab_speech()),
+                                    (2u8, settings_copy.settings_tab_display()),
+                                    (3u8, settings_copy.settings_tab_language()),
                                 ];
                                 for (idx, label) in tabs.iter() {
                                     if ui.selectable_label(
@@ -10199,7 +10292,7 @@ let keep_word_errors = from_word || to_word;
                             ui.add_space(6.0);
                             {
                                 let quality_label =
-                                    performance_level_label(&current_lang_code, new_performance_level);
+                                    performance_level_label_for_ui(settings_copy, new_performance_level);
                                 let mut selected =
                                     performance_index_from_level(&current_lang_code, new_performance_level);
                                 egui::ComboBox::from_id_salt("settings_performance_combo")
@@ -10207,7 +10300,7 @@ let keep_word_errors = from_word || to_word;
                                     .width(260.0)
                                     .show_index(ui, &mut selected, performance_level_count(&current_lang_code), |i| {
                                         let level = performance_level_for_index(&current_lang_code, i);
-                                        performance_level_label(&current_lang_code, level).to_string()
+                                        performance_level_label_for_ui(settings_copy, level).to_string()
                                     });
                                 new_performance_level =
                                     performance_level_for_index(&current_lang_code, selected);
@@ -10216,8 +10309,8 @@ let keep_word_errors = from_word || to_word;
                                 new_model_size = mapped.1;
                                 ui.add_space(4.0);
                                 ui.label(
-                                    egui::RichText::new(performance_level_description(
-                                        &current_lang_code,
+                                    egui::RichText::new(performance_level_description_for_ui(
+                                        settings_copy,
                                         new_performance_level,
                                     ))
                                     .size(13.0 * s)
@@ -10233,7 +10326,7 @@ let keep_word_errors = from_word || to_word;
                             ui.label(egui::RichText::new(lang_for_settings.ui_user_dict()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("{} ord", dict_count)).size(body).color(active_color));
+                                ui.label(egui::RichText::new(settings_copy.words_count(dict_count)).size(body).color(active_color));
                                 if ui.add(egui::Button::new(
                                     egui::RichText::new(lang_for_settings.ui_edit()).size(body)
                                 )).clicked() {
@@ -10285,7 +10378,8 @@ let keep_word_errors = from_word || to_word;
                                     let is_selected = voice.name == current;
                                     let mut label = voice.name.clone();
                                     if !ready {
-                                        label.push_str("  — ikke lastet ned");
+                                        label.push_str("  - ");
+                                        label.push_str(settings_copy.not_downloaded());
                                     }
                                     let resp = ui.selectable_label(
                                         is_selected,
@@ -10337,15 +10431,15 @@ let keep_word_errors = from_word || to_word;
 
                             // ============ Tab 2: Visning (display) ============
                             if settings_tab == 2 {
-                            // -- Fargetema --
-                            ui.label(egui::RichText::new("Fargetema").size(heading).strong().color(label_color));
+                            // -- Color theme --
+                            ui.label(egui::RichText::new(settings_copy.color_theme()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal_wrapped(|ui| {
                                 let themes = [
-                                    (0u8, "Krem"),
-                                    (1u8, "Havblå"),
-                                    (2u8, "Sval grå"),
-                                    (3u8, "Mørk"),
+                                    (0u8, settings_copy.theme_label(0)),
+                                    (1u8, settings_copy.theme_label(1)),
+                                    (2u8, settings_copy.theme_label(2)),
+                                    (3u8, settings_copy.theme_label(3)),
                                 ];
                                 for (idx, label) in themes.iter() {
                                     let tc = theme_for(*idx);
@@ -10365,13 +10459,13 @@ let keep_word_errors = from_word || to_word;
                             ui.add_space(12.0);
 
                             // -- Hover zoom (large-font preview on hover) --
-                            ui.label(egui::RichText::new("Forstørr ord ved hover").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(settings_copy.hover_zoom()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             {
                                 let label = if new_hover_zoom {
-                                    "På — forslag vises i stor skrift når musen er over"
+                                    settings_copy.hover_zoom_on()
                                 } else {
-                                    "Av"
+                                    settings_copy.hover_zoom_off()
                                 };
                                 ui.add(egui::Checkbox::new(
                                     &mut new_hover_zoom,
@@ -10388,14 +10482,14 @@ let keep_word_errors = from_word || to_word;
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 let minus = ui.add(egui::Button::new(egui::RichText::new("  −  ").size(body)));
-                                minus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Reduser UI-størrelse"));
+                                minus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, settings_copy.decrease_size()));
                                 if minus.clicked() {
                                     new_ui_scale = (new_ui_scale - 0.1).max(0.5);
                                 }
                                 ui.label(egui::RichText::new(format!("{:.0}%", new_ui_scale * 100.0)).size(body)
                                     .color(active_color));
                                 let plus = ui.add(egui::Button::new(egui::RichText::new("  +  ").size(body)));
-                                plus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Øk UI-størrelse"));
+                                plus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, settings_copy.increase_size()));
                                 if plus.clicked() {
                                     new_ui_scale = (new_ui_scale + 0.1).min(2.5);
                                 }
@@ -10404,8 +10498,58 @@ let keep_word_errors = from_word || to_word;
 
                             // ============ Tab 3: Språk (language) ============
                             if settings_tab == 3 {
-                            ui.label(egui::RichText::new("Språk").size(heading).strong().color(label_color));
+                            ui.label(egui::RichText::new(settings_copy.app_language()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(settings_copy.app_language_help())
+                                    .size(13.0 * s)
+                                    .color(off_color),
+                            );
+                            ui.add_space(8.0);
+                            {
+                                let selected_text = if new_ui_language_setting == "auto" {
+                                    format!(
+                                        "{} ({})",
+                                        settings_copy.same_as_writing_language(),
+                                        language_display_name(&current_lang_code)
+                                    )
+                                } else {
+                                    language_display_name(&new_ui_language_setting).to_string()
+                                };
+                                egui::ComboBox::from_id_salt("settings_ui_language_combo")
+                                    .selected_text(egui::RichText::new(selected_text).size(body))
+                                    .width(300.0)
+                                    .show_ui(ui, |ui| {
+                                        for opt in INTERFACE_LANGUAGES {
+                                            let label = match opt.code {
+                                                Some(code) => language_display_name(code).to_string(),
+                                                None => format!(
+                                                    "{} ({})",
+                                                    settings_copy.same_as_writing_language(),
+                                                    language_display_name(&current_lang_code)
+                                                ),
+                                            };
+                                            ui.selectable_value(
+                                                &mut new_ui_language_setting,
+                                                opt.setting.to_string(),
+                                                egui::RichText::new(label).size(body),
+                                            );
+                                        }
+                                    });
+                            }
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            ui.label(egui::RichText::new(settings_copy.writing_language()).size(heading).strong().color(label_color));
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(settings_copy.writing_language_help())
+                                    .size(13.0 * s)
+                                    .color(off_color),
+                            );
+                            ui.add_space(8.0);
 
                             for lang in AVAILABLE_LANGUAGES {
                                 let is_active = lang.code == current_lang_code;
@@ -10427,18 +10571,18 @@ let keep_word_errors = from_word || to_word;
                                     ui.add_space(8.0);
 
                                     if is_active {
-                                        ui.label(egui::RichText::new("(aktiv)").size(14.0 * s).color(on_color));
+                                        ui.label(egui::RichText::new(settings_copy.active()).size(14.0 * s).color(on_color));
                                     } else if is_cached {
                                         // Already downloaded — offer to activate
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("Aktiver").size(15.0 * s)
+                                            egui::RichText::new(settings_copy.activate()).size(15.0 * s)
                                         )).clicked() {
                                             switch_to_language = Some(lang.code.to_string());
                                         }
                                     } else {
                                         // Not downloaded — offer to download + activate
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("Last ned").size(15.0 * s)
+                                            egui::RichText::new(settings_copy.download()).size(15.0 * s)
                                         )).clicked() {
                                             switch_to_language = Some(lang.code.to_string());
                                         }
@@ -10454,14 +10598,14 @@ let keep_word_errors = from_word || to_word;
                                 ui.separator();
                                 ui.add_space(12.0);
                                 for err in &load_errors {
-                                    let err_text = settings_error_text(err);
+                                    let err_text = settings_error_text(err, settings_copy);
                                     ui.label(egui::RichText::new(err_text).size(16.0 * s)
                                         .color(egui::Color32::from_rgb(200, 50, 50)));
                                 }
                             }
 
                             ui.add_space(12.0);
-                            ui.label(egui::RichText::new(format!("Bro: {}", bridge_name))
+                            ui.label(egui::RichText::new(format!("{}: {}", settings_copy.bridge(), bridge_name))
                                 .size(14.0 * s).color(off_color));
 
                             // ── Version + auto-update banner ───────────────
@@ -10489,24 +10633,24 @@ let keep_word_errors = from_word || to_word;
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        ui.label(egui::RichText::new("Sjekker etter oppdatering …")
+                                        ui.label(egui::RichText::new(settings_copy.checking_updates())
                                             .size(13.0 * s).color(off_color));
                                     });
                                 }
                                 crate::updates::Status::UpToDate => {
                                     ui.add_space(4.0);
-                                    ui.label(egui::RichText::new("Du har siste versjon.")
+                                    ui.label(egui::RichText::new(settings_copy.up_to_date())
                                         .size(13.0 * s).color(on_color));
                                 }
                                 crate::updates::Status::Available { version } => {
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            egui::RichText::new(format!("Ny versjon tilgjengelig: {}", version))
+                                            egui::RichText::new(settings_copy.update_available(&version))
                                                 .size(14.0 * s).strong().color(active_color),
                                         );
                                         if ui.button(
-                                            egui::RichText::new("Last ned og start på nytt")
+                                            egui::RichText::new(settings_copy.download_and_restart())
                                                 .size(13.0 * s),
                                         ).clicked() {
                                             self.update_service.download_and_restart();
@@ -10517,24 +10661,24 @@ let keep_word_errors = from_word || to_word;
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.spinner();
-                                        ui.label(egui::RichText::new("Laster ned oppdatering …")
+                                        ui.label(egui::RichText::new(settings_copy.downloading_update())
                                             .size(13.0 * s).color(off_color));
                                     });
                                 }
                                 crate::updates::Status::Ready => {
                                     ui.add_space(4.0);
-                                    ui.label(egui::RichText::new("Oppdatering klar — appen starter på nytt …")
+                                    ui.label(egui::RichText::new(settings_copy.update_ready())
                                         .size(13.0 * s).color(on_color));
                                 }
                                 crate::updates::Status::Error { message } => {
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            egui::RichText::new("Kunne ikke sjekke etter oppdatering.")
+                                            egui::RichText::new(settings_copy.update_check_failed())
                                                 .size(13.0 * s).color(off_color),
                                         ).on_hover_text(message);
                                         if ui.button(
-                                            egui::RichText::new("Prøv igjen").size(12.0 * s),
+                                            egui::RichText::new(settings_copy.try_again()).size(12.0 * s),
                                         ).clicked() {
                                             self.update_service.check_now();
                                         }
@@ -10570,6 +10714,12 @@ let keep_word_errors = from_word || to_word;
                 self.theme = new_theme;
                 log!("Theme: {}", self.theme);
             }
+            new_ui_language_setting = normalize_ui_language_setting(&new_ui_language_setting);
+            if new_ui_language_setting != self.ui_language_setting {
+                self.ui_language_setting = new_ui_language_setting.clone();
+                self.ui_language = resolve_ui_language_bundle(&self.ui_language_setting, &*self.language);
+                log!("UI language changed to {}", self.ui_language.code());
+            }
             if (new_ui_scale - self.ui_scale).abs() > 0.01 {
                 self.ui_scale = new_ui_scale;
             }
@@ -10587,6 +10737,7 @@ let keep_word_errors = from_word || to_word;
                     ui_scale: self.ui_scale,
                     voice: voice.clone(),
                     language: self.language.code().to_string(),
+                    ui_language: self.ui_language_setting.clone(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
                     model_size: new_model_size.clone(),
@@ -10603,6 +10754,7 @@ let keep_word_errors = from_word || to_word;
                 || new_speak_on_space != speak_on_space
                 || new_hover_zoom != hover_zoom_prev
                 || new_theme != theme_prev
+                || new_ui_language_setting != ui_language_setting_prev
                 || model_size_changed
                 || (new_ui_scale - ui_scale).abs() > 0.01
             {
@@ -10613,6 +10765,7 @@ let keep_word_errors = from_word || to_word;
                     ui_scale: self.ui_scale,
                     voice: tts::current_voice(),
                     language: self.language.code().to_string(),
+                    ui_language: self.ui_language_setting.clone(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
                     model_size: new_model_size.clone(),
@@ -10628,6 +10781,7 @@ let keep_word_errors = from_word || to_word;
                     ui_scale: self.ui_scale,
                     voice: tts::current_voice(),
                     language: new_lang.clone(),
+                    ui_language: self.ui_language_setting.clone(),
                     hover_zoom: self.hover_zoom,
                     theme: self.theme,
                     model_size: new_model_size.clone(),
@@ -10664,7 +10818,7 @@ let keep_word_errors = from_word || to_word;
             words.sort();
             let mut new_word_buf = self.userdict_new_word.clone();
             let scale = self.ui_scale;
-            let lang_for_dict = self.language.clone();
+            let lang_for_dict = self.ui_language.clone();
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("userdict_editor"),
@@ -10777,7 +10931,7 @@ let keep_word_errors = from_word || to_word;
                 (monitor.y - win_h) / 2.0,
             );
 
-            let lang_for_ocr = self.language.clone();
+            let lang_for_ocr = self.ui_language.clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("ocr_prompt"),
                 spell_viewport_builder()
@@ -10873,6 +11027,251 @@ const AVAILABLE_LANGUAGES: &[LangOption] = &[
     LangOption { code: "nn", name: "Nynorsk" },
     LangOption { code: "en", name: "English" },
 ];
+
+#[derive(Clone, Copy)]
+struct InterfaceLanguageOption {
+    setting: &'static str,
+    code: Option<&'static str>,
+}
+
+const INTERFACE_LANGUAGES: &[InterfaceLanguageOption] = &[
+    InterfaceLanguageOption { setting: "auto", code: None },
+    InterfaceLanguageOption { setting: "nb", code: Some("nb") },
+    InterfaceLanguageOption { setting: "nn", code: Some("nn") },
+    InterfaceLanguageOption { setting: "en", code: Some("en") },
+];
+
+fn normalize_language_code(code: &str) -> &'static str {
+    match code {
+        "nn" => "nn",
+        "en" => "en",
+        "nb" | "no" => "nb",
+        _ => "nb",
+    }
+}
+
+fn normalize_ui_language_setting(setting: &str) -> String {
+    match setting {
+        "auto" => "auto".to_string(),
+        "nn" => "nn".to_string(),
+        "en" => "en".to_string(),
+        "nb" | "no" => "nb".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+fn effective_ui_language_code(setting: &str, writing_code: &str) -> &'static str {
+    match setting {
+        "auto" | "" => normalize_language_code(writing_code),
+        other => normalize_language_code(other),
+    }
+}
+
+fn resolve_ui_language_bundle(
+    setting: &str,
+    writing_language: &dyn language::LanguageBundle,
+) -> Arc<dyn language::LanguageBundle> {
+    let code = effective_ui_language_code(setting, writing_language.code());
+    language::resolve_language(code).unwrap_or_else(|_| {
+        language::resolve_language(writing_language.code())
+            .unwrap_or_else(|_| Arc::new(language::BokmalLanguage))
+    })
+}
+
+fn language_display_name(code: &str) -> &'static str {
+    AVAILABLE_LANGUAGES
+        .iter()
+        .find(|lang| lang.code == normalize_language_code(code))
+        .map(|lang| lang.name)
+        .unwrap_or("Bokmål")
+}
+
+#[derive(Clone, Copy)]
+struct UiCopy {
+    code: &'static str,
+}
+
+fn ui_copy_for(code: &str) -> UiCopy {
+    UiCopy { code: normalize_language_code(code) }
+}
+
+impl UiCopy {
+    fn en(self) -> bool { self.code == "en" }
+    fn nn(self) -> bool { self.code == "nn" }
+
+    fn settings_tab_writing(self) -> &'static str {
+        if self.en() { "Writing" } else { "Skriving" }
+    }
+    fn settings_tab_speech(self) -> &'static str {
+        if self.en() { "Speech" } else { "Tale" }
+    }
+    fn settings_tab_display(self) -> &'static str {
+        if self.en() { "Display" } else if self.nn() { "Vising" } else { "Visning" }
+    }
+    fn settings_tab_language(self) -> &'static str {
+        if self.en() { "Language" } else { "Språk" }
+    }
+    fn app_language(self) -> &'static str {
+        if self.en() { "App language" } else { "Appspråk" }
+    }
+    fn app_language_help(self) -> &'static str {
+        if self.en() {
+            "Controls menus, buttons, messages, and settings text."
+        } else if self.nn() {
+            "Styrer menyar, knappar, meldingar og tekst i innstillingane."
+        } else {
+            "Styrer menyer, knapper, meldinger og tekst i innstillingene."
+        }
+    }
+    fn writing_language(self) -> &'static str {
+        if self.en() { "Writing language" } else { "Skrivespråk" }
+    }
+    fn writing_language_help(self) -> &'static str {
+        if self.en() {
+            "Used for spelling, grammar, completions, speech models, voices, and downloads."
+        } else if self.nn() {
+            "Brukt for stavekontroll, grammatikk, ordforslag, talemodellar, stemmer og nedlastingar."
+        } else {
+            "Brukes for stavekontroll, grammatikk, ordforslag, talemodeller, stemmer og nedlastinger."
+        }
+    }
+    fn same_as_writing_language(self) -> &'static str {
+        if self.en() { "Same as writing language" } else if self.nn() { "Same som skrivespråk" } else { "Samme som skrivespråk" }
+    }
+    fn active(self) -> &'static str {
+        if self.en() { "(active)" } else if self.nn() { "(aktivt)" } else { "(aktiv)" }
+    }
+    fn activate(self) -> &'static str {
+        if self.en() { "Activate" } else { "Aktiver" }
+    }
+    fn download(self) -> &'static str {
+        if self.en() { "Download" } else { "Last ned" }
+    }
+    fn not_downloaded(self) -> &'static str {
+        if self.en() { "not downloaded" } else if self.nn() { "ikkje lasta ned" } else { "ikke lastet ned" }
+    }
+    fn words_count(self, count: usize) -> String {
+        if self.en() {
+            format!("{} {}", count, if count == 1 { "word" } else { "words" })
+        } else {
+            format!("{} ord", count)
+        }
+    }
+    fn color_theme(self) -> &'static str {
+        if self.en() { "Color theme" } else { "Fargetema" }
+    }
+    fn theme_label(self, idx: u8) -> &'static str {
+        match (self.en(), idx) {
+            (true, 0) => "Cream",
+            (true, 1) => "Sea blue",
+            (true, 2) => "Cool gray",
+            (true, _) => "Dark",
+            (false, 0) => "Krem",
+            (false, 1) => "Havblå",
+            (false, 2) => "Sval grå",
+            (false, _) => "Mørk",
+        }
+    }
+    fn hover_zoom(self) -> &'static str {
+        if self.en() { "Enlarge words on hover" } else { "Forstørr ord ved hover" }
+    }
+    fn hover_zoom_on(self) -> &'static str {
+        if self.en() {
+            "On - suggestions are shown larger while the mouse is over them"
+        } else if self.nn() {
+            "På - forslag blir viste i stor skrift når musa er over"
+        } else {
+            "På - forslag vises i stor skrift når musen er over"
+        }
+    }
+    fn hover_zoom_off(self) -> &'static str {
+        if self.en() { "Off" } else { "Av" }
+    }
+    fn decrease_size(self) -> &'static str {
+        if self.en() { "Decrease interface size" } else if self.nn() { "Reduser UI-storleik" } else { "Reduser UI-størrelse" }
+    }
+    fn increase_size(self) -> &'static str {
+        if self.en() { "Increase interface size" } else if self.nn() { "Auk UI-storleik" } else { "Øk UI-størrelse" }
+    }
+    fn bridge(self) -> &'static str {
+        if self.en() { "Bridge" } else { "Bro" }
+    }
+    fn checking_updates(self) -> &'static str {
+        if self.en() { "Checking for updates ..." } else if self.nn() { "Ser etter oppdatering ..." } else { "Sjekker etter oppdatering ..." }
+    }
+    fn up_to_date(self) -> &'static str {
+        if self.en() { "You have the latest version." } else { "Du har siste versjon." }
+    }
+    fn update_available(self, version: &str) -> String {
+        if self.en() { format!("New version available: {}", version) } else if self.nn() { format!("Ny versjon tilgjengeleg: {}", version) } else { format!("Ny versjon tilgjengelig: {}", version) }
+    }
+    fn download_and_restart(self) -> &'static str {
+        if self.en() { "Download and restart" } else { "Last ned og start på nytt" }
+    }
+    fn downloading_update(self) -> &'static str {
+        if self.en() { "Downloading update ..." } else if self.nn() { "Lastar ned oppdatering ..." } else { "Laster ned oppdatering ..." }
+    }
+    fn update_ready(self) -> &'static str {
+        if self.en() { "Update ready - restarting app ..." } else if self.nn() { "Oppdatering klar - appen startar på nytt ..." } else { "Oppdatering klar - appen starter på nytt ..." }
+    }
+    fn update_check_failed(self) -> &'static str {
+        if self.en() { "Could not check for updates." } else if self.nn() { "Kunne ikkje sjå etter oppdatering." } else { "Kunne ikke sjekke etter oppdatering." }
+    }
+    fn try_again(self) -> &'static str {
+        if self.en() { "Try again" } else { "Prøv igjen" }
+    }
+    fn rule_label(self) -> &'static str {
+        if self.en() { "Rule" } else { "Regel" }
+    }
+    fn show_more(self) -> &'static str {
+        if self.en() { "Show more" } else if self.nn() { "Vis meir" } else { "Vis mer" }
+    }
+    fn hide_details(self) -> &'static str {
+        if self.en() { "Hide details" } else if self.nn() { "Skjul detaljar" } else { "Skjul detaljer" }
+    }
+    fn speech_not_ready(self) -> &'static str {
+        if self.en() { "Speech recognition is not ready yet. Check Settings for details." } else if self.nn() { "Talegjenkjenning er ikkje klar enno. Sjå Innstillingar for detaljar." } else { "Talegjenkjenning er ikke klar ennå. Se Innstillinger for detaljer." }
+    }
+    fn microphone_error(self, err: &str) -> String {
+        if self.en() { format!("Microphone error: {}", err) } else { format!("Mikrofonfeil: {}", err) }
+    }
+    fn speech_load_failed(self, err: &str) -> String {
+        if self.en() { format!("Speech recognition failed to load: {}", err) } else if self.nn() { format!("Talegjenkjenning kunne ikkje lastast: {}", err) } else { format!("Talegjenkjenning kunne ikke lastes: {}", err) }
+    }
+    fn speech_streaming_failed(self, err: &str) -> String {
+        if self.en() { format!("Speech recognition streaming failed to load: {}", err) } else if self.nn() { format!("Direkte talegjenkjenning kunne ikkje lastast: {}", err) } else { format!("Direkte talegjenkjenning kunne ikke lastes: {}", err) }
+    }
+    fn download_title(self, lang_name: &str) -> String {
+        if self.en() { format!("Spell - Downloading {}", lang_name) } else if self.nn() { format!("Spell - Lastar ned {}", lang_name) } else { format!("Spell - Laster ned {}", lang_name) }
+    }
+    fn download_heading(self, lang_name: &str) -> String {
+        if self.en() { format!("Downloading {}...", lang_name) } else if self.nn() { format!("Lastar ned {}...", lang_name) } else { format!("Laster ned {}...", lang_name) }
+    }
+    fn download_failed(self) -> &'static str {
+        if self.en() { "Download failed. Some files are missing." } else if self.nn() { "Nedlasting feila. Nokre filer manglar." } else { "Nedlasting feilet. Noen filer mangler." }
+    }
+    fn download_detail(self) -> &'static str {
+        if self.en() { "Detail" } else { "Detalj" }
+    }
+    fn download_error(self) -> &'static str {
+        if self.en() { "Error" } else { "Feil" }
+    }
+    fn download_done(self) -> &'static str {
+        if self.en() { "Done" } else { "Ferdig" }
+    }
+    fn download_waiting(self) -> &'static str {
+        if self.en() { "Waiting..." } else if self.nn() { "Ventar..." } else { "Venter..." }
+    }
+    fn close(self) -> &'static str {
+        if self.en() { "Close" } else { "Lukk" }
+    }
+    fn download_error_context(self) -> &'static str {
+        if self.en() { "Download" } else if self.nn() { "Nedlasting" } else { "Nedlasting" }
+    }
+    fn whisper_download_context(self) -> &'static str {
+        if self.en() { "Whisper download" } else if self.nn() { "Whisper-nedlasting" } else { "Whisper-nedlasting" }
+    }
+}
 
 /// Blend an accent color toward the base (theme.bg) by `amount` (0..1).
 /// Used to produce subtle tinted cards that don't blow out dark themes.
@@ -11477,12 +11876,14 @@ fn run_performance_picker(lang_code: &str) -> (u8, String) {
 // ── Download window: shown when language data is missing ──
 
 fn run_download_window(lang_code: &str) {
-    let model_size = load_settings().model_size;
+    let settings = load_settings();
+    let ui_copy = ui_copy_for(effective_ui_language_code(&settings.ui_language, lang_code));
+    let model_size = settings.model_size;
     let mut items = downloader::language_files(lang_code, &model_size);
     // Append Piper TTS files (model + FST + espeak-ng for English).
     // For "en" this performs a synchronous manifest fetch (~100 ms).
     items.extend(downloader::piper_files(lang_code));
-    let whisper_mode = load_settings().whisper_mode;
+    let whisper_mode = settings.whisper_mode;
     items.extend(downloader::whisper_files(lang_code, whisper_mode));
     let progress = downloader::download_missing(items.clone());
 
@@ -11495,17 +11896,8 @@ fn run_download_window(lang_code: &str) {
     let lang_name = lang_info.map(|l| l.name).unwrap_or(lang_code);
     let dl_lang_code = lang_code.to_string();
 
-    let (win_title, heading_text) = if lang_code == "nn" {
-        (
-            format!("Spell — Lastar ned {}", lang_name),
-            format!("Lastar ned {}...", lang_name),
-        )
-    } else {
-        (
-            format!("Spell — Laster ned {}", lang_name),
-            format!("Laster ned {}...", lang_name),
-        )
-    };
+    let win_title = ui_copy.download_title(lang_name);
+    let heading_text = ui_copy.download_heading(lang_name);
 
     let prog = std::sync::Arc::clone(&progress);
     let options = eframe::NativeOptions {
@@ -11522,6 +11914,7 @@ fn run_download_window(lang_code: &str) {
         done: bool,
         heading: String,
         lang_code: String,
+        ui_copy: UiCopy,
         error_text: &'static str,
         retry_text: &'static str,
         close_text: &'static str,
@@ -11569,15 +11962,15 @@ fn run_download_window(lang_code: &str) {
                                         0.0
                                     };
                                     let status = if item.error.is_some() {
-                                        Some("Feil".to_string())
+                                        Some(self.ui_copy.download_error().to_string())
                                     } else if item.done {
-                                        Some("Ferdig".to_string())
+                                        Some(self.ui_copy.download_done().to_string())
                                     } else if item.count > 1 {
                                         Some(format!("{}/{}", item.done_count, item.count))
                                     } else if item.total > 0 {
                                         None
                                     } else {
-                                        Some("Ventar...".to_string())
+                                        Some(self.ui_copy.download_waiting().to_string())
                                     };
 
                                     let color = if item.error.is_some() {
@@ -11590,7 +11983,7 @@ fn run_download_window(lang_code: &str) {
 
                                     ui.add_sized(
                                         [label_width, 22.0],
-                                        egui::Label::new(egui::RichText::new(item.display_label())
+                                        egui::Label::new(egui::RichText::new(item.localized_display_label(self.ui_copy))
                                             .size(16.0).color(color)),
                                     );
                                     ui.add_space(8.0);
@@ -11624,7 +12017,7 @@ fn run_download_window(lang_code: &str) {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.add_space(16.0);
                                         ui.label(egui::RichText::new(
-                                            format!("Detalj: {}", download_error_code(err))
+                                            format!("{}: {}", self.ui_copy.download_detail(), download_error_code(err))
                                         ).size(12.0).color(egui::Color32::from_rgb(150, 50, 50)));
                                     });
                                 }
@@ -11638,7 +12031,7 @@ fn run_download_window(lang_code: &str) {
                             ui.separator();
                             ui.label(egui::RichText::new(self.error_text)
                                 .size(16.0).color(egui::Color32::from_rgb(200, 50, 50)));
-                            ui.label(egui::RichText::new(format!("Detalj: {}", download_error_code(&err)))
+                            ui.label(egui::RichText::new(format!("{}: {}", self.ui_copy.download_detail(), download_error_code(&err)))
                                 .size(13.0).color(egui::Color32::from_rgb(100, 100, 100)));
                             ui.horizontal(|ui| {
                                 if ui.button(self.retry_text).clicked() {
@@ -11667,16 +12060,8 @@ fn run_download_window(lang_code: &str) {
         }
     }
 
-    let error_text_static: &'static str = if lang_code == "nn" {
-        "Nedlasting feila. Nokre filer manglar."
-    } else {
-        "Nedlasting feilet. Noen filer mangler."
-    };
-    let retry_text_static: &'static str = if lang_code == "nn" {
-        "Prøv igjen"
-    } else {
-        "Prøv på nytt"
-    };
+    let error_text_static: &'static str = ui_copy.download_failed();
+    let retry_text_static: &'static str = ui_copy.try_again();
     let _ = eframe::run_native(
         &win_title,
         options,
@@ -11687,9 +12072,10 @@ fn run_download_window(lang_code: &str) {
                 done: false,
                 heading: heading_text,
                 lang_code: dl_lang_code,
+                ui_copy,
                 error_text: error_text_static,
                 retry_text: retry_text_static,
-                close_text: "Lukk",
+                close_text: ui_copy.close(),
             }) as Box<dyn eframe::App>)
         }),
     );
@@ -11699,35 +12085,58 @@ fn download_error_code(err: &str) -> &str {
     err.split_whitespace().next().unwrap_or("UNKNOWN_DOWNLOAD_ERROR")
 }
 
-fn user_facing_download_error(context: &str, err: &str) -> String {
+fn user_facing_download_error(context: &str, err: &str, ui: UiCopy) -> String {
     let code = download_error_code(err);
     match code {
         "HTTP_404_KEY_NOT_FOUND" => {
             if let Some(key) = s3_key_from_download_error(err) {
-                format!(
-                    "{}: missing file on the download server ({})",
-                    context, key
-                )
+                if ui.en() {
+                    format!("{}: missing file on the download server ({})", context, key)
+                } else if ui.nn() {
+                    format!("{}: fila manglar på nedlastingsserveren ({})", context, key)
+                } else {
+                    format!("{}: filen mangler på nedlastingsserveren ({})", context, key)
+                }
             } else {
-                format!("{}: missing file on the download server", context)
+                if ui.en() {
+                    format!("{}: missing file on the download server", context)
+                } else if ui.nn() {
+                    format!("{}: fila manglar på nedlastingsserveren", context)
+                } else {
+                    format!("{}: filen mangler på nedlastingsserveren", context)
+                }
             }
         }
         "HTTP_403_FORBIDDEN_OR_SIG_INVALID" => {
-            format!("{}: download authorization failed", context)
+            if ui.en() {
+                format!("{}: download authorization failed", context)
+            } else if ui.nn() {
+                format!("{}: nedlastingsgodkjenning feila", context)
+            } else {
+                format!("{}: nedlastingsgodkjenning feilet", context)
+            }
         }
-        "HTTP_408_TIMEOUT" => format!("{}: download timed out", context),
-        "HTTP_429_RATE_LIMITED" => format!("{}: download rate limited", context),
-        "HTTP_5XX_SERVER_ERROR" => format!("{}: download server error", context),
-        _ => format!("{} failed: {}", context, code),
+        "HTTP_408_TIMEOUT" => {
+            if ui.en() { format!("{}: download timed out", context) } else { format!("{}: nedlastingen tidsavbrøt", context) }
+        }
+        "HTTP_429_RATE_LIMITED" => {
+            if ui.en() { format!("{}: download rate limited", context) } else { format!("{}: nedlastingen ble begrenset av serveren", context) }
+        }
+        "HTTP_5XX_SERVER_ERROR" => {
+            if ui.en() { format!("{}: download server error", context) } else { format!("{}: serverfeil under nedlasting", context) }
+        }
+        _ => {
+            if ui.en() { format!("{} failed: {}", context, code) } else { format!("{} feilet: {}", context, code) }
+        }
     }
 }
 
-fn settings_error_text(err: &str) -> String {
+fn settings_error_text(err: &str, ui: UiCopy) -> String {
     if err.contains("X-Amz-Signature=") || err.contains("body_first_500=") {
         if let Some(rest) = err.strip_prefix("Whisper download: ") {
-            return user_facing_download_error("Whisper download", rest);
+            return user_facing_download_error(ui.whisper_download_context(), rest, ui);
         }
-        return user_facing_download_error("Download", err);
+        return user_facing_download_error(ui.download_error_context(), err, ui);
     }
     err.to_string()
 }
@@ -11756,13 +12165,62 @@ struct DownloadDisplayRow {
 }
 
 impl DownloadDisplayRow {
-    fn display_label(&self) -> String {
+    fn localized_display_label(&self, ui: UiCopy) -> String {
+        let label = localized_download_label(&self.label, ui);
         if self.count > 1 {
-            format!("{} ({})", self.label, self.count)
+            format!("{} ({})", label, self.count)
         } else {
-            self.label.clone()
+            label
         }
     }
+}
+
+fn localized_download_label(label: &str, ui: UiCopy) -> String {
+    let plain = label.trim();
+    let lower = plain.to_lowercase();
+    let mapped = match lower.as_str() {
+        "språkmodell" | "language model" => Some(if ui.en() { "Language model" } else { "Språkmodell" }),
+        "tokenizer" => Some("Tokenizer"),
+        "ytelsesdata" => Some(if ui.en() { "Performance data" } else if ui.nn() { "Ytingsdata" } else { "Ytelsesdata" }),
+        "ordbok" | "dictionary" => Some(if ui.en() { "Dictionary" } else { "Ordbok" }),
+        "ordfrekvens" | "ordfrekvenser" | "word frequencies" => Some(if ui.en() { "Word frequencies" } else if ui.nn() { "Ordfrekvens" } else { "Ordfrekvenser" }),
+        "grammatikk" | "grammar" => Some(if ui.en() { "Grammar" } else { "Grammatikk" }),
+        "sammensatte ord" | "samansette ord" | "compound words" => Some(if ui.en() { "Compound words" } else if ui.nn() { "Samansette ord" } else { "Sammensatte ord" }),
+        "setningsdeling" | "sentence splitting" => Some(if ui.en() { "Sentence splitting" } else { "Setningsdeling" }),
+        "norsk piper-modell" => Some(if ui.en() { "Norwegian Piper model" } else { "Norsk Piper-modell" }),
+        "modellkonfig" => Some(if ui.en() { "Model config" } else { "Modellkonfig" }),
+        "ordbok-fst" => Some(if ui.en() { "Dictionary FST" } else { "Ordbok-FST" }),
+        "ordbok-verdier" => Some(if ui.en() { "Dictionary values" } else if ui.nn() { "Ordbok-verdiar" } else { "Ordbok-verdier" }),
+        "fonemtabell" => Some(if ui.en() { "Phoneme table" } else { "Fonemtabell" }),
+        "uttaleregler" => Some(if ui.en() { "Pronunciation rules" } else if ui.nn() { "Uttalereglar" } else { "Uttaleregler" }),
+        "talemodell (rask)" => Some(if ui.en() { "Speech model (fast)" } else if ui.nn() { "Talemodell (rask)" } else { "Talemodell (rask)" }),
+        "talemodell (beste)" => Some(if ui.en() { "Speech model (best)" } else if ui.nn() { "Talemodell (best)" } else { "Talemodell (beste)" }),
+        "espeak-ng library" => Some(if ui.en() { "espeak-ng library" } else { "espeak-ng-bibliotek" }),
+        "espeak-ng data" => Some(if ui.en() { "espeak-ng data" } else { "espeak-ng-data" }),
+        _ => None,
+    };
+    if let Some(mapped) = mapped {
+        return mapped.to_string();
+    }
+
+    if let Some(rest) = plain.strip_prefix("English: ") {
+        return if ui.en() {
+            format!("English: {}", rest)
+        } else if ui.nn() {
+            format!("Engelsk: {}", rest)
+        } else {
+            format!("Engelsk: {}", rest)
+        };
+    }
+    if let Some(rest) = plain.strip_prefix("Config: ") {
+        return if ui.en() {
+            format!("Config: {}", rest)
+        } else {
+            format!("Konfig: {}", rest)
+        };
+    }
+
+    plain.to_string()
 }
 
 fn grouped_download_rows(items: &[downloader::DownloadProgress]) -> Vec<DownloadDisplayRow> {
