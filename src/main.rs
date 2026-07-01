@@ -481,6 +481,79 @@ fn cached_or_trait(cached: &std::path::Path, trait_path: PathBuf) -> PathBuf {
     if cached.exists() { cached.to_path_buf() } else { trait_path }
 }
 
+fn cached_mtag_fst_path(lang: &dyn language::LanguageBundle) -> PathBuf {
+    let cache = downloader::data_dir();
+    let code = lang.code();
+    let lang_dir = cache.join(format!("lang/{}", code));
+    let fst_name = match code {
+        "nn" => "fullform_nn.mfst",
+        "en" => "fullform_en.mfst",
+        _ => "fullform_bm.mfst",
+    };
+    cached_or_trait(&lang_dir.join(fst_name), lang.mtag_fst_path())
+}
+
+fn cross_language_codes(active_code: &str) -> &'static [&'static str] {
+    match active_code {
+        "en" => &["nb", "nn"],
+        "nb" | "nn" | "no" => &["en"],
+        _ => &[],
+    }
+}
+
+fn load_cross_language_analyzers(active_code: &str) -> Vec<(String, Arc<mtag::Analyzer>)> {
+    let mut analyzers = Vec::new();
+    for code in cross_language_codes(active_code) {
+        let Ok(lang) = language::resolve_language(code) else {
+            continue;
+        };
+        let path = cached_mtag_fst_path(&*lang);
+        if !path.exists() {
+            log!("Cross-language barrier: dictionary for '{}' missing at {}", code, path.display());
+            continue;
+        }
+        match mtag::Analyzer::new(&path) {
+            Ok(analyzer) => {
+                log!("Cross-language barrier: loaded '{}' dictionary ({} entries)", code, analyzer.dict_size());
+                analyzers.push(((*code).to_string(), Arc::new(analyzer)));
+            }
+            Err(e) => log!("Cross-language barrier: failed to load '{}' dictionary: {}", code, e),
+        }
+    }
+    analyzers
+}
+
+fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, has_foreign_context: bool) -> bool {
+    foreign_dist == 0
+        || foreign_dist < active_dist
+        || (has_foreign_context && foreign_dist <= active_dist)
+}
+
+#[cfg(test)]
+mod cross_language_barrier_tests {
+    use super::should_skip_cross_language_match;
+
+    #[test]
+    fn skips_exact_foreign_word() {
+        assert!(should_skip_cross_language_match(1, 0, false));
+    }
+
+    #[test]
+    fn skips_when_foreign_match_is_closer() {
+        assert!(should_skip_cross_language_match(2, 1, false));
+    }
+
+    #[test]
+    fn keeps_equal_distance_without_foreign_context() {
+        assert!(!should_skip_cross_language_match(1, 1, false));
+    }
+
+    #[test]
+    fn skips_equal_distance_inside_foreign_context() {
+        assert!(should_skip_cross_language_match(1, 1, true));
+    }
+}
+
 /// Resolve all language data paths, preferring S3-cached files.
 struct ResolvedPaths {
     mtag_fst: PathBuf,
@@ -507,13 +580,13 @@ fn resolve_paths(lang: &dyn language::LanguageBundle, model_size: &str) -> Resol
     };
 
     // Per-language file names in cache
-    let (fst_name, wf_name, onnx_name, tok_name) = match code {
-        "nn" => ("fullform_nn.mfst", "wordfreq_nn.tsv", nor_onnx, "tokenizer.json"),
-        "en" => ("fullform_en.mfst", "wordfreq_en.tsv", "modernbert_base_int8.onnx", "tokenizer_en.json"),
-        _    => ("fullform_bm.mfst", "wordfreq_bm.tsv", nor_onnx, "tokenizer.json"),
+    let (wf_name, onnx_name, tok_name) = match code {
+        "nn" => ("wordfreq_nn.tsv", nor_onnx, "tokenizer.json"),
+        "en" => ("wordfreq_en.tsv", "modernbert_base_int8.onnx", "tokenizer_en.json"),
+        _    => ("wordfreq_bm.tsv", nor_onnx, "tokenizer.json"),
     };
 
-    let mtag_fst = cached_or_trait(&lang_dir.join(fst_name), lang.mtag_fst_path());
+    let mtag_fst = cached_mtag_fst_path(lang);
     let onnx = cached_or_trait(&bert_dir.join(onnx_name), lang.onnx_path());
     let tokenizer = cached_or_trait(&bert_dir.join(tok_name), lang.tokenizer_path());
     let wordfreq = cached_or_trait(&lang_dir.join(wf_name), lang.wordfreq_path());
@@ -1490,6 +1563,8 @@ struct ContextApp {
     checker: Option<AnyChecker>,
     /// Direct analyzer reference for dictionary lookups (cloned from checker before actor takes it)
     analyzer: Option<std::sync::Arc<mtag::Analyzer>>,
+    /// Other installed language dictionaries used to avoid cross-language autocorrections.
+    foreign_analyzers: Vec<(String, Arc<mtag::Analyzer>)>,
     /// Grammar actor: runs grammar checking on background thread
     grammar_actor: Option<grammar_actor::GrammarActorHandle>,
     grammar_errors: Vec<GrammarError>,
@@ -2223,6 +2298,7 @@ impl ContextApp {
         let compound_fst: Option<Arc<fst::raw::Fst<Vec<u8>>>> =
             compound_walker::load_fst_from_mfst(paths.mtag_fst.to_str().unwrap())
                 .ok().map(|f| Arc::new(f));
+        let foreign_analyzers = load_cross_language_analyzers(language.code());
 
         // Spawn heavy model loading on background threads
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
@@ -2319,6 +2395,7 @@ impl ContextApp {
             last_external_layout_app: platform::ForegroundApp::default(),
             checker: None,
             analyzer,
+            foreign_analyzers,
             compound_fst,
             grammar_actor: None,
             grammar_errors: Vec::new(),
@@ -2694,6 +2771,86 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     }
 
     /// Check spelling of a word. `sentence_ctx` is the sentence it appears in.
+    fn best_dictionary_distance(
+        analyzer: &mtag::Analyzer,
+        word_lower: &str,
+        max_distance: u32,
+    ) -> Option<(String, u32)> {
+        if analyzer.has_word(word_lower) {
+            return Some((word_lower.to_string(), 0));
+        }
+
+        analyzer
+            .fuzzy_lookup(word_lower, max_distance)
+            .into_iter()
+            .filter(|(candidate, _)| candidate != word_lower)
+            .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.len().cmp(&b.0.len())))
+    }
+
+    fn sentence_has_foreign_context(&self, sentence_ctx: &str, target_lower: &str) -> bool {
+        if self.foreign_analyzers.is_empty() {
+            return false;
+        }
+        let Some(active_analyzer) = self.analyzer.as_deref() else {
+            return false;
+        };
+
+        sentence_ctx
+            .split(|c: char| !c.is_alphabetic())
+            .map(|token| token.trim().to_lowercase())
+            .filter(|token| token.len() >= 3 && token != target_lower)
+            .any(|token| {
+                !active_analyzer.has_word(&token)
+                    && self.foreign_analyzers.iter().any(|(_, analyzer)| analyzer.has_word(&token))
+            })
+    }
+
+    fn is_cross_language_spelling_token(&self, word: &str, sentence_ctx: &str) -> bool {
+        let clean = word.trim().to_lowercase();
+        if clean.chars().count() < 3 || self.foreign_analyzers.is_empty() {
+            return false;
+        }
+        if self.language.modal_confusion_pairs().iter().any(|(wrong, _)| *wrong == clean.as_str()) {
+            return false;
+        }
+        if self.language.code() == "en" && clean.chars().any(|c| matches!(c, 'æ' | 'ø' | 'å')) {
+            log!("Cross-language barrier: skip '{}' under English (Norwegian letter)", clean);
+            return true;
+        }
+
+        let max_distance = if clean.chars().count() <= 4 { 1 } else { 2 };
+        let active_best = self
+            .analyzer
+            .as_deref()
+            .and_then(|analyzer| Self::best_dictionary_distance(analyzer, &clean, max_distance))
+            .map(|(_, dist)| dist)
+            .unwrap_or(u32::MAX);
+        let has_foreign_context = self.sentence_has_foreign_context(sentence_ctx, &clean);
+
+        for (code, analyzer) in &self.foreign_analyzers {
+            let Some((foreign_word, foreign_dist)) =
+                Self::best_dictionary_distance(analyzer, &clean, max_distance)
+            else {
+                continue;
+            };
+            if should_skip_cross_language_match(active_best, foreign_dist, has_foreign_context) {
+                log!(
+                    "Cross-language barrier: skip '{}' for active={} because {} has '{}' at dist {} (active_dist={}, foreign_context={})",
+                    clean,
+                    self.language.code(),
+                    code,
+                    foreign_word,
+                    foreign_dist,
+                    active_best,
+                    has_foreign_context
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn check_spelling(&mut self, word: &str, sentence_ctx: &str, paragraph_id: &str, doc_offset: usize) {
         let clean = word.trim().to_lowercase();
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
@@ -2788,7 +2945,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // language. BERT can't distinguish forms like "vil" vs "ville"
         // in context, so each language carries its own pair list.
         let modal_fixes = self.language.modal_confusion_pairs();
-        if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean) {
+        if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean.as_str()) {
             if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
                 log!("modal fix: '{}' → '{}'", clean, correct);
                 self.writing_errors.push(WritingError {
@@ -2804,6 +2961,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: paragraph_id.to_string(), error_word: String::new(), top_candidates: vec![],
                 });
             }
+            return;
+        }
+
+        if self.is_cross_language_spelling_token(&clean, sentence_ctx) {
             return;
         }
 
@@ -5460,14 +5621,23 @@ self.grammar_queue.clear();
             // queue the deferred work here and process it after the loop
             // ends (where we can call &mut self methods like
             // `find_spelling_suggestions`).
-            for unk in resp.unknown_words.iter()
-                .filter(|u| !self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&u.word)))
-                .filter(|u| !self.analyzer.as_ref().map_or(false, |a| a.has_word(&u.word)))
-                .filter(|u| !self.wordfreq.as_ref().map_or(false, |wf| {
-                    let freq = wf.get(&u.word.to_lowercase()).copied().unwrap_or(0);
-                    freq >= 1000 // Only skip high-frequency words — low-freq entries may be junk
-                }))
-            {
+            for unk in resp.unknown_words.iter() {
+                if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&unk.word)) {
+                    continue;
+                }
+                if self.analyzer.as_ref().map_or(false, |a| a.has_word(&unk.word)) {
+                    continue;
+                }
+                if self.wordfreq.as_ref().map_or(false, |wf| {
+                    let freq = wf.get(&unk.word.to_lowercase()).copied().unwrap_or(0);
+                    freq >= 1000
+                }) {
+                    continue;
+                }
+                if self.is_cross_language_spelling_token(&unk.word, &resp.sentence) {
+                    continue;
+                }
+
                 let unk_word_lower = unk.word.to_lowercase();
                 let already_displayed = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == unk_word_lower
