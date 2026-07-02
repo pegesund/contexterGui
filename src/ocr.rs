@@ -22,6 +22,7 @@ mod windows_impl {
         last_seq: u32,
         pending_image: bool,
         dismissed_seq: u32,
+        suppress_images_until_cleared: bool,
         /// BCP-47 language code passed to Windows OCR engine (e.g. "nb", "en").
         /// None means screenshot detection is still active, but OCR itself will
         /// report a language-pack error when the user asks to read/copy text.
@@ -62,23 +63,39 @@ mod windows_impl {
                 last_seq: seq,
                 pending_image: false,
                 dismissed_seq: 0,
+                suppress_images_until_cleared: false,
                 ocr_lang_code,
                 unavailable_msg,
             })
         }
         pub fn poll(&mut self) {
             let seq = unsafe { GetClipboardSequenceNumber() };
-            if seq != self.last_seq {
-                self.last_seq = seq;
-                if seq == self.dismissed_seq { return; }
-                if clipboard_has_image() { self.pending_image = true; }
+            if seq == self.last_seq {
+                return;
+            }
+            self.last_seq = seq;
+
+            let has_image = clipboard_has_image();
+            if !has_image {
+                self.pending_image = false;
+                self.suppress_images_until_cleared = false;
+                return;
+            }
+            if seq == self.dismissed_seq { return; }
+            if !self.suppress_images_until_cleared {
+                self.pending_image = true;
             }
         }
         pub fn has_pending_image(&self) -> bool { self.pending_image }
-        pub fn dismiss(&mut self) { self.pending_image = false; self.dismissed_seq = self.last_seq; }
+        pub fn dismiss(&mut self) {
+            self.pending_image = false;
+            self.dismissed_seq = self.last_seq;
+            self.suppress_images_until_cleared = true;
+        }
         pub fn save_image_to(&self, _path: &std::path::Path) -> bool { false } // TODO: Windows
         pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
             self.pending_image = false;
+            self.suppress_images_until_cleared = true;
             let dib_data = read_clipboard_dib()?;
             let (tx, rx) = mpsc::channel();
             let Some(lang_code) = self.ocr_lang_code.clone() else {

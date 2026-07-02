@@ -10968,7 +10968,15 @@ let keep_word_errors = from_word || to_word;
         // OCR: screenshot detected prompt (separate OS window)
         let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
         let ocr_is_busy = self.ocr_receiver.is_some() || self.math_receiver.is_some();
-        if ocr_has_pending && !ocr_is_busy {
+        let ocr_prompt_deferred_for_capture_tool = cfg!(target_os = "windows") && {
+            let fg = self.platform.foreground_app();
+            let title = fg.title.to_ascii_lowercase();
+            fg.exe_name.contains("snippingtool")
+                || fg.exe_name.contains("screenclipping")
+                || title.contains("snipping tool")
+                || title.contains("snip & sketch")
+        };
+        if ocr_has_pending && !ocr_is_busy && !ocr_prompt_deferred_for_capture_tool {
             let mut do_read = false;
             let mut do_copy = false;
             let mut do_math = false;
@@ -11981,6 +11989,14 @@ fn run_download_window(lang_code: &str) -> bool {
         close_text: &'static str,
     }
 
+    impl Drop for DownloadApp {
+        fn drop(&mut self) {
+            if !self.done && !self.completed.load(std::sync::atomic::Ordering::Acquire) {
+                self.cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
     impl eframe::App for DownloadApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             ctx.set_visuals(egui::Visuals::light());
@@ -12157,7 +12173,12 @@ fn run_download_window(lang_code: &str) -> bool {
         }),
     );
 
-    completed.load(std::sync::atomic::Ordering::Acquire) || downloader::all_done(&progress)
+    let completed_ok = completed.load(std::sync::atomic::Ordering::Acquire)
+        || (downloader::all_done(&progress) && downloader::any_error(&progress).is_none());
+    if !completed_ok {
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+    }
+    completed_ok
 }
 
 fn download_error_code(err: &str) -> &str {
