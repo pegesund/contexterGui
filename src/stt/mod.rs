@@ -10,6 +10,14 @@ static MIC_RECORDING: AtomicBool = AtomicBool::new(false);
 /// Saved audio from last recording — for re-transcription with final model
 static SAVED_AUDIO: Mutex<Option<Vec<f32>>> = Mutex::new(None);
 
+struct RecordingStateGuard;
+
+impl Drop for RecordingStateGuard {
+    fn drop(&mut self) {
+        MIC_RECORDING.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Trait for speech-to-text engines.
 /// Implementations must be safe to call from a background thread.
 pub trait SttEngine: Send + Sync {
@@ -51,6 +59,19 @@ impl SttEngine for NoOpSttEngine {
     fn transcribe(&self, _audio: &[f32]) -> String { String::new() }
 }
 
+fn lock_engine<'a>(
+    engine: &'a Arc<Mutex<Box<dyn SttEngine>>>,
+    label: &str,
+) -> std::sync::MutexGuard<'a, Box<dyn SttEngine>> {
+    match engine.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            mic_log(&format!("Microphone: recovered poisoned {} STT engine lock", label));
+            poisoned.into_inner()
+        }
+    }
+}
+
 // Platform implementations
 #[cfg(target_os = "windows")]
 mod windows_impl;
@@ -86,6 +107,7 @@ pub fn start_recording(
     MIC_RECORDING.store(true, Ordering::Relaxed);
 
     std::thread::spawn(move || {
+        let _recording_guard = RecordingStateGuard;
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
@@ -213,7 +235,7 @@ pub fn start_recording(
                     audio_16k.len() as f64 / 16000.0));
                 let start = std::time::Instant::now();
                 let text = {
-                    let eng = streaming_engine.lock().unwrap();
+                    let eng = lock_engine(&streaming_engine, "streaming");
                     eng.transcribe(&audio_16k)
                 };
                 mic_log(&format!("Microphone: partial result in {:.1}s: '{}'",
@@ -252,11 +274,11 @@ pub fn start_recording(
             audio_16k.len() as f64 / 16000.0, auto_final));
         let final_start = std::time::Instant::now();
         let text = if auto_final {
-            let eng = final_engine.lock().unwrap();
+            let eng = lock_engine(&final_engine, "final");
             eng.transcribe(&audio_16k)
         } else {
             // Use streaming engine for quick result — user can click "Forbedre" later
-            let eng = streaming_engine.lock().unwrap();
+            let eng = lock_engine(&streaming_engine, "streaming");
             eng.transcribe(&audio_16k)
         };
         mic_log(&format!("STT final result in {:.1}s: '{}'", final_start.elapsed().as_secs_f64(), text));
@@ -287,7 +309,7 @@ pub fn improve_with_final_model(
             audio.len() as f64 / 16000.0));
         let start = std::time::Instant::now();
         let text = {
-            let eng = final_engine.lock().unwrap();
+            let eng = lock_engine(&final_engine, "final");
             eng.transcribe(&audio)
         };
         mic_log(&format!("Improve: done in {:.1}s: '{}'", start.elapsed().as_secs_f64(), text));

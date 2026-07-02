@@ -1825,6 +1825,7 @@ struct ContextApp {
     whisper_streaming: Option<Arc<Mutex<Box<dyn stt::SttEngine>>>>,    // streaming model (base; None in tiny mode)
     mic_handle: Option<stt::MicHandle>,
     mic_transcribing: bool,
+    mic_waiting_final_since: Option<Instant>,
     mic_result_text: Option<String>,
     whisper_error_text: Option<String>,
     /// Receiver for "Forbedre" re-transcription result (Windows only)
@@ -2581,6 +2582,7 @@ impl ContextApp {
             whisper_streaming: None,
             mic_handle: None,
             mic_transcribing: false,
+            mic_waiting_final_since: None,
             mic_result_text: None,
             whisper_error_text: None,
             improve_rx: None,
@@ -2647,6 +2649,8 @@ impl ContextApp {
             Ok(handle) => {
                 log!("Microphone recording started");
                 self.mic_handle = Some(handle);
+                self.mic_transcribing = false;
+                self.mic_waiting_final_since = None;
                 self.mic_result_text = None;
                 self.whisper_error_text = None;
             }
@@ -7213,20 +7217,64 @@ self.grammar_queue.clear();
         }
 
         // Microphone: check for whisper transcription results (partial or final)
+        let mut mic_rx_disconnected = false;
         if let Some(handle) = &self.mic_handle {
             // Drain all available results, keep the latest
-            while let Ok(result) = handle.result_rx.try_recv() {
-                if result.partial {
-                    log!("Whisper partial: '{}'", trunc(&result.text, 60));
-                    self.mic_result_text = Some(result.text);
-                } else {
-                    log!("Whisper final: '{}'", trunc(&result.text, 60));
-                    self.mic_result_text = Some(result.text);
-                    self.mic_handle = None;
-                    self.mic_transcribing = false;
-                    ctx.request_repaint(); // repaint immediately to show final result
-                    break;
+            loop {
+                match handle.result_rx.try_recv() {
+                    Ok(result) => {
+                        if result.partial {
+                            log!("Whisper partial: '{}'", trunc(&result.text, 60));
+                            self.mic_result_text = Some(result.text);
+                        } else {
+                            log!("Whisper final: '{}'", trunc(&result.text, 60));
+                            self.mic_result_text = Some(result.text);
+                            self.mic_handle = None;
+                            self.mic_transcribing = false;
+                            self.mic_waiting_final_since = None;
+                            ctx.request_repaint(); // repaint immediately to show final result
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        mic_rx_disconnected = true;
+                        break;
+                    }
                 }
+            }
+        }
+        if mic_rx_disconnected {
+            log!("Microphone: result channel disconnected before final transcript");
+            self.mic_handle = None;
+            self.mic_transcribing = false;
+            self.mic_waiting_final_since = None;
+            stt::force_stop();
+            if self.mic_result_text.is_none() {
+                self.whisper_error_text = Some(
+                    ui_copy_for(self.ui_language.code()).speech_stopped_unexpectedly().to_string()
+                );
+            }
+            ctx.request_repaint();
+        } else if self.mic_handle.is_some() && !stt::is_recording() && !self.mic_transcribing {
+            log!("Microphone: recording ended; waiting for final transcript");
+            self.mic_transcribing = true;
+            self.mic_waiting_final_since = Some(Instant::now());
+        }
+        if self.mic_transcribing {
+            let wait_started = self.mic_waiting_final_since.get_or_insert_with(Instant::now);
+            if wait_started.elapsed() > Duration::from_secs(120) {
+                log!("Microphone: final transcription timed out");
+                if let Some(handle) = self.mic_handle.take() {
+                    handle.stop();
+                }
+                stt::force_stop();
+                self.mic_transcribing = false;
+                self.mic_waiting_final_since = None;
+                self.whisper_error_text = Some(
+                    ui_copy_for(self.ui_language.code()).speech_timed_out().to_string()
+                );
+                ctx.request_repaint();
             }
         }
         // Poll for "Forbedre" result
@@ -8405,6 +8453,7 @@ let keep_word_errors = from_word || to_word;
                             if let Some(handle) = &self.mic_handle {
                                 handle.stop();
                                 self.mic_transcribing = true;
+                                self.mic_waiting_final_since = Some(Instant::now());
                             }
                         }
                     }
@@ -10094,6 +10143,7 @@ let keep_word_errors = from_word || to_word;
                     if let Some(handle) = &self.mic_handle {
                         handle.stop();
                         self.mic_transcribing = true;
+                        self.mic_waiting_final_since = Some(Instant::now());
                     }
                 }
                 if do_copy {
@@ -10117,6 +10167,7 @@ let keep_word_errors = from_word || to_word;
                     // (background thread may still be transcribing — it will finish silently)
                     stt::force_stop();
                     self.mic_transcribing = false;
+                    self.mic_waiting_final_since = None;
                     self.mic_result_text = None;
                     self.whisper_error_text = None;
                     self.whisper_loading = false;
@@ -11240,6 +11291,12 @@ impl UiCopy {
     }
     fn speech_streaming_failed(self, err: &str) -> String {
         if self.en() { format!("Speech recognition streaming failed to load: {}", err) } else if self.nn() { format!("Direkte talegjenkjenning kunne ikkje lastast: {}", err) } else { format!("Direkte talegjenkjenning kunne ikke lastes: {}", err) }
+    }
+    fn speech_stopped_unexpectedly(self) -> &'static str {
+        if self.en() { "Speech recognition stopped unexpectedly. Please try again." } else if self.nn() { "Talegjenkjenning stoppa uventa. Prøv igjen." } else { "Talegjenkjenning stoppet uventet. Prøv igjen." }
+    }
+    fn speech_timed_out(self) -> &'static str {
+        if self.en() { "Speech recognition took too long. Please try again with a shorter recording." } else if self.nn() { "Talegjenkjenning tok for lang tid. Prøv igjen med eit kortare opptak." } else { "Talegjenkjenning tok for lang tid. Prøv igjen med et kortere opptak." }
     }
     fn download_title(self, lang_name: &str) -> String {
         if self.en() { format!("Spell - Downloading {}", lang_name) } else if self.nn() { format!("Spell - Lastar ned {}", lang_name) } else { format!("Spell - Laster ned {}", lang_name) }
