@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ── S3 config (read-only credentials for the spell bucket) ──
@@ -41,6 +42,7 @@ pub struct DownloadProgress {
 
 /// Shared progress state polled by the UI.
 pub type SharedProgress = Arc<Mutex<Vec<DownloadProgress>>>;
+pub type SharedCancel = Arc<AtomicBool>;
 
 /// A file to download.
 #[derive(Clone)]
@@ -373,14 +375,26 @@ fn classify_ureq_err(e: ureq::Error) -> (&'static str, String) {
 }
 
 /// Download a single file from S3 to a local path, reporting progress.
-fn download_one(item: &DownloadItem, progress: &SharedProgress, index: usize, total_items: usize) -> Result<(), String> {
+fn download_one(
+    item: &DownloadItem,
+    progress: &SharedProgress,
+    index: usize,
+    total_items: usize,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     let mut override_addrs: Option<Vec<SocketAddr>> = None;
     let mut last_err = String::new();
 
     for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
-        match try_download_one(item, progress, index, override_addrs.clone()) {
+        if cancel.load(Ordering::Acquire) {
+            return Err("DOWNLOAD_CANCELLED".into());
+        }
+        match try_download_one(item, progress, index, override_addrs.clone(), cancel) {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if cancel.load(Ordering::Acquire) || err == "DOWNLOAD_CANCELLED" {
+                    return Err("DOWNLOAD_CANCELLED".into());
+                }
                 if override_addrs.is_none() && should_try_doh_fallback(&err) {
                     log_download_error(
                         index + 1,
@@ -429,9 +443,14 @@ fn try_download_one(
     progress: &SharedProgress,
     index: usize,
     override_addrs: Option<Vec<SocketAddr>>,
+    cancel: &AtomicBool,
 ) -> Result<(), String> {
     use std::io::Read;
     let start = std::time::Instant::now();
+
+    if cancel.load(Ordering::Acquire) {
+        return Err("DOWNLOAD_CANCELLED".into());
+    }
 
     // Create parent directories
     if let Some(parent) = item.local_path.parent() {
@@ -512,6 +531,9 @@ fn try_download_one(
     let mut buf = [0u8; 65536];
 
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err("DOWNLOAD_CANCELLED".into());
+        }
         let n = match reader.read(&mut buf) {
             Ok(n) => n,
             Err(e) => {
@@ -1003,6 +1025,10 @@ fn log_download_session_start(total_items: usize) {
 }
 
 pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
+    download_missing_with_cancel(items, Arc::new(AtomicBool::new(false)))
+}
+
+pub fn download_missing_with_cancel(items: Vec<DownloadItem>, cancel: SharedCancel) -> SharedProgress {
     // Filter to only items not yet cached
     let needed: Vec<DownloadItem> = items.into_iter()
         .filter(|item| !is_cached(item))
@@ -1027,11 +1053,18 @@ pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
     log_download_session_start(needed.len());
 
     let prog = Arc::clone(&progress);
+    let cancel_for_thread = Arc::clone(&cancel);
     std::thread::Builder::new()
         .name("s3-download".into())
         .spawn(move || {
             for (i, item) in needed.iter().enumerate() {
-                if let Err(e) = download_one(item, &prog, i, needed.len()) {
+                if cancel_for_thread.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Err(e) = download_one(item, &prog, i, needed.len(), &cancel_for_thread) {
+                    if cancel_for_thread.load(Ordering::Acquire) || e == "DOWNLOAD_CANCELLED" {
+                        break;
+                    }
                     // Persist to a side log so we can post-mortem failed
                     // downloads in packaged builds (eprintln stderr from a
                     // .app bundle goes nowhere visible). The log file lives

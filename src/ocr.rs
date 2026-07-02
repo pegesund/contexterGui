@@ -33,24 +33,30 @@ mod windows_impl {
         pub fn new(lang: &dyn language::LanguageBundle) -> Result<Self, String> {
             let preferred_code = lang.ocr_language_code();
             let unavailable_msg = lang.ui_ocr_lang_pack_missing().to_string();
-            let ocr_lang_code = if can_create_ocr_engine(preferred_code).unwrap_or(false) {
-                Some(preferred_code.to_string())
-            } else if let Some(fallback) = ["en", "en-US"]
-                .into_iter()
-                .find(|code| can_create_ocr_engine(code).unwrap_or(false))
-            {
-                crate::log!(
-                    "OCR: Windows OCR language '{}' unavailable; using '{}' fallback for screenshot text recognition",
-                    preferred_code,
-                    fallback
-                );
-                Some(fallback.to_string())
-            } else {
-                crate::log!(
-                    "OCR: no usable Windows OCR recognizer found; screenshot detection remains enabled"
-                );
-                None
-            };
+            let ocr_lang_code = select_ocr_language(preferred_code);
+            match &ocr_lang_code {
+                Some(selected) if ocr_language_matches(selected, preferred_code) => {
+                    if selected != preferred_code {
+                        crate::log!(
+                            "OCR: using installed Windows OCR language '{}' for requested '{}'",
+                            selected,
+                            preferred_code
+                        );
+                    }
+                }
+                Some(selected) => {
+                    crate::log!(
+                        "OCR: Windows OCR language '{}' unavailable; using '{}' fallback for screenshot text recognition",
+                        preferred_code,
+                        selected
+                    );
+                }
+                None => {
+                    crate::log!(
+                        "OCR: no usable Windows OCR recognizer found; screenshot detection remains enabled"
+                    );
+                }
+            }
             let seq = unsafe { GetClipboardSequenceNumber() };
             Ok(Self {
                 last_seq: seq,
@@ -88,6 +94,80 @@ mod windows_impl {
                 let _ = tx.send(run_ocr_on_dib(&dib_data, &lang_code));
             });
             Some(rx)
+        }
+    }
+
+    fn select_ocr_language(preferred_code: &str) -> Option<String> {
+        for candidate in ocr_language_candidates(preferred_code) {
+            if can_create_ocr_engine(candidate).unwrap_or(false) {
+                return Some(candidate.to_string());
+            }
+        }
+
+        if let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() {
+            let mut available = Vec::new();
+            for lang in &langs {
+                if let Ok(tag) = lang.LanguageTag() {
+                    available.push(tag.to_string());
+                }
+            }
+
+            if let Some(tag) = available
+                .iter()
+                .find(|tag| ocr_language_matches(tag, preferred_code)
+                    && can_create_ocr_engine(tag).unwrap_or(false))
+            {
+                return Some(tag.clone());
+            }
+
+            if let Some(tag) = available
+                .iter()
+                .find(|tag| ocr_language_matches(tag, "en")
+                    && can_create_ocr_engine(tag).unwrap_or(false))
+            {
+                return Some(tag.clone());
+            }
+        }
+
+        ["en-US", "en"]
+            .into_iter()
+            .find(|code| can_create_ocr_engine(code).unwrap_or(false))
+            .map(str::to_string)
+    }
+
+    fn ocr_language_candidates(preferred_code: &str) -> Vec<&'static str> {
+        match ocr_language_family(preferred_code) {
+            "no" => vec!["nb-NO", "nb", "no-NO", "no", "nn-NO", "nn"],
+            "en" => vec!["en-US", "en"],
+            _ => vec![],
+        }
+    }
+
+    fn ocr_language_matches(tag: &str, preferred_code: &str) -> bool {
+        let tag = tag.to_ascii_lowercase();
+        match ocr_language_family(preferred_code) {
+            "no" => tag == "nb"
+                || tag.starts_with("nb-")
+                || tag == "no"
+                || tag.starts_with("no-")
+                || tag == "nn"
+                || tag.starts_with("nn-"),
+            "en" => tag == "en" || tag.starts_with("en-"),
+            _ => tag == preferred_code.to_ascii_lowercase(),
+        }
+    }
+
+    fn ocr_language_family(code: &str) -> &'static str {
+        let code = code.to_ascii_lowercase();
+        if code == "nb" || code.starts_with("nb-")
+            || code == "nn" || code.starts_with("nn-")
+            || code == "no" || code.starts_with("no-")
+        {
+            "no"
+        } else if code == "en" || code.starts_with("en-") {
+            "en"
+        } else {
+            "other"
         }
     }
 

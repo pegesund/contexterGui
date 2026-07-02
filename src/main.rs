@@ -11932,7 +11932,7 @@ fn run_performance_picker(lang_code: &str) -> (u8, String) {
 
 // ── Download window: shown when language data is missing ──
 
-fn run_download_window(lang_code: &str) {
+fn run_download_window(lang_code: &str) -> bool {
     let settings = load_settings();
     let ui_copy = ui_copy_for(effective_ui_language_code(&settings.ui_language, lang_code));
     let model_size = settings.model_size;
@@ -11942,11 +11942,13 @@ fn run_download_window(lang_code: &str) {
     items.extend(downloader::piper_files(lang_code));
     let whisper_mode = settings.whisper_mode;
     items.extend(downloader::whisper_files(lang_code, whisper_mode));
-    let progress = downloader::download_missing(items.clone());
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress = downloader::download_missing_with_cancel(items.clone(), std::sync::Arc::clone(&cancel));
 
     // If nothing to download, return immediately
     if downloader::all_done(&progress) {
-        return;
+        return true;
     }
 
     let lang_info = AVAILABLE_LANGUAGES.iter().find(|l| l.code == lang_code);
@@ -11967,6 +11969,8 @@ fn run_download_window(lang_code: &str) {
 
     struct DownloadApp {
         progress: downloader::SharedProgress,
+        cancel: downloader::SharedCancel,
+        completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         items: Vec<downloader::DownloadItem>,
         done: bool,
         heading: String,
@@ -11980,6 +11984,12 @@ fn run_download_window(lang_code: &str) {
     impl eframe::App for DownloadApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             ctx.set_visuals(egui::Visuals::light());
+
+            if ctx.input(|i| i.viewport().close_requested()) && !self.done {
+                self.cancel.store(true, std::sync::atomic::Ordering::Release);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
 
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(24.0))
@@ -12095,19 +12105,25 @@ fn run_download_window(lang_code: &str) {
                                     retry_clicked = true;
                                 }
                                 if ui.button(self.close_text).clicked() {
+                                    self.cancel.store(true, std::sync::atomic::Ordering::Release);
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                 }
                             });
                         }
                     } else if all_done {
                         self.done = true;
+                        self.completed.store(true, std::sync::atomic::Ordering::Release);
                         ui.add_space(12.0);
                         // Auto-close after download completes
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
 
                     if retry_clicked {
-                        self.progress = downloader::download_missing(self.items.clone());
+                        self.cancel.store(false, std::sync::atomic::Ordering::Release);
+                        self.progress = downloader::download_missing_with_cancel(
+                            self.items.clone(),
+                            std::sync::Arc::clone(&self.cancel),
+                        );
                         self.done = false;
                     }
                 });
@@ -12119,12 +12135,16 @@ fn run_download_window(lang_code: &str) {
 
     let error_text_static: &'static str = ui_copy.download_failed();
     let retry_text_static: &'static str = ui_copy.try_again();
+    let completed_for_app = std::sync::Arc::clone(&completed);
+    let cancel_for_app = std::sync::Arc::clone(&cancel);
     let _ = eframe::run_native(
         &win_title,
         options,
         Box::new(move |_cc| {
             Ok(Box::new(DownloadApp {
                 progress: prog,
+                cancel: cancel_for_app,
+                completed: completed_for_app,
                 items,
                 done: false,
                 heading: heading_text,
@@ -12136,6 +12156,8 @@ fn run_download_window(lang_code: &str) {
             }) as Box<dyn eframe::App>)
         }),
     );
+
+    completed.load(std::sync::atomic::Ordering::Acquire) || downloader::all_done(&progress)
 }
 
 fn download_error_code(err: &str) -> &str {
@@ -12595,14 +12617,20 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
             }
         }
         eprintln!("Downloading language data for '{}' (model={})...", picked, saved.model_size);
-        run_download_window(&picked);
+        if !run_download_window(&picked) {
+            eprintln!("Language download cancelled for '{}' — exiting.", picked);
+            std::process::exit(0);
+        }
         picked
     } else if !downloader::piper_cached(&lang_code) {
         // Language data is cached but Piper TTS assets aren't. Run the same
         // download window to fetch them. The window short-circuits if
         // everything is already present.
         eprintln!("Downloading Piper TTS assets for '{}'...", lang_code);
-        run_download_window(&lang_code);
+        if !run_download_window(&lang_code) {
+            eprintln!("Package download cancelled for '{}' — exiting.", lang_code);
+            std::process::exit(0);
+        }
         lang_code
     } else {
         lang_code
