@@ -22,23 +22,43 @@ mod windows_impl {
         last_seq: u32,
         pending_image: bool,
         dismissed_seq: u32,
-        /// BCP-47 language code passed to Windows OCR engine (e.g. "nb", "en")
-        ocr_lang_code: String,
+        /// BCP-47 language code passed to Windows OCR engine (e.g. "nb", "en").
+        /// None means screenshot detection is still active, but OCR itself will
+        /// report a language-pack error when the user asks to read/copy text.
+        ocr_lang_code: Option<String>,
+        unavailable_msg: String,
     }
 
     impl OcrClipboard {
         pub fn new(lang: &dyn language::LanguageBundle) -> Result<Self, String> {
-            let lang_code = lang.ocr_language_code();
-            let win_lang = Language::CreateLanguage(&HSTRING::from(lang_code))
-                .map_err(|e| format!("Failed to create Language('{}'): {}", lang_code, e))?;
-            if !OcrEngine::IsLanguageSupported(&win_lang)
-                .map_err(|e| format!("IsLanguageSupported: {}", e))? {
-                return Err(lang.ui_ocr_lang_pack_missing().into());
-            }
-            let _engine = OcrEngine::TryCreateFromLanguage(&win_lang)
-                .map_err(|e| format!("TryCreateFromLanguage: {}", e))?;
+            let preferred_code = lang.ocr_language_code();
+            let unavailable_msg = lang.ui_ocr_lang_pack_missing().to_string();
+            let ocr_lang_code = if can_create_ocr_engine(preferred_code).unwrap_or(false) {
+                Some(preferred_code.to_string())
+            } else if let Some(fallback) = ["en", "en-US"]
+                .into_iter()
+                .find(|code| can_create_ocr_engine(code).unwrap_or(false))
+            {
+                crate::log!(
+                    "OCR: Windows OCR language '{}' unavailable; using '{}' fallback for screenshot text recognition",
+                    preferred_code,
+                    fallback
+                );
+                Some(fallback.to_string())
+            } else {
+                crate::log!(
+                    "OCR: no usable Windows OCR recognizer found; screenshot detection remains enabled"
+                );
+                None
+            };
             let seq = unsafe { GetClipboardSequenceNumber() };
-            Ok(Self { last_seq: seq, pending_image: false, dismissed_seq: 0, ocr_lang_code: lang_code.to_string() })
+            Ok(Self {
+                last_seq: seq,
+                pending_image: false,
+                dismissed_seq: 0,
+                ocr_lang_code,
+                unavailable_msg,
+            })
         }
         pub fn poll(&mut self) {
             let seq = unsafe { GetClipboardSequenceNumber() };
@@ -54,8 +74,12 @@ mod windows_impl {
         pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
             self.pending_image = false;
             let dib_data = read_clipboard_dib()?;
-            let lang_code = self.ocr_lang_code.clone();
             let (tx, rx) = mpsc::channel();
+            let Some(lang_code) = self.ocr_lang_code.clone() else {
+                let msg = self.unavailable_msg.clone();
+                let _ = tx.send(Err(msg));
+                return Some(rx);
+            };
             std::thread::spawn(move || {
                 unsafe {
                     let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -65,6 +89,18 @@ mod windows_impl {
             });
             Some(rx)
         }
+    }
+
+    fn can_create_ocr_engine(lang_code: &str) -> Result<bool, String> {
+        let win_lang = Language::CreateLanguage(&HSTRING::from(lang_code))
+            .map_err(|e| format!("Failed to create Language('{}'): {}", lang_code, e))?;
+        if !OcrEngine::IsLanguageSupported(&win_lang)
+            .map_err(|e| format!("IsLanguageSupported('{}'): {}", lang_code, e))? {
+            return Ok(false);
+        }
+        OcrEngine::TryCreateFromLanguage(&win_lang)
+            .map(|_| true)
+            .map_err(|e| format!("TryCreateFromLanguage('{}'): {}", lang_code, e))
     }
 
     fn clipboard_has_image() -> bool {
