@@ -97,10 +97,7 @@ pub fn check_status() -> SetupStatus {
     if !is_word_installed() {
         return SetupStatus::NoWord;
     }
-    let cert_present = ca_cert_path()
-        .ok()
-        .and_then(|p| if p.exists() { Some(()) } else { None })
-        .is_some();
+    let cert_present = local_cert_files_present();
     let trusted = is_ca_trusted();
     let manifest_in_place = is_manifest_installed();
     if cert_present && trusted && manifest_in_place {
@@ -110,34 +107,97 @@ pub fn check_status() -> SetupStatus {
     }
 }
 
-/// Path to the user's login keychain on modern macOS.
-fn login_keychain_path() -> Option<PathBuf> {
-    Some(
-        dirs::home_dir()?
-            .join("Library/Keychains/login.keychain-db"),
-    )
+fn path_exists(path: Result<PathBuf>) -> bool {
+    path.map(|p| p.exists()).unwrap_or(false)
+}
+
+fn local_ca_material_present() -> bool {
+    path_exists(ca_cert_path()) && path_exists(ca_key_path())
+}
+
+fn local_cert_files_present() -> bool {
+    local_ca_material_present()
+        && path_exists(leaf_cert_path())
+        && path_exists(leaf_key_path())
 }
 
 pub fn is_ca_trusted() -> bool {
     // Authoritative location: System.keychain (admin domain). Office add-in
     // WKWebView only honors trust anchors here.
-    let in_system = Command::new("security")
+    //
+    // Important: do not trust by common name alone. A machine can contain an
+    // older "Spell Word Add-in Local CA" from a previous install while the
+    // current per-user CA/key on disk is different. In that state the app
+    // serves a leaf signed by the local CA, but Word trusts only the old CA,
+    // producing Safari/WKWebView's "not signed by a valid security certificate"
+    // add-in error.
+    let Some(local_ca) = local_ca_pem_block() else {
+        return false;
+    };
+    let output = Command::new("security")
         .args([
             "find-certificate",
+            "-a",
             "-c",
             CA_COMMON_NAME,
+            "-p",
             "/Library/Keychains/System.keychain",
         ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if in_system {
-        return true;
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
     }
-    // Backwards-compat: 0.1.0-test7 briefly used login keychain. If a user has
-    // that cert leftover but no System one, treat as not-yet-trusted so the
-    // wizard re-prompts and installs to the right place.
-    false
+    let system_pem = String::from_utf8_lossy(&output.stdout);
+    pem_blocks(&system_pem)
+        .into_iter()
+        .any(|block| block == local_ca)
+}
+
+fn local_ca_pem_block() -> Option<String> {
+    let ca_pem = ca_cert_path().ok()?;
+    let pem = fs::read_to_string(ca_pem).ok()?;
+    pem_blocks(&pem).into_iter().next()
+}
+
+fn pem_blocks(pem: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+    let mut in_block = false;
+
+    for line in pem.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line == "-----BEGIN CERTIFICATE-----" {
+            current.clear();
+            current.push(line.to_string());
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        current.push(line.to_string());
+        if line == "-----END CERTIFICATE-----" {
+            blocks.push(current.join("\n"));
+            current.clear();
+            in_block = false;
+        }
+    }
+
+    blocks
+}
+
+pub fn refresh_local_leaf_if_ca_trusted() -> Result<bool> {
+    if !is_word_installed() || !local_ca_material_present() || !is_ca_trusted() {
+        return Ok(false);
+    }
+    generate_certs_if_missing()?;
+    Ok(true)
+}
+
+pub fn installed_manifest_needs_repair() -> bool {
+    is_manifest_installed() && check_status() == SetupStatus::NeedsSetup
 }
 
 pub fn is_manifest_installed() -> bool {

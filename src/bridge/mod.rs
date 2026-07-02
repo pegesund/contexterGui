@@ -197,7 +197,7 @@ pub fn create_bridges(lang_word_id: i32) -> Vec<Box<dyn TextBridge>> {
         // Word Add-in bridge: HTTP server that Word's JS add-in connects to.
         // Always start — the add-in connects when it's ready.
         let addin_bridge = word_addin::WordAddinBridge::new();
-        crate::log!("Word Add-in bridge started (HTTP port {})", 52525);
+        crate::log!("Word Add-in bridge started (HTTPS port {})", word_addin::PORT);
         bridges.push(Box::new(addin_bridge));
 
         // Accessibility fallback for Teams, Safari, Chrome inputs, TextEdit, etc.

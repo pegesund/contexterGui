@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::path::PathBuf;
 
-const PORT: u16 = 3000;
+pub const PORT: u16 = 3000;
 
 /// Locate the bundled Word add-in static-file directory.
 ///   - Packaged .app:   <Spell.app>/Contents/Resources/word-addin/
@@ -143,10 +143,21 @@ impl WordAddinBridge {
 
                 if tls_config.is_some() {
                     eprintln!("Word Add-in HTTPS bridge (rustls) listening on port {}", PORT);
+                    crate::log!(
+                        "Word Add-in HTTPS bridge listening on port {} cert={}",
+                        PORT,
+                        cert_path.display()
+                    );
                 } else {
                     eprintln!(
                         "Word Add-in HTTP bridge (no TLS certs at {}) on port {}",
                         cert_path.display(),
+                        PORT
+                    );
+                    crate::log!(
+                        "Word Add-in HTTP bridge fallback: no usable TLS cert/key at cert={} key={} port={}",
+                        cert_path.display(),
+                        key_path.display(),
                         PORT
                     );
                 }
@@ -964,6 +975,7 @@ fn load_rustls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Optio
             .collect();
     if certs.is_empty() {
         eprintln!("rustls: no certificates found in {}", cert_path.display());
+        crate::log!("rustls: no certificates found in {}", cert_path.display());
         return None;
     }
 
@@ -972,13 +984,17 @@ fn load_rustls(cert_path: &std::path::Path, key_path: &std::path::Path) -> Optio
         .flatten()
         .or_else(|| {
             eprintln!("rustls: no private key found in {}", key_path.display());
+            crate::log!("rustls: no private key found in {}", key_path.display());
             None
         })?;
 
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| eprintln!("rustls ServerConfig error: {}", e))
+        .map_err(|e| {
+            eprintln!("rustls ServerConfig error: {}", e);
+            crate::log!("rustls ServerConfig error: {}", e);
+        })
         .ok()?;
 
     Some(Arc::new(config))

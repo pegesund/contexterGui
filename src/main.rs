@@ -12656,7 +12656,13 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
     #[cfg(target_os = "macos")]
     {
         crate::setup::word_addin_setup::refresh_manifest_if_stale();
-        if !saved.word_addin_wizard_dismissed {
+        match crate::setup::word_addin_setup::refresh_local_leaf_if_ca_trusted() {
+            Ok(true) => log!("word-addin: refreshed local TLS leaf certificate"),
+            Ok(false) => {}
+            Err(e) => log!("word-addin: failed to refresh local TLS leaf certificate: {}", e),
+        }
+        let needs_repair = crate::setup::word_addin_setup::installed_manifest_needs_repair();
+        if !saved.word_addin_wizard_dismissed || needs_repair {
             let dismissed_now = run_word_addin_wizard();
             if dismissed_now {
                 saved.word_addin_wizard_dismissed = true;
