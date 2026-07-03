@@ -12006,8 +12006,26 @@ fn ax_close_icon(
 
 fn response_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
     if use_press_event {
-        resp.hovered()
-            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+        let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+        if !primary_pressed {
+            return false;
+        }
+        if resp.hovered() {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            ui.input(|i| {
+                i.pointer
+                    .interact_pos()
+                    .or_else(|| i.pointer.latest_pos())
+                    .is_some_and(|pos| resp.rect.contains(pos))
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     } else {
         resp.clicked()
     }
