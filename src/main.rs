@@ -6254,6 +6254,14 @@ fn get_screen_size(platform: &dyn platform::PlatformServices) -> (f32, f32) {
     platform.screen_size()
 }
 
+fn is_windows_capture_tool(app: &platform::ForegroundApp) -> bool {
+    cfg!(target_os = "windows")
+        && (app.exe_name.contains("snippingtool")
+            || app.exe_name.contains("screenclipping")
+            || app.title.to_ascii_lowercase().contains("snipping tool")
+            || app.title.to_ascii_lowercase().contains("snip & sketch"))
+}
+
 /// Insert thin-space (U+2009) between every pair of letters so the word
 /// renders with extra letter spacing — per Zorzi et al. (PNAS 2012), this
 /// improves reading speed and reduces errors for dyslexic readers by ~20%.
@@ -7045,7 +7053,13 @@ self.grammar_queue.clear();
         // resulting state interleaving corrupted the main popup's text
         // layout (labels wrapped at single-character widths until the
         // OCR prompt was closed). Just polling is enough.
+        let fg_for_ocr = self.platform.foreground_app();
+        let capture_tool_active = is_windows_capture_tool(&fg_for_ocr);
+        let fg_for_ocr_kind = self.platform.classify_app(&fg_for_ocr);
         if let Some(ocr) = &mut self.ocr {
+            if !capture_tool_active && fg_for_ocr_kind != platform::AppKind::OurApp {
+                ocr.clear_image_suppression();
+            }
             ocr.poll();
         }
 
@@ -10968,15 +10982,12 @@ let keep_word_errors = from_word || to_word;
         // OCR: screenshot detected prompt (separate OS window)
         let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
         let ocr_is_busy = self.ocr_receiver.is_some() || self.math_receiver.is_some();
-        let ocr_prompt_deferred_for_capture_tool = cfg!(target_os = "windows") && {
-            let fg = self.platform.foreground_app();
-            let title = fg.title.to_ascii_lowercase();
-            fg.exe_name.contains("snippingtool")
-                || fg.exe_name.contains("screenclipping")
-                || title.contains("snipping tool")
-                || title.contains("snip & sketch")
-        };
-        if ocr_has_pending && !ocr_is_busy && !ocr_prompt_deferred_for_capture_tool {
+        if ocr_has_pending && !ocr_is_busy {
+            if ctx.input(|i| i.viewport().minimized).unwrap_or(false) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+                self.last_window_always_on_top = Some(true);
+            }
             let mut do_read = false;
             let mut do_copy = false;
             let mut do_math = false;

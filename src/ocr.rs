@@ -92,6 +92,9 @@ mod windows_impl {
             self.dismissed_seq = self.last_seq;
             self.suppress_images_until_cleared = true;
         }
+        pub fn clear_image_suppression(&mut self) {
+            self.suppress_images_until_cleared = false;
+        }
         pub fn save_image_to(&self, _path: &std::path::Path) -> bool { false } // TODO: Windows
         pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> {
             self.pending_image = false;
@@ -339,6 +342,7 @@ mod macos_impl {
 
         pub fn has_pending_image(&self) -> bool { self.pending_image }
         pub fn dismiss(&mut self) { self.pending_image = false; }
+        pub fn clear_image_suppression(&mut self) {}
 
         /// Save the clipboard image to a file. Returns true on success.
         pub fn save_image_to(&self, path: &std::path::Path) -> bool {
@@ -464,6 +468,7 @@ impl OcrClipboard {
     pub fn poll(&mut self) {}
     pub fn has_pending_image(&self) -> bool { false }
     pub fn dismiss(&mut self) {}
+    pub fn clear_image_suppression(&mut self) {}
     pub fn save_image_to(&self, _path: &std::path::Path) -> bool { false }
     pub fn start_ocr(&mut self) -> Option<mpsc::Receiver<Result<String, String>>> { None }
 }
