@@ -591,6 +591,16 @@ impl TextBridge for WordComBridge {
         Some(text.replace('\r', " "))
     }
 
+    fn paragraph_count(&self) -> Option<usize> {
+        (|| -> Result<usize> {
+            let app = self.get_app().ok_or_else(|| Error::from_hresult(E_FAIL))?;
+            let doc = app.get_dispatch("ActiveDocument")?;
+            let paragraphs = doc.get_dispatch("Paragraphs")?;
+            let count = unsafe { extract_i32(&paragraphs.get("Count")?)? };
+            Ok(count.max(0) as usize)
+        })().ok()
+    }
+
 
     fn select_range(&self, char_start: usize, char_end: usize) -> Option<(i32, i32)> {
         // Step 1: Select the range in Word (clamp to doc length)

@@ -141,6 +141,79 @@ fn save_settings(s: &UserSettings) {
     }
 }
 
+// ── Sentence verdict cache ──────────────────────────────────────────────
+// Caches the FINAL per-sentence check result (grammar errors + BERT-ranked
+// spelling suggestions), keyed by normalized sentence text. Keying by text
+// instead of paragraph/document identity means the cache survives Word's
+// ParaID churn, document switches, focus roundtrips and (persisted to disk)
+// app restarts — re-entering a document replays verdicts instantly instead
+// of re-running SWI-Prolog + BERT over every sentence.
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedSentenceError {
+    is_grammar: bool,
+    word: String,
+    suggestion: String,
+    explanation: String,
+    rule_name: String,
+    error_word: String,
+    position: usize,
+    top_candidates: Vec<String>,
+}
+
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct CachedSentenceVerdict {
+    errors: Vec<CachedSentenceError>,
+    /// Spelling results still in flight (waiting for BERT). Only replay
+    /// entries with pending == 0 — a partial entry would silently drop the
+    /// unresolved words. Entries stuck with pending > 0 (queue cleared by an
+    /// app switch) are simply re-checked next scan.
+    pending: u32,
+}
+
+const SENTENCE_CACHE_CAP: usize = 20_000;
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SentenceCache {
+    /// Bump when suggestion quality changes materially — mismatch discards.
+    version: String,
+    entries: std::collections::HashMap<String, CachedSentenceVerdict>,
+}
+
+fn sentence_cache_key(sentence: &str) -> String {
+    sentence.trim().to_lowercase()
+}
+
+fn sentence_cache_path() -> PathBuf {
+    settings_path().with_file_name("sentence_cache.json")
+}
+
+fn load_sentence_cache() -> SentenceCache {
+    let cur = env!("CARGO_PKG_VERSION");
+    // Debug builds start with a cold cache every launch so testing is
+    // realistic (no verdicts leaking in from a previous run). Release keeps
+    // the disk cache so documents re-open instantly across app restarts.
+    #[cfg(debug_assertions)]
+    {
+        let _ = std::fs::remove_file(sentence_cache_path());
+        return SentenceCache { version: cur.to_string(), ..Default::default() };
+    }
+    #[cfg(not(debug_assertions))]
+    match std::fs::read_to_string(sentence_cache_path()) {
+        Ok(json) => {
+            let c: SentenceCache = serde_json::from_str(&json).unwrap_or_default();
+            if c.version == cur { c } else { SentenceCache { version: cur.to_string(), ..Default::default() } }
+        }
+        Err(_) => SentenceCache { version: cur.to_string(), ..Default::default() },
+    }
+}
+
+fn save_sentence_cache(c: &SentenceCache) {
+    if let Ok(json) = serde_json::to_string(c) {
+        let _ = std::fs::write(sentence_cache_path(), json);
+    }
+}
+
 /// Truncate a string to at most `max` bytes, backing up to the nearest char boundary.
 /// Compute boost multiplier for a candidate word based on document frequency and user dictionary.
 /// Returns 1.0 (no boost) for common function words or words not in doc/user_dict.
@@ -1395,6 +1468,14 @@ impl BridgeManager {
         self.effective_bridge().and_then(|b| b.read_paragraph_at(cursor_offset))
     }
 
+    fn read_paragraphs(&self) -> Option<Vec<(String, String, usize)>> {
+        self.effective_bridge().and_then(|b| b.read_paragraphs())
+    }
+
+    fn paragraph_count(&self) -> Option<usize> {
+        self.effective_bridge().and_then(|b| b.paragraph_count())
+    }
+
     fn read_full_document(&self) -> Option<String> {
         // When last user app was a browser, ONLY read from Browser bridge
         if self.last_user_was_browser {
@@ -1438,12 +1519,24 @@ impl BridgeManager {
         }
     }
 
+    // Range-based underlines only exist in the Word bridges (COM on Windows,
+    // Add-in on Mac) — char offsets mean nothing to Accessibility/Browser.
+    // Route directly to the Word bridge instead of effective_bridge() so
+    // underlines still land in the Word doc while the user has our own
+    // window (or another app) momentarily focused. Routing via
+    // effective_bridge() made every mark attempt return false the instant
+    // the user tabbed away, and the errors sat unmarked until Word regained
+    // focus.
+    fn word_bridge(&self) -> Option<&Box<dyn TextBridge>> {
+        self.bridges.iter().find(|b| b.name().contains("Word"))
+    }
+
     fn mark_error_underline(&self, char_start: usize, char_end: usize, color: bridge::ErrorUnderlineColor) -> bool {
-        self.effective_bridge().map(|b| b.mark_error_underline(char_start, char_end, color)).unwrap_or(false)
+        self.word_bridge().map(|b| b.mark_error_underline(char_start, char_end, color)).unwrap_or(false)
     }
 
     fn clear_error_underline(&self, char_start: usize, char_end: usize) -> bool {
-        self.effective_bridge().map(|b| b.clear_error_underline(char_start, char_end)).unwrap_or(false)
+        self.word_bridge().map(|b| b.clear_error_underline(char_start, char_end)).unwrap_or(false)
     }
 
     fn clear_all_error_underlines(&self) -> bool {
@@ -1645,6 +1738,15 @@ struct ContextApp {
     pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
+    /// Last observed Word paragraph count — a DROP means paragraphs were
+    /// deleted (cut/select-delete), which the cursor-paragraph feed can't see.
+    last_para_count: usize,
+    /// Throttle for the background paragraph-count probe (bulk-delete
+    /// detection must run even when the Word context doesn't change).
+    last_para_probe: Instant,
+    /// Final per-sentence verdicts (grammar + BERT-ranked spelling), keyed by
+    /// normalized sentence text. Survives doc switches and app restarts.
+    sentence_cache: SentenceCache,
     last_grammar_ctx_key: String,
     last_known_cursor_offset: Option<usize>,
     prefix_index: Option<PrefixIndex>,
@@ -1868,6 +1970,9 @@ struct ContextApp {
     /// transient Word -> Explorer/Spell -> Word bounce from clearing Word's
     /// active errors when focus returns.
     prev_fg_was_writing_surface: Option<bool>,
+    /// Whether the previously focused external app was Word — a switch that
+    /// involves Word on either side keeps Word error state (partial clear).
+    prev_fg_was_word: bool,
     /// True when the foreground app is a browser this frame. Set at the
     /// top of every update() so grammar/BERT pollers can gate on it.
     suppress_errors: bool,
@@ -2220,6 +2325,7 @@ impl ContextApp {
         self.last_doc_approx_len = 0;
         self.last_known_cursor_offset = None;
         self.paragraph_texts.clear();
+        self.last_para_count = 0;
         self.completions.clear();
         self.open_completions.clear();
         self.last_completed_prefix.clear();
@@ -2477,6 +2583,9 @@ impl ContextApp {
             pending_incomplete_sentence: None,
             grammar_inflight: std::collections::HashSet::new(),
             paragraph_texts: std::collections::HashMap::new(),
+            last_para_count: 0,
+            last_para_probe: Instant::now(),
+            sentence_cache: load_sentence_cache(),
             last_grammar_ctx_key: String::new(),
             last_known_cursor_offset: None,
             prefix_index: None,
@@ -2603,6 +2712,7 @@ impl ContextApp {
             prev_word_title: String::new(),
             prev_fg_pid: 0,
             prev_fg_was_writing_surface: None,
+            prev_fg_was_word: false,
             suppress_errors: false,
             prev_was_writing_app: None,
             update_service: {
@@ -3526,6 +3636,15 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
     /// Handle BERT spelling score response for spelling re-ranking.
     fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scored_candidates: &[(String, f32)]) {
+        // The BERT leg for this sentence's word has completed (whatever the
+        // outcome) — count down the sentence-cache pending counter so the
+        // entry becomes replayable once every queued word has resolved.
+        if let Some(d) = &pending.deferred_push {
+            let ck = sentence_cache_key(&d.sentence);
+            if let Some(e) = self.sentence_cache.entries.get_mut(&ck) {
+                e.pending = e.pending.saturating_sub(1);
+            }
+        }
         if scored_candidates.is_empty() {
             // Worker couldn't produce any candidate (compound_walker found
             // nothing for gibberish-like input, BERT returned -inf for all,
@@ -3539,6 +3658,18 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 let already = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == deferred.word.to_lowercase()
                         && e.paragraph_id == deferred.paragraph_id
+                });
+                // Cache regardless of the display dedup — the entry's pending
+                // counter was already decremented for this word.
+                self.cache_sentence_spelling(&deferred.sentence.clone(), CachedSentenceError {
+                    is_grammar: false,
+                    word: deferred.word.clone(),
+                    suggestion: String::new(),
+                    explanation: deferred.explanation.clone(),
+                    rule_name: "stavefeil".to_string(),
+                    error_word: String::new(),
+                    position: deferred.position,
+                    top_candidates: Vec::new(),
                 });
                 if !already {
                     self.writing_errors.push(WritingError {
@@ -3608,6 +3739,26 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             // unknown_words handler. We held off pushing the WritingError so
             // the user never saw an ortho-first guess. Push it now with the
             // properly ranked suggestion and draw the underline.
+            let suggestion = capitalize(best, &deferred.sentence, &deferred.word);
+            // Top 5 alternates = next 4 BERT-ranked candidates (excluding the best pick).
+            let top5: Vec<String> = rescored.iter().skip(1).take(5)
+                .map(|(c, _)| c.clone()).collect();
+
+            // Cache BEFORE the display dedup below: the verdict belongs in
+            // this sentence's cache entry even when a matching error is
+            // already on screen (pending was decremented above — skipping
+            // the append would leave a "complete" entry missing this word).
+            self.cache_sentence_spelling(&deferred.sentence.clone(), CachedSentenceError {
+                is_grammar: false,
+                word: deferred.word.clone(),
+                suggestion: suggestion.clone(),
+                explanation: deferred.explanation.clone(),
+                rule_name: "stavefeil_bert".to_string(),
+                error_word: String::new(),
+                position: deferred.position,
+                top_candidates: top5.clone(),
+            });
+
             let already = self.writing_errors.iter().any(|e| {
                 e.word.to_lowercase() == deferred.word.to_lowercase()
                     && !e.ignored
@@ -3616,10 +3767,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             });
             if already { return; }
 
-            let suggestion = capitalize(best, &deferred.sentence, &deferred.word);
-            // Top 5 alternates = next 4 BERT-ranked candidates (excluding the best pick).
-            let top5: Vec<String> = rescored.iter().skip(1).take(5)
-                .map(|(c, _)| c.clone()).collect();
             log!("spelling deferred push: '{}' → '{}' (BERT-ranked)", deferred.word, suggestion);
             self.writing_errors.push(WritingError {
                 category: ErrorCategory::Spelling,
@@ -3694,6 +3841,22 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
     }
 
+    /// Append a finished spelling verdict to the sentence cache (replayed on
+    /// document re-entry instead of re-running SWI + BERT). Replaces any
+    /// previous entry for the same word so re-checks upgrade in place.
+    fn cache_sentence_spelling(&mut self, sentence: &str, err: CachedSentenceError) {
+        let key = sentence_cache_key(sentence);
+        if self.sentence_cache.entries.len() >= SENTENCE_CACHE_CAP
+            && !self.sentence_cache.entries.contains_key(&key)
+        {
+            return;
+        }
+        let e = self.sentence_cache.entries.entry(key).or_default();
+        e.errors.retain(|x| !(x.is_grammar == err.is_grammar && x.word.eq_ignore_ascii_case(&err.word)));
+        e.errors.push(err);
+        save_sentence_cache(&self.sentence_cache);
+    }
+
     /// Apply grammar-filter refinement to a previously-pushed spelling
     /// WritingError. The original WritingError was created with the
     /// raw BERT pick so the underline is visible immediately. Grammar
@@ -3723,6 +3886,19 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
             s
         };
+        // Mirror the upgrade into the sentence cache so replays get the
+        // grammar-refined suggestion, not the raw BERT pick.
+        {
+            let ck = sentence_cache_key(&pending.sentence);
+            if let Some(entry) = self.sentence_cache.entries.get_mut(&ck) {
+                for ce in &mut entry.errors {
+                    if !ce.is_grammar && ce.word.to_lowercase() == word_lower {
+                        ce.suggestion = suggestion.clone();
+                    }
+                }
+                save_sentence_cache(&self.sentence_cache);
+            }
+        }
         for e in &mut self.writing_errors {
             if !matches!(e.category, ErrorCategory::Spelling) { continue; }
             if e.word.to_lowercase() != word_lower { continue; }
@@ -4424,6 +4600,107 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
     }
 
+    /// Paste/cut/move/delete detection for Word COM. The cursor-paragraph feed
+    /// only ever sees ONE paragraph, so bulk edits are invisible to it: pasted
+    /// paragraphs never get checked, and deleting paragraphs leaves their
+    /// errors orphaned in the list forever. One cheap COM property read
+    /// (Paragraphs.Count) tells us when either happened:
+    ///
+    ///  - count GREW by more than a single Enter → paste/doc-open → sweep and
+    ///    process every paragraph.
+    ///  - count SHRANK since last look → paragraphs deleted → sweep and prune
+    ///    errors whose para_id no longer exists in the doc.
+    ///
+    /// `cursor_para_id`: the paragraph the cursor is in when called from the
+    /// context poll — lets a single Enter (count+1 with the cursor in the new
+    /// paragraph) skip the sweep. The throttled background probe passes None.
+    /// read_paragraphs() (the expensive full read) only runs on real bulk
+    /// changes.
+    fn check_word_bulk_change(&mut self, cursor_para_id: Option<&str>) {
+        let doc_count = match self.manager.paragraph_count() {
+            Some(c) => c,
+            None => return,
+        };
+        // grew must NOT require the cursor to sit in an unknown paragraph:
+        // after a paste Word leaves the cursor in the paragraph FOLLOWING the
+        // pasted content — an id we've already cached. Compare against the
+        // count we saw last time instead.
+        let is_new_para = cursor_para_id
+            .map_or(false, |id| !self.paragraph_texts.contains_key(id));
+        let grew = if self.last_para_count > 0 {
+            let plain_enter = doc_count == self.last_para_count + 1 && is_new_para;
+            doc_count > self.last_para_count && !plain_enter
+        } else {
+            // First look at this doc since connect/clear.
+            doc_count > self.paragraph_texts.len() + 1
+        };
+        let shrank = self.last_para_count > 0 && doc_count < self.last_para_count;
+        self.last_para_count = doc_count;
+        if !grew && !shrank {
+            return;
+        }
+        let all_paras = match self.manager.read_paragraphs() {
+            Some(p) => p,
+            None => return,
+        };
+        log!(
+            "Bulk doc change ({}): sweeping {} paragraphs (cached {}, doc has {})",
+            if grew { "paste/open" } else { "delete/cut" },
+            all_paras.len(),
+            self.paragraph_texts.len(),
+            doc_count
+        );
+        // Prune state for Word paragraphs that no longer exist. Only numeric
+        // ids are Word COM ParaIDs — leave uia:/browser paragraphs from other
+        // apps alone so a Word sweep can't wipe their errors.
+        let live: std::collections::HashSet<&String> =
+            all_paras.iter().map(|(id, _, _)| id).collect();
+        let dead: Vec<String> = self.paragraph_texts.keys()
+            .filter(|id| id.parse::<i64>().is_ok() && !live.contains(id))
+            .cloned().collect();
+        for id in dead {
+            log!("Paragraph deleted: pruning errors/caches for para={}", trunc(&id, 10));
+            self.paragraph_texts.remove(&id);
+            if let Some(hashes) = self.paragraph_sentence_hashes.remove(&id) {
+                for h in hashes {
+                    self.processed_sentence_hashes.remove(&h);
+                    self.grammar_inflight.remove(&h);
+                }
+            }
+            self.writing_errors.retain(|e| e.paragraph_id != id);
+            self.pending_spelling_bert.retain(|p| {
+                p.deferred_push.as_ref().map_or(true, |d| d.paragraph_id != id)
+            });
+            self.pending_spelling_grammar.retain(|p| p.paragraph_id != id);
+        }
+        // Re-anchor surviving errors: paragraphs after a deleted/inserted one
+        // shifted, so stored char offsets are stale. Word moves the underline
+        // formatting with the text, but "Rett opp" and re-marking need fresh
+        // offsets — zeroing the range makes sync_error_underlines recompute it
+        // from the paragraph's new start.
+        for (pid, ptext, pstart) in &all_paras {
+            for e in &mut self.writing_errors {
+                if e.paragraph_id == *pid {
+                    let sent_lower = e.sentence_context.to_lowercase();
+                    if let Some(idx) = ptext.to_lowercase().find(&sent_lower) {
+                        let new_off = pstart + ptext[..idx].chars().count();
+                        if new_off != e.doc_offset {
+                            e.doc_offset = new_off;
+                            e.word_doc_start = 0;
+                            e.word_doc_end = 0;
+                        }
+                    }
+                }
+            }
+        }
+        for (pid, ptext, pstart) in all_paras {
+            if cursor_para_id == Some(pid.as_str()) {
+                continue;
+            }
+            self.process_com_changed_paragraph(pid, ptext, pstart);
+        }
+    }
+
     /// Process a single paragraph read via COM — mirrors process_addin_changed_paragraphs for Mac.
     /// Called on each keystroke with the paragraph at cursor. Only reprocesses if text changed.
     fn process_com_changed_paragraph(&mut self, para_id: String, text: String, char_start: usize) {
@@ -4493,7 +4770,26 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
 
         // Split into sentences
-        let sentences = split_sentences(&clean_text);
+        let mut sentences = split_sentences(&clean_text);
+        // "Vent på space" for lone words: split_sentences drops trailing
+        // unpunctuated fragments with fewer than two words, so a single
+        // gibberish word ("Aweffwfwfwf ") was NEVER checked — the sentence
+        // list stayed empty until a second word plus a following space
+        // arrived. Once the user has finished the word (or the paragraph is
+        // first seen, e.g. during a paste sweep), append the fragment as its
+        // own sentence so it flows through the same hash/cache/send gates.
+        if user_finished_word || para_first_seen {
+            let trailing = clean_text.rsplit(['.', '!', '?', ':']).next().unwrap_or("");
+            let frag = trailing.trim();
+            if !frag.is_empty()
+                && frag.split_whitespace().count() == 1
+                && frag.chars().count() >= 3
+                && !sentences.iter().any(|s| s == frag)
+            {
+                sentences.push(frag.to_string());
+            }
+        }
+        let sentences = sentences;
         let new_hashes: Vec<u64> = sentences.iter()
             .map(|s| hash_str(&format!("{}|{}", para_id, s))).collect();
 
@@ -4535,6 +4831,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // keystroke, saturating the SWI-Prolog actor and starving the
         // completion path.
         let _ = (para_first_seen, user_finished_word); // used below
+        let mut any_replayed = false;
         if let Some(actor) = &self.grammar_actor {
             let clean_lower = clean_text.to_lowercase();
             let mut search_from = 0usize;
@@ -4562,17 +4859,83 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
                 });
 
-                if is_complete || user_finished_word || para_first_seen {
-                    let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-                    actor.check_sentence_with_doc(sentence_text, doc_offset, &para_id, 0, &self.last_doc_text, &uw);
-                    self.grammar_inflight.insert(sent_h);
-                    log!("Grammar send (COM): '{}' (para={} doc_off={})", trunc(sentence_text, 50), trunc(&para_id, 10), doc_offset);
+                // Nothing below runs mid-word — same "vent på space" gate as
+                // the actor send, so cache replays can't paint errors while
+                // the user is still typing the word.
+                if !(is_complete || user_finished_word || para_first_seen) {
+                    continue;
                 }
+
+                // Sentence cache: replay a finished verdict instead of
+                // re-running SWI + BERT. Keyed by sentence TEXT, so this
+                // works across ParaID churn, doc switches and app restarts.
+                // Entries with pending > 0 (spelling still in flight when
+                // they were written) are skipped and re-checked normally.
+                let cached_verdict = self.sentence_cache.entries
+                    .get(&sentence_cache_key(sentence_text))
+                    .filter(|v| v.pending == 0)
+                    .cloned();
+                if let Some(verdict) = cached_verdict {
+                    self.processed_sentence_hashes.insert(sent_h);
+                    let mut replayed = 0usize;
+                    for ce in &verdict.errors {
+                        if ce.is_grammar && !is_complete {
+                            continue;
+                        }
+                        if !ce.is_grammar {
+                            let wl = ce.word.to_lowercase();
+                            if self.ignored_words.contains(&ce.word)
+                                || self.ignored_words.contains(&wl) {
+                                continue;
+                            }
+                            if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&ce.word)) {
+                                continue;
+                            }
+                            let already = self.writing_errors.iter().any(|e| {
+                                e.word.to_lowercase() == wl && e.paragraph_id == para_id && !e.ignored
+                            });
+                            if already { continue; }
+                        }
+                        self.writing_errors.push(WritingError {
+                            category: if ce.is_grammar { ErrorCategory::Grammar } else { ErrorCategory::Spelling },
+                            word: if ce.is_grammar { sentence_text.to_string() } else { ce.word.clone() },
+                            suggestion: ce.suggestion.clone(),
+                            explanation: ce.explanation.clone(),
+                            rule_name: ce.rule_name.clone(),
+                            sentence_context: sentence_text.to_string(),
+                            doc_offset,
+                            position: ce.position,
+                            ignored: false,
+                            word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                            paragraph_id: para_id.clone(),
+                            error_word: ce.error_word.clone(),
+                            top_candidates: ce.top_candidates.clone(),
+                        });
+                        replayed += 1;
+                    }
+                    log!("Sentence cache hit: '{}' → {} errors replayed",
+                        trunc(sentence_text, 50), replayed);
+                    if replayed > 0 {
+                        any_replayed = true;
+                    }
+                    continue;
+                }
+
+                let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+                actor.check_sentence_with_doc(sentence_text, doc_offset, &para_id, 0, &self.last_doc_text, &uw);
+                self.grammar_inflight.insert(sent_h);
+                log!("Grammar send (COM): '{}' (para={} doc_off={})", trunc(sentence_text, 50), trunc(&para_id, 10), doc_offset);
             }
         }
 
         // Store new sentence hashes
         self.paragraph_sentence_hashes.insert(para_id.clone(), new_hashes);
+
+        // Replayed errors need their underlines drawn (they bypass the
+        // BERT-response path that normally triggers the sync).
+        if any_replayed {
+            self.sync_error_underlines();
+        }
 
         // COM mode: last_doc_text = current paragraph only.
         // paragraph_texts accumulates all visited paragraphs for error tracking/pruning,
@@ -5025,6 +5388,7 @@ self.writing_errors.clear();
                 }
                 self.paragraph_sentence_hashes.clear();
                 self.paragraph_texts.clear();
+                self.last_para_count = 0;
                 self.last_doc_text.clear();
                 self.grammar_inflight.clear();
                 self.llm_checked_hashes.clear();
@@ -5565,6 +5929,7 @@ self.grammar_queue.clear();
         // via `actor`), processed after it ends so we can call &mut self
         // methods like find_spelling_suggestions.
         let mut unknown_words_to_rank: Vec<(DeferredSpellingPush, Vec<String>)> = Vec::new();
+        let mut cache_dirty = false;
 
         while let Some(resp) = actor.try_recv() {
             // Always process responses — they belong to the Word doc the user
@@ -5611,6 +5976,22 @@ self.grammar_queue.clear();
             self.grammar_inflight.remove(&sent_h);
             self.processed_sentence_hashes.insert(sent_h); // Mark sentence as processed
 
+            // Sentence cache: a fresh check of this exact text supersedes
+            // whatever the entry held — RESET it before rebuilding. Without
+            // this, entries built while the user typed the sentence
+            // incrementally only contained the words that were NEW at each
+            // boundary (the dedup below skips already-displayed words), so a
+            // replay after a doc switch showed just the last error.
+            let ck_resp = sentence_cache_key(&resp.sentence);
+            if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
+                || self.sentence_cache.entries.contains_key(&ck_resp)
+            {
+                let entry = self.sentence_cache.entries.entry(ck_resp).or_default();
+                entry.errors.clear();
+                entry.pending = 0;
+                cache_dirty = true;
+            }
+
             // Handle grammar errors — only for complete sentences (ends with punctuation)
             let sentence_complete = resp.sentence.ends_with('.') || resp.sentence.ends_with('!')
                 || resp.sentence.ends_with('?') || resp.sentence.ends_with(':');
@@ -5652,11 +6033,12 @@ self.grammar_queue.clear();
                         // (or "" with quotes) so the explanation reads cleanly.
                         let display_alt = if first_alt == DELETE_SENTINEL { "" } else { first_alt };
                         log!("  Grammar fix: '{}' → '{}' [{}]", ge.word, display_alt, ge.rule_name);
+                        let explanation = format!("«{}» → «{}»: {}", ge.word, display_alt, ge.explanation);
                         self.writing_errors.push(WritingError {
                             category: ErrorCategory::Grammar,
                             word: resp.sentence.to_string(),
-                            suggestion: corrected,
-                            explanation: format!("«{}» → «{}»: {}", ge.word, display_alt, ge.explanation),
+                            suggestion: corrected.clone(),
+                            explanation: explanation.clone(),
                             rule_name: ge.rule_name.clone(),
                             sentence_context: resp.sentence.to_string(),
                             doc_offset: resp.doc_offset,
@@ -5664,6 +6046,27 @@ self.grammar_queue.clear();
                             ignored: false,
                             word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: ge.word.clone(), top_candidates: vec![],
                         });
+                        // Sentence cache: grammar verdict is final at push time.
+                        // (Direct field access — `actor` holds a borrow of self.)
+                        let ck = sentence_cache_key(&resp.sentence);
+                        if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
+                            || self.sentence_cache.entries.contains_key(&ck)
+                        {
+                            let entry = self.sentence_cache.entries.entry(ck).or_default();
+                            entry.errors.retain(|x| !(x.is_grammar
+                                && x.rule_name == ge.rule_name && x.error_word == ge.word));
+                            entry.errors.push(CachedSentenceError {
+                                is_grammar: true,
+                                word: resp.sentence.to_string(),
+                                suggestion: corrected,
+                                explanation,
+                                rule_name: ge.rule_name.clone(),
+                                error_word: ge.word.clone(),
+                                position: i,
+                                top_candidates: vec![],
+                            });
+                            cache_dirty = true;
+                        }
                         // Blue underline for grammar errors
                         for b in &self.manager.bridges {
                             b.underline_word(&ge.word, &resp.paragraph_id, "#0000FF");
@@ -5684,6 +6087,25 @@ self.grammar_queue.clear();
                         ignored: false,
                         word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(), top_candidates: vec![],
                     });
+                    let ck = sentence_cache_key(&resp.sentence);
+                    if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
+                        || self.sentence_cache.entries.contains_key(&ck)
+                    {
+                        let entry = self.sentence_cache.entries.entry(ck).or_default();
+                        entry.errors.retain(|x| !(x.is_grammar
+                            && x.rule_name == first.rule_name && x.error_word == first.word));
+                        entry.errors.push(CachedSentenceError {
+                            is_grammar: true,
+                            word: resp.sentence.to_string(),
+                            suggestion: String::new(),
+                            explanation: first.explanation.clone(),
+                            rule_name: first.rule_name.clone(),
+                            error_word: first.word.clone(),
+                            position: 0,
+                            top_candidates: vec![],
+                        });
+                        cache_dirty = true;
+                    }
                     // Blue underline for grammar errors without suggestions too
                     for b in &self.manager.bridges {
                         b.underline_word(&first.word, &resp.paragraph_id, "#0000FF");
@@ -5738,7 +6160,49 @@ self.grammar_queue.clear();
                         && (d.paragraph_id == resp.paragraph_id
                             || (!resp.sentence.is_empty() && d.sentence == resp.sentence))
                 });
-                if already_displayed || already_pending || already_in_queue {
+                if already_displayed {
+                    // The word won't be re-queued for BERT (its verdict was
+                    // computed when an earlier prefix of this sentence was
+                    // checked) — but THIS sentence's cache entry still needs
+                    // the full verdict. Copy it from the displayed error.
+                    let src = self.writing_errors.iter().find(|e| {
+                        matches!(e.category, ErrorCategory::Spelling)
+                            && e.word.to_lowercase() == unk_word_lower
+                            && !e.ignored
+                    }).map(|e| (e.word.clone(), e.suggestion.clone(), e.explanation.clone(),
+                                e.rule_name.clone(), e.top_candidates.clone()));
+                    if let Some((w, sug, expl, rule, top)) = src {
+                        if let Some(entry) = self.sentence_cache.entries
+                            .get_mut(&sentence_cache_key(&resp.sentence))
+                        {
+                            entry.errors.retain(|x| !(!x.is_grammar && x.word.eq_ignore_ascii_case(&w)));
+                            entry.errors.push(CachedSentenceError {
+                                is_grammar: false,
+                                word: w,
+                                suggestion: sug,
+                                explanation: expl,
+                                rule_name: rule,
+                                error_word: String::new(),
+                                position: unk.position,
+                                top_candidates: top,
+                            });
+                            cache_dirty = true;
+                        }
+                    }
+                    continue;
+                }
+                if already_pending || already_in_queue {
+                    // Verdict for this word is in flight for an earlier text
+                    // of the sentence — we can't complete this entry now.
+                    // Bump pending with no matching decrement so the entry
+                    // never replays half a verdict; the next fresh check of
+                    // this text resets it and rebuilds completely.
+                    if let Some(entry) = self.sentence_cache.entries
+                        .get_mut(&sentence_cache_key(&resp.sentence))
+                    {
+                        entry.pending += 1;
+                        cache_dirty = true;
+                    }
                     continue;
                 }
 
@@ -5754,6 +6218,8 @@ self.grammar_queue.clear();
                 let fuzzy_fallback: Vec<String> = unk.spelling_suggestions.clone();
                 unknown_words_to_rank.push((deferred, fuzzy_fallback));
             }
+            // (The cache entry for this response was created/reset right
+            // after the stale guards; empty entry = clean sentence.)
 
             // Stale underlines from previous sessions are cleared at app startup
             // via AppleScript (set underline of font to underline none).
@@ -5783,6 +6249,12 @@ self.grammar_queue.clear();
                 }
             }
             if let Some(request_id) = request_id_opt {
+                // Sentence-cache entry can't replay until this word's BERT
+                // result lands — handle_spelling_bert_response decrements.
+                if let Some(e) = self.sentence_cache.entries.get_mut(&sentence_cache_key(&deferred.sentence)) {
+                    e.pending += 1;
+                    cache_dirty = true;
+                }
                 self.pending_spelling_bert.push(PendingSpellingBert {
                     request_id,
                     error_idx_word: deferred.word.to_lowercase(),
@@ -5815,7 +6287,7 @@ self.grammar_queue.clear();
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Spelling,
                     word: deferred.word.clone(),
-                    suggestion: best,
+                    suggestion: best.clone(),
                     explanation: deferred.explanation.clone(),
                     rule_name: "stavefeil".to_string(),
                     sentence_context: deferred.sentence.clone(),
@@ -5825,12 +6297,25 @@ self.grammar_queue.clear();
                     word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
                     paragraph_id: deferred.paragraph_id.clone(),
                     error_word: String::new(),
+                    top_candidates: top5.clone(),
+                });
+                self.cache_sentence_spelling(&deferred.sentence, CachedSentenceError {
+                    is_grammar: false,
+                    word: deferred.word.clone(),
+                    suggestion: best,
+                    explanation: deferred.explanation.clone(),
+                    rule_name: "stavefeil".to_string(),
+                    error_word: String::new(),
+                    position: deferred.position,
                     top_candidates: top5,
                 });
                 for b in &self.manager.bridges {
                     b.underline_word(&deferred.word, &deferred.paragraph_id, "#FF0000");
                 }
             }
+        }
+        if cache_dirty {
+            save_sentence_cache(&self.sentence_cache);
         }
 
         if t_poll_start.elapsed().as_millis() > 5 {
@@ -6557,18 +7042,66 @@ impl eframe::App for ContextApp {
                 let has_state_to_clear = !self.writing_errors.is_empty()
                     || !self.paragraph_texts.is_empty()
                     || !self.last_doc_text.is_empty();
-                if switching_between_writing_surfaces && has_state_to_clear {
+                // Word detours are special: the user constantly glances at
+                // Spell / a terminal / Slack and comes right back, and the
+                // bridge-switch handler deliberately KEEPS Word error state
+                // for exactly that reason (keep_word_errors). This clear ran
+                // before that handler and wiped everything anyway — in-flight
+                // grammar responses for Word paragraphs then got discarded as
+                // "paragraph gone", so after a reconnect + tab-out the errors
+                // for already-checked sentences never came back. When either
+                // side of the switch is Word, do a PARTIAL clear instead:
+                // keep Word-scoped state (numeric ParaIDs) and drop only the
+                // other app's (uia:/ax:) state. The display layer hides Word
+                // errors while a non-Word app is focused.
+                let involves_word = now_word || self.prev_fg_was_word;
+                if switching_between_writing_surfaces && has_state_to_clear && involves_word {
+                    let is_word_id = |id: &str| id.parse::<i64>().is_ok();
+                    let before = self.writing_errors.len();
+                    self.writing_errors.retain(|e| is_word_id(&e.paragraph_id));
+                    let dropped_hashes: Vec<u64> = self.paragraph_sentence_hashes.iter()
+                        .filter(|(id, _)| !is_word_id(id))
+                        .flat_map(|(_, hs)| hs.iter().copied())
+                        .collect();
+                    for h in dropped_hashes {
+                        self.processed_sentence_hashes.remove(&h);
+                        self.grammar_inflight.remove(&h);
+                    }
+                    self.paragraph_sentence_hashes.retain(|id, _| is_word_id(id));
+                    self.paragraph_texts.retain(|id, _| is_word_id(id));
+                    self.pending_spelling_bert.retain(|p| {
+                        p.deferred_push.as_ref().map_or(false, |d| is_word_id(&d.paragraph_id))
+                    });
+                    self.pending_spelling_grammar.retain(|p| is_word_id(&p.paragraph_id));
+                    self.pending_grammar_bert.clear();
+                    self.pending_consonant_bert.clear();
+                    self.pending_consonant_checks.clear();
+                    self.spelling_queue.clear();
+                    self.grammar_queue.clear();
+                    self.grammar_queue_total = 0;
+                    self.grammar_scanning = false;
+                    self.last_doc_text.clear();
+                    self.last_doc_hash = 0;
+                    self.last_doc_approx_len = 0;
+                    self.last_sentence_count = 0;
+                    self.last_spell_checked_word.clear();
+                    self.last_known_cursor_offset = None;
+                    self.focused_error_idx = None;
+                    log!("Cross-app Word detour ({}→{}) — kept {} Word errors, dropped {} non-Word",
+                        self.prev_fg_pid, fg.pid,
+                        self.writing_errors.len(), before - self.writing_errors.len());
+                } else if switching_between_writing_surfaces && has_state_to_clear {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
                         self.prev_fg_pid, fg.pid,
                         self.writing_errors.len(), self.paragraph_texts.len());
                     self.manager.clear_all_error_underlines();
                     self.writing_errors.clear();
                     self.paragraph_texts.clear();
+                    self.last_para_count = 0;
                     self.paragraph_sentence_hashes.clear();
                     self.processed_sentence_hashes.clear();
                     self.grammar_inflight.clear();
                     self.grammar_queue.clear();
-self.grammar_queue.clear();
                     self.grammar_queue_total = 0;
                     self.grammar_scanning = false;
                     self.spelling_queue.clear();
@@ -6620,6 +7153,7 @@ self.grammar_queue.clear();
                 self.prev_fg_pid = fg.pid;
                 self.prev_fg_was_writing_surface =
                     Some(now_browser || self.platform.is_writing_app(&fg));
+                self.prev_fg_was_word = now_word;
             }
 
             self.suppress_errors = now_browser;
@@ -6746,8 +7280,19 @@ self.grammar_queue.clear();
         // of update() (above the skip_processing gate) — nothing to do here.
 
         self.poll_grammar_responses();
-       
-        if let Some(actor) = &self.grammar_actor {
+
+        // Background bulk-change probe: a select-all-delete in Word often
+        // produces NO context change (the cursor lands where the context
+        // reads the same as cached), so the count check inside the context
+        // poll never fires and deleted paragraphs' errors sit in the list
+        // forever. Probe Paragraphs.Count once a second while Word COM is
+        // the active bridge — a single COM property read, with the sweep
+        // only running when the count actually jumped.
+        if self.manager.active_bridge_name() == "Word COM"
+            && self.last_para_probe.elapsed().as_millis() >= 1000
+        {
+            self.last_para_probe = Instant::now();
+            self.check_word_bulk_change(None);
         }
 
         
@@ -7394,15 +7939,10 @@ self.grammar_queue.clear();
                     // detour Word → Slack → Word doesn't drop them in the
                     // middle hop. The display layer hides them outside Word.
                     let keep_word_errors = from_word || to_word;
-let keep_word_errors = from_word || to_word;
                     log!("Bridge switched {} → {} — {} errors, {} spelling queue, {} pending BERT, {} grammar queue",
                         from, to, self.writing_errors.len(), self.spelling_queue.len(),
                         self.pending_spelling_bert.len(), self.grammar_queue.len());
                     self.spelling_queue.clear();
-                    self.pending_spelling_bert.clear();
-                    self.pending_spelling_grammar.clear();
-                    self.pending_grammar_bert.clear();
-                    self.pending_consonant_bert.clear();
                     self.grammar_queue.clear();
                     self.grammar_queue_total = 0;
                     self.completions.clear();
@@ -7411,12 +7951,28 @@ let keep_word_errors = from_word || to_word;
                     self.last_dispatched_sentence.clear();
                     self.grammar_scanning = false;
                     if keep_word_errors {
-                        log!("Bridge switch kept Word error state");
+                        // Bridge switch WITH keep_word_errors means the user is
+                        // still working with a Word doc — the pending BERT/
+                        // grammar_refine items in flight belong to that doc.
+                        // Clearing them here previously threw away every typo
+                        // whose BERT rank hadn't landed yet: after pasting 10
+                        // lines, the actor produced 26 unknown-word candidates,
+                        // BERT ranked 2 before Word momentarily lost focus, and
+                        // the remaining 24 pending items got wiped so no
+                        // underline ever appeared. Hold them; responses stay
+                        // valid because the target paragraphs are still there.
+                        log!("Bridge switch kept Word error state ({} pending BERT held)",
+                            self.pending_spelling_bert.len());
                     } else {
+                        self.pending_spelling_bert.clear();
+                        self.pending_spelling_grammar.clear();
+                        self.pending_grammar_bert.clear();
+                        self.pending_consonant_bert.clear();
                         self.writing_errors.clear();
                         self.processed_sentence_hashes.clear();
                         self.paragraph_sentence_hashes.clear();
                         self.paragraph_texts.clear();
+                        self.last_para_count = 0;
                         self.last_doc_text.clear();
                         self.last_doc_hash = 0;
                     }
@@ -7457,6 +8013,10 @@ let keep_word_errors = from_word || to_word;
                             }
                             new_ctx = refined;
                         }
+                        // Paste/cut/move/delete detection — see
+                        // check_word_bulk_change. Passing the cursor paragraph
+                        // lets a single Enter skip the sweep.
+                        self.check_word_bulk_change(Some(&para_id));
                         self.process_com_changed_paragraph(para_id, text, start);
                     }
                 } else if self.manager.last_user_was_browser {

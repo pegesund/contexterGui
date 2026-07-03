@@ -5,7 +5,8 @@ fn main() {
     let fst = acatts_rust::compound_walker::load_fst_from_mfst(dict.to_str().unwrap()).unwrap();
 
     let words = vec!["spilflfler", "fotcaball", "fotaaball", "karrierekompasset",
-                     "maskinlæringsalgoritme", "fotball", "spiller", "hus"];
+                     "maskinlæringsalgoritme", "fotball", "spiller", "hus",
+                     "sneøen", "vintrern", "skii", "liikkker"];
     for w in &words {
         let t = std::time::Instant::now();
         let results = acatts_rust::compound_walker::compound_fuzzy_walk(

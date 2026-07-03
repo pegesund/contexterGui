@@ -107,6 +107,11 @@ pub trait TextBridge {
     /// Read the single paragraph at cursor position. Returns (para_id, text, char_start).
     fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> { None }
 
+    /// Total paragraph count in the active document. Cheap probe (one COM
+    /// property read on Word). Used to detect paste/cut/move by comparing
+    /// against how many paragraphs we've cached.
+    fn paragraph_count(&self) -> Option<usize> { None }
+
     /// Read cached selected text (polled while external app had focus).
     fn read_selected_text(&self) -> Option<String> { None }
 

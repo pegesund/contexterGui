@@ -263,24 +263,9 @@ pub fn spawn_grammar_actor_with_loader(
                             let analyzer = match &checker {
                                 AnyChecker::Swi(c) => c.analyzer().clone(),
                             };
+                            let _ = (&fst, &lang, &wf); // fuzzy walk no longer used here
                             Box::new(move |word: &str| -> bool {
-                                let word_check = |w: &str| -> bool {
-                                    analyzer.dict_lookup(w).map_or(false, |rs|
-                                        rs.iter().any(|r| r.pos != mtag::types::Pos::Prop))
-                                };
-                                let noun_check = |w: &str| -> bool {
-                                    analyzer.dict_lookup(w).map_or(false, |rs| {
-                                        let n = rs.iter().filter(|r| r.pos == mtag::types::Pos::Subst).count();
-                                        let a = rs.iter().filter(|r| r.pos == mtag::types::Pos::Adj).count();
-                                        n > 0 && n >= a
-                                    })
-                                };
-                                let results = crate::compound_walker::compound_fuzzy_walk(
-                                    &fst, word, &*lang,
-                                    wf.as_ref().map(|w| w.as_ref()),
-                                    Some(&word_check), Some(&noun_check),
-                                );
-                                results.iter().any(|r| r.total_edits == 0)
+                                nostos_cognio::grammar::is_novel_compound(&analyzer, word)
                             }) as Box<dyn Fn(&str) -> bool>
                         });
                         let compound_ref2: Option<&dyn Fn(&str) -> bool> = compound_check2.as_ref().map(|b| b.as_ref());
