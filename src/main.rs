@@ -247,6 +247,25 @@ fn trunc(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+#[cfg(target_os = "windows")]
+fn windows_notepad_non_prose_viewer(app: &platform::ForegroundApp) -> bool {
+    if app.exe_name != "notepad.exe" {
+        return false;
+    }
+    let title = app.title.to_lowercase();
+    [
+        ".log", ".json", ".toml", ".yaml", ".yml", ".rs", ".py", ".js", ".ts", ".tsx",
+        ".jsx", ".css", ".html", ".xml",
+    ]
+    .iter()
+    .any(|ext| title.contains(ext))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_notepad_non_prose_viewer(_app: &platform::ForegroundApp) -> bool {
+    false
+}
+
 fn normalized_contains_sentence(doc: &str, sentence: &str) -> bool {
     let needle = sentence.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     if needle.is_empty() {
@@ -1111,6 +1130,10 @@ impl BridgeManager {
     #[cfg(target_os = "windows")]
     fn read_context_windows(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
         let other_writing_app = fg.is_other && self.platform.is_writing_app(&fg.app);
+        if windows_notepad_non_prose_viewer(&fg.app) {
+            self.last_context = None;
+            return None;
+        }
         let is_supported = fg.word_is_foreground || fg.is_browser || fg.is_notepad || other_writing_app;
         if !is_supported {
             return self.last_context.clone();
@@ -8632,6 +8655,7 @@ impl eframe::App for ContextApp {
         };
         let fg_for_layout_kind = self.platform.classify_app(&fg_for_layout);
         let slack_layout = fg_for_layout.exe_name.contains("slack");
+        let suppress_panels_for_viewer = windows_notepad_non_prose_viewer(&fg_for_layout);
         // Windows/macOS often spend the first click on activating our topmost
         // borderless popup. Count mouse-down as the action trigger there so
         // completion rows, quick-fix labels, and toolbar icons work with a
@@ -8640,7 +8664,8 @@ impl eframe::App for ContextApp {
             cfg!(any(target_os = "windows", target_os = "macos"))
                 || current_fg_kind_for_layout == platform::AppKind::OurApp
                 || slack_layout;
-        let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
+        let has_active_errors =
+            !suppress_panels_for_viewer && self.writing_errors.iter().any(|e| !e.ignored);
 
         // No tab auto-switch. The pencil icon's red dot already serves as
         // the "you have errors" global indicator regardless of which tab
@@ -8661,9 +8686,13 @@ impl eframe::App for ContextApp {
         // is kept as a struct field for future use but no longer drives
         // tab routing.
 
-        let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
+        let bulb_visible = !suppress_panels_for_viewer
+            && self.selected_tab == 0
+            && self.show_completions
+            && has_completions;
         let pencil_visible = self.selected_tab == 1 && self.show_grammar && has_active_errors;
         let suggestion_status_visible = self.selected_tab == 0
+            && !suppress_panels_for_viewer
             && self.show_completions
             && !has_completions
             && (self.startup_rx.is_some() || (!self.bert_ready && !self.load_errors.is_empty()));
@@ -9368,7 +9397,7 @@ impl eframe::App for ContextApp {
                 self.platform.set_tab_intercept(false);
                 self.selection_mode = false;
             }
-            if self.selected_tab == 0 && self.show_completions {
+            if !suppress_panels_for_viewer && self.selected_tab == 0 && self.show_completions {
                 let has_sugg = !self.completions.is_empty() || !self.open_completions.is_empty();
                 if has_sugg && !self.selection_mode { self.platform.set_tab_intercept(true); }
                 else if !has_sugg { self.platform.set_tab_intercept(false); self.selection_mode = false; }
@@ -9568,9 +9597,14 @@ impl eframe::App for ContextApp {
             // the popup should collapse to the toolbar in that state
             // (the toolbar's pencil icon stays green to signal clean,
             // which is enough).
-            let has_active_errors_render = self.writing_errors.iter().any(|e| !e.ignored);
+            let has_active_errors_render =
+                !suppress_panels_for_viewer && self.writing_errors.iter().any(|e| !e.ignored);
             let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
-            if self.selected_tab == 1 && self.show_grammar && (has_active_errors_render || show_scanning || self.llm_waiting) {
+            if !suppress_panels_for_viewer
+                && self.selected_tab == 1
+                && self.show_grammar
+                && (has_active_errors_render || show_scanning || self.llm_waiting)
+            {
                 // Visual separator when the bulb panel is rendering above.
                 let bulb_rendering = self.selected_tab == 0
                     && self.show_completions
