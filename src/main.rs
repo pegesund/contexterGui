@@ -8343,6 +8343,17 @@ let keep_word_errors = from_word || to_word;
                 )
             }
         };
+        let border_rect = ctx.content_rect().shrink(0.5);
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("spell_window_border"),
+        ))
+        .rect_stroke(
+            border_rect,
+            0.0,
+            egui::Stroke::new(1.0, stroke_col),
+            egui::StrokeKind::Inside,
+        );
         let toolbar_frame = egui::Frame::new()
             .fill(theme.bg)
             .stroke(egui::Stroke::new(1.0, stroke_col))
