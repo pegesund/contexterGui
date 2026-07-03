@@ -1613,6 +1613,11 @@ fn byte_index_for_char(text: &str, char_idx: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+fn has_word_text_after_char(text: &str, char_idx: usize) -> bool {
+    let byte_idx = byte_index_for_char(text, char_idx.min(text.chars().count()));
+    text[byte_idx..].chars().any(|c| c.is_alphanumeric())
+}
+
 fn escape_json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -4720,13 +4725,19 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             if cursor_para_id == Some(pid.as_str()) {
                 continue;
             }
-            self.process_com_changed_paragraph(pid, ptext, pstart);
+            self.process_com_changed_paragraph(pid, ptext, pstart, None);
         }
     }
 
     /// Process a single paragraph read via COM — mirrors process_addin_changed_paragraphs for Mac.
     /// Called on each keystroke with the paragraph at cursor. Only reprocesses if text changed.
-    fn process_com_changed_paragraph(&mut self, para_id: String, text: String, char_start: usize) {
+    fn process_com_changed_paragraph(
+        &mut self,
+        para_id: String,
+        text: String,
+        char_start: usize,
+        cursor_offset: Option<usize>,
+    ) {
         // Clean control characters
         let clean_text: String = text.chars()
             .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
@@ -4778,6 +4789,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let new_ws_count = clean_text.chars().filter(|c| c.is_whitespace()).count();
         let user_finished_word = new_ws_count > prev_ws_count;
         let para_first_seen = prev_text_for_words.is_none();
+        let editing_existing_text = !para_first_seen
+            && cursor_offset
+                .map(|off| {
+                    let cursor_in_para = off.saturating_sub(char_start);
+                    has_word_text_after_char(&clean_text, cursor_in_para)
+                })
+                .unwrap_or(false);
 
         log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
         self.paragraph_texts.insert(para_id.clone(), clean_text.clone());
@@ -4801,7 +4819,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // arrived. Once the user has finished the word (or the paragraph is
         // first seen, e.g. during a paste sweep), append the fragment as its
         // own sentence so it flows through the same hash/cache/send gates.
-        if user_finished_word || para_first_seen {
+        // If the cursor has real word text after it, the user is editing an
+        // existing paragraph in place; in that case we also check immediately
+        // instead of requiring a space after the edited word.
+        if user_finished_word || para_first_seen || editing_existing_text {
             let trailing = clean_text.rsplit(['.', '!', '?', ':']).next().unwrap_or("");
             let frag = trailing.trim();
             if !frag.is_empty()
@@ -4852,8 +4873,9 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // the first time we've seen the paragraph). Word's trailing-space
         // padding made the old `para_ends_with_boundary` check fire on every
         // keystroke, saturating the SWI-Prolog actor and starving the
-        // completion path.
-        let _ = (para_first_seen, user_finished_word); // used below
+        // completion path. In-place edits are allowed through because the word
+        // already has surrounding prose and the user expects feedback without
+        // pressing space.
         let mut any_replayed = false;
         if let Some(actor) = &self.grammar_actor {
             let clean_lower = clean_text.to_lowercase();
@@ -4882,10 +4904,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
                 });
 
-                // Nothing below runs mid-word — same "vent på space" gate as
-                // the actor send, so cache replays can't paint errors while
-                // the user is still typing the word.
-                if !(is_complete || user_finished_word || para_first_seen) {
+                // Normal end-of-paragraph typing still waits for the word to
+                // finish. In-place edits are allowed through immediately
+                // because the cursor has existing prose after it.
+                if !(is_complete || user_finished_word || para_first_seen || editing_existing_text) {
                     continue;
                 }
 
@@ -8040,7 +8062,7 @@ impl eframe::App for ContextApp {
                         // check_word_bulk_change. Passing the cursor paragraph
                         // lets a single Enter skip the sweep.
                         self.check_word_bulk_change(Some(&para_id));
-                        self.process_com_changed_paragraph(para_id, text, start);
+                        self.process_com_changed_paragraph(para_id, text, start, offset);
                     }
                 } else if self.manager.last_user_was_browser {
                     if let Some(doc) = self.manager.read_full_document() {
