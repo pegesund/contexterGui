@@ -8204,13 +8204,16 @@ let keep_word_errors = from_word || to_word;
         if !is_minimised {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             self.last_window_always_on_top = Some(true);
+            let ocr_prompt_active = self.ocr.as_ref().map_or(false, |o| o.has_pending_image())
+                || self.ocr_receiver.is_some()
+                || self.math_receiver.is_some();
             let spell_dialog_open = self.show_settings_window
                 || self.show_userdict_window
                 || self.suggestion_window.is_some()
                 || self.rule_info_window.is_some()
                 || self.show_voice_window;
             #[cfg(target_os = "windows")]
-            if !spell_dialog_open {
+            if !spell_dialog_open && !ocr_prompt_active {
                 platform::windows::keep_main_overlay_topmost();
             }
         }
@@ -11009,8 +11012,10 @@ let keep_word_errors = from_word || to_word;
                     .with_inner_size([win_w, win_h])
                     .with_position(screen_center)
                     .with_always_on_top()
+                    .with_active(true)
                     .with_decorations(true),
                 |vp_ctx, _class| {
+                    vp_ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
                     if vp_ctx.input(|i| i.viewport().close_requested()) {
                         do_dismiss = true;
                     }
