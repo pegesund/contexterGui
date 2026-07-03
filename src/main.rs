@@ -837,10 +837,6 @@ struct BridgeManager {
     active_idx: usize,
     /// PID of the last app we successfully read text from (to avoid switching to terminals etc.)
     last_user_pid: u32,
-    /// Window handle of the last app we successfully read text from.
-    /// Used on Windows to return focus to the correct UIA target after the
-    /// user clicks inside Spell's floating window.
-    last_user_handle: isize,
     /// True when the last user-focused app was a browser — NEVER activate Word COM in this state
     last_user_was_browser: bool,
     /// Last successfully read context (returned when our window is foreground)
@@ -918,7 +914,6 @@ impl BridgeManager {
             last_check: Instant::now(),
             active_idx: 0,
             last_user_pid: 0,
-            last_user_handle: 0,
             last_user_was_browser: browser_file_exists,
             last_context: None,
             bridge_switched: false,
@@ -1044,7 +1039,6 @@ impl BridgeManager {
                         // target app (Word) for subsequent focus-redirects.
                         if !fg.our_window_focused {
                             self.last_user_pid = fg.app.pid;
-                            self.last_user_handle = fg.app.handle;
                         }
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
@@ -1074,7 +1068,6 @@ impl BridgeManager {
         }
         self.active_idx = browser_idx;
         self.last_user_pid = fg.app.pid;
-        self.last_user_handle = fg.app.handle;
         self.last_context = Some(ctx.clone());
         Some(ctx)
     }
@@ -1105,7 +1098,6 @@ impl BridgeManager {
                         }
                         self.active_idx = i;
                         self.last_user_pid = fg.app.pid;
-                        self.last_user_handle = fg.app.handle;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
                     }
@@ -1119,13 +1111,9 @@ impl BridgeManager {
     #[cfg(target_os = "windows")]
     fn read_context_windows(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
         let other_writing_app = fg.is_other && self.platform.is_writing_app(&fg.app);
-        let notepad_writing_app = fg.is_notepad && self.platform.is_writing_app(&fg.app);
-        let is_supported = fg.word_is_foreground || fg.is_browser || notepad_writing_app || other_writing_app;
+        let is_supported = fg.word_is_foreground || fg.is_browser || fg.is_notepad || other_writing_app;
         if !is_supported {
-            self.last_context = None;
-            self.last_user_pid = 0;
-            self.last_user_handle = 0;
-            return None;
+            return self.last_context.clone();
         }
 
         if fg.is_browser {
@@ -1146,7 +1134,7 @@ impl BridgeManager {
         // Windows UIA bridge: Notepad + any other UIA-accessible app. Covers
         // Sticky Notes, WordPad, Mail, search bars, generic Win32 + UWP text
         // fields.
-        if notepad_writing_app || other_writing_app {
+        if fg.is_notepad || other_writing_app {
             self.last_user_was_browser = false;
             let accessibility_idx = self.bridges
                 .iter()
@@ -1164,7 +1152,6 @@ impl BridgeManager {
                 }
                 self.active_idx = i;
                 self.last_user_pid = fg.app.pid;
-                self.last_user_handle = fg.app.handle;
 
                 if let Some(ctx) = self.bridges[i].read_context() {
                     // Returning this even when the text is momentarily empty is
@@ -1186,13 +1173,10 @@ impl BridgeManager {
 
     #[cfg(target_os = "macos")]
     fn read_context_macos(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
-        let use_ax_bridge = (fg.is_notepad || fg.is_other) && self.platform.is_writing_app(&fg.app);
+        let use_ax_bridge = fg.is_notepad || fg.is_other;
         let is_supported = fg.word_is_foreground || fg.is_browser || use_ax_bridge;
         if !is_supported {
-            self.last_context = None;
-            self.last_user_pid = 0;
-            self.last_user_handle = 0;
-            return None;
+            return self.last_context.clone();
         }
 
         if fg.is_browser {
@@ -1248,7 +1232,6 @@ impl BridgeManager {
                         }
                         self.active_idx = i;
                         self.last_user_pid = fg.app.pid;
-                        self.last_user_handle = fg.app.handle;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
                     }
@@ -1283,7 +1266,6 @@ impl BridgeManager {
                         }
                         self.active_idx = i;
                         self.last_user_pid = fg.app.pid;
-                        self.last_user_handle = fg.app.handle;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
                     }
@@ -1346,8 +1328,6 @@ impl BridgeManager {
     fn clear_context(&mut self) {
         self.last_context = None;
         self.last_user_was_browser = false;
-        self.last_user_pid = 0;
-        self.last_user_handle = 0;
     }
 
     fn request_word_rescan(&self) {
@@ -1418,19 +1398,6 @@ impl BridgeManager {
     }
 
     fn restore_last_external_target(&self) {
-        #[cfg(target_os = "windows")]
-        {
-            if self.last_user_handle == 0 {
-                return;
-            }
-            for bridge in &self.bridges {
-                if bridge.name() == "Accessibility" {
-                    bridge.set_target_hwnd(self.last_user_handle);
-                    bridge.set_fg_hwnd(self.last_user_handle);
-                }
-            }
-        }
-
         #[cfg(target_os = "macos")]
         {
             if self.last_user_pid == 0 {
@@ -6991,7 +6958,7 @@ impl eframe::App for ContextApp {
             let now_word = kind == platform::AppKind::Word;
             let now_our_app = kind == platform::AppKind::OurApp;
 
-            if !now_our_app {
+            if !now_our_app && (now_browser || self.platform.is_writing_app(&fg)) {
                 self.last_external_layout_app = fg.clone();
             }
 
@@ -8664,9 +8631,6 @@ impl eframe::App for ContextApp {
             current_fg_for_layout.clone()
         };
         let fg_for_layout_kind = self.platform.classify_app(&fg_for_layout);
-        let layout_is_writing_surface =
-            fg_for_layout_kind == platform::AppKind::Browser
-                || self.platform.is_writing_app(&fg_for_layout);
         let slack_layout = fg_for_layout.exe_name.contains("slack");
         // Windows/macOS often spend the first click on activating our topmost
         // borderless popup. Count mouse-down as the action trigger there so
@@ -8676,8 +8640,7 @@ impl eframe::App for ContextApp {
             cfg!(any(target_os = "windows", target_os = "macos"))
                 || current_fg_kind_for_layout == platform::AppKind::OurApp
                 || slack_layout;
-        let has_active_errors =
-            layout_is_writing_surface && self.writing_errors.iter().any(|e| !e.ignored);
+        let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
 
         // No tab auto-switch. The pencil icon's red dot already serves as
         // the "you have errors" global indicator regardless of which tab
@@ -8698,13 +8661,9 @@ impl eframe::App for ContextApp {
         // is kept as a struct field for future use but no longer drives
         // tab routing.
 
-        let bulb_visible = layout_is_writing_surface
-            && self.selected_tab == 0
-            && self.show_completions
-            && has_completions;
+        let bulb_visible = self.selected_tab == 0 && self.show_completions && has_completions;
         let pencil_visible = self.selected_tab == 1 && self.show_grammar && has_active_errors;
         let suggestion_status_visible = self.selected_tab == 0
-            && layout_is_writing_surface
             && self.show_completions
             && !has_completions
             && (self.startup_rx.is_some() || (!self.bert_ready && !self.load_errors.is_empty()));
@@ -9409,7 +9368,7 @@ impl eframe::App for ContextApp {
                 self.platform.set_tab_intercept(false);
                 self.selection_mode = false;
             }
-            if layout_is_writing_surface && self.selected_tab == 0 && self.show_completions {
+            if self.selected_tab == 0 && self.show_completions {
                 let has_sugg = !self.completions.is_empty() || !self.open_completions.is_empty();
                 if has_sugg && !self.selection_mode { self.platform.set_tab_intercept(true); }
                 else if !has_sugg { self.platform.set_tab_intercept(false); self.selection_mode = false; }
@@ -9609,14 +9568,9 @@ impl eframe::App for ContextApp {
             // the popup should collapse to the toolbar in that state
             // (the toolbar's pencil icon stays green to signal clean,
             // which is enough).
-            let has_active_errors_render =
-                layout_is_writing_surface && self.writing_errors.iter().any(|e| !e.ignored);
+            let has_active_errors_render = self.writing_errors.iter().any(|e| !e.ignored);
             let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
-            if layout_is_writing_surface
-                && self.selected_tab == 1
-                && self.show_grammar
-                && (has_active_errors_render || show_scanning || self.llm_waiting)
-            {
+            if self.selected_tab == 1 && self.show_grammar && (has_active_errors_render || show_scanning || self.llm_waiting) {
                 // Visual separator when the bulb panel is rendering above.
                 let bulb_rendering = self.selected_tab == 0
                     && self.show_completions

@@ -683,9 +683,6 @@ impl PlatformServices for WindowsPlatform {
         if app.pid == std::process::id() {
             return false;
         }
-        if title_looks_like_non_prose_document(&app.title) {
-            return false;
-        }
         if matches!(self.classify_app(app), AppKind::Word | AppKind::Browser | AppKind::Notepad) {
             return true;
         }
@@ -804,26 +801,4 @@ impl PlatformServices for WindowsPlatform {
     fn init_tts(&self, lang: &dyn language::LanguageVoice) {
         crate::tts::init_tts(lang);
     }
-}
-
-fn title_looks_like_non_prose_document(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    [
-        ".log",
-        ".json",
-        ".toml",
-        ".yaml",
-        ".yml",
-        ".rs",
-        ".py",
-        ".js",
-        ".ts",
-        ".tsx",
-        ".jsx",
-        ".css",
-        ".html",
-        ".xml",
-    ]
-    .iter()
-    .any(|ext| lower.contains(ext))
 }
