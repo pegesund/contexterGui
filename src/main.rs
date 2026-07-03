@@ -8716,8 +8716,18 @@ impl eframe::App for ContextApp {
         } else {
             42.0
         };
+        let update_toast_reserved_h = if self
+            .update_toast
+            .as_ref()
+            .is_some_and(|(_, deadline)| Instant::now() < *deadline)
+        {
+            update_toast_height(s)
+        } else {
+            0.0
+        };
         let max_h = if slack_layout { 190.0 } else { 335.0 };
-        let desired_win_h = (s * (base_h + content_rows * 20.0)).clamp(min_h * s, max_h * s);
+        let desired_win_h = (s * (base_h + content_rows * 20.0) + update_toast_reserved_h)
+            .clamp(min_h * s + update_toast_reserved_h, max_h * s + update_toast_reserved_h);
         let mut win_h = desired_win_h;
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
@@ -9266,29 +9276,30 @@ impl eframe::App for ContextApp {
             } else {
                 let toast_copy = ui_copy_for(self.ui_language.code());
                 egui::TopBottomPanel::bottom("update_toast")
+                    .exact_height(update_toast_height(s))
                     .frame(
                         egui::Frame::new()
                             .fill(egui::Color32::from_rgb(0, 100, 180))
-                            .inner_margin(egui::Margin::symmetric(10, 6)),
+                            .inner_margin(egui::Margin::symmetric(10, 4)),
                     )
                     .show(ctx, |ui| {
                         let mut close_clicked = false;
                         let resp = ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(if toast_copy.en() {
-                                    format!("New version {} available - click Settings to update", toast_version)
-                                } else if toast_copy.nn() {
-                                    format!("Ny versjon {} tilgjengeleg - klikk Innstillingar for å oppdatere", toast_version)
-                                } else {
-                                    format!("Ny versjon {} tilgjengelig - klikk Innstillinger for å oppdatere", toast_version)
-                                })
-                                .size(11.0 * s)
-                                .color(egui::Color32::WHITE),
+                            let close_side = 14.0 * s;
+                            let text_width = (ui.available_width() - close_side - 10.0 * s).max(80.0);
+                            ui.add_sized(
+                                [text_width, 18.0 * s],
+                                egui::Label::new(
+                                    egui::RichText::new(toast_copy.update_toast(&toast_version))
+                                        .size(11.0 * s)
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .truncate(),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let side = 14.0 * s;
+                                    let side = close_side;
                                     let (rect, close) = ui.allocate_exact_size(
                                         egui::vec2(side, side),
                                         egui::Sense::click() | egui::Sense::hover(),
@@ -11744,6 +11755,10 @@ fn ui_copy_for(code: &str) -> UiCopy {
     UiCopy { code: normalize_language_code(code) }
 }
 
+fn update_toast_height(scale: f32) -> f32 {
+    (32.0 * scale).max(30.0)
+}
+
 impl UiCopy {
     fn en(self) -> bool { self.code == "en" }
     fn nn(self) -> bool { self.code == "nn" }
@@ -11853,6 +11868,15 @@ impl UiCopy {
     }
     fn update_available(self, version: &str) -> String {
         if self.en() { format!("New version available: {}", version) } else if self.nn() { format!("Ny versjon tilgjengeleg: {}", version) } else { format!("Ny versjon tilgjengelig: {}", version) }
+    }
+    fn update_toast(self, version: &str) -> String {
+        if self.en() {
+            format!("Update {} available - open Settings", version)
+        } else if self.nn() {
+            format!("Oppdatering {} tilgjengeleg - opne Innstillingar", version)
+        } else {
+            format!("Oppdatering {} tilgjengelig - åpne Innstillinger", version)
+        }
     }
     fn download_and_restart(self) -> &'static str {
         if self.en() { "Download and restart" } else { "Last ned og start på nytt" }
