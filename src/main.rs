@@ -9067,9 +9067,10 @@ impl eframe::App for ContextApp {
                             #[cfg(target_os = "macos")]
                             {
                                 // macOS: live streaming with Apple SFSpeechRecognizer
-                                match stt::start_recording_live() {
+                                let stt_code = self.language.stt_language_code();
+                                match stt::start_recording_live(stt_code) {
                                     Ok(handle) => {
-                                        log!("Microphone recording started (Apple STT)");
+                                        log!("Microphone recording started (Apple STT, language={})", stt_code);
                                         self.mic_handle = Some(handle);
                                         self.mic_result_text = None;
                                     }

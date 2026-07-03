@@ -10,26 +10,44 @@ fn stt_log(msg: &str) {
 }
 
 /// macOS STT engine — batch transcription from audio buffer (used as fallback)
-pub struct MacSttEngine;
+pub struct MacSttEngine {
+    locale_identifier: String,
+}
 
 impl MacSttEngine {
-    pub fn new() -> Self { MacSttEngine }
+    pub fn new() -> Self {
+        Self::for_language("no")
+    }
+
+    pub fn for_language(stt_language_code: &str) -> Self {
+        MacSttEngine {
+            locale_identifier: apple_locale_for_stt_code(stt_language_code).to_string(),
+        }
+    }
 }
 
 impl SttEngine for MacSttEngine {
     fn transcribe(&self, audio: &[f32]) -> String {
         let wav_path = std::env::temp_dir().join("spell_stt_input.wav");
         if write_wav(&wav_path, audio, 16000).is_err() { return String::new(); }
-        let result = transcribe_file(&wav_path).unwrap_or_default();
+        let result = transcribe_file(&wav_path, &self.locale_identifier).unwrap_or_default();
         let _ = std::fs::remove_file(&wav_path);
         result
+    }
+}
+
+fn apple_locale_for_stt_code(stt_language_code: &str) -> &'static str {
+    match stt_language_code {
+        "en" => "en-US",
+        "nb" | "nn" | "no" => "nb-NO",
+        _ => "nb-NO",
     }
 }
 
 /// Start live recording with streaming SFSpeechRecognizer.
 /// Audio from cpal is fed directly to SFSpeechAudioBufferRecognitionRequest.
 /// Partial results stream to the UI while recording.
-pub fn start_recording_live() -> Result<MicHandle, String> {
+pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String> {
     if MIC_RECORDING.load(Ordering::Relaxed) {
         return Err("Already recording".into());
     }
@@ -37,6 +55,7 @@ pub fn start_recording_live() -> Result<MicHandle, String> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (result_tx, result_rx) = mpsc::channel();
     let stop_clone = stop_flag.clone();
+    let locale_identifier = apple_locale_for_stt_code(stt_language_code).to_string();
 
     MIC_RECORDING.store(true, Ordering::Relaxed);
 
@@ -79,11 +98,12 @@ pub fn start_recording_live() -> Result<MicHandle, String> {
         unsafe {
             let locale = {
                 let cls = Class::get("NSLocale").unwrap();
-                let ns_id = make_nsstring("nb-NO");
+                let ns_id = make_nsstring(&locale_identifier);
                 let loc: *mut Object = msg_send![cls, alloc];
                 let loc: *mut Object = msg_send![loc, initWithLocaleIdentifier: ns_id];
                 loc
             };
+            stt_log(&format!("STT locale: {}", locale_identifier));
 
             let cls = Class::get("SFSpeechRecognizer").unwrap();
             let recognizer: *mut Object = msg_send![cls, alloc];
@@ -345,7 +365,7 @@ fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Resul
     Ok(())
 }
 
-fn transcribe_file(path: &std::path::Path) -> Result<String, String> {
+fn transcribe_file(path: &std::path::Path, locale_identifier: &str) -> Result<String, String> {
     use objc::runtime::{Class, Object, BOOL, YES};
     use objc::*;
     use block::ConcreteBlock;
@@ -360,6 +380,7 @@ fn transcribe_file(path: &std::path::Path) -> Result<String, String> {
     let result2 = result_text.clone();
     let error2 = error_text.clone();
     let path_clone = path_str.clone();
+    let locale_clone = locale_identifier.to_string();
 
     unsafe {
         let setup_block = ConcreteBlock::new(move || {
@@ -371,7 +392,7 @@ fn transcribe_file(path: &std::path::Path) -> Result<String, String> {
             };
             let locale = {
                 let cls = Class::get("NSLocale").unwrap();
-                let ns_id = make_nsstring("nb-NO");
+                let ns_id = make_nsstring(&locale_clone);
                 let loc: *mut Object = msg_send![cls, alloc];
                 let loc: *mut Object = msg_send![loc, initWithLocaleIdentifier: ns_id];
                 loc
