@@ -20,8 +20,10 @@ var lastCursorInPara = 0;
 var documentId = (Office.context && Office.context.document && Office.context.document.url)
     || ("unsaved-" + Math.random().toString(36).substring(2, 10));
 
-// Paragraph tracking: paragraphId -> hash of full paragraph text
+// Paragraph tracking: paragraphId -> fingerprint of full paragraph text + synthetic document position
 var paragraphMap = {};
+var paragraphStartMap = {};
+var knownParagraphItemCount = 0;
 var initialScanDone = false; // set true after first successful /changed POST
 var totalSent = 0;
 
@@ -66,6 +68,34 @@ function hashString(str) {
     return hash;
 }
 
+// Mac Word's Office.js Range.start currently reports 0 for every paragraph in
+// the desktop taskpane. Spell still needs stable per-paragraph document offsets
+// so copied identical sentences do not collapse into one visible error. Use the
+// body paragraph order and text lengths as a synthetic document coordinate.
+function computeParagraphStarts(items) {
+    var starts = [];
+    paragraphStartMap = {};
+    var pos = 0;
+    for (var i = 0; i < items.length; i++) {
+        var paraId = items[i].uniqueLocalId || "";
+        var text = items[i].text || "";
+        starts.push(pos);
+        if (paraId && paragraphStartMap[paraId] === undefined) {
+            paragraphStartMap[paraId] = pos;
+        }
+        pos += text.length + 1;
+    }
+    return starts;
+}
+
+function paragraphStartFor(paraId) {
+    return paragraphStartMap[paraId] || 0;
+}
+
+function paragraphFingerprint(text, charStart) {
+    return String(hashString(text)) + "@" + String(charStart || 0);
+}
+
 // ── Initial scan: hash all paragraphs, send all to Rust ──
 
 function initialScan() {
@@ -77,6 +107,8 @@ function initialScan() {
         body: JSON.stringify({ documentName: docName })
     }).catch(function () {});
     paragraphMap = {};
+    paragraphStartMap = {};
+    knownParagraphItemCount = 0;
 
     enqueueWordRun(function () { return Word.run(function (ctx) {
         // Disable Word's built-in proofing — Spell handles spelling/grammar
@@ -92,21 +124,16 @@ function initialScan() {
             for (var i = 0; i < items.length; i++) {
                 items[i].load("text,uniqueLocalId");
             }
-            var startRanges = [];
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i].getRange("Start");
-                r.load("start");
-                startRanges.push(r);
-            }
             return ctx.sync().then(function () {
                 var changed = [];
+                var charStarts = computeParagraphStarts(items);
+                knownParagraphItemCount = items.length;
                 for (var i = 0; i < items.length; i++) {
                     var paraId = items[i].uniqueLocalId;
                     var paraText = items[i].text;
-                    var charStart = startRanges[i].start || 0;
+                    var charStart = charStarts[i] || 0;
                     if (paraText.trim().length < 2) continue; // skip empty
-                    var h = hashString(paraText);
-                    paragraphMap[paraId] = h;
+                    paragraphMap[paraId] = paragraphFingerprint(paraText, charStart);
                     changed.push({ paragraphId: paraId, text: paraText, charStart: charStart });
                 }
 
@@ -138,23 +165,27 @@ function onParagraphChanged(event) {
         var ids = event.uniqueLocalIds;
         if (!ids || ids.length === 0) return ctx.sync();
 
+        // Bulk edits and drag/move operations can change paragraph positions
+        // without changing the document count. A full rescan refreshes the
+        // synthetic offsets used by Rust to distinguish repeated text blocks.
+        if (ids.length > 1) {
+            scheduleRescan();
+            return ctx.sync();
+        }
+
         var paragraphs = [];
-        var startRanges = [];
         for (var i = 0; i < ids.length; i++) {
             var para = ctx.document.getParagraphByUniqueLocalId(ids[i]);
             para.load("text,uniqueLocalId");
             paragraphs.push(para);
-            var r = para.getRange("Start");
-            r.load("start");
-            startRanges.push(r);
         }
         return ctx.sync().then(function () {
             var changed = [];
             for (var i = 0; i < paragraphs.length; i++) {
                 var paraId = paragraphs[i].uniqueLocalId;
                 var paraText = paragraphs[i].text;
-                var charStart = startRanges[i].start || 0;
-                var newHash = hashString(paraText);
+                var charStart = paragraphStartFor(paraId);
+                var newHash = paragraphFingerprint(paraText, charStart);
                 var oldHash = paragraphMap[paraId];
 
                 if (oldHash !== newHash) {
@@ -190,21 +221,17 @@ function rescanAll() {
             for (var i = 0; i < items.length; i++) {
                 items[i].load("text,uniqueLocalId");
             }
-            var startRanges = [];
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i].getRange("Start");
-                r.load("start");
-                startRanges.push(r);
-            }
             return ctx.sync().then(function () {
                 var changed = [];
                 var currentIds = {};
                 var deletedIds = [];
+                var charStarts = computeParagraphStarts(items);
+                knownParagraphItemCount = items.length;
 
                 for (var i = 0; i < items.length; i++) {
                     var paraId = items[i].uniqueLocalId;
                     var paraText = items[i].text;
-                    var charStart = startRanges[i].start || 0;
+                    var charStart = charStarts[i] || 0;
                     currentIds[paraId] = true;
 
                     if (paraText.trim().length < 2) {
@@ -216,7 +243,7 @@ function rescanAll() {
                         continue;
                     }
 
-                    var newHash = hashString(paraText);
+                    var newHash = paragraphFingerprint(paraText, charStart);
                     var oldHash = paragraphMap[paraId];
 
                     if (oldHash !== newHash) {
@@ -254,13 +281,13 @@ function rescanAll() {
 
 // Light paragraph count check — only loads count, not text
 function checkParagraphCount() {
+    if (isWordBusy()) return;
     Word.run(function (ctx) {
         var paragraphs = ctx.document.body.paragraphs;
         paragraphs.load("items");
         return ctx.sync().then(function () {
             var currentCount = paragraphs.items.length;
-            var knownCount = Object.keys(paragraphMap).length;
-            if (currentCount !== knownCount) {
+            if (currentCount !== knownParagraphItemCount) {
                 rescanAll();
             }
         });
@@ -346,12 +373,13 @@ function doSelectionRead() {
 
             // Check if paragraph is new or changed (paste/cut/drag) — trigger rescan
             var paraId = para.uniqueLocalId;
-            var currentHash = hashString(paraText);
+            var paraStart = paragraphStartFor(paraId);
+            var currentHash = paragraphFingerprint(paraText, paraStart);
             var oldHash = paragraphMap[paraId];
             if (oldHash === undefined || oldHash !== currentHash) {
                 if (oldHash !== currentHash) {
                     paragraphMap[paraId] = currentHash;
-                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText, charStart: paraRange.start || 0, cursorStart: cursorInPara }]);
+                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText, charStart: paraStart, cursorStart: cursorInPara }]);
                 }
                 if (oldHash === undefined) {
                     scheduleRescan();
@@ -745,15 +773,14 @@ function doReplaceAtCursor(prefix, replacement) {
                 var cursorTarget = before.length + replacement.length + space.length;
                 var inserted = para.insertText(newText, "Replace");
                 para.load("uniqueLocalId");
-                var startRange = para.getRange("Start");
-                startRange.load("start");
                 return ctx.sync().then(function () {
                     inserted.select("End");
                     var paraId = para.uniqueLocalId || "";
-                    paragraphMap[paraId] = hashString(newText);
+                    var charStart = paragraphStartFor(paraId);
+                    paragraphMap[paraId] = paragraphFingerprint(newText, charStart);
                     lastCursorInPara = cursorTarget;
                     lastCursorParaId = paraId;
-                    sendChangedParagraphs([{ paragraphId: paraId, text: newText, charStart: startRange.start || 0 }]);
+                    sendChangedParagraphs([{ paragraphId: paraId, text: newText, charStart: charStart }]);
                     lastSentKey = "";
                     lastSentWord = "";
                     lastSelStart = -1;
@@ -808,15 +835,14 @@ function doReplaceAtCursor(prefix, replacement) {
             var cursorTarget = before.length + replacement.length + space.length;
             var inserted = para.insertText(newText, "Replace");
             para.load("uniqueLocalId");
-            var startRange = para.getRange("Start");
-            startRange.load("start");
             return ctx.sync().then(function () {
                 inserted.select("End");
                 var paraId = para.uniqueLocalId || "";
-                paragraphMap[paraId] = hashString(newText);
+                var charStart = paragraphStartFor(paraId);
+                paragraphMap[paraId] = paragraphFingerprint(newText, charStart);
                 lastCursorInPara = cursorTarget;
                 lastCursorParaId = paraId;
-                sendChangedParagraphs([{ paragraphId: paraId, text: newText, charStart: startRange.start || 0 }]);
+                sendChangedParagraphs([{ paragraphId: paraId, text: newText, charStart: charStart }]);
                 // Reset context guards so post-insert update gets through
                 lastSentKey = "";
                 lastSentWord = "";
