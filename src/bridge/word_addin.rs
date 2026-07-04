@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const PORT: u16 = 3000;
 
@@ -172,9 +172,6 @@ impl WordAddinBridge {
                     }
                 };
 
-                // Cache static files
-                let html = std::fs::read_to_string(static_dir.join("taskpane.html")).unwrap_or_default();
-                let js = std::fs::read_to_string(static_dir.join("taskpane.js")).unwrap_or_default();
                 // Pre-load PNG icons (referenced by manifest.xml's IconUrl /
                 // HighResolutionIconUrl). Word fetches these once on add-in
                 // registration; pre-loading avoids a disk read per request.
@@ -187,6 +184,7 @@ impl WordAddinBridge {
                 let icon_80: Arc<Vec<u8>> = Arc::new(
                     std::fs::read(static_dir.join("icon-80.png")).unwrap_or_default()
                 );
+                let static_dir = Arc::new(static_dir);
 
                 for stream in listener.incoming() {
                     if let Ok(tcp_stream) = stream {
@@ -204,8 +202,7 @@ impl WordAddinBridge {
                         let completions = Arc::clone(&completions_clone);
                         let ui_state = Arc::clone(&ui_state_clone);
                         let tls_cfg = tls_config.clone();
-                        let html = html.clone();
-                        let js = js.clone();
+                        let static_dir = Arc::clone(&static_dir);
                         let i32 = Arc::clone(&icon_32);
                         let i64 = Arc::clone(&icon_64);
                         let i80 = Arc::clone(&icon_80);
@@ -216,7 +213,7 @@ impl WordAddinBridge {
                                     Ok(conn) => {
                                         let mut tls_stream = rustls::StreamOwned::new(conn, tcp_stream);
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, &html, &js, &i32, &i64, &i80);
+                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, static_dir.as_path(), &i32, &i64, &i80);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -224,7 +221,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, &html, &js, &i32, &i64, &i80);
+                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, static_dir.as_path(), &i32, &i64, &i80);
                             }
                         });
                     }
@@ -576,8 +573,7 @@ fn handle_request_rw<S: Read + Write>(
     errors_json: &Arc<Mutex<String>>,
     completions_json: &Arc<Mutex<String>>,
     ui_state_json: &Arc<Mutex<String>>,
-    static_html: &str,
-    static_js: &str,
+    static_dir: &Path,
     icon_32: &[u8],
     icon_64: &[u8],
     icon_80: &[u8],
@@ -897,6 +893,7 @@ fn handle_request_rw<S: Read + Write>(
         }
 
         ("GET", "/taskpane.html") | ("GET", "/") => {
+            let static_html = read_static_text(static_dir, "taskpane.html");
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: text/html; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
                 cors, static_html.len(), static_html
@@ -905,6 +902,7 @@ fn handle_request_rw<S: Read + Write>(
         }
 
         ("GET", path) if path.starts_with("/taskpane.js") => {
+            let static_js = read_static_text(static_dir, "taskpane.js");
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{}Content-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: {}\r\n\r\n{}",
                 cors, static_js.len(), static_js
@@ -960,6 +958,21 @@ fn serve_png<S: Write>(stream: &mut S, cors: &str, bytes: &[u8]) {
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(bytes);
+}
+
+fn read_static_text(static_dir: &Path, file_name: &str) -> String {
+    let path = static_dir.join(file_name);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            log_to_file(&format!(
+                "STATIC READ FAILED: {} ({})",
+                path.display(),
+                e
+            ));
+            String::new()
+        }
+    }
 }
 
 /// Load TLS cert+key from PEM files and build a rustls ServerConfig.
@@ -1161,7 +1174,32 @@ fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
         pos = obj_end;
     }
 
+    synthesize_missing_paragraph_starts(&mut results);
+
     if results.is_empty() { None } else { Some(results) }
+}
+
+fn synthesize_missing_paragraph_starts(paragraphs: &mut [ChangedParagraph]) {
+    if paragraphs.len() <= 1 {
+        return;
+    }
+
+    let all_zero = paragraphs.iter().all(|p| p.char_start.unwrap_or(0) == 0);
+    if !all_zero {
+        return;
+    }
+
+    let mut start = 0usize;
+    for p in paragraphs.iter_mut() {
+        p.char_start = Some(start);
+        start += p.text.chars().count() + 1;
+    }
+
+    log_to_file(&format!(
+        "CHANGED synthesized paragraph starts for {} paragraphs (last_end={})",
+        paragraphs.len(),
+        start
+    ));
 }
 
 /// Parse deleted paragraph IDs from the add-in's POST.

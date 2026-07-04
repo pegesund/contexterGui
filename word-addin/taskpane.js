@@ -11,6 +11,7 @@
  */
 
 var BRIDGE_URL = "https://localhost:3000";
+var ADDIN_BUILD = "20260704-offsets2";
 var statusEl;
 var SENTENCE_DELIMITERS = /[.!?:]/;
 var lastSentKey = "";
@@ -32,6 +33,7 @@ Office.onReady(function (info) {
 
     if (info.host === Office.HostType.Word) {
         setStatus("Koblet til Word", "ok");
+        logDebug("ADDIN BUILD " + ADDIN_BUILD);
 
         Office.context.document.addHandlerAsync(
             Office.EventType.DocumentSelectionChanged,
@@ -55,6 +57,14 @@ function setStatus(msg, cls) {
         statusEl.textContent = msg;
         statusEl.className = cls || "";
     }
+}
+
+function logDebug(msg) {
+    fetch(BRIDGE_URL + "/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msg: msg })
+    }).catch(function () {});
 }
 
 // ── Hashing ──
@@ -127,6 +137,7 @@ function initialScan() {
             return ctx.sync().then(function () {
                 var changed = [];
                 var charStarts = computeParagraphStarts(items);
+                logDebug("initialScan starts " + charStarts.slice(0, 8).join(","));
                 knownParagraphItemCount = items.length;
                 for (var i = 0; i < items.length; i++) {
                     var paraId = items[i].uniqueLocalId;
@@ -226,6 +237,7 @@ function rescanAll() {
                 var currentIds = {};
                 var deletedIds = [];
                 var charStarts = computeParagraphStarts(items);
+                logDebug("rescanAll starts " + charStarts.slice(0, 8).join(","));
                 knownParagraphItemCount = items.length;
 
                 for (var i = 0; i < items.length; i++) {

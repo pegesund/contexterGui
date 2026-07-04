@@ -3222,8 +3222,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                         found = true;
                     }
                 }
-                // Also accept words found in wordfreq (freq ≥ 10 in Norwegian corpus)
-                if !found {
+                // Also accept words found in the Norwegian wordfreq corpus.
+                // The English corpus is noisy and contains common misspellings
+                // like "recieved" and "writting", so it must rank suggestions
+                // but not mark analyzer-unknown words as correct.
+                if !found && self.language.code() != "en" {
                     if let Some(wf) = &self.wordfreq {
                         if wf.contains_key(&clean) {
                             found = true;
@@ -6236,7 +6239,7 @@ self.grammar_queue.clear();
                 if self.analyzer.as_ref().map_or(false, |a| a.has_word(&unk.word)) {
                     continue;
                 }
-                if self.wordfreq.as_ref().map_or(false, |wf| {
+                if self.language.code() != "en" && self.wordfreq.as_ref().map_or(false, |wf| {
                     let freq = wf.get(&unk.word.to_lowercase()).copied().unwrap_or(0);
                     freq >= 1000
                 }) {
@@ -7781,15 +7784,20 @@ impl eframe::App for ContextApp {
                         self.prefix_index = prefix_index;
                         self.baselines = baselines;
                         self.wordfreq = wordfreq;
-                        // Retroactively remove spelling errors for words now found in wordfreq
-                        if let Some(wf) = &self.wordfreq {
-                            let before = self.writing_errors.len();
-                            self.writing_errors.retain(|e| {
-                                !(matches!(e.category, ErrorCategory::Spelling) && wf.contains_key(&e.word.to_lowercase()))
-                            });
-                            let removed = before - self.writing_errors.len();
-                            if removed > 0 {
-                                log!("Wordfreq: removed {} false-positive spelling errors", removed);
+                        // Retroactively remove spelling errors for words now found in
+                        // Norwegian wordfreq. Do not do this for English: the English
+                        // frequency corpus contains common misspellings, and the analyzer
+                        // result is the source of truth for spelling correctness there.
+                        if self.language.code() != "en" {
+                            if let Some(wf) = &self.wordfreq {
+                                let before = self.writing_errors.len();
+                                self.writing_errors.retain(|e| {
+                                    !(matches!(e.category, ErrorCategory::Spelling) && wf.contains_key(&e.word.to_lowercase()))
+                                });
+                                let removed = before - self.writing_errors.len();
+                                if removed > 0 {
+                                    log!("Wordfreq: removed {} false-positive spelling errors", removed);
+                                }
                             }
                         }
                         self.embedding_store = embedding_store;
