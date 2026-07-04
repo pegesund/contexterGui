@@ -1766,6 +1766,10 @@ struct ContextApp {
     pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
+    /// Word Add-in paragraph start offsets. Mac Word taskpane uses synthetic
+    /// offsets from paragraph order, so same-text paragraphs must still be
+    /// reprocessed when their document position changes.
+    paragraph_doc_starts: std::collections::HashMap<String, usize>,
     /// Last observed Word paragraph count — a DROP means paragraphs were
     /// deleted (cut/select-delete), which the cursor-paragraph feed can't see.
     last_para_count: usize,
@@ -2353,6 +2357,7 @@ impl ContextApp {
         self.last_doc_approx_len = 0;
         self.last_known_cursor_offset = None;
         self.paragraph_texts.clear();
+        self.paragraph_doc_starts.clear();
         self.last_para_count = 0;
         self.completions.clear();
         self.open_completions.clear();
@@ -2611,6 +2616,7 @@ impl ContextApp {
             pending_incomplete_sentence: None,
             grammar_inflight: std::collections::HashSet::new(),
             paragraph_texts: std::collections::HashMap::new(),
+            paragraph_doc_starts: std::collections::HashMap::new(),
             last_para_count: 0,
             last_para_probe: Instant::now(),
             sentence_cache: load_sentence_cache(),
@@ -4537,6 +4543,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             if !current_ids.contains(old_id) {
                 log!("Para deleted: {}", old_id);
                 self.paragraph_texts.remove(old_id);
+                self.paragraph_doc_starts.remove(old_id);
                 if let Some(hashes) = self.paragraph_sentence_hashes.remove(old_id) {
                     for h in &hashes {
                         self.processed_sentence_hashes.remove(h);
@@ -4686,6 +4693,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         for id in dead {
             log!("Paragraph deleted: pruning errors/caches for para={}", trunc(&id, 10));
             self.paragraph_texts.remove(&id);
+            self.paragraph_doc_starts.remove(&id);
             if let Some(hashes) = self.paragraph_sentence_hashes.remove(&id) {
                 for h in hashes {
                     self.processed_sentence_hashes.remove(&h);
@@ -4755,6 +4763,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             for id in &stale {
                 log!("Evicting stale paragraph {} (replaced by {} at offset {})", trunc(id, 10), trunc(&para_id, 10), char_start);
                 self.paragraph_texts.remove(id);
+                self.paragraph_doc_starts.remove(id);
                 if let Some(hashes) = self.paragraph_sentence_hashes.remove(id) {
                     for h in hashes { self.processed_sentence_hashes.remove(&h); }
                 }
@@ -5420,7 +5429,13 @@ self.writing_errors.clear();
                 self.manager.clear_all_error_underlines();
                 // Collect hashes of sentences that HAD errors — these need re-checking
                 let error_hashes: std::collections::HashSet<u64> = self.writing_errors.iter()
-                    .map(|e| hash_str(&format!("{}|{}", e.paragraph_id, e.sentence_context)))
+                    .map(|e| {
+                        if self.paragraph_doc_starts.contains_key(&e.paragraph_id) {
+                            addin_sentence_hash(&e.paragraph_id, &e.sentence_context, e.doc_offset)
+                        } else {
+                            hash_str(&format!("{}|{}", e.paragraph_id, e.sentence_context))
+                        }
+                    })
                     .collect();
                 self.writing_errors.clear();
                 // Only remove hashes for sentences that had errors — forces re-check
@@ -5430,6 +5445,7 @@ self.writing_errors.clear();
                 }
                 self.paragraph_sentence_hashes.clear();
                 self.paragraph_texts.clear();
+                self.paragraph_doc_starts.clear();
                 self.last_para_count = 0;
                 self.last_doc_text.clear();
                 self.grammar_inflight.clear();
@@ -5464,12 +5480,20 @@ self.grammar_queue.clear();
         for bridge in &self.manager.bridges {
             let changed = bridge.drain_changed_paragraphs();
             for p in changed {
-                // Skip if text is identical to last time (add-in sends duplicates)
-                if self.paragraph_texts.get(&p.paragraph_id).map_or(false, |t| t == &p.text) {
+                let para_char_start = p.char_start.unwrap_or(0);
+                let same_text = self
+                    .paragraph_texts
+                    .get(&p.paragraph_id)
+                    .map_or(false, |t| t == &p.text);
+                let previous_start = self.paragraph_doc_starts.get(&p.paragraph_id).copied();
+                let same_start = previous_start == Some(para_char_start);
+                let start_changed = previous_start.map_or(false, |old| old != para_char_start);
+                // Skip exact duplicates. A paragraph moving to a new document
+                // offset is not a duplicate even when the text is unchanged.
+                if same_text && same_start {
                     continue;
                 }
 
-                let para_char_start = p.char_start.unwrap_or(0);
                 log!(
                     "Addin changed paragraph: '{}' (para={} start={} cursor={:?})",
                     trunc(&p.text, 50),
@@ -5478,6 +5502,7 @@ self.grammar_queue.clear();
                     p.cursor_start
                 );
                 self.paragraph_texts.insert(p.paragraph_id.clone(), p.text.clone());
+                self.paragraph_doc_starts.insert(p.paragraph_id.clone(), para_char_start);
                 if !self.context.paragraph_id.is_empty()
                     && self.context.paragraph_id == p.paragraph_id
                     && self.context.masked_sentence.is_some()
@@ -5558,7 +5583,26 @@ self.grammar_queue.clear();
                 // get distinct document positions, matching the Windows COM path.
                 let sentences = split_sentences_with_offsets(&clean_text);
                 let new_hashes: Vec<u64> = sentences.iter()
-                    .map(|(s, _)| hash_str(&format!("{}|{}", p.paragraph_id, s))).collect();
+                    .map(|(s, sent_offset)| addin_sentence_hash(
+                        &p.paragraph_id,
+                        s,
+                        para_char_start + *sent_offset,
+                    ))
+                    .collect();
+
+                if start_changed {
+                    let before = self.writing_errors.len();
+                    self.writing_errors.retain(|e| e.paragraph_id != p.paragraph_id);
+                    if self.writing_errors.len() < before {
+                        log!(
+                            "  Removed {} moved-paragraph errors for para={} old_start={:?} new_start={}",
+                            before - self.writing_errors.len(),
+                            trunc(&p.paragraph_id, 10),
+                            previous_start,
+                            para_char_start
+                        );
+                    }
+                }
 
                 // Remove old sentence hashes for this paragraph from clean set
                 // and clear errors for sentences that no longer exist
@@ -5619,7 +5663,7 @@ self.grammar_queue.clear();
                 // Check each sentence: skip if already processed (hash unchanged)
                 for (sentence_text, sent_offset) in &sentences {
                     let doc_offset = para_char_start + *sent_offset;
-                    let sent_h = hash_str(&format!("{}|{}", p.paragraph_id, sentence_text));
+                    let sent_h = addin_sentence_hash(&p.paragraph_id, sentence_text, doc_offset);
 
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                         || sentence_text.ends_with('?') || sentence_text.ends_with(':');
@@ -5690,6 +5734,7 @@ self.grammar_queue.clear();
                     log!("Cleared {} errors for deleted para={}", before - self.writing_errors.len(), trunc(&para_id, 10));
                 }
                 self.paragraph_texts.remove(&para_id);
+                self.paragraph_doc_starts.remove(&para_id);
                 // Remove sentence hashes for deleted paragraph
                 if let Some(hashes) = self.paragraph_sentence_hashes.remove(&para_id) {
                     for h in hashes {
@@ -5702,6 +5747,7 @@ self.grammar_queue.clear();
         // Clean stale paragraph_texts entries (paragraphs that were deleted/merged)
         let active_para_ids: std::collections::HashSet<&String> = self.paragraph_sentence_hashes.keys().collect();
         self.paragraph_texts.retain(|k, _| active_para_ids.contains(k));
+        self.paragraph_doc_starts.retain(|k, _| active_para_ids.contains(k));
 
         // Update last_doc_text from accumulated paragraph texts (for prune_resolved_errors)
         if !self.paragraph_texts.is_empty() {
@@ -5998,6 +6044,8 @@ self.grammar_queue.clear();
                 trunc(&resp.paragraph_id, 10));
             let sent_h = if resp.paragraph_id.is_empty() {
                 hash_str(&resp.sentence)
+            } else if self.paragraph_doc_starts.contains_key(&resp.paragraph_id) {
+                addin_sentence_hash(&resp.paragraph_id, &resp.sentence, resp.doc_offset)
             } else {
                 hash_str(&format!("{}|{}", resp.paragraph_id, resp.sentence))
             };
@@ -6757,6 +6805,10 @@ pub(crate) fn hash_str(s: &str) -> u64 {
     hasher.finish()
 }
 
+fn addin_sentence_hash(paragraph_id: &str, sentence: &str, doc_offset: usize) -> u64 {
+    hash_str(&format!("{}|{}|{}", paragraph_id, doc_offset, sentence))
+}
+
 fn split_sentences(text: &str) -> Vec<String> {
     split_sentences_with_offsets(text).into_iter().map(|(s, _)| s).collect()
 }
@@ -7132,6 +7184,7 @@ impl eframe::App for ContextApp {
                     }
                     self.paragraph_sentence_hashes.retain(|id, _| is_word_id(id));
                     self.paragraph_texts.retain(|id, _| is_word_id(id));
+                    self.paragraph_doc_starts.retain(|id, _| is_word_id(id));
                     self.pending_spelling_bert.retain(|p| {
                         p.deferred_push.as_ref().map_or(false, |d| is_word_id(&d.paragraph_id))
                     });
@@ -7160,6 +7213,7 @@ impl eframe::App for ContextApp {
                     self.manager.clear_all_error_underlines();
                     self.writing_errors.clear();
                     self.paragraph_texts.clear();
+                    self.paragraph_doc_starts.clear();
                     self.last_para_count = 0;
                     self.paragraph_sentence_hashes.clear();
                     self.processed_sentence_hashes.clear();
@@ -8035,6 +8089,7 @@ impl eframe::App for ContextApp {
                         self.processed_sentence_hashes.clear();
                         self.paragraph_sentence_hashes.clear();
                         self.paragraph_texts.clear();
+                        self.paragraph_doc_starts.clear();
                         self.last_para_count = 0;
                         self.last_doc_text.clear();
                         self.last_doc_hash = 0;
