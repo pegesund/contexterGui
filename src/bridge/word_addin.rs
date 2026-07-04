@@ -38,7 +38,9 @@ fn static_word_addin_dir() -> Option<PathBuf> {
 pub struct ChangedParagraph {
     pub paragraph_id: String,
     pub text: String,
-    /// Absolute cursor position (from sel.start) — used to derive word/sentence for suggestions
+    /// Paragraph start offset in the Word document, sent by Office.js.
+    pub char_start: Option<usize>,
+    /// Cursor offset inside this paragraph — used to derive word/sentence for suggestions.
     pub cursor_start: Option<usize>,
 }
 
@@ -1126,7 +1128,7 @@ fn escape_json(s: &str) -> String {
 }
 
 /// Parse changed paragraphs from the add-in POST.
-/// JSON: { "type": "changed", "paragraphs": [{"paragraphId": "...", "text": "..."}] }
+/// JSON: { "type": "changed", "paragraphs": [{"paragraphId": "...", "text": "...", "charStart": 123}] }
 fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
     let arr_start = body.find("\"paragraphs\"")?;
     let arr_body = &body[arr_start..];
@@ -1149,10 +1151,11 @@ fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
 
         let paragraph_id = extract_json_string(obj, "paragraphId").unwrap_or_default();
         let text = clean_word_text(&extract_json_string(obj, "text").unwrap_or_default());
+        let char_start = extract_json_number(obj, "charStart");
         let cursor_start = extract_json_number(obj, "cursorStart");
 
         if !text.is_empty() {
-            results.push(ChangedParagraph { paragraph_id, text, cursor_start });
+            results.push(ChangedParagraph { paragraph_id, text, char_start, cursor_start });
         }
 
         pos = obj_end;

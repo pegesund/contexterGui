@@ -92,15 +92,22 @@ function initialScan() {
             for (var i = 0; i < items.length; i++) {
                 items[i].load("text,uniqueLocalId");
             }
+            var startRanges = [];
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i].getRange("Start");
+                r.load("start");
+                startRanges.push(r);
+            }
             return ctx.sync().then(function () {
                 var changed = [];
                 for (var i = 0; i < items.length; i++) {
                     var paraId = items[i].uniqueLocalId;
                     var paraText = items[i].text;
+                    var charStart = startRanges[i].start || 0;
                     if (paraText.trim().length < 2) continue; // skip empty
                     var h = hashString(paraText);
                     paragraphMap[paraId] = h;
-                    changed.push({ paragraphId: paraId, text: paraText });
+                    changed.push({ paragraphId: paraId, text: paraText, charStart: charStart });
                 }
 
                 setStatus("Skannet " + items.length + " avsnitt, sender " + changed.length, "ok");
@@ -132,22 +139,27 @@ function onParagraphChanged(event) {
         if (!ids || ids.length === 0) return ctx.sync();
 
         var paragraphs = [];
+        var startRanges = [];
         for (var i = 0; i < ids.length; i++) {
             var para = ctx.document.getParagraphByUniqueLocalId(ids[i]);
             para.load("text,uniqueLocalId");
             paragraphs.push(para);
+            var r = para.getRange("Start");
+            r.load("start");
+            startRanges.push(r);
         }
         return ctx.sync().then(function () {
             var changed = [];
             for (var i = 0; i < paragraphs.length; i++) {
                 var paraId = paragraphs[i].uniqueLocalId;
                 var paraText = paragraphs[i].text;
+                var charStart = startRanges[i].start || 0;
                 var newHash = hashString(paraText);
                 var oldHash = paragraphMap[paraId];
 
                 if (oldHash !== newHash) {
                     paragraphMap[paraId] = newHash;
-                    changed.push({ paragraphId: paraId, text: paraText });
+                    changed.push({ paragraphId: paraId, text: paraText, charStart: charStart });
                 }
             }
             if (changed.length > 0) {
@@ -178,6 +190,12 @@ function rescanAll() {
             for (var i = 0; i < items.length; i++) {
                 items[i].load("text,uniqueLocalId");
             }
+            var startRanges = [];
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i].getRange("Start");
+                r.load("start");
+                startRanges.push(r);
+            }
             return ctx.sync().then(function () {
                 var changed = [];
                 var currentIds = {};
@@ -186,6 +204,7 @@ function rescanAll() {
                 for (var i = 0; i < items.length; i++) {
                     var paraId = items[i].uniqueLocalId;
                     var paraText = items[i].text;
+                    var charStart = startRanges[i].start || 0;
                     currentIds[paraId] = true;
 
                     if (paraText.trim().length < 2) {
@@ -203,7 +222,7 @@ function rescanAll() {
                     if (oldHash !== newHash) {
                         // New or changed paragraph
                         paragraphMap[paraId] = newHash;
-                        changed.push({ paragraphId: paraId, text: paraText });
+                        changed.push({ paragraphId: paraId, text: paraText, charStart: charStart });
                     }
                 }
 
@@ -328,12 +347,13 @@ function doSelectionRead() {
             // Check if paragraph is new or changed (paste/cut/drag) — trigger rescan
             var paraId = para.uniqueLocalId;
             var currentHash = hashString(paraText);
-            if (paragraphMap[paraId] === undefined || paragraphMap[paraId] !== currentHash) {
-                if (paragraphMap[paraId] !== currentHash) {
+            var oldHash = paragraphMap[paraId];
+            if (oldHash === undefined || oldHash !== currentHash) {
+                if (oldHash !== currentHash) {
                     paragraphMap[paraId] = currentHash;
-                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText, cursorStart: cursorInPara }]);
+                    sendChangedParagraphs([{ paragraphId: paraId, text: paraText, charStart: paraRange.start || 0, cursorStart: cursorInPara }]);
                 }
-                if (paragraphMap[paraId] === undefined) {
+                if (oldHash === undefined) {
                     scheduleRescan();
                 }
             }
@@ -725,13 +745,15 @@ function doReplaceAtCursor(prefix, replacement) {
                 var cursorTarget = before.length + replacement.length + space.length;
                 var inserted = para.insertText(newText, "Replace");
                 para.load("uniqueLocalId");
+                var startRange = para.getRange("Start");
+                startRange.load("start");
                 return ctx.sync().then(function () {
                     inserted.select("End");
                     var paraId = para.uniqueLocalId || "";
                     paragraphMap[paraId] = hashString(newText);
                     lastCursorInPara = cursorTarget;
                     lastCursorParaId = paraId;
-                    sendChangedParagraphs([{ paragraphId: paraId, text: newText }]);
+                    sendChangedParagraphs([{ paragraphId: paraId, text: newText, charStart: startRange.start || 0 }]);
                     lastSentKey = "";
                     lastSentWord = "";
                     lastSelStart = -1;
@@ -786,13 +808,15 @@ function doReplaceAtCursor(prefix, replacement) {
             var cursorTarget = before.length + replacement.length + space.length;
             var inserted = para.insertText(newText, "Replace");
             para.load("uniqueLocalId");
+            var startRange = para.getRange("Start");
+            startRange.load("start");
             return ctx.sync().then(function () {
                 inserted.select("End");
                 var paraId = para.uniqueLocalId || "";
                 paragraphMap[paraId] = hashString(newText);
                 lastCursorInPara = cursorTarget;
                 lastCursorParaId = paraId;
-                sendChangedParagraphs([{ paragraphId: paraId, text: newText }]);
+                sendChangedParagraphs([{ paragraphId: paraId, text: newText, charStart: startRange.start || 0 }]);
                 // Reset context guards so post-insert update gets through
                 lastSentKey = "";
                 lastSentWord = "";

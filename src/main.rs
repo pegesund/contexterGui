@@ -3303,20 +3303,18 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
         // Word not found — unified suggestion pipeline
         // Dedup: skip if this word already has a spelling error in this
-        // paragraph OR in the same sentence-context. The paragraph_id
-        // match alone is not enough: when Word's `uniqueLocalId` for a
-        // paragraph rotates (happens on document save, Word→Browser→Word
-        // refocus, and certain Office sync events), the same misspelling
-        // gets a fresh ID and slips past the strict (word, paragraph_id)
-        // check, producing the "same word shows up twice in the pencil
-        // panel" symptom reported 2026-05-18 ("jkkdf/jaked" + "kkkdf/kaks"
-        // each appeared twice after refocusing Word).
+        // paragraph OR at the same sentence/document offset. The offset
+        // fallback catches Word paragraph-id churn after refocus/save without
+        // collapsing copied identical sentences that live elsewhere in the
+        // document.
         if self.writing_errors.iter().any(|e| {
             matches!(e.category, ErrorCategory::Spelling)
                 && e.word.to_lowercase() == clean
                 && !e.ignored
                 && (e.paragraph_id == paragraph_id
-                    || (!sentence_ctx.is_empty() && e.sentence_context == sentence_ctx))
+                    || (!sentence_ctx.is_empty()
+                        && e.sentence_context == sentence_ctx
+                        && e.doc_offset == doc_offset))
         }) {
             return;
         }
@@ -3345,23 +3343,20 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let shown_suggestion = best.clone();
 
         // Dedup: don't add a second spelling error for the same word in the
-        // same paragraph OR same sentence-context. Mirrors the guards at
-        // line ~2208 (this fn, "Word not found" branch) and 4676
-        // (poll_grammar_responses). Strict paragraph_id matching alone is
-        // not enough — Word's uniqueLocalId for a paragraph can rotate
-        // after a save / refocus, and the same word then sneaks past the
-        // dedup with a fresh ID. Sentence-context is the stable fallback
-        // (the misspelling lives in the same trimmed sentence regardless
-        // of how Word numbers the paragraph this session).
+        // same paragraph OR at the same sentence/document offset. Mirrors the
+        // grammar response guard: paragraph-id churn should dedupe, copied
+        // identical sentences at different offsets should remain visible.
         let already_exists = self.writing_errors.iter().any(|e| {
             matches!(e.category, ErrorCategory::Spelling)
                 && e.word.to_lowercase() == clean.to_lowercase()
                 && !e.ignored
                 && (e.paragraph_id == paragraph_id
-                    || (!sentence_ctx.is_empty() && e.sentence_context == sentence_ctx))
+                    || (!sentence_ctx.is_empty()
+                        && e.sentence_context == sentence_ctx
+                        && e.doc_offset == doc_offset))
         });
         if already_exists {
-            log!("Spelling dedup: '{}' already in para={} (sentence_ctx match ok), skipping push", clean, trunc(paragraph_id, 12));
+            log!("Spelling dedup: '{}' already in para={} (same occurrence), skipping push", clean, trunc(paragraph_id, 12));
             return;
         }
 
@@ -3791,7 +3786,9 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 e.word.to_lowercase() == deferred.word.to_lowercase()
                     && !e.ignored
                     && (e.paragraph_id == deferred.paragraph_id
-                        || (!deferred.sentence.is_empty() && e.sentence_context == deferred.sentence))
+                        || (!deferred.sentence.is_empty()
+                            && e.sentence_context == deferred.sentence
+                            && e.doc_offset == deferred.doc_offset))
             });
             if already { return; }
 
@@ -5472,7 +5469,14 @@ self.grammar_queue.clear();
                     continue;
                 }
 
-                log!("Addin changed paragraph: '{}' (para={} cursor={:?})", trunc(&p.text, 50), trunc(&p.paragraph_id, 10), p.cursor_start);
+                let para_char_start = p.char_start.unwrap_or(0);
+                log!(
+                    "Addin changed paragraph: '{}' (para={} start={} cursor={:?})",
+                    trunc(&p.text, 50),
+                    trunc(&p.paragraph_id, 10),
+                    para_char_start,
+                    p.cursor_start
+                );
                 self.paragraph_texts.insert(p.paragraph_id.clone(), p.text.clone());
                 if !self.context.paragraph_id.is_empty()
                     && self.context.paragraph_id == p.paragraph_id
@@ -5513,7 +5517,8 @@ self.grammar_queue.clear();
                         self.context.sentence = new_sentence;
                         self.context.masked_sentence = Some(masked);
                         self.context.paragraph_id = p.paragraph_id.clone();
-                        self.context.cursor_doc_offset = p.cursor_start;
+                        self.context.cursor_doc_offset =
+                            p.cursor_start.map(|c| para_char_start + c);
                         self.last_prefix_change = Instant::now();
                         self.pending_completion = true;
                     }
@@ -5548,10 +5553,12 @@ self.grammar_queue.clear();
                     log!("  Email skip words: {:?}", email_skip_words);
                 }
 
-                // Split paragraph into sentences
-                let sentences = split_sentences(&clean_text);
+                // Split paragraph into sentences. Mac Word Add-in sends the
+                // paragraph start offset so copied identical sentences still
+                // get distinct document positions, matching the Windows COM path.
+                let sentences = split_sentences_with_offsets(&clean_text);
                 let new_hashes: Vec<u64> = sentences.iter()
-                    .map(|s| hash_str(&format!("{}|{}", p.paragraph_id, s))).collect();
+                    .map(|(s, _)| hash_str(&format!("{}|{}", p.paragraph_id, s))).collect();
 
                 // Remove old sentence hashes for this paragraph from clean set
                 // and clear errors for sentences that no longer exist
@@ -5564,8 +5571,12 @@ self.grammar_queue.clear();
                     }
                 }
                 // Clear errors for sentences that are no longer in the paragraph
-                let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
-                let para_text_lower = sentences.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
+                let new_sentence_set: std::collections::HashSet<String> =
+                    sentences.iter().map(|(s, _)| s.to_lowercase()).collect();
+                let para_text_lower = sentences.iter()
+                    .map(|(s, _)| s.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let before_count = self.writing_errors.len();
                 // Track whether a spelling error was removed because its word is
                 // no longer in the paragraph text (user manually corrected it).
@@ -5606,7 +5617,8 @@ self.grammar_queue.clear();
                 }
 
                 // Check each sentence: skip if already processed (hash unchanged)
-                for sentence_text in &sentences {
+                for (sentence_text, sent_offset) in &sentences {
+                    let doc_offset = para_char_start + *sent_offset;
                     let sent_h = hash_str(&format!("{}|{}", p.paragraph_id, sentence_text));
 
                     let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
@@ -5641,7 +5653,7 @@ self.grammar_queue.clear();
                     if is_complete || first_seen || just_finished_word {
                         let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                         uw.extend(email_skip_words.iter().cloned());
-                        actor.check_sentence_with_doc(sentence_text, 0, &p.paragraph_id, 0, &self.last_doc_text, &uw);
+                        actor.check_sentence_with_doc(sentence_text, doc_offset, &p.paragraph_id, 0, &self.last_doc_text, &uw);
                         self.grammar_inflight.insert(sent_h);
                         self.pending_incomplete_sentence = None;
                     } else {
@@ -6191,19 +6203,25 @@ self.grammar_queue.clear();
                     e.word.to_lowercase() == unk_word_lower
                         && !e.ignored
                         && (e.paragraph_id == resp.paragraph_id
-                            || (!resp.sentence.is_empty() && e.sentence_context == resp.sentence))
+                            || (!resp.sentence.is_empty()
+                                && e.sentence_context == resp.sentence
+                                && e.doc_offset == resp.doc_offset))
                 });
                 let already_pending = self.pending_spelling_bert.iter().any(|p| {
                     p.deferred_push.as_ref().map_or(false, |d| {
                         d.word.to_lowercase() == unk_word_lower
                             && (d.paragraph_id == resp.paragraph_id
-                                || (!resp.sentence.is_empty() && d.sentence == resp.sentence))
+                                || (!resp.sentence.is_empty()
+                                    && d.sentence == resp.sentence
+                                    && d.doc_offset == resp.doc_offset))
                     })
                 });
                 let already_in_queue = unknown_words_to_rank.iter().any(|(d, _): &(DeferredSpellingPush, _)| {
                     d.word.to_lowercase() == unk_word_lower
                         && (d.paragraph_id == resp.paragraph_id
-                            || (!resp.sentence.is_empty() && d.sentence == resp.sentence))
+                            || (!resp.sentence.is_empty()
+                                && d.sentence == resp.sentence
+                                && d.doc_offset == resp.doc_offset))
                 });
                 if already_displayed {
                     // The word won't be re-queued for BERT (its verdict was
