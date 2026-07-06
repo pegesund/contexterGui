@@ -3270,6 +3270,25 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             || (tokens.len() >= 5 && foreign_hits >= active_hits.saturating_add(3))
     }
 
+    fn should_surface_unknown_spelling_word(&self, word: &str, sentence_ctx: &str) -> bool {
+        if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(word)) {
+            return false;
+        }
+        if self.analyzer.as_ref().map_or(false, |a| a.has_word(word)) {
+            return false;
+        }
+        if self.language.code() != "en" && self.wordfreq.as_ref().map_or(false, |wf| {
+            let freq = wf.get(&word.to_lowercase()).copied().unwrap_or(0);
+            freq >= 1000
+        }) {
+            return false;
+        }
+        if self.is_cross_language_spelling_token(word, sentence_ctx) {
+            return false;
+        }
+        true
+    }
+
     fn accept_mic_transcript(&mut self, text: String) {
         if self.transcript_language_mismatch(&text) {
             log!(
@@ -6296,9 +6315,21 @@ self.grammar_queue.clear();
             }
 
             // Handle grammar errors — only for complete sentences (ends with punctuation)
+            let has_actionable_unknown_words = resp.unknown_words.iter().any(|unk| {
+                self.should_surface_unknown_spelling_word(&unk.word, &resp.sentence)
+            });
+            if has_actionable_unknown_words && !resp.errors.is_empty() {
+                log!(
+                    "Skipping grammar errors until spelling is resolved: '{}' (errors={} unknown={})",
+                    trunc(&resp.sentence, 60),
+                    resp.errors.len(),
+                    resp.unknown_words.len()
+                );
+            }
+
             let sentence_complete = resp.sentence.ends_with('.') || resp.sentence.ends_with('!')
                 || resp.sentence.ends_with('?') || resp.sentence.ends_with(':');
-            if !resp.errors.is_empty() && sentence_complete {
+            if !resp.errors.is_empty() && sentence_complete && !has_actionable_unknown_words {
                 for ge in &resp.errors {
                     log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
                 }
@@ -6428,19 +6459,7 @@ self.grammar_queue.clear();
             // ends (where we can call &mut self methods like
             // `find_spelling_suggestions`).
             for unk in resp.unknown_words.iter() {
-                if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&unk.word)) {
-                    continue;
-                }
-                if self.analyzer.as_ref().map_or(false, |a| a.has_word(&unk.word)) {
-                    continue;
-                }
-                if self.language.code() != "en" && self.wordfreq.as_ref().map_or(false, |wf| {
-                    let freq = wf.get(&unk.word.to_lowercase()).copied().unwrap_or(0);
-                    freq >= 1000
-                }) {
-                    continue;
-                }
-                if self.is_cross_language_spelling_token(&unk.word, &resp.sentence) {
+                if !self.should_surface_unknown_spelling_word(&unk.word, &resp.sentence) {
                     continue;
                 }
 
