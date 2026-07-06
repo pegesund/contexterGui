@@ -3100,6 +3100,55 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         false
     }
 
+    fn transcript_language_mismatch(&self, text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with("Feil:") || trimmed.starts_with("Error:") {
+            return false;
+        }
+
+        let tokens: Vec<String> = trimmed
+            .split(|c: char| !c.is_alphabetic())
+            .map(|token| token.trim().to_lowercase())
+            .filter(|token| token.chars().count() >= 2)
+            .take(24)
+            .collect();
+        if tokens.len() < 3 || self.foreign_analyzers.is_empty() {
+            return false;
+        }
+
+        let active_hits = self.analyzer.as_ref().map_or(0, |analyzer| {
+            tokens.iter().filter(|token| analyzer.has_word(token)).count()
+        });
+        let foreign_hits = tokens
+            .iter()
+            .filter(|token| self.foreign_analyzers.iter().any(|(_, analyzer)| analyzer.has_word(token)))
+            .count();
+
+        if self.language.code() == "en" && contains_norwegian_letters(trimmed) && foreign_hits > active_hits {
+            return true;
+        }
+
+        foreign_hits >= 3 && active_hits == 0
+            || (tokens.len() >= 5 && foreign_hits >= active_hits.saturating_add(3))
+    }
+
+    fn accept_mic_transcript(&mut self, text: String) {
+        if self.transcript_language_mismatch(&text) {
+            log!(
+                "STT language guard: rejected transcript for selected language {}: '{}'",
+                self.language.code(),
+                trunc(&text, 80)
+            );
+            self.mic_result_text = None;
+            self.whisper_error_text = Some(
+                ui_copy_for(self.ui_language.code()).speech_language_mismatch(self.language.display_name())
+            );
+        } else {
+            self.whisper_error_text = None;
+            self.mic_result_text = Some(text);
+        }
+    }
+
     fn check_spelling(&mut self, word: &str, sentence_ctx: &str, paragraph_id: &str, doc_offset: usize) {
         let clean = word.trim().to_lowercase();
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
@@ -7957,7 +8006,7 @@ impl eframe::App for ContextApp {
                             self.mic_result_text = Some(result.text);
                         } else {
                             log!("Whisper final: '{}'", trunc(&result.text, 60));
-                            self.mic_result_text = Some(result.text);
+                            self.accept_mic_transcript(result.text);
                             self.mic_handle = None;
                             self.mic_transcribing = false;
                             self.mic_waiting_final_since = None;
@@ -8010,7 +8059,7 @@ impl eframe::App for ContextApp {
         if let Some(ref rx) = self.improve_rx {
             if let Ok(text) = rx.try_recv() {
                 log!("Improve result: '{}'", trunc(&text, 60));
-                self.mic_result_text = Some(text);
+                self.accept_mic_transcript(text);
                 self.improve_rx = None;
                 self.improve_running = false;
                 ctx.request_repaint();
@@ -12101,6 +12150,15 @@ impl UiCopy {
     }
     fn speech_timed_out(self) -> &'static str {
         if self.en() { "Speech recognition took too long. Please try again with a shorter recording." } else if self.nn() { "Talegjenkjenning tok for lang tid. Prøv igjen med eit kortare opptak." } else { "Talegjenkjenning tok for lang tid. Prøv igjen med et kortere opptak." }
+    }
+    fn speech_language_mismatch(self, selected_language: &str) -> String {
+        if self.en() {
+            format!("Speech did not look like {}. Select the correct writing language or try again.", selected_language)
+        } else if self.nn() {
+            format!("Talespr\u{00e5}ket ser ikkje ut til \u{00e5} vere {}. Vel rett skrivespr\u{00e5}k eller pr\u{00f8}v igjen.", selected_language)
+        } else {
+            format!("Talespr\u{00e5}ket ser ikke ut til \u{00e5} v\u{00e6}re {}. Velg riktig skrivespr\u{00e5}k eller pr\u{00f8}v igjen.", selected_language)
+        }
     }
     fn download_title(self, lang_name: &str) -> String {
         if self.en() { format!("Spell - Downloading {}", lang_name) } else if self.nn() { format!("Spell - Lastar ned {}", lang_name) } else { format!("Spell - Laster ned {}", lang_name) }
