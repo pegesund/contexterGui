@@ -6536,11 +6536,33 @@ self.grammar_queue.clear();
                 log!("  deferred spelling push: '{}' (waiting for BERT rank, id={})",
                      deferred.word, request_id);
             } else {
+                let pipeline_fallback: Vec<String> = self.analyzer.as_ref()
+                    .map(|analyzer| {
+                        spelling_scorer::find_candidates_pipeline(
+                            analyzer,
+                            self.compound_fst.as_deref(),
+                            self.wordfreq.as_deref(),
+                            &user_dict_words_snapshot,
+                            &doc_word_counts_snapshot,
+                            &deferred.word.to_lowercase(),
+                            &deferred.sentence,
+                            &*self.language,
+                        )
+                        .into_iter()
+                        .map(|(candidate, _)| candidate)
+                        .collect()
+                    })
+                    .unwrap_or_default();
+                let fallback_words = if pipeline_fallback.is_empty() {
+                    fuzzy_fallback
+                } else {
+                    pipeline_fallback
+                };
                 let best = apply_original_initial_case(
-                    &fuzzy_fallback.first().cloned().unwrap_or_default(),
+                    &fallback_words.first().cloned().unwrap_or_default(),
                     &deferred.word,
                 );
-                let top5: Vec<String> = fuzzy_fallback.iter().skip(1).take(5).cloned().collect();
+                let top5: Vec<String> = fallback_words.iter().skip(1).take(5).cloned().collect();
                 if self.is_cross_language_spelling_token(&deferred.word, &deferred.sentence) {
                     log!(
                         "spelling fallback: suppressing '{}' after cross-language recheck",
@@ -9414,11 +9436,12 @@ impl eframe::App for ContextApp {
                 self.dedup_writing_errors();
 
                 // --- Error count + AI fix button (only when grammar panel visible) ---
-                // Gate the badge on fg=Word too. writing_errors persists across
-                // app switches (so they reappear when the user returns), but
-                // they aren't relevant to display while in Slack/Safari/Terminal.
-                let badge_in_word = fg_for_layout_kind == platform::AppKind::Word;
-                if self.show_grammar && badge_in_word {
+                // Show the badge in the same writing-app contexts where the
+                // pencil panel can render, not just Word.
+                let badge_in_writing_app = self.platform.is_writing_app(&fg_for_layout)
+                    && !matches!(fg_for_layout_kind, platform::AppKind::OurApp)
+                    && !suppress_panels_for_viewer;
+                if self.show_grammar && badge_in_writing_app {
                     let err_count = self.writing_errors.iter()
                         .filter(|e| !e.ignored && e.rule_name != "llm_correction")
                         .count();

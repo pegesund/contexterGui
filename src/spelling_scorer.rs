@@ -44,6 +44,62 @@ pub fn levenshtein_distance(a: &str, b: &str) -> u32 {
     d[m][n]
 }
 
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn promote_orthographic_anchor(
+    word_lower: &str,
+    ranked: &mut Vec<(String, f32)>,
+    ortho_map: &HashMap<String, f32>,
+) {
+    if ranked.len() < 2 || word_lower.chars().count() < 8 {
+        return;
+    }
+
+    let best_lower = ranked[0].0.to_lowercase();
+    if common_prefix_len(word_lower, &best_lower) >= 4 {
+        return;
+    }
+    let best_ortho = ortho_map
+        .get(ranked[0].0.as_str())
+        .copied()
+        .unwrap_or(0.0);
+
+    let anchor = ranked
+        .iter()
+        .enumerate()
+        .take(10)
+        .filter_map(|(idx, (candidate, _))| {
+            let candidate_lower = candidate.to_lowercase();
+            let prefix = common_prefix_len(word_lower, &candidate_lower);
+            if prefix < 4 {
+                return None;
+            }
+            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.0);
+            Some((idx, prefix, ortho))
+        })
+        .max_by(|left, right| {
+            left.2
+                .partial_cmp(&right.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.1.cmp(&right.1))
+        });
+
+    let Some((anchor_idx, _prefix, anchor_ortho)) = anchor else {
+        return;
+    };
+    if anchor_idx == 0 || anchor_ortho < 0.55 || anchor_ortho < best_ortho * 1.30 {
+        return;
+    }
+
+    let anchor = ranked.remove(anchor_idx);
+    ranked.insert(0, anchor);
+}
+
 /// Compute trigrams for a word.
 pub fn trigrams(word: &str) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
@@ -740,6 +796,7 @@ pub fn bert_score_only(
             (candidate.clone(), sent_score * ortho.sqrt())
         }).collect();
         reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        promote_orthographic_anchor(&word_lower, &mut reranked, &ortho_map);
         reranked
     } else {
         weighted
@@ -937,6 +994,7 @@ pub fn score_and_rerank(
             (candidate.clone(), sent_score * eff.sqrt())
         }).collect();
         reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        promote_orthographic_anchor(&word_lower, &mut reranked, &ortho_map);
         reranked
     } else {
         weighted

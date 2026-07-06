@@ -133,6 +133,7 @@ fn main() {
         ("Ho likarr ikkje musikk.",      "likarr",  "likar"),
         ("Han har ein stoor bil.",       "stoor",   "stor"),
         ("Vi spelar fottball.",          "fottball","fotball"),
+        ("Eg opna dokkumentet, måtte uplod fila og appllicationen stoppa.", "appllicationen", "applikasjonen"),
         // `bollarr` (extra r) keeps NN `bollar` within candidate-pool edit
         // distance. The original `bøler` failed because the ø→o vowel
         // substitution exceeded the orthographic distance limit, so neither
