@@ -466,6 +466,29 @@ pub(crate) struct WritingError {
     pub(crate) top_candidates: Vec<String>,
 }
 
+fn writing_error_identity_key(e: &WritingError) -> String {
+    let category = match &e.category {
+        ErrorCategory::Spelling => "spelling",
+        ErrorCategory::Grammar => "grammar",
+        ErrorCategory::SentenceBoundary => "boundary",
+    };
+    let trigger = if e.error_word.is_empty() {
+        e.word.as_str()
+    } else {
+        e.error_word.as_str()
+    };
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        category,
+        e.paragraph_id,
+        e.doc_offset,
+        e.sentence_context.to_lowercase(),
+        e.rule_name,
+        trigger.to_lowercase(),
+        e.position
+    )
+}
+
 #[derive(Clone)]
 struct SpellingQueueItem {
     word: String,
@@ -2415,6 +2438,28 @@ fn build_right_completions(
 }
 
 impl ContextApp {
+    fn dedup_writing_errors(&mut self) {
+        let before = self.writing_errors.len();
+        if before < 2 {
+            return;
+        }
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut kept_reversed: Vec<WritingError> = Vec::with_capacity(before);
+        for error in self.writing_errors.drain(..).rev() {
+            if error.ignored || seen.insert(writing_error_identity_key(&error)) {
+                kept_reversed.push(error);
+            }
+        }
+        kept_reversed.reverse();
+        self.writing_errors = kept_reversed;
+
+        let removed = before.saturating_sub(self.writing_errors.len());
+        if removed > 0 {
+            log!("Deduplicated {} repeated writing error rows", removed);
+        }
+    }
+
     /// Reset all error/spelling/grammar state when the user switches to a
     /// different app or document, so stale results don't bleed across contexts.
     fn clear_for_app_switch(&mut self) {
@@ -9365,6 +9410,8 @@ impl eframe::App for ContextApp {
                     }
                 }
 
+
+                self.dedup_writing_errors();
 
                 // --- Error count + AI fix button (only when grammar panel visible) ---
                 // Gate the badge on fg=Word too. writing_errors persists across
