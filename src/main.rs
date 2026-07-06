@@ -9977,6 +9977,16 @@ impl eframe::App for ContextApp {
                                 // Buttons on top line
                                 let first_alt = alternatives.first().copied();
                                 let first_suggestion = first_alt.map(|i| self.writing_errors[i].suggestion.clone()).unwrap_or_default();
+                                let no_suggestion_text = if !error.error_word.is_empty() {
+                                    error.error_word.clone()
+                                } else {
+                                    error.word.clone()
+                                };
+                                let read_text = if first_suggestion.is_empty() {
+                                    no_suggestion_text.clone()
+                                } else {
+                                    first_suggestion.clone()
+                                };
                                 let err_rule = error.rule_name.clone();
                                 let err_expl = error.explanation.clone();
                                 let err_ctx = error.sentence_context.clone();
@@ -9985,7 +9995,7 @@ impl eframe::App for ContextApp {
                                         action = Some((idx, "ignore_group"));
                                     }
                                     if icon_button(ui, "🔊", self.ui_language.ui_read_aloud()) {
-                                        tts::speak_word(&first_suggestion);
+                                        tts::speak_word(&read_text);
                                     }
                                     if icon_button(ui, "💡", self.ui_language.ui_show_rule_info()) {
                                         let fix_idx = first_alt.unwrap_or(idx);
@@ -10016,19 +10026,47 @@ impl eframe::App for ContextApp {
                                 // Only the green suggestion — clickable to apply the fix.
                                 // Original (red strikethrough) and explanation moved to
                                 // the details popup to keep the card minimal.
-                                for &alt_idx in &alternatives {
-                                    let alt = &self.writing_errors[alt_idx];
-                                    let alt_resp = ui.add(egui::Label::new(
-                                        egui::RichText::new(&alt.suggestion)
-                                            .size(11.0 * s)
-                                            .strong()
-                                            .color(theme.ok),
-                                    ).sense(egui::Sense::click()));
-                                    if alt_resp.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                if alternatives.is_empty() {
+                                    ui.horizontal(|ui| {
+                                        let speak_resp = ui.add(egui::Label::new(
+                                            egui::RichText::new("\u{1F50A}").size(9.0 * s)
+                                                .color(theme.muted)
+                                        ).sense(egui::Sense::click()));
+                                        if speak_resp.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if response_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
+                                            tts::speak_word(&no_suggestion_text);
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(&no_suggestion_text)
+                                                .size(12.0 * s)
+                                                .strong()
+                                                .color(theme.err),
+                                        );
+                                    });
+                                    if !error.explanation.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&error.explanation)
+                                                .size(10.0 * s)
+                                                .color(theme.muted),
+                                        );
                                     }
-                                    if response_clicked(ui, &alt_resp, toolbar_mouse_down_click) {
-                                        action = Some((alt_idx, "fix"));
+                                } else {
+                                    for &alt_idx in &alternatives {
+                                        let alt = &self.writing_errors[alt_idx];
+                                        let alt_resp = ui.add(egui::Label::new(
+                                            egui::RichText::new(&alt.suggestion)
+                                                .size(11.0 * s)
+                                                .strong()
+                                                .color(theme.ok),
+                                        ).sense(egui::Sense::click()));
+                                        if alt_resp.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if response_clicked(ui, &alt_resp, toolbar_mouse_down_click) {
+                                            action = Some((alt_idx, "fix"));
+                                        }
                                     }
                                 }
                                 // Explanation intentionally omitted from the card — see
