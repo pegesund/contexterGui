@@ -630,6 +630,27 @@ fn contains_norwegian_letters(text: &str) -> bool {
     })
 }
 
+fn is_word_scoped_paragraph_id(paragraph_id: &str) -> bool {
+    if paragraph_id.is_empty() {
+        return false;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        paragraph_id.chars().all(|c| c.is_ascii_digit())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        !paragraph_id.starts_with("ax:") && !paragraph_id.starts_with("browser:")
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign_context_score: usize) -> bool {
     foreign_dist == 0
         || foreign_dist < active_dist
@@ -7263,29 +7284,28 @@ impl eframe::App for ContextApp {
                 // "paragraph gone", so after a reconnect + tab-out the errors
                 // for already-checked sentences never came back. When either
                 // side of the switch is Word, do a PARTIAL clear instead:
-                // keep Word-scoped state (numeric ParaIDs) and drop only the
-                // other app's (uia:/ax:) state. The display layer hides Word
+                // keep Word-scoped state and drop only the other app's
+                // (uia:/ax:/browser:) state. The display layer hides Word
                 // errors while a non-Word app is focused.
                 let involves_word = now_word || self.prev_fg_was_word;
                 if switching_between_writing_surfaces && has_state_to_clear && involves_word {
-                    let is_word_id = |id: &str| id.parse::<i64>().is_ok();
                     let before = self.writing_errors.len();
-                    self.writing_errors.retain(|e| is_word_id(&e.paragraph_id));
+                    self.writing_errors.retain(|e| is_word_scoped_paragraph_id(&e.paragraph_id));
                     let dropped_hashes: Vec<u64> = self.paragraph_sentence_hashes.iter()
-                        .filter(|(id, _)| !is_word_id(id))
+                        .filter(|(id, _)| !is_word_scoped_paragraph_id(id))
                         .flat_map(|(_, hs)| hs.iter().copied())
                         .collect();
                     for h in dropped_hashes {
                         self.processed_sentence_hashes.remove(&h);
                         self.grammar_inflight.remove(&h);
                     }
-                    self.paragraph_sentence_hashes.retain(|id, _| is_word_id(id));
-                    self.paragraph_texts.retain(|id, _| is_word_id(id));
-                    self.paragraph_doc_starts.retain(|id, _| is_word_id(id));
+                    self.paragraph_sentence_hashes.retain(|id, _| is_word_scoped_paragraph_id(id));
+                    self.paragraph_texts.retain(|id, _| is_word_scoped_paragraph_id(id));
+                    self.paragraph_doc_starts.retain(|id, _| is_word_scoped_paragraph_id(id));
                     self.pending_spelling_bert.retain(|p| {
-                        p.deferred_push.as_ref().map_or(false, |d| is_word_id(&d.paragraph_id))
+                        p.deferred_push.as_ref().map_or(false, |d| is_word_scoped_paragraph_id(&d.paragraph_id))
                     });
-                    self.pending_spelling_grammar.retain(|p| is_word_id(&p.paragraph_id));
+                    self.pending_spelling_grammar.retain(|p| is_word_scoped_paragraph_id(&p.paragraph_id));
                     self.pending_grammar_bert.clear();
                     self.pending_consonant_bert.clear();
                     self.pending_consonant_checks.clear();
