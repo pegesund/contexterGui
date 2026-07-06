@@ -651,6 +651,31 @@ fn is_word_scoped_paragraph_id(paragraph_id: &str) -> bool {
     }
 }
 
+fn apply_original_initial_case(raw: &str, original: &str) -> String {
+    let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
+    if s.is_empty() {
+        return s;
+    }
+
+    let Some(original_first) = original.chars().find(|c| c.is_alphabetic()) else {
+        return s;
+    };
+    let Some(suggestion_first) = s.chars().next() else {
+        return s;
+    };
+
+    let replacement = if original_first.is_uppercase() {
+        suggestion_first.to_uppercase().to_string()
+    } else if original_first.is_lowercase() {
+        suggestion_first.to_lowercase().to_string()
+    } else {
+        return s;
+    };
+    let first_len = suggestion_first.len_utf8();
+    s.replace_range(..first_len, &replacement);
+    s
+}
+
 fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign_context_score: usize) -> bool {
     foreign_dist == 0
         || foreign_dist < active_dist
@@ -660,7 +685,7 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
 
 #[cfg(test)]
 mod cross_language_barrier_tests {
-    use super::should_skip_cross_language_match;
+    use super::{apply_original_initial_case, should_skip_cross_language_match};
 
     #[test]
     fn skips_exact_foreign_word() {
@@ -690,6 +715,16 @@ mod cross_language_barrier_tests {
     #[test]
     fn keeps_clear_active_typo_inside_strong_foreign_context() {
         assert!(!should_skip_cross_language_match(1, 2, 2));
+    }
+
+    #[test]
+    fn lowercases_suggestion_when_original_is_lowercase() {
+        assert_eq!(apply_original_initial_case("Dokumentet", "dokummentet"), "dokumentet");
+    }
+
+    #[test]
+    fn uppercases_suggestion_when_original_is_uppercase() {
+        assert_eq!(apply_original_initial_case("dokumentet", "Dokummentet"), "Dokumentet");
     }
 }
 
@@ -3171,7 +3206,8 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     }
 
     fn check_spelling(&mut self, word: &str, sentence_ctx: &str, paragraph_id: &str, doc_offset: usize) {
-        let clean = word.trim().to_lowercase();
+        let original_word = word.trim();
+        let clean = original_word.to_lowercase();
         if clean.is_empty() || clean.len() < 2 || clean == self.last_spell_checked_word {
             return;
         }
@@ -3266,12 +3302,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let modal_fixes = self.language.modal_confusion_pairs();
         if let Some((_, correct)) = modal_fixes.iter().find(|(wrong, _)| *wrong == clean.as_str()) {
             if !self.writing_errors.iter().any(|e| e.word == clean && e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
-                log!("modal fix: '{}' → '{}'", clean, correct);
+                let suggestion = apply_original_initial_case(correct, original_word);
+                log!("modal fix: '{}' → '{}'", clean, suggestion);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Spelling,
                     word: clean.clone(),
-                    suggestion: correct.to_string(),
-                    explanation: format!("«{}» → «{}»", clean, correct),
+                    suggestion: suggestion.clone(),
+                    explanation: format!("«{}» → «{}»", clean, suggestion),
                     rule_name: "stavefeil_modal".to_string(),
                     sentence_context: sentence_ctx.to_string(),
                     doc_offset,
@@ -3443,7 +3480,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let has_pending_bert = self.pending_spelling_bert.last()
             .map(|p| p.error_idx_word == clean.to_lowercase())
             .unwrap_or(false);
-        let shown_suggestion = best.clone();
+        let shown_suggestion = apply_original_initial_case(&best, original_word);
 
         // Dedup: don't add a second spelling error for the same word in the
         // same paragraph OR at the same sentence/document offset. Mirrors the
@@ -3850,21 +3887,8 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
         let Some((best, _)) = rescored.first() else { return };
 
-        // Capitalize helper: matches the sentence-start / originally-upper logic
-        // we used before splitting into deferred-vs-update paths.
-        let capitalize = |raw: &str, sentence_ctx: &str, word: &str| -> String {
-            let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-            if s.is_empty() { return s; }
-            let word_lower = word.to_lowercase();
-            let at_sentence_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
-            let is_upper = sentence_ctx.to_lowercase().find(&word_lower)
-                .and_then(|pos| sentence_ctx[pos..].chars().next())
-                .map_or(false, |c| c.is_uppercase());
-            if at_sentence_start || is_upper {
-                let mut chars = s.chars();
-                s = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
-            }
-            s
+        let capitalize = |raw: &str, _sentence_ctx: &str, word: &str| -> String {
+            apply_original_initial_case(raw, word)
         };
 
         if let Some(deferred) = &pending.deferred_push {
@@ -4013,21 +4037,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let filtered = spelling_scorer::apply_grammar_filter(&pending.bert_ranked, &grammar_results);
         let Some((best_after, _)) = filtered.first() else { return; };
         let word_lower = pending.word.to_lowercase();
-        // Capitalize like the original push did.
-        let suggestion = {
-            let mut s = best_after.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-            if !s.is_empty() {
-                let at_start = pending.sentence.to_lowercase().starts_with(&word_lower);
-                let is_upper = pending.sentence.to_lowercase().find(&word_lower)
-                    .and_then(|pos| pending.sentence[pos..].chars().next())
-                    .map_or(false, |c| c.is_uppercase());
-                if at_start || is_upper {
-                    let mut chars = s.chars();
-                    s = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
-                }
-            }
-            s
-        };
+        let suggestion = apply_original_initial_case(best_after, &pending.word);
         // Mirror the upgrade into the sentence cache so replays get the
         // grammar-refined suggestion, not the raw BERT pick.
         {
@@ -4154,16 +4164,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             let suggestions = self.find_spelling_suggestions(&word, &sentence_ctx);
             if let Some((best, score)) = suggestions.first() {
                 if !best.is_empty() {
-                    let mut suggestion = best.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-                    let word_lower = word.to_lowercase();
-                    let at_start = sentence_ctx.to_lowercase().starts_with(&word_lower);
-                    let is_upper = sentence_ctx.to_lowercase().find(&word_lower)
-                        .and_then(|pos| sentence_ctx[pos..].chars().next())
-                        .map_or(false, |c| c.is_uppercase());
-                    if at_start || is_upper {
-                        let mut chars = suggestion.chars();
-                        suggestion = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
-                    }
+                    let suggestion = apply_original_initial_case(best, &word);
                     log!("Spelling upgrade: '{}' → '{}' score={:.2}", word, suggestion, score);
                     self.writing_errors[idx].suggestion = suggestion;
                 }
@@ -6490,20 +6491,10 @@ self.grammar_queue.clear();
                 log!("  deferred spelling push: '{}' (waiting for BERT rank, id={})",
                      deferred.word, request_id);
             } else {
-                let unk_word_lower = deferred.word.to_lowercase();
-                let mut best = fuzzy_fallback.first().cloned().unwrap_or_default()
-                    .trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
-                if !best.is_empty() {
-                    let at_sentence_start = deferred.sentence.to_lowercase().starts_with(&unk_word_lower);
-                    let is_upper_in_original = deferred.sentence.to_lowercase()
-                        .find(&unk_word_lower)
-                        .and_then(|pos| deferred.sentence[pos..].chars().next())
-                        .map_or(false, |c| c.is_uppercase());
-                    if at_sentence_start || is_upper_in_original {
-                        let mut chars = best.chars();
-                        best = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
-                    }
-                }
+                let best = apply_original_initial_case(
+                    &fuzzy_fallback.first().cloned().unwrap_or_default(),
+                    &deferred.word,
+                );
                 let top5: Vec<String> = fuzzy_fallback.iter().skip(1).take(5).cloned().collect();
                 if self.is_cross_language_spelling_token(&deferred.word, &deferred.sentence) {
                     log!(
