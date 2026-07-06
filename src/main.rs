@@ -621,10 +621,20 @@ fn load_cross_language_analyzers(active_code: &str) -> Vec<(String, Arc<mtag::An
     analyzers
 }
 
-fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, has_foreign_context: bool) -> bool {
+fn contains_norwegian_letters(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            '\u{00e6}' | '\u{00f8}' | '\u{00e5}' | '\u{00c6}' | '\u{00d8}' | '\u{00c5}'
+        )
+    })
+}
+
+fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign_context_score: usize) -> bool {
     foreign_dist == 0
         || foreign_dist < active_dist
-        || (has_foreign_context && foreign_dist <= active_dist)
+        || (foreign_context_score > 0 && foreign_dist <= active_dist)
+        || (foreign_context_score >= 2 && active_dist > 1 && foreign_dist <= 2)
 }
 
 #[cfg(test)]
@@ -633,22 +643,32 @@ mod cross_language_barrier_tests {
 
     #[test]
     fn skips_exact_foreign_word() {
-        assert!(should_skip_cross_language_match(1, 0, false));
+        assert!(should_skip_cross_language_match(1, 0, 0));
     }
 
     #[test]
     fn skips_when_foreign_match_is_closer() {
-        assert!(should_skip_cross_language_match(2, 1, false));
+        assert!(should_skip_cross_language_match(2, 1, 0));
     }
 
     #[test]
     fn keeps_equal_distance_without_foreign_context() {
-        assert!(!should_skip_cross_language_match(1, 1, false));
+        assert!(!should_skip_cross_language_match(1, 1, 0));
     }
 
     #[test]
     fn skips_equal_distance_inside_foreign_context() {
-        assert!(should_skip_cross_language_match(1, 1, true));
+        assert!(should_skip_cross_language_match(1, 1, 1));
+    }
+
+    #[test]
+    fn skips_looser_match_inside_strong_foreign_context() {
+        assert!(should_skip_cross_language_match(2, 2, 2));
+    }
+
+    #[test]
+    fn keeps_clear_active_typo_inside_strong_foreign_context() {
+        assert!(!should_skip_cross_language_match(1, 2, 2));
     }
 }
 
@@ -3012,35 +3032,39 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.len().cmp(&b.0.len())))
     }
 
-    fn sentence_has_foreign_context(&self, sentence_ctx: &str, target_lower: &str) -> bool {
-        if self.foreign_analyzers.is_empty() {
-            return false;
-        }
-        let Some(active_analyzer) = self.analyzer.as_deref() else {
-            return false;
-        };
+    fn sentence_foreign_context_score(&self, sentence_ctx: &str, target_lower: &str) -> usize {
+        let active_code = self.language.code();
+        let active_analyzer = self.analyzer.as_deref();
 
         sentence_ctx
             .split(|c: char| !c.is_alphabetic())
             .map(|token| token.trim().to_lowercase())
-            .filter(|token| token.len() >= 3 && token != target_lower)
-            .any(|token| {
-                !active_analyzer.has_word(&token)
-                    && self.foreign_analyzers.iter().any(|(_, analyzer)| analyzer.has_word(&token))
+            .filter(|token| token.chars().count() >= 2 && token != target_lower)
+            .filter(|token| {
+                if active_code == "en" && contains_norwegian_letters(token) {
+                    return true;
+                }
+                if token.chars().count() < 3 || self.foreign_analyzers.is_empty() {
+                    return false;
+                }
+                active_analyzer.map_or(false, |analyzer| !analyzer.has_word(token))
+                    && self.foreign_analyzers.iter().any(|(_, analyzer)| analyzer.has_word(token))
             })
+            .take(3)
+            .count()
     }
 
     fn is_cross_language_spelling_token(&self, word: &str, sentence_ctx: &str) -> bool {
         let clean = word.trim().to_lowercase();
-        if clean.chars().count() < 3 || self.foreign_analyzers.is_empty() {
-            return false;
-        }
         if self.language.modal_confusion_pairs().iter().any(|(wrong, _)| *wrong == clean.as_str()) {
             return false;
         }
-        if self.language.code() == "en" && clean.chars().any(|c| matches!(c, 'æ' | 'ø' | 'å')) {
+        if self.language.code() == "en" && contains_norwegian_letters(&clean) {
             log!("Cross-language barrier: skip '{}' under English (Norwegian letter)", clean);
             return true;
+        }
+        if clean.chars().count() < 3 || self.foreign_analyzers.is_empty() {
+            return false;
         }
 
         let max_distance = if clean.chars().count() <= 4 { 1 } else { 2 };
@@ -3050,7 +3074,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             .and_then(|analyzer| Self::best_dictionary_distance(analyzer, &clean, max_distance))
             .map(|(_, dist)| dist)
             .unwrap_or(u32::MAX);
-        let has_foreign_context = self.sentence_has_foreign_context(sentence_ctx, &clean);
+        let foreign_context_score = self.sentence_foreign_context_score(sentence_ctx, &clean);
 
         for (code, analyzer) in &self.foreign_analyzers {
             let Some((foreign_word, foreign_dist)) =
@@ -3058,16 +3082,16 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             else {
                 continue;
             };
-            if should_skip_cross_language_match(active_best, foreign_dist, has_foreign_context) {
+            if should_skip_cross_language_match(active_best, foreign_dist, foreign_context_score) {
                 log!(
-                    "Cross-language barrier: skip '{}' for active={} because {} has '{}' at dist {} (active_dist={}, foreign_context={})",
+                    "Cross-language barrier: skip '{}' for active={} because {} has '{}' at dist {} (active_dist={}, foreign_context_score={})",
                     clean,
                     self.language.code(),
                     code,
                     foreign_word,
                     foreign_dist,
                     active_best,
-                    has_foreign_context
+                    foreign_context_score
                 );
                 return true;
             }
@@ -3687,6 +3711,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             // grammar response.
             log!("spelling BERT response: empty scored_candidates — pushing underline without suggestion");
             if let Some(deferred) = &pending.deferred_push {
+                if self.is_cross_language_spelling_token(&deferred.word, &deferred.sentence) {
+                    log!(
+                        "spelling BERT response: suppressing '{}' after cross-language recheck",
+                        deferred.word
+                    );
+                    return;
+                }
                 let already = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == deferred.word.to_lowercase()
                         && e.paragraph_id == deferred.paragraph_id
@@ -3775,6 +3806,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             // Top 5 alternates = next 4 BERT-ranked candidates (excluding the best pick).
             let top5: Vec<String> = rescored.iter().skip(1).take(5)
                 .map(|(c, _)| c.clone()).collect();
+            if self.is_cross_language_spelling_token(&deferred.word, &deferred.sentence) {
+                log!(
+                    "spelling deferred push: suppressing '{}' after cross-language recheck",
+                    deferred.word
+                );
+                return;
+            }
 
             // Cache BEFORE the display dedup below: the verdict belongs in
             // this sentence's cache entry even when a matching error is
@@ -6397,6 +6435,13 @@ self.grammar_queue.clear();
                     }
                 }
                 let top5: Vec<String> = fuzzy_fallback.iter().skip(1).take(5).cloned().collect();
+                if self.is_cross_language_spelling_token(&deferred.word, &deferred.sentence) {
+                    log!(
+                        "spelling fallback: suppressing '{}' after cross-language recheck",
+                        deferred.word
+                    );
+                    continue;
+                }
                 log!("  Spelling (no BERT): '{}' → '{}'", deferred.word, best);
                 self.writing_errors.push(WritingError {
                     category: ErrorCategory::Spelling,
