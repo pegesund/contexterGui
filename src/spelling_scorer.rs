@@ -61,9 +61,8 @@ fn promote_orthographic_anchor(
     }
 
     let best_lower = ranked[0].0.to_lowercase();
-    if common_prefix_len(word_lower, &best_lower) >= 4 {
-        return;
-    }
+    let best_prefix = common_prefix_len(word_lower, &best_lower);
+    let best_dist = levenshtein_distance(word_lower, &best_lower);
     let best_ortho = ortho_map
         .get(ranked[0].0.as_str())
         .copied()
@@ -80,24 +79,91 @@ fn promote_orthographic_anchor(
                 return None;
             }
             let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.0);
-            Some((idx, prefix, ortho))
+            let dist = levenshtein_distance(word_lower, &candidate_lower);
+            Some((idx, prefix, ortho, dist))
         })
         .max_by(|left, right| {
             left.2
                 .partial_cmp(&right.2)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| right.3.cmp(&left.3))
         });
 
-    let Some((anchor_idx, _prefix, anchor_ortho)) = anchor else {
+    let Some((anchor_idx, _prefix, anchor_ortho, anchor_dist)) = anchor else {
         return;
     };
-    if anchor_idx == 0 || anchor_ortho < 0.55 || anchor_ortho < best_ortho * 1.30 {
+    if anchor_idx == 0 {
+        return;
+    }
+
+    let weak_best_shape = best_prefix < 4
+        && anchor_ortho >= 0.55
+        && anchor_ortho >= best_ortho * 1.30;
+    let much_closer_shape = anchor_ortho >= 0.82
+        && anchor_dist.saturating_add(1) <= best_dist
+        && anchor_ortho >= best_ortho * 1.15;
+
+    if !weak_best_shape && !much_closer_shape {
         return;
     }
 
     let anchor = ranked.remove(anchor_idx);
     ranked.insert(0, anchor);
+}
+
+#[cfg(test)]
+mod orthographic_anchor_tests {
+    use super::promote_orthographic_anchor;
+    use std::collections::HashMap;
+
+    #[test]
+    fn promotes_close_norwegian_form_over_contextual_plural() {
+        let mut ranked = vec![
+            ("dokumenta".to_string(), 12.0),
+            ("dokumentet".to_string(), 11.0),
+        ];
+        let ortho_map = HashMap::from([
+            ("dokumenta".to_string(), 0.72),
+            ("dokumentet".to_string(), 0.96),
+        ]);
+
+        promote_orthographic_anchor("dokummentet", &mut ranked, &ortho_map);
+
+        assert_eq!(ranked[0].0, "dokumentet");
+    }
+
+    #[test]
+    fn promotes_same_stem_over_unrelated_semantic_candidate() {
+        let mut ranked = vec![
+            ("attraksjonen".to_string(), 12.0),
+            ("applikasjonen".to_string(), 11.0),
+        ];
+        let ortho_map = HashMap::from([
+            ("attraksjonen".to_string(), 0.31),
+            ("applikasjonen".to_string(), 0.87),
+        ]);
+
+        promote_orthographic_anchor("appllicationen", &mut ranked, &ortho_map);
+
+        assert_eq!(ranked[0].0, "applikasjonen");
+    }
+
+    #[test]
+    fn keeps_bert_pick_when_spelling_gap_is_small() {
+        let mut ranked = vec![
+            ("message".to_string(), 12.0),
+            ("massage".to_string(), 11.0),
+        ];
+        let ortho_map = HashMap::from([
+            ("message".to_string(), 0.86),
+            ("massage".to_string(), 0.90),
+        ]);
+
+        promote_orthographic_anchor("mesage", &mut ranked, &ortho_map);
+
+        assert_eq!(ranked[0].0, "message");
+    }
 }
 
 /// Compute trigrams for a word.

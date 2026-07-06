@@ -172,6 +172,7 @@ struct CachedSentenceVerdict {
 }
 
 const SENTENCE_CACHE_CAP: usize = 20_000;
+const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v2";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SentenceCache {
@@ -184,27 +185,35 @@ fn sentence_cache_key(sentence: &str) -> String {
     sentence.trim().to_lowercase()
 }
 
+fn sentence_cache_key_for_language(lang_code: &str, sentence: &str) -> String {
+    format!("{}:{}", lang_code, sentence_cache_key(sentence))
+}
+
 fn sentence_cache_path() -> PathBuf {
     settings_path().with_file_name("sentence_cache.json")
 }
 
+fn sentence_cache_version() -> String {
+    format!("{}:{}", env!("CARGO_PKG_VERSION"), SENTENCE_CACHE_SCHEMA)
+}
+
 fn load_sentence_cache() -> SentenceCache {
-    let cur = env!("CARGO_PKG_VERSION");
+    let cur = sentence_cache_version();
     // Debug builds start with a cold cache every launch so testing is
     // realistic (no verdicts leaking in from a previous run). Release keeps
     // the disk cache so documents re-open instantly across app restarts.
     #[cfg(debug_assertions)]
     {
         let _ = std::fs::remove_file(sentence_cache_path());
-        return SentenceCache { version: cur.to_string(), ..Default::default() };
+        return SentenceCache { version: cur, ..Default::default() };
     }
     #[cfg(not(debug_assertions))]
     match std::fs::read_to_string(sentence_cache_path()) {
         Ok(json) => {
             let c: SentenceCache = serde_json::from_str(&json).unwrap_or_default();
-            if c.version == cur { c } else { SentenceCache { version: cur.to_string(), ..Default::default() } }
+            if c.version == cur { c } else { SentenceCache { version: cur, ..Default::default() } }
         }
-        Err(_) => SentenceCache { version: cur.to_string(), ..Default::default() },
+        Err(_) => SentenceCache { version: cur, ..Default::default() },
     }
 }
 
@@ -708,7 +717,7 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
 
 #[cfg(test)]
 mod cross_language_barrier_tests {
-    use super::{apply_original_initial_case, should_skip_cross_language_match};
+    use super::{apply_original_initial_case, sentence_cache_key_for_language, should_skip_cross_language_match};
 
     #[test]
     fn skips_exact_foreign_word() {
@@ -748,6 +757,16 @@ mod cross_language_barrier_tests {
     #[test]
     fn uppercases_suggestion_when_original_is_uppercase() {
         assert_eq!(apply_original_initial_case("dokumentet", "Dokummentet"), "Dokumentet");
+    }
+
+    #[test]
+    fn sentence_cache_keys_are_language_scoped() {
+        let sentence = "Eg opna dokkumentet.";
+
+        assert_ne!(
+            sentence_cache_key_for_language("en", sentence),
+            sentence_cache_key_for_language("nn", sentence)
+        );
     }
 }
 
@@ -3164,7 +3183,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             log!("Cross-language barrier: skip '{}' under English (Norwegian letter)", clean);
             return true;
         }
-        if clean.chars().count() < 3 || self.foreign_analyzers.is_empty() {
+        if clean.chars().count() < 3 {
             return false;
         }
 
@@ -3176,6 +3195,24 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             .map(|(_, dist)| dist)
             .unwrap_or(u32::MAX);
         let foreign_context_score = self.sentence_foreign_context_score(sentence_ctx, &clean);
+
+        if self.language.code() == "en"
+            && clean.chars().count() >= 5
+            && foreign_context_score > 0
+            && active_best > 1
+        {
+            log!(
+                "Cross-language barrier: skip '{}' under English because surrounding text looks Norwegian (active_dist={}, foreign_context_score={})",
+                clean,
+                active_best,
+                foreign_context_score
+            );
+            return true;
+        }
+
+        if self.foreign_analyzers.is_empty() {
+            return false;
+        }
 
         for (code, analyzer) in &self.foreign_analyzers {
             let Some((foreign_word, foreign_dist)) =
@@ -3848,7 +3885,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // outcome) — count down the sentence-cache pending counter so the
         // entry becomes replayable once every queued word has resolved.
         if let Some(d) = &pending.deferred_push {
-            let ck = sentence_cache_key(&d.sentence);
+            let ck = sentence_cache_key_for_language(self.language.code(), &d.sentence);
             if let Some(e) = self.sentence_cache.entries.get_mut(&ck) {
                 e.pending = e.pending.saturating_sub(1);
             }
@@ -4056,7 +4093,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     /// document re-entry instead of re-running SWI + BERT). Replaces any
     /// previous entry for the same word so re-checks upgrade in place.
     fn cache_sentence_spelling(&mut self, sentence: &str, err: CachedSentenceError) {
-        let key = sentence_cache_key(sentence);
+        let key = sentence_cache_key_for_language(self.language.code(), sentence);
         if self.sentence_cache.entries.len() >= SENTENCE_CACHE_CAP
             && !self.sentence_cache.entries.contains_key(&key)
         {
@@ -4086,7 +4123,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // Mirror the upgrade into the sentence cache so replays get the
         // grammar-refined suggestion, not the raw BERT pick.
         {
-            let ck = sentence_cache_key(&pending.sentence);
+            let ck = sentence_cache_key_for_language(self.language.code(), &pending.sentence);
             if let Some(entry) = self.sentence_cache.entries.get_mut(&ck) {
                 for ce in &mut entry.errors {
                     if !ce.is_grammar && ce.word.to_lowercase() == word_lower {
@@ -5075,12 +5112,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
 
                 // Sentence cache: replay a finished verdict instead of
-                // re-running SWI + BERT. Keyed by sentence TEXT, so this
-                // works across ParaID churn, doc switches and app restarts.
+                // re-running SWI + BERT. Keyed by writing language + sentence
+                // text, so verdicts survive doc switches but never leak
+                // between English, Bokmål, and Nynorsk sessions.
                 // Entries with pending > 0 (spelling still in flight when
                 // they were written) are skipped and re-checked normally.
                 let cached_verdict = self.sentence_cache.entries
-                    .get(&sentence_cache_key(sentence_text))
+                    .get(&sentence_cache_key_for_language(self.language.code(), sentence_text))
                     .filter(|v| v.pending == 0)
                     .cloned();
                 if let Some(verdict) = cached_verdict {
@@ -5097,6 +5135,9 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                                 continue;
                             }
                             if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&ce.word)) {
+                                continue;
+                            }
+                            if self.is_cross_language_spelling_token(&ce.word, sentence_text) {
                                 continue;
                             }
                             let already = self.writing_errors.iter().any(|e| {
@@ -6244,7 +6285,7 @@ self.grammar_queue.clear();
             // incrementally only contained the words that were NEW at each
             // boundary (the dedup below skips already-displayed words), so a
             // replay after a doc switch showed just the last error.
-            let ck_resp = sentence_cache_key(&resp.sentence);
+            let ck_resp = sentence_cache_key_for_language(self.language.code(), &resp.sentence);
             if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
                 || self.sentence_cache.entries.contains_key(&ck_resp)
             {
@@ -6310,7 +6351,7 @@ self.grammar_queue.clear();
                         });
                         // Sentence cache: grammar verdict is final at push time.
                         // (Direct field access — `actor` holds a borrow of self.)
-                        let ck = sentence_cache_key(&resp.sentence);
+                        let ck = sentence_cache_key_for_language(self.language.code(), &resp.sentence);
                         if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
                             || self.sentence_cache.entries.contains_key(&ck)
                         {
@@ -6349,7 +6390,7 @@ self.grammar_queue.clear();
                         ignored: false,
                         word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: resp.paragraph_id.clone(), error_word: first.word.clone(), top_candidates: vec![],
                     });
-                    let ck = sentence_cache_key(&resp.sentence);
+                    let ck = sentence_cache_key_for_language(self.language.code(), &resp.sentence);
                     if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
                         || self.sentence_cache.entries.contains_key(&ck)
                     {
@@ -6441,7 +6482,7 @@ self.grammar_queue.clear();
                                 e.rule_name.clone(), e.top_candidates.clone()));
                     if let Some((w, sug, expl, rule, top)) = src {
                         if let Some(entry) = self.sentence_cache.entries
-                            .get_mut(&sentence_cache_key(&resp.sentence))
+                            .get_mut(&sentence_cache_key_for_language(self.language.code(), &resp.sentence))
                         {
                             entry.errors.retain(|x| !(!x.is_grammar && x.word.eq_ignore_ascii_case(&w)));
                             entry.errors.push(CachedSentenceError {
@@ -6466,7 +6507,7 @@ self.grammar_queue.clear();
                     // never replays half a verdict; the next fresh check of
                     // this text resets it and rebuilds completely.
                     if let Some(entry) = self.sentence_cache.entries
-                        .get_mut(&sentence_cache_key(&resp.sentence))
+                        .get_mut(&sentence_cache_key_for_language(self.language.code(), &resp.sentence))
                     {
                         entry.pending += 1;
                         cache_dirty = true;
@@ -6519,7 +6560,9 @@ self.grammar_queue.clear();
             if let Some(request_id) = request_id_opt {
                 // Sentence-cache entry can't replay until this word's BERT
                 // result lands — handle_spelling_bert_response decrements.
-                if let Some(e) = self.sentence_cache.entries.get_mut(&sentence_cache_key(&deferred.sentence)) {
+                if let Some(e) = self.sentence_cache.entries.get_mut(
+                    &sentence_cache_key_for_language(self.language.code(), &deferred.sentence)
+                ) {
                     e.pending += 1;
                     cache_dirty = true;
                 }
