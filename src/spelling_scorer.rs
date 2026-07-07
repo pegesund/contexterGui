@@ -815,6 +815,7 @@ pub fn bert_score_only(
             .collect(),
         Err(_) => return candidates.to_vec(),
     };
+    if scored.is_empty() { return candidates.to_vec(); }
 
     let ortho_map: HashMap<String, f32> = candidates.iter().cloned().collect();
 
