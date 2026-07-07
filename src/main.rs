@@ -172,7 +172,7 @@ struct CachedSentenceVerdict {
 }
 
 const SENTENCE_CACHE_CAP: usize = 20_000;
-const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v2";
+const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v3-prefix-rescue";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SentenceCache {

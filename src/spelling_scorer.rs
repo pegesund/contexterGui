@@ -390,6 +390,47 @@ pub fn find_candidates_pipeline(
         }
     }
 
+    // Source 3b: Long-word prefix rescue.
+    //
+    // BM/NN normally get long fuzzy candidates from the compound walker, but
+    // one-part corrections still obey MAX_EDITS_PER_PART=2 there. Loanword
+    // typos such as "appllicationen" -> "applikasjonen" are edit-distance 4
+    // (extra l, c->k, t->s, i->j). Bokmal happened to recover these via
+    // wordfreq, while Nynorsk can miss them when the valid form is in the FST
+    // but absent from wordfreq. Reuse the existing prefix source with a short
+    // stable prefix, then keep only close dictionary words.
+    if char_count >= 8 {
+        let prefix_len = 4.min(char_count);
+        let prefix_end = word_lower
+            .char_indices()
+            .nth(prefix_len)
+            .map(|(idx, _)| idx)
+            .unwrap_or(word_lower.len());
+        let broad_prefix = &word_lower[..prefix_end];
+        if broad_prefix.len() >= 4 {
+            for w in analyzer.prefix_lookup(broad_prefix, 80) {
+                let wl = w.to_lowercase();
+                if wl == word_lower || wl.len() < 5 || seen.contains(&wl) {
+                    continue;
+                }
+                let len_delta = (wl.chars().count() as i32 - char_count as i32).unsigned_abs();
+                if len_delta > 3 {
+                    continue;
+                }
+                let dist = levenshtein_distance(&word_lower, &wl);
+                if dist > 4 {
+                    continue;
+                }
+                let w_tri = trigrams(&wl);
+                let common = word_trigrams.iter().filter(|t| w_tri.contains(t)).count();
+                if common >= 2 && seen.insert(wl.clone()) {
+                    edit_distances.entry(wl.clone()).or_insert(dist);
+                    candidates.push(wl);
+                }
+            }
+        }
+    }
+
     // Source 6: Split function word
     if let Some(split) = try_split_function_word(&word_lower, analyzer, lang) {
         let sl = split.to_lowercase();
