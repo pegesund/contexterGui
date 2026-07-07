@@ -522,6 +522,15 @@ struct SpellingQueueItem {
     paragraph_id: String,
 }
 
+#[derive(Clone)]
+struct PendingComMidwordCheck {
+    para_id: String,
+    text: String,
+    char_start: usize,
+    cursor_offset: Option<usize>,
+    due_at: Instant,
+}
+
 fn word_token_at_position(sentence_ctx: &str, error_word: &str, position: usize) -> Option<String> {
     let word_lower = error_word.to_lowercase();
     let mut fallback = None;
@@ -2225,6 +2234,7 @@ struct ContextApp {
     paragraph_sentence_hashes: HashMap<String, Vec<u64>>,
     /// Pending spelling work — checked incrementally
     spelling_queue: Vec<SpellingQueueItem>,
+    pending_com_midword_check: Option<PendingComMidwordCheck>,
     /// Pending grammar work: sentences still to check (incremental, one per frame)
     grammar_queue: Vec<(String, usize)>,
     /// Total sentences when grammar scan started (for progress bar)
@@ -3043,6 +3053,7 @@ impl ContextApp {
             processed_sentence_hashes: std::collections::HashSet::new(),
             paragraph_sentence_hashes: HashMap::new(),
             spelling_queue: Vec::new(),
+            pending_com_midword_check: None,
             grammar_queue: Vec::new(),
             grammar_queue_total: 0,
             grammar_scanning: false,
@@ -5227,7 +5238,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             if cursor_para_id == Some(pid.as_str()) {
                 continue;
             }
-            self.process_com_changed_paragraph(pid, ptext, pstart, None);
+            self.process_com_changed_paragraph(pid, ptext, pstart, None, false);
         }
     }
 
@@ -5239,6 +5250,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         text: String,
         char_start: usize,
         cursor_offset: Option<usize>,
+        force_midword_check: bool,
     ) {
         // Clean control characters
         let clean_text: String = text.chars()
@@ -5269,7 +5281,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
 
         // Skip if text identical to cached
-        if self.paragraph_texts.get(&para_id).map_or(false, |t| t == &clean_text) {
+        if !force_midword_check && self.paragraph_texts.get(&para_id).map_or(false, |t| t == &clean_text) {
             return;
         }
 
@@ -5325,7 +5337,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // If the cursor has real word text after it, the user is editing an
         // existing paragraph in place; in that case we also check immediately
         // instead of requiring a space after the edited word.
-        if user_finished_word || para_first_seen || editing_existing_text {
+        if user_finished_word || para_first_seen || editing_existing_text || force_midword_check {
             let trailing = clean_text.rsplit(['.', '!', '?', ':']).next().unwrap_or("");
             let frag = trailing.trim();
             if !frag.is_empty()
@@ -5410,7 +5422,14 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 // Normal end-of-paragraph typing still waits for the word to
                 // finish. In-place edits are allowed through immediately
                 // because the cursor has existing prose after it.
-                if !(is_complete || user_finished_word || para_first_seen || editing_existing_text) {
+                if !(is_complete || user_finished_word || para_first_seen || editing_existing_text || force_midword_check) {
+                    self.pending_com_midword_check = Some(PendingComMidwordCheck {
+                        para_id: para_id.clone(),
+                        text: clean_text.clone(),
+                        char_start,
+                        cursor_offset,
+                        due_at: Instant::now() + Duration::from_millis(650),
+                    });
                     continue;
                 }
 
@@ -5501,6 +5520,32 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // Rebuild word counts + prune
         self.rebuild_doc_word_counts();
         self.prune_resolved_errors();
+    }
+
+    fn process_pending_com_midword_check(&mut self) {
+        let Some(pending) = self.pending_com_midword_check.clone() else {
+            return;
+        };
+        if Instant::now() < pending.due_at {
+            return;
+        }
+        if self.manager.active_bridge_name() != "Word COM" {
+            self.pending_com_midword_check = None;
+            return;
+        }
+        if self.paragraph_texts.get(&pending.para_id).map_or(false, |text| text != &pending.text) {
+            self.pending_com_midword_check = None;
+            return;
+        }
+
+        self.pending_com_midword_check = None;
+        self.process_com_changed_paragraph(
+            pending.para_id,
+            pending.text,
+            pending.char_start,
+            pending.cursor_offset,
+            true,
+        );
     }
 
     /// Prepare grammar scan: read document, split sentences, compute offsets, fill queue.
@@ -8051,6 +8096,8 @@ impl eframe::App for ContextApp {
         
         self.process_addin_changed_paragraphs();
        
+        self.process_pending_com_midword_check();
+
 
         
         self.poll_llm_responses();
@@ -8781,7 +8828,7 @@ impl eframe::App for ContextApp {
                         // check_word_bulk_change. Passing the cursor paragraph
                         // lets a single Enter skip the sweep.
                         self.check_word_bulk_change(Some(&para_id));
-                        self.process_com_changed_paragraph(para_id, text, start, offset);
+                        self.process_com_changed_paragraph(para_id, text, start, offset, false);
                     }
                 } else if self.manager.last_user_was_browser {
                     if let Some(doc) = self.manager.read_full_document() {
