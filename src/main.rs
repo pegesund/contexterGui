@@ -498,6 +498,23 @@ fn writing_error_identity_key(e: &WritingError) -> String {
     )
 }
 
+fn writing_error_has_visible_panel_text(e: &WritingError) -> bool {
+    match e.category {
+        ErrorCategory::Spelling => {
+            !e.word.trim().is_empty() || !e.suggestion.trim().is_empty()
+        }
+        ErrorCategory::Grammar => {
+            !e.suggestion.trim().is_empty()
+                || !e.error_word.trim().is_empty()
+                || !e.word.trim().is_empty()
+                || !e.explanation.trim().is_empty()
+        }
+        ErrorCategory::SentenceBoundary => {
+            !e.word.trim().is_empty() || !e.suggestion.trim().is_empty()
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SpellingQueueItem {
     word: String,
@@ -689,6 +706,16 @@ fn apply_original_initial_case(raw: &str, original: &str) -> String {
         return s;
     }
 
+    let alpha_count = original.chars().filter(|c| c.is_alphabetic()).count();
+    let original_all_upper = alpha_count >= 2
+        && original
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(|c| c.is_uppercase());
+    if original_all_upper {
+        return s.to_uppercase();
+    }
+
     let Some(original_first) = original.chars().find(|c| c.is_alphabetic()) else {
         return s;
     };
@@ -708,6 +735,66 @@ fn apply_original_initial_case(raw: &str, original: &str) -> String {
     s
 }
 
+fn capitalize_first_alpha(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut changed = false;
+    for c in raw.chars() {
+        if !changed && c.is_alphabetic() {
+            out.extend(c.to_uppercase());
+            changed = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn clean_word_token(raw: &str) -> &str {
+    raw.trim_matches(|c: char| {
+        c.is_ascii_punctuation()
+            || c == '\u{00ab}'
+            || c == '\u{00bb}'
+            || c == '\u{201c}'
+            || c == '\u{201d}'
+            || c == '\u{2018}'
+            || c == '\u{2019}'
+    })
+}
+
+fn is_simple_titlecase_word(word: &str) -> bool {
+    let mut alpha = word.chars().filter(|c| c.is_alphabetic());
+    let Some(first) = alpha.next() else {
+        return false;
+    };
+    first.is_uppercase() && alpha.all(|c| c.is_lowercase())
+}
+
+fn is_all_upper_word(word: &str) -> bool {
+    let mut saw_alpha = false;
+    for c in word.chars().filter(|c| c.is_alphabetic()) {
+        saw_alpha = true;
+        if !c.is_uppercase() {
+            return false;
+        }
+    }
+    saw_alpha
+}
+
+fn has_mixed_non_titlecase(word: &str) -> bool {
+    let has_upper = word.chars().any(|c| c.is_alphabetic() && c.is_uppercase());
+    let has_lower = word.chars().any(|c| c.is_alphabetic() && c.is_lowercase());
+    has_upper && has_lower && !is_simple_titlecase_word(word)
+}
+
+fn sentence_starts_with_word(sentence: &str, word: &str) -> bool {
+    sentence
+        .split_whitespace()
+        .map(clean_word_token)
+        .find(|w| !w.is_empty())
+        .map(|first| first == word)
+        .unwrap_or(false)
+}
+
 fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign_context_score: usize) -> bool {
     foreign_dist == 0
         || foreign_dist < active_dist
@@ -717,7 +804,10 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
 
 #[cfg(test)]
 mod cross_language_barrier_tests {
-    use super::{apply_original_initial_case, sentence_cache_key_for_language, should_skip_cross_language_match};
+    use super::{
+        apply_original_initial_case, has_mixed_non_titlecase, sentence_cache_key_for_language,
+        should_skip_cross_language_match,
+    };
 
     #[test]
     fn skips_exact_foreign_word() {
@@ -757,6 +847,18 @@ mod cross_language_barrier_tests {
     #[test]
     fn uppercases_suggestion_when_original_is_uppercase() {
         assert_eq!(apply_original_initial_case("dokumentet", "Dokummentet"), "Dokumentet");
+    }
+
+    #[test]
+    fn preserves_all_caps_suggestion_when_original_is_all_caps() {
+        assert_eq!(apply_original_initial_case("dokumentet", "DOKUMMENTET"), "DOKUMENTET");
+    }
+
+    #[test]
+    fn detects_mixed_non_titlecase_words() {
+        assert!(has_mixed_non_titlecase("DoKuMenTeT"));
+        assert!(!has_mixed_non_titlecase("Dokumentet"));
+        assert!(!has_mixed_non_titlecase("dokumentet"));
     }
 
     #[test]
@@ -3289,6 +3391,73 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         true
     }
 
+    fn is_known_active_word(&self, lower_word: &str) -> bool {
+        if self.analyzer.as_ref().map_or(false, |a| a.has_word(lower_word)) {
+            return true;
+        }
+        self.language.code() != "en"
+            && self.wordfreq.as_ref().map_or(false, |wf| wf.contains_key(lower_word))
+    }
+
+    fn casing_correction_for_known_word(&self, word: &str, sentence_ctx: &str) -> Option<String> {
+        let clean = clean_word_token(word);
+        if clean.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+            return None;
+        }
+        if clean.chars().any(|c| c.is_ascii_digit()) {
+            return None;
+        }
+
+        let lower = clean.to_lowercase();
+        if clean == lower {
+            return None;
+        }
+        let abnormal_mixed = has_mixed_non_titlecase(clean);
+        let long_all_upper = is_all_upper_word(clean)
+            && clean.chars().filter(|c| c.is_alphabetic()).count() >= 5;
+        if !abnormal_mixed && !long_all_upper {
+            return None;
+        }
+        if self.ignored_words.contains(&lower) {
+            return None;
+        }
+        if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&lower)) {
+            return None;
+        }
+        if !self.is_known_active_word(&lower) {
+            return None;
+        }
+        if self.is_cross_language_spelling_token(&lower, sentence_ctx) {
+            return None;
+        }
+
+        let suggestion = if sentence_starts_with_word(sentence_ctx, clean) {
+            capitalize_first_alpha(&lower)
+        } else {
+            lower
+        };
+        (suggestion != clean).then_some(suggestion)
+    }
+
+    fn should_force_cased_unknown_spelling(&self, word: &str, sentence_ctx: &str) -> bool {
+        let clean = clean_word_token(word);
+        let alpha_count = clean.chars().filter(|c| c.is_alphabetic()).count();
+        if alpha_count < 5 || !is_all_upper_word(clean) {
+            return false;
+        }
+        let lower = clean.to_lowercase();
+        if self.ignored_words.contains(&lower) {
+            return false;
+        }
+        if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&lower)) {
+            return false;
+        }
+        if self.is_known_active_word(&lower) {
+            return false;
+        }
+        !self.is_cross_language_spelling_token(&lower, sentence_ctx)
+    }
+
     fn accept_mic_transcript(&mut self, text: String) {
         if self.transcript_language_mismatch(&text) {
             log!(
@@ -3603,7 +3772,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
         self.writing_errors.push(WritingError {
             category: ErrorCategory::Spelling,
-            word: clean.clone(),
+            word: original_word.to_string(),
             suggestion: shown_suggestion,
             explanation: self.language.ui_word_not_in_dict(&clean),
             rule_name: rule.to_string(),
@@ -6314,11 +6483,79 @@ self.grammar_queue.clear();
                 cache_dirty = true;
             }
 
+            let mut added_casing_error = false;
+            let mut seen_casing_words = std::collections::HashSet::new();
+            for token in resp.sentence.split_whitespace() {
+                let clean = clean_word_token(token);
+                if clean.is_empty() {
+                    continue;
+                }
+                let clean_lower = clean.to_lowercase();
+                if !seen_casing_words.insert(clean_lower.clone()) {
+                    continue;
+                }
+                let Some(suggestion) = self.casing_correction_for_known_word(clean, &resp.sentence) else {
+                    continue;
+                };
+                let already = self.writing_errors.iter().any(|e| {
+                    matches!(e.category, ErrorCategory::Spelling)
+                        && e.word.eq_ignore_ascii_case(clean)
+                        && !e.ignored
+                        && (e.paragraph_id == resp.paragraph_id
+                            || (!resp.sentence.is_empty()
+                                && e.sentence_context == resp.sentence
+                                && e.doc_offset == resp.doc_offset))
+                });
+                if already {
+                    continue;
+                }
+
+                log!("casing spelling: '{}' -> '{}'", clean, suggestion);
+                let explanation = format!("{} -> {}", clean, suggestion);
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Spelling,
+                    word: clean.to_string(),
+                    suggestion: suggestion.clone(),
+                    explanation: explanation.clone(),
+                    rule_name: "stavefeil_case".to_string(),
+                    sentence_context: resp.sentence.clone(),
+                    doc_offset: resp.doc_offset,
+                    position: 0,
+                    ignored: false,
+                    word_doc_start: 0,
+                    word_doc_end: 0,
+                    underlined: false,
+                    pinned: false,
+                    paragraph_id: resp.paragraph_id.clone(),
+                    error_word: String::new(),
+                    top_candidates: vec![],
+                });
+                let ck = sentence_cache_key_for_language(self.language.code(), &resp.sentence);
+                if self.sentence_cache.entries.len() < SENTENCE_CACHE_CAP
+                    || self.sentence_cache.entries.contains_key(&ck)
+                {
+                    let entry = self.sentence_cache.entries.entry(ck).or_default();
+                    entry.errors.retain(|x| !(!x.is_grammar && x.word.eq_ignore_ascii_case(clean)));
+                    entry.errors.push(CachedSentenceError {
+                        is_grammar: false,
+                        word: clean.to_string(),
+                        suggestion,
+                        explanation,
+                        rule_name: "stavefeil_case".to_string(),
+                        error_word: String::new(),
+                        position: 0,
+                        top_candidates: vec![],
+                    });
+                }
+                added_casing_error = true;
+                cache_dirty = true;
+            }
+
             // Handle grammar errors — only for complete sentences (ends with punctuation)
             let has_actionable_unknown_words = resp.unknown_words.iter().any(|unk| {
                 self.should_surface_unknown_spelling_word(&unk.word, &resp.sentence)
             });
-            if has_actionable_unknown_words && !resp.errors.is_empty() {
+            if (has_actionable_unknown_words || added_casing_error) && !resp.errors.is_empty() {
                 log!(
                     "Skipping grammar errors until spelling is resolved: '{}' (errors={} unknown={})",
                     trunc(&resp.sentence, 60),
@@ -6329,7 +6566,11 @@ self.grammar_queue.clear();
 
             let sentence_complete = resp.sentence.ends_with('.') || resp.sentence.ends_with('!')
                 || resp.sentence.ends_with('?') || resp.sentence.ends_with(':');
-            if !resp.errors.is_empty() && sentence_complete && !has_actionable_unknown_words {
+            if !resp.errors.is_empty()
+                && sentence_complete
+                && !has_actionable_unknown_words
+                && !added_casing_error
+            {
                 for ge in &resp.errors {
                     log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
                 }
@@ -6458,12 +6699,35 @@ self.grammar_queue.clear();
             // queue the deferred work here and process it after the loop
             // ends (where we can call &mut self methods like
             // `find_spelling_suggestions`).
-            for unk in resp.unknown_words.iter() {
-                if !self.should_surface_unknown_spelling_word(&unk.word, &resp.sentence) {
+            let mut unknown_items: Vec<(String, usize, Vec<String>)> = resp.unknown_words.iter()
+                .map(|unk| (unk.word.clone(), unk.position, unk.spelling_suggestions.clone()))
+                .collect();
+            let mut unknown_lowers: std::collections::HashSet<String> = unknown_items.iter()
+                .map(|(word, _, _)| word.to_lowercase())
+                .collect();
+            for token in resp.sentence.split_whitespace() {
+                let clean = clean_word_token(token);
+                if clean.is_empty() {
+                    continue;
+                }
+                let lower = clean.to_lowercase();
+                if unknown_lowers.contains(&lower) {
+                    continue;
+                }
+                if self.should_force_cased_unknown_spelling(clean, &resp.sentence) {
+                    unknown_lowers.insert(lower);
+                    unknown_items.push((clean.to_string(), 0, Vec::new()));
+                }
+            }
+
+            for (unk_word, unk_position, fuzzy_fallback) in unknown_items {
+                if !self.should_surface_unknown_spelling_word(&unk_word, &resp.sentence)
+                    && !self.should_force_cased_unknown_spelling(&unk_word, &resp.sentence)
+                {
                     continue;
                 }
 
-                let unk_word_lower = unk.word.to_lowercase();
+                let unk_word_lower = unk_word.to_lowercase();
                 let already_displayed = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == unk_word_lower
                         && !e.ignored
@@ -6511,7 +6775,7 @@ self.grammar_queue.clear();
                                 explanation: expl,
                                 rule_name: rule,
                                 error_word: String::new(),
-                                position: unk.position,
+                                position: unk_position,
                                 top_candidates: top,
                             });
                             cache_dirty = true;
@@ -6534,16 +6798,15 @@ self.grammar_queue.clear();
                     continue;
                 }
 
-                let explanation = self.language.ui_word_not_in_dict(&unk.word);
+                let explanation = self.language.ui_word_not_in_dict(&unk_word);
                 let deferred = DeferredSpellingPush {
-                    word: unk.word.clone(),
+                    word: unk_word,
                     sentence: resp.sentence.to_string(),
                     paragraph_id: resp.paragraph_id.clone(),
                     doc_offset: resp.doc_offset,
-                    position: unk.position,
+                    position: unk_position,
                     explanation,
                 };
-                let fuzzy_fallback: Vec<String> = unk.spelling_suggestions.clone();
                 unknown_words_to_rank.push((deferred, fuzzy_fallback));
             }
             // (The cache entry for this response was created/reset right
@@ -7660,7 +7923,7 @@ impl eframe::App for ContextApp {
         // Update errors JSON for /errors endpoint
         {
             let json = format!("[{}]", self.writing_errors.iter()
-                .filter(|e| !e.ignored)
+                .filter(|e| !e.ignored && writing_error_has_visible_panel_text(e))
                 .map(|e| {
                     let cat = match e.category {
                         ErrorCategory::Spelling => "spelling",
@@ -7726,12 +7989,17 @@ impl eframe::App for ContextApp {
                 && !matches!(fg_kind, platform::AppKind::OurApp);
             let tips_count = if self.show_grammar && in_writing_app {
                 self.writing_errors.iter()
-                    .filter(|e| !e.ignored && e.rule_name != "llm_correction")
+                    .filter(|e| {
+                        !e.ignored
+                            && e.rule_name != "llm_correction"
+                            && writing_error_has_visible_panel_text(e)
+                    })
                     .count()
             } else {
                 0
             };
-            let has_active_errors = self.writing_errors.iter().any(|e| !e.ignored);
+            let has_active_errors = self.writing_errors.iter()
+                .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
             let pencil_visible = in_writing_app && self.show_grammar
                 && (has_active_errors
                     || (self.grammar_scanning && self.grammar_queue_total > 0)
@@ -9002,7 +9270,8 @@ impl eframe::App for ContextApp {
                 || current_fg_kind_for_layout == platform::AppKind::OurApp
                 || slack_layout;
         let has_active_errors =
-            !suppress_panels_for_viewer && self.writing_errors.iter().any(|e| !e.ignored);
+            !suppress_panels_for_viewer && self.writing_errors.iter()
+                .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
 
         // No tab auto-switch. The pencil icon's red dot already serves as
         // the "you have errors" global indicator regardless of which tab
@@ -9047,7 +9316,9 @@ impl eframe::App for ContextApp {
         if pencil_visible {
             // Each error card ≈ 6 rows now that the alternatives column is
             // gone (was 7 with the right-column stack).
-            let errors = self.writing_errors.iter().filter(|e| !e.ignored).count();
+            let errors = self.writing_errors.iter()
+                .filter(|e| !e.ignored && writing_error_has_visible_panel_text(e))
+                .count();
             content_rows += (errors as f32 * 6.0).max(3.0);
         }
         if suggestion_status_visible {
@@ -9249,7 +9520,8 @@ impl eframe::App for ContextApp {
         // Clear the default background so transparency works
         // Determine tab indicators
         let has_grammar = !self.grammar_errors.is_empty()
-            || self.writing_errors.iter().any(|e| !e.ignored);
+            || self.writing_errors.iter()
+                .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
 
         let theme = theme_for(self.theme);
         // Flip egui's light/dark visuals so widget chrome (scrollbars, button
@@ -9505,7 +9777,11 @@ impl eframe::App for ContextApp {
                     && !suppress_panels_for_viewer;
                 if self.show_grammar && badge_in_writing_app {
                     let err_count = self.writing_errors.iter()
-                        .filter(|e| !e.ignored && e.rule_name != "llm_correction")
+                        .filter(|e| {
+                            !e.ignored
+                                && e.rule_name != "llm_correction"
+                                && writing_error_has_visible_panel_text(e)
+                        })
                         .count();
                     if err_count > 0 {
                         ui.add_space(8.0);
@@ -9938,7 +10214,8 @@ impl eframe::App for ContextApp {
             // (the toolbar's pencil icon stays green to signal clean,
             // which is enough).
             let has_active_errors_render =
-                !suppress_panels_for_viewer && self.writing_errors.iter().any(|e| !e.ignored);
+                !suppress_panels_for_viewer && self.writing_errors.iter()
+                    .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
             let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
             if !suppress_panels_for_viewer
                 && self.selected_tab == 1
@@ -9970,7 +10247,7 @@ impl eframe::App for ContextApp {
 
                 let mut active_errors: Vec<usize> = self.writing_errors.iter()
                     .enumerate()
-                    .filter(|(_, e)| !e.ignored)
+                    .filter(|(_, e)| !e.ignored && writing_error_has_visible_panel_text(e))
                     .map(|(i, _)| i)
                     .collect();
                 // Sort: focused error first, then SentenceBoundary, Grammar, Spelling
@@ -10364,7 +10641,7 @@ impl eframe::App for ContextApp {
                                     self.manager.clear_underline_word(&error.word, &error.paragraph_id);
                                 }
                                 if matches!(error.category, ErrorCategory::Spelling) {
-                                    self.ignored_words.insert(error.word.clone());
+                                    self.ignored_words.insert(error.word.to_lowercase());
                                 }
                                 self.writing_errors[idx].ignored = true;
                                 self.writing_errors[idx].underlined = false;
