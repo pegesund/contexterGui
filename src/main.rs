@@ -12443,11 +12443,6 @@ impl eframe::App for ContextApp {
         let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
         let ocr_is_busy = self.ocr_receiver.is_some() || self.math_receiver.is_some();
         if ocr_has_pending && !ocr_is_busy {
-            if ctx.input(|i| i.viewport().minimized).unwrap_or(false) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                self.last_window_always_on_top = Some(true);
-            }
             let mut do_read = false;
             let mut do_copy = false;
             let mut do_math = false;
