@@ -798,7 +798,7 @@ fn sentence_starts_with_word(sentence: &str, word: &str) -> bool {
 fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign_context_score: usize) -> bool {
     foreign_dist == 0
         || foreign_dist < active_dist
-        || (foreign_context_score > 0 && foreign_dist <= active_dist)
+        || (foreign_context_score >= 2 && foreign_dist <= active_dist)
         || (foreign_context_score >= 2 && active_dist > 1 && foreign_dist <= 2)
 }
 
@@ -825,8 +825,8 @@ mod cross_language_barrier_tests {
     }
 
     #[test]
-    fn skips_equal_distance_inside_foreign_context() {
-        assert!(should_skip_cross_language_match(1, 1, 1));
+    fn keeps_equal_distance_inside_weak_foreign_context() {
+        assert!(!should_skip_cross_language_match(1, 1, 1));
     }
 
     #[test]
@@ -2671,6 +2671,7 @@ impl ContextApp {
         if let Some(word) = word {
             if !word.is_empty() {
                 self.last_space_speak = Instant::now();
+                log!("Speak-on-space: '{}'", word);
                 tts::speak_word(&word);
             }
         }
@@ -3300,7 +3301,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
         if self.language.code() == "en"
             && clean.chars().count() >= 5
-            && foreign_context_score > 0
+            && foreign_context_score >= 2
             && active_best > 1
         {
             log!(

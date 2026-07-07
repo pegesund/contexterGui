@@ -135,7 +135,10 @@ impl PiperTtsEngine {
                 }
 
                 speaking_w.store(true, Ordering::Relaxed);
-                play_wav(&tmp_path, &synth.samples, synth.sample_rate, &stop_w);
+                if !play_wav(&tmp_path, &synth.samples, synth.sample_rate, &stop_w) {
+                    eprintln!("Piper TTS: playback failed for {}", tmp_path.display());
+                    crate::log!("Piper TTS: playback failed for {}", tmp_path.display());
+                }
                 speaking_w.store(false, Ordering::Relaxed);
 
                 let _ = std::fs::remove_file(&tmp_path);
@@ -271,7 +274,7 @@ fn temp_wav_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn play_wav(path: &Path, samples: &[f32], sample_rate: u32, stop: &AtomicBool) {
+fn play_wav(path: &Path, samples: &[f32], sample_rate: u32, stop: &AtomicBool) -> bool {
     use libloading::{Library, Symbol};
     use std::os::windows::ffi::OsStrExt;
 
@@ -284,14 +287,16 @@ fn play_wav(path: &Path, samples: &[f32], sample_rate: u32, stop: &AtomicBool) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Piper TTS: winmm.dll load failed: {}", e);
-            return;
+            crate::log!("Piper TTS: winmm.dll load failed: {}", e);
+            return false;
         }
     };
     let play: Symbol<PlaySoundFn> = match unsafe { winmm.get(b"PlaySoundW") } {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Piper TTS: PlaySoundW lookup failed: {}", e);
-            return;
+            crate::log!("Piper TTS: PlaySoundW lookup failed: {}", e);
+            return false;
         }
     };
     let wide: Vec<u16> = path
@@ -299,8 +304,11 @@ fn play_wav(path: &Path, samples: &[f32], sample_rate: u32, stop: &AtomicBool) {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    unsafe {
-        play(wide.as_ptr(), 0, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    let started = unsafe { play(wide.as_ptr(), 0, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) };
+    if started == 0 {
+        eprintln!("Piper TTS: PlaySoundW failed for {}", path.display());
+        crate::log!("Piper TTS: PlaySoundW failed for {}", path.display());
+        return false;
     }
 
     let duration_ms = (samples.len() as u64 * 1000) / sample_rate.max(1) as u64 + 200;
@@ -314,10 +322,11 @@ fn play_wav(path: &Path, samples: &[f32], sample_rate: u32, stop: &AtomicBool) {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    true
 }
 
 #[cfg(target_os = "macos")]
-fn play_wav(path: &Path, _samples: &[f32], _sample_rate: u32, stop: &AtomicBool) {
+fn play_wav(path: &Path, _samples: &[f32], _sample_rate: u32, stop: &AtomicBool) -> bool {
     let child = std::process::Command::new("afplay").arg(path).spawn().ok();
     if let Some(mut c) = child {
         loop {
@@ -332,11 +341,18 @@ fn play_wav(path: &Path, _samples: &[f32], _sample_rate: u32, stop: &AtomicBool)
                 Err(_) => break,
             }
         }
+        true
+    } else {
+        eprintln!("Piper TTS: afplay spawn failed for {}", path.display());
+        crate::log!("Piper TTS: afplay spawn failed for {}", path.display());
+        false
     }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn play_wav(_path: &Path, _samples: &[f32], _sample_rate: u32, _stop: &AtomicBool) {}
+fn play_wav(_path: &Path, _samples: &[f32], _sample_rate: u32, _stop: &AtomicBool) -> bool {
+    false
+}
 
 impl TtsEngine for PiperTtsEngine {
     fn speak(&self, text: &str) {
