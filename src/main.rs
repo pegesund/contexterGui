@@ -522,10 +522,78 @@ struct SpellingQueueItem {
     paragraph_id: String,
 }
 
+fn word_token_at_position(sentence_ctx: &str, error_word: &str, position: usize) -> Option<String> {
+    let word_lower = error_word.to_lowercase();
+    let mut fallback = None;
+    let mut token_idx = 0usize;
+    for token in sentence_ctx.split_whitespace() {
+        let clean = clean_word_token(token);
+        if clean.is_empty() {
+            continue;
+        }
+        if clean.to_lowercase() == word_lower {
+            if token_idx == position {
+                return Some(clean.to_string());
+            }
+            if fallback.is_none() {
+                fallback = Some(clean.to_string());
+            }
+        }
+        token_idx += 1;
+    }
+    fallback
+}
+
 /// Find a word within a sentence and return (doc_start, doc_end) in absolute char offsets.
 /// `error_word` = the word to find, `sentence_ctx` = the sentence text,
 /// `doc_offset` = char offset of the sentence in the document.
-fn find_word_doc_range(error_word: &str, sentence_ctx: &str, doc_offset: usize) -> (usize, usize) {
+fn find_word_doc_range_at_position(
+    error_word: &str,
+    sentence_ctx: &str,
+    doc_offset: usize,
+    token_position: Option<usize>,
+) -> (usize, usize) {
+    if let Some(position) = token_position {
+        let word_lower = error_word.to_lowercase();
+        let mut token_idx = 0usize;
+        let mut token_start_byte = None;
+        let mut token_start_char = 0usize;
+        let mut char_pos = 0usize;
+
+        for (byte_idx, ch) in sentence_ctx.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(start_byte) = token_start_byte.take() {
+                    let token = &sentence_ctx[start_byte..byte_idx];
+                    let clean = clean_word_token(token);
+                    if !clean.is_empty() {
+                        if token_idx == position && clean.to_lowercase() == word_lower {
+                            let clean_byte = token.find(clean).unwrap_or(0);
+                            let clean_start = token[..clean_byte].chars().count();
+                            let start = doc_offset + token_start_char + clean_start;
+                            return (start, start + clean.chars().count());
+                        }
+                        token_idx += 1;
+                    }
+                }
+            } else if token_start_byte.is_none() {
+                token_start_byte = Some(byte_idx);
+                token_start_char = char_pos;
+            }
+            char_pos += 1;
+        }
+
+        if let Some(start_byte) = token_start_byte {
+            let token = &sentence_ctx[start_byte..];
+            let clean = clean_word_token(token);
+            if !clean.is_empty() && token_idx == position && clean.to_lowercase() == word_lower {
+                let clean_byte = token.find(clean).unwrap_or(0);
+                let clean_start = token[..clean_byte].chars().count();
+                let start = doc_offset + token_start_char + clean_start;
+                return (start, start + clean.chars().count());
+            }
+        }
+    }
+
     let word_lower = error_word.to_lowercase();
     let sent_lower = sentence_ctx.to_lowercase();
     // Find word at a word boundary in the sentence
@@ -805,8 +873,8 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
 #[cfg(test)]
 mod cross_language_barrier_tests {
     use super::{
-        apply_original_initial_case, has_mixed_non_titlecase, sentence_cache_key_for_language,
-        should_skip_cross_language_match,
+        apply_original_initial_case, find_word_doc_range_at_position, has_mixed_non_titlecase,
+        sentence_cache_key_for_language, should_skip_cross_language_match, word_token_at_position,
     };
 
     #[test]
@@ -859,6 +927,46 @@ mod cross_language_barrier_tests {
         assert!(has_mixed_non_titlecase("DoKuMenTeT"));
         assert!(!has_mixed_non_titlecase("Dokumentet"));
         assert!(!has_mixed_non_titlecase("dokumentet"));
+    }
+
+    #[test]
+    fn preserves_cased_unknown_token_from_sentence_position() {
+        let sentence = "Vi lagret Dokummentet, og DOKUMMENTET.";
+
+        assert_eq!(
+            word_token_at_position(sentence, "dokummentet", 2).as_deref(),
+            Some("Dokummentet")
+        );
+        assert_eq!(
+            word_token_at_position(sentence, "dokummentet", 4).as_deref(),
+            Some("DOKUMMENTET")
+        );
+    }
+
+    #[test]
+    fn finds_duplicate_word_range_by_sentence_position() {
+        let sentence = "Vi lagret dokummentet og dokummentet.";
+        let first = find_word_doc_range_at_position("dokummentet", sentence, 10, Some(2));
+        let second = find_word_doc_range_at_position("dokummentet", sentence, 10, Some(4));
+
+        assert_ne!(first, second);
+        assert!(second.0 > first.0);
+        assert_eq!(
+            sentence
+                .chars()
+                .skip(first.0 - 10)
+                .take(first.1 - first.0)
+                .collect::<String>(),
+            "dokummentet"
+        );
+        assert_eq!(
+            sentence
+                .chars()
+                .skip(second.0 - 10)
+                .take(second.1 - second.0)
+                .collect::<String>(),
+            "dokummentet"
+        );
     }
 
     #[test]
@@ -4098,6 +4206,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
                 let already = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == deferred.word.to_lowercase()
+                        && e.position == deferred.position
                         && e.paragraph_id == deferred.paragraph_id
                 });
                 // Cache regardless of the display dedup — the entry's pending
@@ -4196,6 +4305,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
 
             let already = self.writing_errors.iter().any(|e| {
                 e.word.to_lowercase() == deferred.word.to_lowercase()
+                    && e.position == deferred.position
                     && !e.ignored
                     && (e.paragraph_id == deferred.paragraph_id
                         || (!deferred.sentence.is_empty()
@@ -4289,7 +4399,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return;
         }
         let e = self.sentence_cache.entries.entry(key).or_default();
-        e.errors.retain(|x| !(x.is_grammar == err.is_grammar && x.word.eq_ignore_ascii_case(&err.word)));
+        e.errors.retain(|x| {
+            !(x.is_grammar == err.is_grammar
+                && x.position == err.position
+                && x.word.eq_ignore_ascii_case(&err.word))
+        });
         e.errors.push(err);
         save_sentence_cache(&self.sentence_cache);
     }
@@ -5330,7 +5444,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                                 continue;
                             }
                             let already = self.writing_errors.iter().any(|e| {
-                                e.word.to_lowercase() == wl && e.paragraph_id == para_id && !e.ignored
+                                e.word.to_lowercase() == wl
+                                    && e.position == ce.position
+                                    && e.paragraph_id == para_id
+                                    && !e.ignored
                             });
                             if already { continue; }
                         }
@@ -6701,24 +6818,29 @@ self.grammar_queue.clear();
             // ends (where we can call &mut self methods like
             // `find_spelling_suggestions`).
             let mut unknown_items: Vec<(String, usize, Vec<String>)> = resp.unknown_words.iter()
-                .map(|unk| (unk.word.clone(), unk.position, unk.spelling_suggestions.clone()))
+                .map(|unk| {
+                    let display_word = word_token_at_position(&resp.sentence, &unk.word, unk.position)
+                        .unwrap_or_else(|| unk.word.clone());
+                    (display_word, unk.position, unk.spelling_suggestions.clone())
+                })
                 .collect();
             let mut unknown_lowers: std::collections::HashSet<String> = unknown_items.iter()
                 .map(|(word, _, _)| word.to_lowercase())
                 .collect();
+            let mut token_position = 0usize;
             for token in resp.sentence.split_whitespace() {
                 let clean = clean_word_token(token);
                 if clean.is_empty() {
                     continue;
                 }
                 let lower = clean.to_lowercase();
-                if unknown_lowers.contains(&lower) {
-                    continue;
-                }
-                if self.should_force_cased_unknown_spelling(clean, &resp.sentence) {
+                if !unknown_lowers.contains(&lower)
+                    && self.should_force_cased_unknown_spelling(clean, &resp.sentence)
+                {
                     unknown_lowers.insert(lower);
-                    unknown_items.push((clean.to_string(), 0, Vec::new()));
+                    unknown_items.push((clean.to_string(), token_position, Vec::new()));
                 }
+                token_position += 1;
             }
 
             for (unk_word, unk_position, fuzzy_fallback) in unknown_items {
@@ -6731,6 +6853,7 @@ self.grammar_queue.clear();
                 let unk_word_lower = unk_word.to_lowercase();
                 let already_displayed = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == unk_word_lower
+                        && e.position == unk_position
                         && !e.ignored
                         && (e.paragraph_id == resp.paragraph_id
                             || (!resp.sentence.is_empty()
@@ -6740,6 +6863,7 @@ self.grammar_queue.clear();
                 let already_pending = self.pending_spelling_bert.iter().any(|p| {
                     p.deferred_push.as_ref().map_or(false, |d| {
                         d.word.to_lowercase() == unk_word_lower
+                            && d.position == unk_position
                             && (d.paragraph_id == resp.paragraph_id
                                 || (!resp.sentence.is_empty()
                                     && d.sentence == resp.sentence
@@ -6748,6 +6872,7 @@ self.grammar_queue.clear();
                 });
                 let already_in_queue = unknown_words_to_rank.iter().any(|(d, _): &(DeferredSpellingPush, _)| {
                     d.word.to_lowercase() == unk_word_lower
+                        && d.position == unk_position
                         && (d.paragraph_id == resp.paragraph_id
                             || (!resp.sentence.is_empty()
                                 && d.sentence == resp.sentence
@@ -6761,6 +6886,7 @@ self.grammar_queue.clear();
                     let src = self.writing_errors.iter().find(|e| {
                         matches!(e.category, ErrorCategory::Spelling)
                             && e.word.to_lowercase() == unk_word_lower
+                            && e.position == unk_position
                             && !e.ignored
                     }).map(|e| (e.word.clone(), e.suggestion.clone(), e.explanation.clone(),
                                 e.rule_name.clone(), e.top_candidates.clone()));
@@ -6768,7 +6894,11 @@ self.grammar_queue.clear();
                         if let Some(entry) = self.sentence_cache.entries
                             .get_mut(&sentence_cache_key_for_language(self.language.code(), &resp.sentence))
                         {
-                            entry.errors.retain(|x| !(!x.is_grammar && x.word.eq_ignore_ascii_case(&w)));
+                            entry.errors.retain(|x| {
+                                !(!x.is_grammar
+                                    && x.position == unk_position
+                                    && x.word.eq_ignore_ascii_case(&w))
+                            });
                             entry.errors.push(CachedSentenceError {
                                 is_grammar: false,
                                 word: w,
@@ -6954,7 +7084,12 @@ self.grammar_queue.clear();
                         e.word_doc_start, e.word_doc_end, trunc(&e.word, 50));
                 } else if matches!(e.category, ErrorCategory::Spelling) {
                     // Spelling: underline just the misspelled word
-                    let (s, end) = find_word_doc_range(&e.word, &e.sentence_context, e.doc_offset);
+                    let (s, end) = find_word_doc_range_at_position(
+                        &e.word,
+                        &e.sentence_context,
+                        e.doc_offset,
+                        Some(e.position),
+                    );
                     e.word_doc_start = s;
                     e.word_doc_end = end;
                     log!("Underline: spelling range {}..{} for '{}' in '{}'",
