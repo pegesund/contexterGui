@@ -879,12 +879,83 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
         || (foreign_context_score >= 2 && active_dist > 1 && foreign_dist <= 2)
 }
 
+fn known_word_spelling_variants_for_analyzer(
+    analyzer: &mtag::Analyzer,
+    language_code: &str,
+    clean: &str,
+) -> Vec<String> {
+    let lower = clean.to_lowercase();
+    let mut variants = Vec::new();
+
+    if language_code != "en" {
+        let short_diacritic = match lower.as_str() {
+            "pa" => Some("på"),
+            "ar" => Some("år"),
+            _ => None,
+        };
+        if let Some(candidate) = short_diacritic {
+            if analyzer.has_word(candidate) {
+                variants.push(candidate.to_string());
+            }
+        }
+    }
+
+    if analyzer.has_word(&lower) {
+        let kt_gt_alt = if lower.ends_with("kt") {
+            Some(format!("{}gt", &lower[..lower.len() - 2]))
+        } else if lower.ends_with("gt") {
+            Some(format!("{}kt", &lower[..lower.len() - 2]))
+        } else {
+            None
+        };
+        if let Some(alt) = kt_gt_alt.filter(|alt| analyzer.has_word(alt)) {
+            variants.push(alt);
+        }
+
+        if lower.chars().count() >= 4 {
+            let orig_pos = reading_pos_set(analyzer, &lower);
+            for variant in consonant_variants(&lower) {
+                if !analyzer.has_word(&variant) {
+                    continue;
+                }
+                let variant_pos = reading_pos_set(analyzer, &variant);
+                if orig_pos.intersection(&variant_pos).next().is_some() {
+                    variants.push(variant);
+                }
+            }
+        }
+    }
+
+    variants.retain(|variant| variant != &lower);
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+fn reading_pos_set(analyzer: &mtag::Analyzer, word: &str) -> std::collections::HashSet<String> {
+    let mut pos = std::collections::HashSet::new();
+    if let Some(readings) = analyzer.dict_lookup(word) {
+        for reading in &readings {
+            pos.insert(reading.pos.to_string());
+        }
+    }
+    pos
+}
+
 #[cfg(test)]
 mod cross_language_barrier_tests {
     use super::{
         apply_original_initial_case, find_word_doc_range_at_position, has_mixed_non_titlecase,
-        sentence_cache_key_for_language, should_skip_cross_language_match, word_token_at_position,
+        known_word_spelling_variants_for_analyzer, sentence_cache_key_for_language,
+        should_skip_cross_language_match, word_token_at_position,
     };
+    use std::path::PathBuf;
+
+    fn bokmal_analyzer() -> mtag::Analyzer {
+        let dict_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+        mtag::Analyzer::new(dict_path.to_str().unwrap()).expect("load Bokmål analyzer")
+    }
 
     #[test]
     fn skips_exact_foreign_word() {
@@ -986,6 +1057,28 @@ mod cross_language_barrier_tests {
             sentence_cache_key_for_language("en", sentence),
             sentence_cache_key_for_language("nn", sentence)
         );
+    }
+
+    #[test]
+    fn known_word_variants_include_norwegian_short_diacritics() {
+        let analyzer = bokmal_analyzer();
+
+        let pa = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "pa");
+        assert!(pa.iter().any(|candidate| candidate == "på"), "got {pa:?}");
+
+        let ar = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "ar");
+        assert!(ar.iter().any(|candidate| candidate == "år"), "got {ar:?}");
+    }
+
+    #[test]
+    fn known_word_variants_include_consonant_repairs() {
+        let analyzer = bokmal_analyzer();
+
+        let morr = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "morr");
+        assert!(morr.iter().any(|candidate| candidate == "mor"), "got {morr:?}");
+
+        let katen = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "katen");
+        assert!(katen.iter().any(|candidate| candidate == "katten"), "got {katen:?}");
     }
 }
 
@@ -3576,6 +3669,31 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return false;
         }
         !self.is_cross_language_spelling_token(&lower, sentence_ctx)
+    }
+
+    fn spelling_variants_for_suppressed_token(&self, word: &str, sentence_ctx: &str) -> Vec<String> {
+        let clean = clean_word_token(word);
+        if clean.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+            return Vec::new();
+        }
+        let lower = clean.to_lowercase();
+        if self.ignored_words.contains(&lower) {
+            return Vec::new();
+        }
+        if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(&lower)) {
+            return Vec::new();
+        }
+        if Self::is_code_like_spelling_token(&lower) {
+            return Vec::new();
+        }
+        if self.is_cross_language_spelling_token(&lower, sentence_ctx) {
+            return Vec::new();
+        }
+        let analyzer = match &self.analyzer {
+            Some(analyzer) => analyzer,
+            None => return Vec::new(),
+        };
+        known_word_spelling_variants_for_analyzer(analyzer, self.language.code(), &lower)
     }
 
     fn accept_mic_transcript(&mut self, text: String) {
@@ -6581,6 +6699,7 @@ self.grammar_queue.clear();
         // via `actor`), processed after it ends so we can call &mut self
         // methods like find_spelling_suggestions.
         let mut unknown_words_to_rank: Vec<(DeferredSpellingPush, Vec<String>)> = Vec::new();
+        let mut known_variant_checks_to_send: Vec<(String, Vec<String>, String, usize)> = Vec::new();
         let mut cache_dirty = false;
 
         while let Some(resp) = actor.try_recv() {
@@ -6647,6 +6766,7 @@ self.grammar_queue.clear();
             }
 
             let mut added_casing_error = false;
+            let mut added_known_variant_check = false;
             let mut seen_casing_words = std::collections::HashSet::new();
             for token in resp.sentence.split_whitespace() {
                 let clean = clean_word_token(token);
@@ -6715,10 +6835,63 @@ self.grammar_queue.clear();
             }
 
             // Handle grammar errors — only for complete sentences (ends with punctuation)
+            let mut seen_variant_words = std::collections::HashSet::new();
+            for token in resp.sentence.split_whitespace() {
+                let clean = clean_word_token(token);
+                if clean.is_empty() {
+                    continue;
+                }
+                let clean_lower = clean.to_lowercase();
+                if !seen_variant_words.insert(clean_lower.clone()) {
+                    continue;
+                }
+                if !self.bert_ready {
+                    continue;
+                }
+                let variants = self.spelling_variants_for_suppressed_token(clean, &resp.sentence);
+                if variants.is_empty() {
+                    continue;
+                }
+                let already_displayed = self.writing_errors.iter().any(|e| {
+                    e.word.eq_ignore_ascii_case(clean)
+                        && !e.ignored
+                        && (e.paragraph_id == resp.paragraph_id
+                            || (!resp.sentence.is_empty()
+                                && e.sentence_context == resp.sentence
+                                && e.doc_offset == resp.doc_offset))
+                });
+                let already_pending = self.pending_consonant_bert.iter().any(|pending| {
+                    pending.word.eq_ignore_ascii_case(&clean_lower)
+                        && pending.sentence_ctx == resp.sentence
+                        && pending.doc_offset == resp.doc_offset
+                });
+                let already_queued = known_variant_checks_to_send.iter().any(|(word, _, sentence, doc_offset)| {
+                    word.eq_ignore_ascii_case(&clean_lower)
+                        && sentence == &resp.sentence
+                        && *doc_offset == resp.doc_offset
+                });
+                if already_displayed || already_pending || already_queued {
+                    continue;
+                }
+
+                log!(
+                    "known-word spelling variant check: '{}' variants={:?}",
+                    clean_lower,
+                    variants
+                );
+                known_variant_checks_to_send.push((
+                    clean_lower,
+                    variants,
+                    resp.sentence.clone(),
+                    resp.doc_offset,
+                ));
+                added_known_variant_check = true;
+            }
+
             let has_actionable_unknown_words = resp.unknown_words.iter().any(|unk| {
                 self.should_surface_unknown_spelling_word(&unk.word, &resp.sentence)
             });
-            if (has_actionable_unknown_words || added_casing_error) && !resp.errors.is_empty() {
+            if (has_actionable_unknown_words || added_casing_error || added_known_variant_check) && !resp.errors.is_empty() {
                 log!(
                     "Skipping grammar errors until spelling is resolved: '{}' (errors={} unknown={})",
                     trunc(&resp.sentence, 60),
@@ -6733,6 +6906,7 @@ self.grammar_queue.clear();
                 && sentence_complete
                 && !has_actionable_unknown_words
                 && !added_casing_error
+                && !added_known_variant_check
             {
                 for ge in &resp.errors {
                     log!("  Grammar error: '{}' → '{}' ({})", ge.word, ge.suggestion, ge.rule_name);
@@ -6998,6 +7172,10 @@ self.grammar_queue.clear();
         // off the main thread, so this loop no longer blocks rendering.
         // If BERT isn't ready we fall back to the grammar checker's fuzzy
         // suggestion so the user still sees an underline immediately.
+        for (word, variants, sentence, doc_offset) in known_variant_checks_to_send {
+            self.send_consonant_bert(&word, variants, &sentence, doc_offset);
+        }
+
         let user_dict_words_snapshot: Vec<String> = self.user_dict.as_ref()
             .map(|ud| ud.list_words()).unwrap_or_default();
         let doc_word_counts_snapshot = self.doc_word_counts.clone();
