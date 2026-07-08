@@ -245,6 +245,79 @@ pub fn compute_boost(
     wf_boost * ctx_mult
 }
 
+fn repeated_char_repairs(word: &str, analyzer: &mtag::Analyzer) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut repairs = Vec::new();
+    for idx in 1..chars.len() {
+        if chars[idx] != chars[idx - 1] || !chars[idx].is_alphabetic() {
+            continue;
+        }
+        let mut candidate_chars = chars.clone();
+        candidate_chars.remove(idx);
+        let candidate: String = candidate_chars.into_iter().collect();
+        if candidate != word && analyzer.has_word(&candidate) {
+            repairs.push(candidate);
+        }
+    }
+    repairs.sort();
+    repairs.dedup();
+    repairs
+}
+
+#[cfg(test)]
+mod candidate_generation_tests {
+    use super::{find_candidates_pipeline, repeated_char_repairs};
+    use crate::compound_walker::load_fst_from_mfst;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn bokmal_resources() -> (mtag::Analyzer, fst::raw::Fst<Vec<u8>>, HashMap<String, u64>) {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dict = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+        let training = {
+            let mac = base.join("../contexter-repo/training-data");
+            if mac.exists() { mac } else { base.join("../contexter/training-data") }
+        };
+        let analyzer = mtag::Analyzer::new(dict.to_str().unwrap()).expect("load analyzer");
+        let fst = load_fst_from_mfst(dict.to_str().unwrap()).expect("load compound fst");
+        let wordfreq = nostos_cognio::wordfreq::load_wordfreq(training.join("wordfreq.tsv").as_path(), 10);
+        (analyzer, fst, wordfreq)
+    }
+
+    #[test]
+    fn repeated_special_vowel_repairs_known_word() {
+        let (analyzer, _fst, _wordfreq) = bokmal_resources();
+
+        let repairs = repeated_char_repairs("åår", &analyzer);
+
+        assert!(repairs.iter().any(|candidate| candidate == "år"), "got {repairs:?}");
+    }
+
+    #[test]
+    fn repeated_special_vowel_repair_beats_short_neighbors() {
+        let (analyzer, fst, wordfreq) = bokmal_resources();
+        let empty_user: Vec<String> = Vec::new();
+        let empty_doc: HashMap<String, u16> = HashMap::new();
+
+        let candidates = find_candidates_pipeline(
+            &analyzer,
+            Some(&fst),
+            Some(&wordfreq),
+            &empty_user,
+            &empty_doc,
+            "åår",
+            "Det er et fiønt åår.",
+            &language::BokmalLanguage,
+        );
+
+        assert_eq!(candidates.first().map(|(word, _)| word.as_str()), Some("år"));
+    }
+}
+
 /// Phase 1: Generate spelling candidates, ortho-score them, and dictionary-filter.
 ///
 /// THIS IS THE ONLY CANDIDATE-GENERATION ENTRY POINT. Both the GUI path
@@ -291,6 +364,7 @@ pub fn find_candidates_pipeline(
     // that distinguish "this is a real compound" from "this is a fuzzy
     // single-word hit" still can.
     let mut compound_candidates: HashSet<String> = HashSet::new();
+    let mut repeated_char_candidates: HashSet<String> = HashSet::new();
 
     let uses_compound = lang.uses_compound_lookup();
 
@@ -387,6 +461,18 @@ pub fn find_candidates_pipeline(
             if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
                 candidates.push(wl);
             }
+        }
+    }
+
+    // Source 3c: Repeated-character collapse.
+    // Handles typos such as "åår" -> "år". The generic fuzzy path also finds
+    // many one-edit neighbours for short words, so track this source for an
+    // ortho boost below instead of letting FST order decide.
+    for repaired in repeated_char_repairs(&word_lower, analyzer) {
+        edit_distances.entry(repaired.clone()).or_insert(1);
+        repeated_char_candidates.insert(repaired.clone());
+        if seen.insert(repaired.clone()) {
+            candidates.push(repaired);
         }
     }
 
@@ -655,6 +741,9 @@ pub fn find_candidates_pipeline(
         // matches above legitimate dist-1 fixes for non-skeleton inputs
         // (but the gate above prevents that branch entirely for those).
         if input_is_skeleton && consonant_skeleton(w) == input_skel {
+            effective_boost = effective_boost.max(1.5);
+        }
+        if repeated_char_candidates.contains(w) {
             effective_boost = effective_boost.max(1.5);
         }
         ortho_sim *= effective_boost;

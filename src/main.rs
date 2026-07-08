@@ -891,6 +891,7 @@ fn known_word_spelling_variants_for_analyzer(
         let short_diacritic = match lower.as_str() {
             "pa" => Some("på"),
             "ar" => Some("år"),
+            "tæl" => Some("til"),
             _ => None,
         };
         if let Some(candidate) = short_diacritic {
@@ -1068,6 +1069,9 @@ mod cross_language_barrier_tests {
 
         let ar = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "ar");
         assert!(ar.iter().any(|candidate| candidate == "år"), "got {ar:?}");
+
+        let tael = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "tæl");
+        assert!(tael.iter().any(|candidate| candidate == "til"), "got {tael:?}");
     }
 
     #[test]
