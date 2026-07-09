@@ -51,12 +51,71 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
         .count()
 }
 
+fn is_repeated_char_repair(word_lower: &str, candidate_lower: &str) -> bool {
+    let word_chars: Vec<char> = word_lower.chars().collect();
+    let candidate_chars: Vec<char> = candidate_lower.chars().collect();
+    if word_chars.len() != candidate_chars.len() + 1 {
+        return false;
+    }
+
+    for idx in 1..word_chars.len() {
+        if word_chars[idx] != word_chars[idx - 1] || !word_chars[idx].is_alphabetic() {
+            continue;
+        }
+        let mut repaired = word_chars.clone();
+        repaired.remove(idx);
+        if repaired == candidate_chars {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn promote_short_repeated_char_anchor(
+    word_lower: &str,
+    ranked: &mut Vec<(String, f32)>,
+    ortho_map: &HashMap<String, f32>,
+    best_ortho: f32,
+    best_dist: u32,
+) {
+    let anchor = ranked
+        .iter()
+        .enumerate()
+        .take(10)
+        .filter_map(|(idx, (candidate, _))| {
+            if idx == 0 {
+                return None;
+            }
+            let candidate_lower = candidate.to_lowercase();
+            if !is_repeated_char_repair(word_lower, &candidate_lower) {
+                return None;
+            }
+            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.0);
+            let dist = levenshtein_distance(word_lower, &candidate_lower);
+            if dist > best_dist || ortho < 0.82 || ortho < best_ortho * 1.10 {
+                return None;
+            }
+            Some((idx, ortho))
+        })
+        .max_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+    if let Some((anchor_idx, _)) = anchor {
+        let anchor = ranked.remove(anchor_idx);
+        ranked.insert(0, anchor);
+    }
+}
+
 fn promote_orthographic_anchor(
     word_lower: &str,
     ranked: &mut Vec<(String, f32)>,
     ortho_map: &HashMap<String, f32>,
 ) {
-    if ranked.len() < 2 || word_lower.chars().count() < 8 {
+    if ranked.len() < 2 {
         return;
     }
 
@@ -67,6 +126,11 @@ fn promote_orthographic_anchor(
         .get(ranked[0].0.as_str())
         .copied()
         .unwrap_or(0.0);
+
+    if word_lower.chars().count() < 8 {
+        promote_short_repeated_char_anchor(word_lower, ranked, ortho_map, best_ortho, best_dist);
+        return;
+    }
 
     let anchor = ranked
         .iter()
@@ -116,6 +180,38 @@ fn promote_orthographic_anchor(
 mod orthographic_anchor_tests {
     use super::promote_orthographic_anchor;
     use std::collections::HashMap;
+
+    #[test]
+    fn promotes_short_repeated_char_repair_over_contextual_neighbor() {
+        let mut ranked = vec![
+            ("uår".to_string(), 12.0),
+            ("år".to_string(), 11.0),
+        ];
+        let ortho_map = HashMap::from([
+            ("uår".to_string(), 1.06),
+            ("år".to_string(), 1.50),
+        ]);
+
+        promote_orthographic_anchor("åår", &mut ranked, &ortho_map);
+
+        assert_eq!(ranked[0].0, "år");
+    }
+
+    #[test]
+    fn keeps_short_bert_pick_when_repeated_repair_is_not_clearly_better() {
+        let mut ranked = vec![
+            ("uår".to_string(), 12.0),
+            ("år".to_string(), 11.0),
+        ];
+        let ortho_map = HashMap::from([
+            ("uår".to_string(), 1.42),
+            ("år".to_string(), 1.50),
+        ]);
+
+        promote_orthographic_anchor("åår", &mut ranked, &ortho_map);
+
+        assert_eq!(ranked[0].0, "uår");
+    }
 
     #[test]
     fn promotes_close_norwegian_form_over_contextual_plural() {
