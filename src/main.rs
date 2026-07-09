@@ -11179,7 +11179,15 @@ impl eframe::App for ContextApp {
                                         egui::ScrollArea::vertical().max_height(win_h - 80.0).show(ui, |ui| {
                                             for (i, (candidate, _score)) in candidates_clone.iter().enumerate() {
                                                 ui.horizontal(|ui| {
-                                                    if icon_button(ui, "🔊", lang_for_vp.ui_read_aloud()) {
+                                                    let speak_resp = ui
+                                                        .add(egui::Button::new(
+                                                            egui::RichText::new("🔊").size(14.0 * s),
+                                                        ))
+                                                        .on_hover_text(lang_for_vp.ui_read_aloud());
+                                                    if speak_resp.hovered() {
+                                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                    }
+                                                    if speak_resp.clicked() {
                                                         tts::speak_word(candidate);
                                                     }
                                                     if ui.button(
