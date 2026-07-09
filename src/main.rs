@@ -1907,6 +1907,19 @@ impl BridgeManager {
         bridge.map(|b| b.place_cursor_at_end_of_word(word, paragraph_id)).unwrap_or(false)
     }
 
+    fn can_navigate_to_error(&self, paragraph_id: &str) -> bool {
+        if paragraph_id.is_empty() {
+            return self
+                .effective_bridge()
+                .map(|b| b.name() == "Word COM")
+                .unwrap_or(false);
+        }
+
+        self.bridge_for_paragraph_id(paragraph_id)
+            .map(|b| matches!(b.name(), "Word COM" | "Word Add-in"))
+            .unwrap_or(false)
+    }
+
     fn read_document_context(&self) -> Option<String> {
         self.effective_bridge().and_then(|b| b.read_document_context())
     }
@@ -1962,12 +1975,19 @@ impl BridgeManager {
     }
 
     fn select_word_in_paragraph(&self, word: &str, paragraph_id: &str) -> bool {
-        for bridge in &self.bridges {
-            if bridge.select_word_in_paragraph(word, paragraph_id) {
-                return true;
-            }
-        }
-        false
+        self.restore_last_external_target();
+        let bridge = self
+            .bridge_for_paragraph_id(paragraph_id)
+            .or_else(|| self.effective_bridge());
+        bridge.map(|b| {
+            log!(
+                "select_word_in_paragraph('{}') via bridge '{}' para='{}'",
+                trunc(word, 40),
+                b.name(),
+                trunc(paragraph_id, 12)
+            );
+            b.select_word_in_paragraph(word, paragraph_id)
+        }).unwrap_or(false)
     }
 
     fn set_target_hwnd(&self, hwnd: isize) {
@@ -10702,8 +10722,10 @@ impl eframe::App for ContextApp {
                                     if icon_button(ui, "🔊", self.ui_language.ui_read_aloud()) {
                                         tts::speak_word(&err_suggestion);
                                     }
-                                    if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
-                                        action = Some((idx, "goto"));
+                                    if self.manager.can_navigate_to_error(&error.paragraph_id) {
+                                        if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
+                                            action = Some((idx, "goto"));
+                                        }
                                     }
                                 });
                                 ui.label(
@@ -10784,8 +10806,10 @@ impl eframe::App for ContextApp {
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                         self.rule_info_show_more = false;
                                     }
-                                    if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
-                                        action = Some((idx, "goto"));
+                                    if self.manager.can_navigate_to_error(&error.paragraph_id) {
+                                        if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
+                                            action = Some((idx, "goto"));
+                                        }
                                     }
                                 });
                                 // Only the green suggestion — clickable to apply the fix.
@@ -10873,8 +10897,10 @@ impl eframe::App for ContextApp {
                                     // 0.5 cm right padding so buttons don't hug the edge.
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.add_space(19.0 * s);
-                                        if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
-                                            action = Some((idx, "goto"));
+                                        if self.manager.can_navigate_to_error(&error.paragraph_id) {
+                                            if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
+                                                action = Some((idx, "goto"));
+                                            }
                                         }
                                         if icon_button(ui, "?", self.ui_language.ui_more_suggestions()) {
                                             action = Some((idx, "suggest"));
@@ -11055,15 +11081,22 @@ impl eframe::App for ContextApp {
                                 };
                                 let para_id = error.paragraph_id.clone();
                                 log!("GOTO: select '{}' in paragraph '{}'", goto_word, para_id);
+                                let can_navigate = self.manager.can_navigate_to_error(&para_id);
                                 // Try paragraph-based selection first (add-in), fall back to range
-                                if !para_id.is_empty() && self.manager.select_word_in_paragraph(&goto_word, &para_id) {
+                                if !can_navigate {
+                                    log!("GOTO: navigation unsupported for paragraph '{}'", para_id);
+                                }
+                                else if !para_id.is_empty() && self.manager.select_word_in_paragraph(&goto_word, &para_id) {
                                     log!("GOTO: select_word_in_paragraph succeeded");
                                     // No screen position from add-in — skip window move
                                 }
                                 // Fall back to character range selection (Windows COM)
                                 else {
-                                let start = error.doc_offset;
-                                let end = start + error.sentence_context.chars().count();
+                                let (start, end) = if error.word_doc_start < error.word_doc_end {
+                                    (error.word_doc_start, error.word_doc_end)
+                                } else {
+                                    (error.doc_offset, error.doc_offset + error.sentence_context.chars().count())
+                                };
                                 log!("GOTO: fallback selecting range {}..{}", start, end);
                                 match self.manager.select_range(start, end) {
                                     Some((x, y)) => {
