@@ -1167,7 +1167,9 @@ fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
         let char_start = extract_json_number(obj, "charStart");
         let cursor_start = extract_json_number(obj, "cursorStart");
 
-        if !text.is_empty() {
+        // Empty text with a paragraph id is meaningful: the paragraph was
+        // cleared by delete/cut, and main.rs must see it to prune stale errors.
+        if !text.is_empty() || !paragraph_id.is_empty() {
             results.push(ChangedParagraph { paragraph_id, text, char_start, cursor_start });
         }
 
@@ -1230,6 +1232,31 @@ fn parse_deleted_json(body: &str) -> Option<Vec<String>> {
     }
 
     if results.is_empty() { None } else { Some(results) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_changed_json;
+
+    #[test]
+    fn parse_changed_json_keeps_empty_paragraph_with_id() {
+        let body = r#"{"type":"changed","paragraphs":[{"paragraphId":"p1","text":"","charStart":42,"cursorStart":0}]}"#;
+
+        let paragraphs = parse_changed_json(body).expect("changed paragraph");
+
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].paragraph_id, "p1");
+        assert_eq!(paragraphs[0].text, "");
+        assert_eq!(paragraphs[0].char_start, Some(42));
+        assert_eq!(paragraphs[0].cursor_start, Some(0));
+    }
+
+    #[test]
+    fn parse_changed_json_skips_empty_paragraph_without_id() {
+        let body = r#"{"type":"changed","paragraphs":[{"paragraphId":"","text":"","charStart":0,"cursorStart":0}]}"#;
+
+        assert!(parse_changed_json(body).is_none());
+    }
 }
 
 fn pop_only_pending_reply(
