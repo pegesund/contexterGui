@@ -10702,7 +10702,7 @@ impl eframe::App for ContextApp {
                                     if icon_button(ui, "🔊", self.ui_language.ui_read_aloud()) {
                                         tts::speak_word(&err_suggestion);
                                     }
-                                    if icon_button(ui, "▶", self.ui_language.ui_show_in_document()) {
+                                    if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
@@ -10784,7 +10784,7 @@ impl eframe::App for ContextApp {
                                         self.rule_info_window = Some((err_rule.clone(), err_expl.clone(), err_ctx.clone(), fix_idx, first_suggestion.clone()));
                                         self.rule_info_show_more = false;
                                     }
-                                    if icon_button(ui, "▶", self.ui_language.ui_show_in_document()) {
+                                    if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
                                         action = Some((idx, "goto"));
                                     }
                                 });
@@ -10873,7 +10873,7 @@ impl eframe::App for ContextApp {
                                     // 0.5 cm right padding so buttons don't hug the edge.
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.add_space(19.0 * s);
-                                        if icon_button(ui, "▶", self.ui_language.ui_show_in_document()) {
+                                        if icon_button(ui, "⌖", self.ui_language.ui_show_in_document()) {
                                             action = Some((idx, "goto"));
                                         }
                                         if icon_button(ui, "?", self.ui_language.ui_more_suggestions()) {
