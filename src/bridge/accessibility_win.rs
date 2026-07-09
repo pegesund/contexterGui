@@ -109,6 +109,9 @@ impl AccessibilityBridge {
     }
 
     fn accept_text_element(&self, element: IUIAutomationElement) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
+        if !Self::is_visible_text_element(&element) {
+            return None;
+        }
         let (raw, doc) = Self::try_read_raw(&element)?;
         if doc.is_empty() || !Self::is_text_field(&doc) || self.should_reject_stale_doc(&doc) {
             return None;
@@ -119,6 +122,30 @@ impl AccessibilityBridge {
         }
         let caret = Self::estimate_caret_from_element(&element, &raw.before);
         Some((raw, doc, element, caret))
+    }
+
+    fn is_visible_text_element(element: &IUIAutomationElement) -> bool {
+        unsafe {
+            if let Ok(is_offscreen) = element.CurrentIsOffscreen() {
+                if is_offscreen.as_bool() {
+                    bridge_log("Rejecting offscreen UIA text element");
+                    return false;
+                }
+            }
+
+            if let Ok(rect) = element.CurrentBoundingRectangle() {
+                let width = rect.right - rect.left;
+                let height = rect.bottom - rect.top;
+                if width <= 0 || height <= 0 {
+                    bridge_log(&format!(
+                        "Rejecting zero-size UIA text element: {}x{}",
+                        width, height
+                    ));
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn find_text_element_from_hwnd(&self, uia: &IUIAutomation, hwnd: HWND) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
@@ -351,7 +378,9 @@ impl AccessibilityBridge {
             // This gives us LIVE text even when the terminal has focus
             let saved = self.saved_element.borrow().clone();
             if let Some(ref element) = saved {
-                if let Some((raw, doc)) = Self::try_read_raw(element) {
+                if !Self::is_visible_text_element(element) {
+                    bridge_log("Saved element hidden/offscreen - clearing");
+                } else if let Some((raw, doc)) = Self::try_read_raw(element) {
                     if !doc.is_empty() && !self.should_reject_stale_doc(&doc) {
                         bridge_log(&format!("Saved element re-read: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
@@ -611,18 +640,27 @@ impl AccessibilityBridge {
         unsafe {
             let saved = self.saved_element.borrow().clone();
             if let Some(ref element) = saved {
-                if let Some(range) = Self::try_get_document_range(element) {
-                    bridge_log("get_document_range: saved element");
-                    return Some(range);
+                if Self::is_visible_text_element(element) {
+                    if let Some(range) = Self::try_get_document_range(element) {
+                        bridge_log("get_document_range: saved element");
+                        return Some(range);
+                    }
+                } else {
+                    bridge_log("get_document_range: saved element hidden/offscreen - clearing");
+                    drop(saved);
+                    *self.saved_element.borrow_mut() = None;
+                    self.saved_element_pid.set(0);
                 }
             }
 
             let uia = crate::platform::windows::cached_uia()?;
 
             if let Ok(focused) = uia.GetFocusedElement() {
-                if let Some(range) = Self::try_get_document_range(&focused) {
-                    bridge_log("get_document_range: focused element");
-                    return Some(range);
+                if Self::is_visible_text_element(&focused) {
+                    if let Some(range) = Self::try_get_document_range(&focused) {
+                        bridge_log("get_document_range: focused element");
+                        return Some(range);
+                    }
                 }
             }
 
@@ -632,9 +670,11 @@ impl AccessibilityBridge {
             }
 
             let root = uia.ElementFromHandle(HWND(hwnd_val as *mut _)).ok()?;
-            if let Some(range) = Self::try_get_document_range(&root) {
-                bridge_log("get_document_range: hwnd root");
-                return Some(range);
+            if Self::is_visible_text_element(&root) {
+                if let Some(range) = Self::try_get_document_range(&root) {
+                    bridge_log("get_document_range: hwnd root");
+                    return Some(range);
+                }
             }
 
             let condition = uia.CreateTrueCondition().ok()?;
@@ -643,6 +683,9 @@ impl AccessibilityBridge {
             bridge_log(&format!("get_document_range: {} descendants", count));
             for i in 0..count.min(100) {
                 if let Ok(desc) = descendants.GetElement(i) {
+                    if !Self::is_visible_text_element(&desc) {
+                        continue;
+                    }
                     if let Some(range) = Self::try_get_document_range(&desc) {
                         let name = desc.CurrentName().unwrap_or_default().to_string();
                         bridge_log(&format!("get_document_range: descendant {} name='{}'", i, name));
