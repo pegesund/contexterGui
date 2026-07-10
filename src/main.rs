@@ -7847,7 +7847,8 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, hover: &str) -> bool {
     };
     let btn = egui::Button::new(egui::RichText::new(icon).size(14.0).color(text_col))
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, stroke_col));
+        .stroke(egui::Stroke::new(1.0, stroke_col))
+        .min_size(egui::vec2(22.0, 20.0));
     let resp = ui.add(btn);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hover));
     if resp.hovered() {
