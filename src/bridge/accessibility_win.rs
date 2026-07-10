@@ -421,6 +421,10 @@ impl AccessibilityBridge {
         }
     }
 
+    fn is_plausible_gui_caret((_, y): (i32, i32)) -> bool {
+        y.abs() >= 20
+    }
+
     fn read_context_via_uia(&self) -> Option<String> {
         unsafe {
             let uia = crate::platform::windows::cached_uia()?;
@@ -815,7 +819,7 @@ impl TextBridge for AccessibilityBridge {
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        let gui_caret = self.get_caret_pos();
+        let gui_caret = self.get_caret_pos().filter(|&pos| Self::is_plausible_gui_caret(pos));
         let raw = self.get_raw_text();
         match raw {
             Some((raw, estimated_caret)) => {
