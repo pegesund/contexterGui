@@ -249,6 +249,34 @@ pub fn compute_boost(
     }
 }
 
+fn rescore_spelling_response<F>(
+    scored_candidates: &[(String, f32)],
+    original_candidates: &[(String, f32)],
+    mut boost_for: F,
+) -> Vec<(String, f32)>
+where
+    F: FnMut(&str) -> f32,
+{
+    let ortho_map: HashMap<String, f32> = original_candidates.iter().cloned().collect();
+    let worker_already_applied_ortho = original_candidates.is_empty();
+    let mut rescored: Vec<(String, f32)> = scored_candidates
+        .iter()
+        .map(|(candidate, worker_score)| {
+            let ortho_weight = if worker_already_applied_ortho {
+                1.0
+            } else {
+                ortho_map.get(candidate).copied().unwrap_or(0.5).sqrt()
+            };
+            (
+                candidate.clone(),
+                worker_score * ortho_weight * boost_for(candidate),
+            )
+        })
+        .collect();
+    rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    rescored
+}
+
 fn trunc(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }
     let mut end = max;
@@ -948,7 +976,7 @@ mod cross_language_barrier_tests {
     use super::{
         apply_original_initial_case, find_word_doc_range_at_position, has_mixed_non_titlecase,
         known_word_spelling_variants_for_analyzer, sentence_cache_key_for_language,
-        should_skip_cross_language_match, word_token_at_position,
+        rescore_spelling_response, should_skip_cross_language_match, word_token_at_position,
     };
     use std::path::PathBuf;
 
@@ -1083,6 +1111,24 @@ mod cross_language_barrier_tests {
 
         let katen = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "katen");
         assert!(katen.iter().any(|candidate| candidate == "katten"), "got {katen:?}");
+    }
+
+    #[test]
+    fn full_worker_spelling_response_preserves_orthographic_order() {
+        let scored = vec![("år".to_string(), 12.0), ("uår".to_string(), 11.0)];
+        let reranked = rescore_spelling_response(&scored, &[], |_| 1.0);
+
+        assert_eq!(reranked[0].0, "år");
+        assert_eq!(reranked[0].1, 12.0);
+    }
+
+    #[test]
+    fn lightweight_spelling_response_still_applies_main_ortho_scores() {
+        let scored = vec![("uår".to_string(), 12.0), ("år".to_string(), 11.0)];
+        let candidates = vec![("uår".to_string(), 0.5), ("år".to_string(), 1.5)];
+        let reranked = rescore_spelling_response(&scored, &candidates, |_| 1.0);
+
+        assert_eq!(reranked[0].0, "år");
     }
 }
 
@@ -4401,20 +4447,31 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
             return;
         }
-        // scored_candidates is already sorted best-first by the worker
-        // Re-rank using sqrt(ortho) weighting from the original candidates
-        let ortho_map: std::collections::HashMap<String, f32> = pending.candidates.iter().cloned().collect();
-        let mut rescored: Vec<(String, f32)> = scored_candidates.iter()
-            .map(|(candidate, bert_score)| {
-                let ortho_sim = ortho_map.get(candidate).copied().unwrap_or(0.5);
-                let boost = compute_boost(candidate, &self.doc_word_counts,
-                    self.user_dict.as_ref(), self.wordfreq.as_deref(), &*self.language);
-                let final_score = bert_score * ortho_sim.sqrt() * boost;
-                log!("  spelling BERT: '{}' bert={:.3} × sqrt(ortho {:.2}) × boost {:.2} = {:.3}", candidate, bert_score, ortho_sim, boost, final_score);
-                (candidate.clone(), final_score)
-            })
-            .collect();
-        rescored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // SpellingFull already ran the shared orthographic scorer in the worker.
+        // Its pending request intentionally has no candidate map, so applying
+        // the old 0.5 fallback here erased exact repairs such as åår -> år.
+        // Lightweight SpellingScore requests still carry their original ortho
+        // scores and keep the existing sqrt(ortho) weighting here.
+        let worker_already_applied_ortho = pending.candidates.is_empty();
+        let rescored = rescore_spelling_response(
+            scored_candidates,
+            &pending.candidates,
+            |candidate| compute_boost(
+                candidate,
+                &self.doc_word_counts,
+                self.user_dict.as_ref(),
+                self.wordfreq.as_deref(),
+                &*self.language,
+            ),
+        );
+        for (candidate, final_score) in &rescored {
+            log!(
+                "  spelling BERT: '{}' source={} final={:.3}",
+                candidate,
+                if worker_already_applied_ortho { "worker-ortho" } else { "main-ortho" },
+                final_score,
+            );
+        }
 
         let Some((best, _)) = rescored.first() else { return };
 
