@@ -9640,6 +9640,13 @@ impl eframe::App for ContextApp {
         let has_completions = !self.completions.is_empty() || !self.open_completions.is_empty();
         let current_fg_for_layout = self.platform.foreground_app();
         let current_fg_kind_for_layout = self.platform.classify_app(&current_fg_for_layout);
+        // A press delivered to this viewport can arrive one frame before
+        // Windows reports Spell as foreground. Hold the current screen
+        // position through that activation frame; otherwise a transient UIA
+        // caret from the previous app can move the popup before the action
+        // (fix, completion, or toolbar toggle) is handled.
+        let overlay_pointer_pressed =
+            ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
         let fg_for_layout = if current_fg_kind_for_layout == platform::AppKind::OurApp
             && self.last_external_layout_app.pid != 0
         {
@@ -9817,7 +9824,11 @@ impl eframe::App for ContextApp {
         }
 
         let mut next_outer_pos = None;
-        if self.follow_cursor && self.goto_freeze_until.is_none() {
+        if self.follow_cursor
+            && self.goto_freeze_until.is_none()
+            && current_fg_kind_for_layout != platform::AppKind::OurApp
+            && !overlay_pointer_pressed
+        {
             if let Some((x, y)) = self.last_caret_pos {
                 let (screen_w, screen_h) = get_screen_size(&*self.platform);
                 let slack_positioning = slack_layout;
