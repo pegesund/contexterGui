@@ -816,6 +816,23 @@ fn paragraph_id_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
     }
 }
 
+fn error_paragraph_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
+    paragraph_id.is_empty() || paragraph_id_matches_bridge(paragraph_id, bridge_name)
+}
+
+fn spelling_error_still_present(check_text: &str, word: &str, sentence_context: &str) -> bool {
+    let word_lower = word.to_lowercase();
+    let word_present = check_text
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|candidate| candidate == word_lower);
+    if !word_present {
+        return false;
+    }
+
+    let sentence_lower = sentence_context.trim().to_lowercase();
+    sentence_lower.is_empty() || check_text.contains(&sentence_lower)
+}
+
 fn apply_original_initial_case(raw: &str, original: &str) -> String {
     let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
     if s.is_empty() {
@@ -985,10 +1002,11 @@ fn reading_pos_set(analyzer: &mtag::Analyzer, word: &str) -> std::collections::H
 #[cfg(test)]
 mod cross_language_barrier_tests {
     use super::{
-        apply_original_initial_case, find_word_doc_range_at_position, has_mixed_non_titlecase,
-        known_word_spelling_variants_for_analyzer, sentence_cache_key_for_language,
-        paragraph_id_matches_bridge, rescore_spelling_response,
-        should_skip_cross_language_match, word_token_at_position,
+        apply_original_initial_case, error_paragraph_matches_bridge,
+        find_word_doc_range_at_position, has_mixed_non_titlecase,
+        known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
+        rescore_spelling_response, sentence_cache_key_for_language,
+        should_skip_cross_language_match, spelling_error_still_present, word_token_at_position,
     };
     use std::path::PathBuf;
 
@@ -1149,6 +1167,22 @@ mod cross_language_barrier_tests {
         assert!(!paragraph_id_matches_bridge("uia:0", "Browser"));
         assert!(paragraph_id_matches_bridge("uia:0", "Accessibility"));
         assert!(!paragraph_id_matches_bridge("browser:0", "Accessibility"));
+        assert!(error_paragraph_matches_bridge("", "Browser"));
+    }
+
+    #[test]
+    fn spelling_error_requires_its_original_sentence_to_remain() {
+        let text = "another typo remains. the original sentence is now fixed.";
+        assert!(!spelling_error_still_present(
+            text,
+            "typo",
+            "This sentence contained typo."
+        ));
+        assert!(spelling_error_still_present(
+            "this sentence contained typo. another sentence.",
+            "typo",
+            "This sentence contained typo."
+        ));
     }
 }
 
@@ -5211,10 +5245,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 };
                 match e.category {
                     ErrorCategory::Grammar => !check_text.contains(&e.sentence_context.to_lowercase()),
-                    ErrorCategory::Spelling => {
-                        let word_lower = e.word.to_lowercase();
-                        !check_text.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower)
-                    }
+                    ErrorCategory::Spelling => !spelling_error_still_present(
+                        check_text,
+                        &e.word,
+                        &e.sentence_context,
+                    ),
                     ErrorCategory::SentenceBoundary => !check_text.contains(&e.word.to_lowercase()),
                 }
             };
@@ -5244,10 +5279,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             };
             let still_present = match e.category {
                 ErrorCategory::Grammar => check_text.contains(&e.sentence_context.to_lowercase()),
-                ErrorCategory::Spelling => {
-                    let word_lower = e.word.to_lowercase();
-                    check_text.split(|c: char| !c.is_alphanumeric()).any(|w| w == word_lower)
-                }
+                ErrorCategory::Spelling => spelling_error_still_present(
+                    check_text,
+                    &e.word,
+                    &e.sentence_context,
+                ),
                 ErrorCategory::SentenceBoundary => check_text.contains(&e.word.to_lowercase()),
             };
             if !still_present {
@@ -6628,8 +6664,10 @@ self.grammar_queue.clear();
         let mut seen: std::collections::HashSet<(String, usize, String)> =
             std::collections::HashSet::new();
         let mut count = 0;
+        let active_bridge = self.manager.active_bridge_name().to_string();
         for e in &self.writing_errors {
             if e.ignored { continue; }
+            if !error_paragraph_matches_bridge(&e.paragraph_id, &active_bridge) { continue; }
             if e.suggestion.is_empty() { continue; }
             if e.suggestion == "<DELETE>" { continue; }      // needs special remove flow
             if e.rule_name == "llm_correction" { continue; } // LLM owns these
@@ -8386,10 +8424,16 @@ impl eframe::App for ContextApp {
         self.poll_llm_responses();
        
 
+        let active_error_bridge = self.manager.active_bridge_name().to_string();
+
         // Update errors JSON for /errors endpoint
         {
             let json = format!("[{}]", self.writing_errors.iter()
-                .filter(|e| !e.ignored && writing_error_has_visible_panel_text(e))
+                .filter(|e| {
+                    !e.ignored
+                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && writing_error_has_visible_panel_text(e)
+                })
                 .map(|e| {
                     let cat = match e.category {
                         ErrorCategory::Spelling => "spelling",
@@ -8457,6 +8501,7 @@ impl eframe::App for ContextApp {
                 self.writing_errors.iter()
                     .filter(|e| {
                         !e.ignored
+                            && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
                             && e.rule_name != "llm_correction"
                             && writing_error_has_visible_panel_text(e)
                     })
@@ -8465,7 +8510,11 @@ impl eframe::App for ContextApp {
                 0
             };
             let has_active_errors = self.writing_errors.iter()
-                .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
+                .any(|e| {
+                    !e.ignored
+                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && writing_error_has_visible_panel_text(e)
+                });
             let pencil_visible = in_writing_app && self.show_grammar
                 && (has_active_errors
                     || (self.grammar_scanning && self.grammar_queue_total > 0)
@@ -9762,6 +9811,7 @@ impl eframe::App for ContextApp {
         let fg_for_layout_kind = self.platform.classify_app(&fg_for_layout);
         let slack_layout = fg_for_layout.exe_name.contains("slack");
         let suppress_panels_for_viewer = windows_notepad_non_prose_viewer(&fg_for_layout);
+        let active_error_bridge = self.manager.active_bridge_name().to_string();
         // Windows/macOS often spend the first click on activating our topmost
         // borderless popup. Count mouse-down as the action trigger there so
         // completion rows, quick-fix labels, and toolbar icons work with a
@@ -9772,7 +9822,11 @@ impl eframe::App for ContextApp {
                 || slack_layout;
         let has_active_errors =
             !suppress_panels_for_viewer && self.writing_errors.iter()
-                .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
+                .any(|e| {
+                    !e.ignored
+                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && writing_error_has_visible_panel_text(e)
+                });
 
         // No tab auto-switch. The pencil icon's red dot already serves as
         // the "you have errors" global indicator regardless of which tab
@@ -9818,7 +9872,11 @@ impl eframe::App for ContextApp {
             // Each error card ≈ 6 rows now that the alternatives column is
             // gone (was 7 with the right-column stack).
             let errors = self.writing_errors.iter()
-                .filter(|e| !e.ignored && writing_error_has_visible_panel_text(e))
+                .filter(|e| {
+                    !e.ignored
+                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && writing_error_has_visible_panel_text(e)
+                })
                 .count();
             content_rows += (errors as f32 * 6.0).max(3.0);
         }
@@ -10026,7 +10084,11 @@ impl eframe::App for ContextApp {
         // Determine tab indicators
         let has_grammar = !self.grammar_errors.is_empty()
             || self.writing_errors.iter()
-                .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
+                .any(|e| {
+                    !e.ignored
+                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && writing_error_has_visible_panel_text(e)
+                });
 
         let theme = theme_for(self.theme);
         // Flip egui's light/dark visuals so widget chrome (scrollbars, button
@@ -10284,6 +10346,7 @@ impl eframe::App for ContextApp {
                     let err_count = self.writing_errors.iter()
                         .filter(|e| {
                             !e.ignored
+                                && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
                                 && e.rule_name != "llm_correction"
                                 && writing_error_has_visible_panel_text(e)
                         })
@@ -10720,7 +10783,11 @@ impl eframe::App for ContextApp {
             // which is enough).
             let has_active_errors_render =
                 !suppress_panels_for_viewer && self.writing_errors.iter()
-                    .any(|e| !e.ignored && writing_error_has_visible_panel_text(e));
+                    .any(|e| {
+                        !e.ignored
+                            && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                            && writing_error_has_visible_panel_text(e)
+                    });
             let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
             if !suppress_panels_for_viewer
                 && self.selected_tab == 1
@@ -10752,7 +10819,11 @@ impl eframe::App for ContextApp {
 
                 let mut active_errors: Vec<usize> = self.writing_errors.iter()
                     .enumerate()
-                    .filter(|(_, e)| !e.ignored && writing_error_has_visible_panel_text(e))
+                    .filter(|(_, e)| {
+                        !e.ignored
+                            && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                            && writing_error_has_visible_panel_text(e)
+                    })
                     .map(|(i, _)| i)
                     .collect();
                 // Sort: focused error first, then SentenceBoundary, Grammar, Spelling
