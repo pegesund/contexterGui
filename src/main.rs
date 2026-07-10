@@ -2452,14 +2452,12 @@ struct ContextApp {
     /// apps. 0 = uninitialised. Updated only for non-OurApp foregrounds so
     /// briefly clicking on Spell's own window doesn't reset the tracker.
     prev_fg_pid: u32,
-    /// Whether the previous foreground EXTERNAL app was a writing surface
-    /// (browser, Word, or any app Spell can write with). This prevents a
-    /// transient Word -> Explorer/Spell -> Word bounce from clearing Word's
-    /// active errors when focus returns.
-    prev_fg_was_writing_surface: Option<bool>,
-    /// Whether the previously focused external app was Word — a switch that
+    /// PID of the last foreground writing surface. This intentionally skips
+    /// transient non-writing foregrounds like Explorer and Task Switching.
+    prev_writing_fg_pid: u32,
+    /// Whether the previous foreground writing surface was Word. A switch that
     /// involves Word on either side keeps Word error state (partial clear).
-    prev_fg_was_word: bool,
+    prev_writing_fg_was_word: bool,
     /// True when the foreground app is a browser this frame. Set at the
     /// top of every update() so grammar/BERT pollers can gate on it.
     suppress_errors: bool,
@@ -3224,8 +3222,8 @@ impl ContextApp {
             prev_fg_was_browser: false,
             prev_word_title: String::new(),
             prev_fg_pid: 0,
-            prev_fg_was_writing_surface: None,
-            prev_fg_was_word: false,
+            prev_writing_fg_pid: 0,
+            prev_writing_fg_was_word: false,
             suppress_errors: false,
             prev_was_writing_app: None,
             update_service: {
@@ -7957,8 +7955,11 @@ impl eframe::App for ContextApp {
             let now_browser = kind == platform::AppKind::Browser;
             let now_word = kind == platform::AppKind::Word;
             let now_our_app = kind == platform::AppKind::OurApp;
+            let now_known_external = !now_our_app && fg.pid != 0;
+            let now_writing_surface =
+                now_known_external && (now_browser || self.platform.is_writing_app(&fg));
 
-            if !now_our_app && (now_browser || self.platform.is_writing_app(&fg)) {
+            if now_writing_surface {
                 self.last_external_layout_app = fg.clone();
             }
 
@@ -7969,7 +7970,7 @@ impl eframe::App for ContextApp {
             //
             // Skip when transitioning TO our own window so brief clicks on
             // Spell don't blow away the active state.
-            if !now_our_app
+            if now_known_external
                 && self.prev_fg_pid != 0
                 && fg.pid != self.prev_fg_pid
             {
@@ -8031,10 +8032,10 @@ impl eframe::App for ContextApp {
                 // state is re-derivable via request_word_rescan() below;
                 // Browser state re-derives from /tmp/spell-browser.json
                 // on the next extension write.
-                let entering_writing_surface = !now_our_app
-                    && (now_browser || self.platform.is_writing_app(&fg));
                 let switching_between_writing_surfaces =
-                    self.prev_fg_was_writing_surface == Some(true) && entering_writing_surface;
+                    now_writing_surface
+                        && self.prev_writing_fg_pid != 0
+                        && fg.pid != self.prev_writing_fg_pid;
                 // Skip the clear entirely when there's nothing to clear. The
                 // log line was spamming chrome://extensions-style noise on
                 // every app-switch even though the operation was a no-op,
@@ -8054,7 +8055,7 @@ impl eframe::App for ContextApp {
                 // keep Word-scoped state and drop only the other app's
                 // (uia:/ax:/browser:) state. The display layer hides Word
                 // errors while a non-Word app is focused.
-                let involves_word = now_word || self.prev_fg_was_word;
+                let involves_word = now_word || self.prev_writing_fg_was_word;
                 if switching_between_writing_surfaces && has_state_to_clear && involves_word {
                     let before = self.writing_errors.len();
                     self.writing_errors.retain(|e| is_word_scoped_paragraph_id(&e.paragraph_id));
@@ -8088,11 +8089,11 @@ impl eframe::App for ContextApp {
                     self.last_known_cursor_offset = None;
                     self.focused_error_idx = None;
                     log!("Cross-app Word detour ({}→{}) — kept {} Word errors, dropped {} non-Word",
-                        self.prev_fg_pid, fg.pid,
+                        self.prev_writing_fg_pid, fg.pid,
                         self.writing_errors.len(), before - self.writing_errors.len());
                 } else if switching_between_writing_surfaces && has_state_to_clear {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
-                        self.prev_fg_pid, fg.pid,
+                        self.prev_writing_fg_pid, fg.pid,
                         self.writing_errors.len(), self.paragraph_texts.len());
                     self.manager.clear_all_error_underlines();
                     self.writing_errors.clear();
@@ -8147,14 +8148,16 @@ impl eframe::App for ContextApp {
                 self.prev_word_title = title;
             }
 
-            // Only track external apps; clicking on Spell itself shouldn't
+            // Only track known external apps; clicking on Spell itself or an
+            // unknown pid=0 foreground shouldn't
             // mark Spell as the "previous" app — otherwise the next external
             // switch wouldn't be detected (Spell.pid would equal Spell.pid).
-            if !now_our_app {
+            if now_known_external {
                 self.prev_fg_pid = fg.pid;
-                self.prev_fg_was_writing_surface =
-                    Some(now_browser || self.platform.is_writing_app(&fg));
-                self.prev_fg_was_word = now_word;
+                if now_writing_surface {
+                    self.prev_writing_fg_pid = fg.pid;
+                    self.prev_writing_fg_was_word = now_word;
+                }
             }
 
             self.suppress_errors = now_browser;
