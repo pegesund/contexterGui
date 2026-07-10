@@ -28,6 +28,8 @@ pub struct AccessibilityBridge {
     edit_hwnd: std::cell::Cell<isize>,
     /// Cached full document text from last successful read
     cached_doc: std::cell::RefCell<String>,
+    /// Distinguishes an initialized empty editor from no successful UIA read.
+    has_cached_doc: std::cell::Cell<bool>,
     /// Cursor offset inside cached_doc. For windowed reads this is local to cached_doc.
     cached_cursor: std::cell::Cell<usize>,
     /// Last known good UIA text element (e.g. the Edge textarea).
@@ -47,6 +49,7 @@ impl AccessibilityBridge {
             fg_hwnd: std::cell::Cell::new(0),
             edit_hwnd: std::cell::Cell::new(0),
             cached_doc: std::cell::RefCell::new(String::new()),
+            has_cached_doc: std::cell::Cell::new(false),
             cached_cursor: std::cell::Cell::new(0),
             saved_element: std::cell::RefCell::new(None),
             saved_element_pid: std::cell::Cell::new(0),
@@ -112,7 +115,7 @@ impl AccessibilityBridge {
         if !Self::is_visible_text_element(&element) {
             return None;
         }
-        let (raw, doc) = Self::try_read_raw(&element)?;
+        let (raw, doc) = Self::try_read_raw(&element, false)?;
         if doc.is_empty() || !Self::is_text_field(&doc) || self.should_reject_stale_doc(&doc) {
             return None;
         }
@@ -170,7 +173,7 @@ impl AccessibilityBridge {
     }
 
     /// Try to read text from a UIA element using TextPattern2, TextPattern v1, or ValuePattern.
-    fn try_read_raw(element: &IUIAutomationElement) -> Option<(RawCursorText, String)> {
+    fn try_read_raw(element: &IUIAutomationElement, allow_empty: bool) -> Option<(RawCursorText, String)> {
         unsafe {
             // 1. TextPattern2 — best: gives caret position + before/after text (Notepad, Word)
             if let Ok(pattern2) =
@@ -193,7 +196,7 @@ impl AccessibilityBridge {
                     })().unwrap_or_default();
 
                     let doc = format!("{}{}", before, after);
-                    if !doc.is_empty() {
+                    if !doc.is_empty() || allow_empty {
                         return Some((RawCursorText { before, after }, doc));
                     }
                 }
@@ -205,7 +208,7 @@ impl AccessibilityBridge {
             {
                 if let Ok(doc_range) = tp1.DocumentRange() {
                     let text = doc_range.GetText(6000).unwrap_or_default().to_string();
-                    if !text.is_empty() {
+                    if !text.is_empty() || allow_empty {
                         // No caret info from v1 — put everything as "before" (cursor at end)
                         return Some((RawCursorText { before: text.clone(), after: String::new() }, text));
                     }
@@ -226,7 +229,7 @@ impl AccessibilityBridge {
                     } else {
                         value_text
                     };
-                    if !text.is_empty() {
+                    if !text.is_empty() || allow_empty {
                         return Some((RawCursorText { before: text.clone(), after: String::new() }, text));
                     }
                 }
@@ -346,6 +349,7 @@ impl AccessibilityBridge {
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
                         self.cached_cursor.set(raw.before.chars().count());
                         *self.cached_doc.borrow_mut() = doc;
+                        self.has_cached_doc.set(true);
                         *self.saved_element.borrow_mut() = Some(element);
                         self.saved_element_pid.set(focused_pid);
                         return Some((raw, caret));
@@ -367,6 +371,7 @@ impl AccessibilityBridge {
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
                         self.cached_cursor.set(raw.before.chars().count());
                         *self.cached_doc.borrow_mut() = doc;
+                        self.has_cached_doc.set(true);
                         *self.saved_element.borrow_mut() = Some(element);
                         self.saved_element_pid.set(fg_pid);
                         return Some((raw, caret));
@@ -380,13 +385,14 @@ impl AccessibilityBridge {
             if let Some(ref element) = saved {
                 if !Self::is_visible_text_element(element) {
                     bridge_log("Saved element hidden/offscreen - clearing");
-                } else if let Some((raw, doc)) = Self::try_read_raw(element) {
-                    if !doc.is_empty() && !self.should_reject_stale_doc(&doc) {
+                } else if let Some((raw, doc)) = Self::try_read_raw(element, true) {
+                    if !self.should_reject_stale_doc(&doc) {
                         bridge_log(&format!("Saved element re-read: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
                         let caret = Self::estimate_caret_from_element(element, &raw.before);
                         self.cached_cursor.set(raw.before.chars().count());
                         *self.cached_doc.borrow_mut() = doc;
+                        self.has_cached_doc.set(true);
                         return Some((raw, caret));
                     }
                 }
@@ -855,7 +861,7 @@ impl TextBridge for AccessibilityBridge {
         // Use cached text from get_raw_text() — live UIA reads fail because
         // our always-on-top window steals focus between context read and grammar check
         let cached = self.cached_doc.borrow();
-        if !cached.is_empty() {
+        if self.has_cached_doc.get() {
             Some(cached.clone())
         } else {
             None
@@ -883,6 +889,7 @@ impl TextBridge for AccessibilityBridge {
             ));
             self.edit_hwnd.set(0);
             self.cached_doc.borrow_mut().clear();
+            self.has_cached_doc.set(false);
             self.cached_cursor.set(0);
             *self.saved_element.borrow_mut() = None;
             self.saved_element_pid.set(0);

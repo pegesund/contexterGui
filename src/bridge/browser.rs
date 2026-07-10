@@ -58,16 +58,20 @@ impl BrowserBridge {
         }
     }
 
+    fn cached_data(&self) -> Option<(String, usize, usize, Option<(i32, i32)>)> {
+        if self.last_modified.get() == 0 {
+            return None;
+        }
+        let text = self.last_text.borrow().clone();
+        let cursor = self.last_cursor.get();
+        Some((text, cursor, cursor, self.last_caret.get()))
+    }
+
     fn read_data_file(&self) -> Option<(String, usize, usize, Option<(i32, i32)>)> {
         // Rate-limit file reads to every 100ms
         if let Some(last) = self.last_read.get() {
             if last.elapsed().as_millis() < 100 {
-                let text = self.last_text.borrow().clone();
-                if !text.is_empty() {
-                    let cursor = self.last_cursor.get();
-                    return Some((text, cursor, cursor, self.last_caret.get()));
-                }
-                return None;
+                return self.cached_data();
             }
         }
         self.last_read.set(Some(Instant::now()));
@@ -80,12 +84,7 @@ impl BrowserBridge {
 
         // Only re-read if file changed
         if modified == self.last_modified.get() {
-            let text = self.last_text.borrow().clone();
-            if !text.is_empty() {
-                let cursor = self.last_cursor.get();
-                return Some((text, cursor, cursor, self.last_caret.get()));
-            }
-            return None;
+            return self.cached_data();
         }
 
         // After a replace, the file still contains pre-replace text until the
@@ -102,12 +101,7 @@ impl BrowserBridge {
             self.replace_freeze_time.set(None);
             // Fall through to read the file normally
         } else if freeze > 0 && modified <= freeze {
-            let text = self.last_text.borrow().clone();
-            if !text.is_empty() {
-                let cursor = self.last_cursor.get();
-                return Some((text, cursor, cursor, self.last_caret.get()));
-            }
-            return None;
+            return self.cached_data();
         } else if freeze > 0 {
             // File is newer than freeze — but verify the old word is actually gone.
             let old_word = self.replace_old_word.borrow().clone();
@@ -118,12 +112,7 @@ impl BrowserBridge {
                         let file_lower = file_text.to_lowercase();
                         if has_whole_word(&file_lower, &old_word) {
                             log_browser(&format!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word));
-                            let text = self.last_text.borrow().clone();
-                            if !text.is_empty() {
-                                let cursor = self.last_cursor.get();
-                                return Some((text, cursor, cursor, self.last_caret.get()));
-                            }
-                            return None;
+                            return self.cached_data();
                         }
                     }
                 }
@@ -612,7 +601,7 @@ fn has_whole_word(text: &str, word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::completed_word_from_transition;
+    use super::{BrowserBridge, completed_word_from_transition};
 
     #[test]
     fn completed_word_is_emitted_after_fresh_space_payload() {
@@ -648,5 +637,17 @@ mod tests {
             completed_word_from_transition("hello ", 6, "hello  ", 7),
             None
         );
+    }
+
+    #[test]
+    fn initialized_empty_browser_payload_remains_readable() {
+        let bridge = BrowserBridge::new();
+        bridge.last_modified.set(1);
+        bridge.last_cursor.set(0);
+        bridge.last_text.borrow_mut().clear();
+
+        let (text, start, end, _) = bridge.cached_data().expect("empty payload is valid");
+        assert!(text.is_empty());
+        assert_eq!((start, end), (0, 0));
     }
 }

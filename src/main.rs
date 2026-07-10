@@ -805,6 +805,17 @@ fn is_word_scoped_paragraph_id(paragraph_id: &str) -> bool {
     }
 }
 
+fn paragraph_id_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
+    match bridge_name {
+        "Browser" => paragraph_id.starts_with("browser:"),
+        "Accessibility" | "Accessibility (macOS)" => {
+            paragraph_id.starts_with("uia:") || paragraph_id.starts_with("ax:")
+        }
+        "Word COM" | "Word Add-in" => is_word_scoped_paragraph_id(paragraph_id),
+        _ => false,
+    }
+}
+
 fn apply_original_initial_case(raw: &str, original: &str) -> String {
     let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
     if s.is_empty() {
@@ -976,7 +987,8 @@ mod cross_language_barrier_tests {
     use super::{
         apply_original_initial_case, find_word_doc_range_at_position, has_mixed_non_titlecase,
         known_word_spelling_variants_for_analyzer, sentence_cache_key_for_language,
-        rescore_spelling_response, should_skip_cross_language_match, word_token_at_position,
+        paragraph_id_matches_bridge, rescore_spelling_response,
+        should_skip_cross_language_match, word_token_at_position,
     };
     use std::path::PathBuf;
 
@@ -1129,6 +1141,14 @@ mod cross_language_barrier_tests {
         let reranked = rescore_spelling_response(&scored, &candidates, |_| 1.0);
 
         assert_eq!(reranked[0].0, "år");
+    }
+
+    #[test]
+    fn paragraph_scope_distinguishes_browser_and_windows_accessibility() {
+        assert!(paragraph_id_matches_bridge("browser:0", "Browser"));
+        assert!(!paragraph_id_matches_bridge("uia:0", "Browser"));
+        assert!(paragraph_id_matches_bridge("uia:0", "Accessibility"));
+        assert!(!paragraph_id_matches_bridge("browser:0", "Accessibility"));
     }
 }
 
@@ -8989,9 +9009,54 @@ impl eframe::App for ContextApp {
                             .normalize_bridge_caret_position(Some((x, y)), ctx.pixels_per_point());
                     }
                 }
+                let active_name = self.manager.active_bridge_name().to_string();
+                let fg = self.platform.foreground_app();
+                let fg_kind = self.platform.classify_app(&fg);
+                let grammar_feed = self.platform.grammar_feed_policy(&active_name, &fg, fg_kind);
+                let full_document_bridge = matches!(
+                    active_name.as_str(),
+                    "Browser" | "Accessibility" | "Accessibility (macOS)"
+                );
+                let previous_doc_hash = hash_str(&self.last_doc_text);
+                if full_document_bridge {
+                    if let Some(doc) = self.manager.read_full_document() {
+                        self.try_update_doc_text(doc);
+                    }
+                }
+                let full_doc_changed = full_document_bridge
+                    && hash_str(&self.last_doc_text) != previous_doc_hash;
+                if full_doc_changed {
+                    log!("Full document changed without requiring a caret-context change (bridge='{}')", active_name);
+                    if self.last_doc_text.trim().is_empty() {
+                        let removed_ids: Vec<String> = self.paragraph_texts.keys()
+                            .filter(|id| paragraph_id_matches_bridge(id, &active_name))
+                            .cloned()
+                            .collect();
+                        for id in &removed_ids {
+                            if let Some(hashes) = self.paragraph_sentence_hashes.remove(id) {
+                                for hash in hashes {
+                                    self.processed_sentence_hashes.remove(&hash);
+                                    self.grammar_inflight.remove(&hash);
+                                }
+                            }
+                            self.paragraph_texts.remove(id);
+                            self.paragraph_doc_starts.remove(id);
+                        }
+                        self.pending_spelling_bert.retain(|pending| {
+                            pending.deferred_push.as_ref().map_or(true, |deferred| {
+                                !paragraph_id_matches_bridge(&deferred.paragraph_id, &active_name)
+                            })
+                        });
+                        self.pending_spelling_grammar.retain(|pending| {
+                            !paragraph_id_matches_bridge(&pending.paragraph_id, &active_name)
+                        });
+                        log!("Empty document removed {} cached paragraphs for bridge '{}'", removed_ids.len(), active_name);
+                    }
+                }
                 let ctx_changed = new_ctx.word != self.context.word
                     || new_ctx.sentence != self.context.sentence
-                    || new_ctx.masked_sentence != self.context.masked_sentence;
+                    || new_ctx.masked_sentence != self.context.masked_sentence
+                    || full_doc_changed;
                 // Track cursor offset for paragraph scanning when our window has focus
                 if let Some(off) = new_ctx.cursor_doc_offset {
                     self.last_known_cursor_offset = Some(off);
@@ -9057,10 +9122,6 @@ impl eframe::App for ContextApp {
                 // Incremental paragraph scan: platform policy decides which
                 // bridges feed paragraph-shaped events and which bridges take
                 // the full-document fallback.
-                let active_name = self.manager.active_bridge_name();
-                let fg = self.platform.foreground_app();
-                let fg_kind = self.platform.classify_app(&fg);
-                let grammar_feed = self.platform.grammar_feed_policy(active_name, &fg, fg_kind);
                 if grammar_feed.use_paragraph_feed {
                     let offset = new_ctx.cursor_doc_offset.or(self.last_known_cursor_offset);
                     let paragraph = if grammar_feed.force_cursor_offset {
@@ -9092,19 +9153,6 @@ impl eframe::App for ContextApp {
                         // lets a single Enter skip the sweep.
                         self.check_word_bulk_change(Some(&para_id));
                         self.process_com_changed_paragraph(para_id, text, start, offset, false);
-                    }
-                } else if self.manager.last_user_was_browser {
-                    if let Some(doc) = self.manager.read_full_document() {
-                        self.try_update_doc_text(doc);
-                    }
-                } else {
-                    // Accessibility / non-COM bridges: copy the bridge's cached
-                    // full-document text into last_doc_text so the full-doc
-                    // scanner (update_grammar_errors() below) has something to
-                    // chew on. Without this, last_doc_text stays empty and
-                    // grammar checking is silent for every non-Word app.
-                    if let Some(doc) = self.manager.read_full_document() {
-                        self.try_update_doc_text(doc);
                     }
                 }
                 let fg = self.platform.foreground_app();
