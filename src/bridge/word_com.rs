@@ -622,6 +622,14 @@ impl TextBridge for WordComBridge {
             return None;
         }
 
+        // COM's Application.Activate selects the range but does not reliably
+        // transfer foreground ownership away from Spell's topmost window.
+        // Restore Word explicitly before reading its GUI-thread caret.
+        unsafe {
+            let _ = SetForegroundWindow(self.word_hwnd);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
         // Step 2: Get screen position of the selection via GetGUIThreadInfo
         // After Select+Activate, Word's thread has the caret at the selection
         unsafe {
