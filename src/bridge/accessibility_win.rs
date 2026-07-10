@@ -750,24 +750,12 @@ impl AccessibilityBridge {
                         }
                     }
 
-                    // Get or cache the edit control HWND
+                    // Select the exact visible UIA range, then type into that
+                    // foreground selection. Win11 Notepad keeps multiple tab
+                    // editors under one top-level HWND; recursively choosing the
+                    // first RichEdit child can address a hidden tab even though
+                    // this UIA range belongs to the active one.
                     let hwnd_val = self.target_hwnd.get();
-                    let edit_val = self.edit_hwnd.get();
-                    let edit = if edit_val != 0 {
-                        HWND(edit_val as *mut _)
-                    } else if hwnd_val != 0 {
-                        let found = find_edit_child(HWND(hwnd_val as *mut _));
-                        self.edit_hwnd.set(found.0 as isize);
-                        found
-                    } else {
-                        HWND(std::ptr::null_mut())
-                    };
-                    bridge_log(&format!("target_hwnd={} edit_hwnd={}", hwnd_val, edit.0 as isize));
-
-                    // Select the text via UIA. Native Edit/RichEdit controls can
-                    // then use EM_REPLACESEL. Electron/Slack exposes TextPattern
-                    // but has no edit child, so SendInput types over the selected
-                    // range in the foreground composer.
                     let sel_result = found_range.Select();
                     bridge_log(&format!("Select result: {:?}", sel_result));
                     if sel_result.is_err() {
@@ -777,17 +765,11 @@ impl AccessibilityBridge {
                     std::thread::sleep(std::time::Duration::from_millis(35));
                     bridge_log(&format!("Sending replacement: '{}' ({} chars)", replace, replace.len()));
 
-                    if edit.0 as isize != 0 {
-                        // EM_REPLACESEL: atomic, no focus needed, targets edit control directly
-                        replace_selection(edit, replace);
-                    } else {
-                        // Fallback: SendInput (needs focus)
-                        if hwnd_val != 0 {
-                            let _ = SetForegroundWindow(HWND(hwnd_val as *mut _));
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                        send_string(replace);
+                    if hwnd_val != 0 {
+                        let _ = SetForegroundWindow(HWND(hwnd_val as *mut _));
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
+                    send_string(replace);
 
                     // Update cached doc so grammar checker sees the new text
                     {
