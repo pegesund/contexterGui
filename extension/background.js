@@ -55,7 +55,14 @@ function connectNative() {
       // Forward replace actions to content script
       if (msg.action === "replace") {
         console.log("Spell replace:", JSON.stringify(msg));
-        if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
+        const targetTabId = Number.isInteger(msg.tabId) && msg.tabId > 0 ? msg.tabId : null;
+        if (targetTabId) {
+          if (contentPorts.has(targetTabId)) {
+            sendToTabPorts(targetTabId, msg);
+          } else {
+            console.warn("Spell: replacement target tab is not connected:", targetTabId);
+          }
+        } else if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
           sendToTabPorts(lastActiveTabId, msg);
         } else {
           for (const tabId of [...contentPorts.keys()]) {

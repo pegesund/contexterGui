@@ -67,6 +67,14 @@ impl BrowserBridge {
         Some((text, cursor, cursor, self.last_caret.get()))
     }
 
+    fn source_tab_id(&self) -> usize {
+        self.last_source
+            .borrow()
+            .split_once('|')
+            .and_then(|(tab_id, _url)| tab_id.parse().ok())
+            .unwrap_or(0)
+    }
+
     fn read_data_file(&self) -> Option<(String, usize, usize, Option<(i32, i32)>)> {
         // Rate-limit file reads to every 100ms
         if let Some(last) = self.last_read.get() {
@@ -234,8 +242,8 @@ impl TextBridge for BrowserBridge {
         let escaped = replacement.replace('\\', "\\\\").replace('"', "\\\"");
         let escaped_old_word = old_word.replace('\\', "\\\\").replace('"', "\\\"");
         let json = format!(
-            r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-            start, end, escaped, escaped_old_word
+            r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+            self.source_tab_id(), start, end, escaped, escaped_old_word
         );
         if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
             self.update_cached_text(start, end, replacement);
@@ -257,8 +265,8 @@ impl TextBridge for BrowserBridge {
             let escaped_text = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let escaped_find = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-                start, end, escaped_text, escaped_find
+                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+                self.source_tab_id(), start, end, escaped_text, escaped_find
             );
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
@@ -284,8 +292,8 @@ impl TextBridge for BrowserBridge {
             let escaped_text = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let escaped_find = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-                start, end, escaped_text, escaped_find
+                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+                self.source_tab_id(), start, end, escaped_text, escaped_find
             );
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
@@ -326,8 +334,8 @@ impl TextBridge for BrowserBridge {
             let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let find_escaped = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-                start, end, escaped, find_escaped
+                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+                self.source_tab_id(), start, end, escaped, find_escaped
             );
             log_browser(&format!("  reply JSON: {}", json));
             if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
