@@ -60,21 +60,41 @@ if errors:
 print('  manifest validation OK')
 PY
 
-WINDOWS_TAR=""
-if command -v cygpath >/dev/null 2>&1 && [ -n "${WINDIR:-}" ]; then
-    WINDOWS_TAR="$(cygpath -u "$WINDIR/System32/tar.exe")"
-fi
-
 if command -v zip >/dev/null 2>&1; then
     (cd "$STAGE" && zip -qr "$ZIP" .)
-elif [ -n "$WINDOWS_TAR" ] && [ -x "$WINDOWS_TAR" ]; then
-    (cd "$STAGE" && "$WINDOWS_TAR" -a -c -f "$ZIP" "${SHIP[@]}")
 else
-    echo "ERROR: zip is required (or Windows tar.exe when using Git Bash)"
-    exit 1
+    (cd "$STAGE" && python3 - "../$(basename "$ZIP")" "${SHIP[@]}" <<'PY'
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+import sys
+
+output = Path(sys.argv[1])
+with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+    for item_name in sys.argv[2:]:
+        item = Path(item_name)
+        if item.is_dir():
+            for child in sorted(item.rglob("*")):
+                if child.is_file():
+                    archive.write(child, child.as_posix())
+        else:
+            archive.write(item, item.as_posix())
+PY
+    )
 fi
 echo "  wrote $ZIP ($(du -h "$ZIP" | cut -f1))"
 echo "  files in zip:"
-unzip -l "$ZIP" | awk 'NR>3 && $1 != "----" && $1 != "" && $4 != "" {print "    " $4}' | sed '$d'
+if command -v unzip >/dev/null 2>&1; then
+    unzip -l "$ZIP" | awk 'NR>3 && $1 != "----" && $1 != "" && $4 != "" {print "    " $4}' | sed '$d'
+else
+    (cd "$DIST" && python3 - "$(basename "$ZIP")" <<'PY'
+from zipfile import ZipFile
+import sys
+
+with ZipFile(sys.argv[1]) as archive:
+    for name in archive.namelist():
+        print(f"    {name}")
+PY
+    )
+fi
 echo
 echo "Done. Upload via Chrome Web Store dev console (see SUBMISSION_GUIDE.md)."
