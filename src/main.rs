@@ -1634,11 +1634,9 @@ impl BridgeManager {
             // Word, so we don't spam every poll while user works in another app.
             // When Word IS the foreground app, log every attempt so a failing
             // Office install is visible immediately.
-            static LAST_FAIL_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let now_ms = self.last_check.elapsed().as_millis() as u64;
-            let last = LAST_FAIL_LOG.load(std::sync::atomic::Ordering::Relaxed);
-            if word_is_fg || now_ms.wrapping_sub(last) > 30_000 {
-                LAST_FAIL_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+            static FAIL_LOG_THROTTLE: crate::logging::LogThrottle =
+                crate::logging::LogThrottle::new();
+            if word_is_fg || FAIL_LOG_THROTTLE.should_emit(Duration::from_secs(30)) {
                 log!(
                     "Word COM bridge late-connect attempted (fg=Word? {}) — try_connect returned None (Word window 'OpusApp' not found OR IDispatch lookup failed). Make sure Word is fully started; restart Spell if Word was opened from a different user session.",
                     word_is_fg
@@ -9134,11 +9132,11 @@ impl eframe::App for ContextApp {
            
             if ctx_result.is_none() {
                 // Only log once per second to avoid spam
-                static LAST_NONE_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let now_ms = self.last_poll.elapsed().as_millis() as u64;
-                let last = LAST_NONE_LOG.load(std::sync::atomic::Ordering::Relaxed);
-                if now_ms.wrapping_sub(last) > 1000 || last == 0 {
-                    LAST_NONE_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                static NONE_LOG_THROTTLE: crate::logging::LogThrottle =
+                    crate::logging::LogThrottle::new();
+                if crate::logging::debug_logging_enabled()
+                    && NONE_LOG_THROTTLE.should_emit(Duration::from_secs(1))
+                {
                     debug_log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
@@ -9165,11 +9163,11 @@ impl eframe::App for ContextApp {
                             self.last_caret_pos = Some(new_pos);
                         }
                     } else {
-                        static LAST_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        let now_ms = self.last_poll.elapsed().as_millis() as u64;
-                        let last = LAST_MISS.load(std::sync::atomic::Ordering::Relaxed);
-                        if now_ms.wrapping_sub(last) > 2000 || last == 0 {
-                            LAST_MISS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        static MISS_LOG_THROTTLE: crate::logging::LogThrottle =
+                            crate::logging::LogThrottle::new();
+                        if crate::logging::debug_logging_enabled()
+                            && MISS_LOG_THROTTLE.should_emit(Duration::from_secs(2))
+                        {
                             debug_log!("caret: no platform position, no bridge position (kind={:?})", kind);
                         }
                     }
