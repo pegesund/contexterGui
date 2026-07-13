@@ -16,11 +16,21 @@ fn log_browser(msg: &str) {
 }
 
 fn data_path() -> PathBuf {
-    std::env::temp_dir().join("spell-browser.json")
+    let name = if cfg!(test) {
+        format!("spell-browser-test-{}-data.json", std::process::id())
+    } else {
+        "spell-browser.json".to_string()
+    };
+    std::env::temp_dir().join(name)
 }
 
 fn reply_path() -> PathBuf {
-    std::env::temp_dir().join("spell-browser-reply.json")
+    let name = if cfg!(test) {
+        format!("spell-browser-test-{}-reply.json", std::process::id())
+    } else {
+        "spell-browser-reply.json".to_string()
+    };
+    std::env::temp_dir().join(name)
 }
 
 pub struct BrowserBridge {
