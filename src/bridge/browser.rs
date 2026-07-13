@@ -657,9 +657,10 @@ mod tests {
     }
 
     #[test]
-    fn completion_reply_decodes_prefix_and_supplies_expected_word() {
+    fn completion_reply_targets_source_tab_and_supplies_expected_word() {
         let bridge = BrowserBridge::new();
         *bridge.last_text.borrow_mut() = "Han gik til skolen.".to_string();
+        *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test".to_string();
         bridge.last_cursor.set(7);
         let reply = reply_path();
         let _ = std::fs::remove_file(&reply);
@@ -667,7 +668,7 @@ mod tests {
         assert!(bridge.replace_word("gik|gikk"));
         assert_eq!(
             std::fs::read_to_string(&reply).expect("browser replacement reply"),
-            r#"{"action":"replace","start":4,"end":7,"text":"gikk","expected":"gik"}"#,
+            r#"{"action":"replace","tabId":42,"start":4,"end":7,"text":"gikk","expected":"gik"}"#,
         );
         assert_eq!(&*bridge.last_text.borrow(), "Han gikk til skolen.");
 
