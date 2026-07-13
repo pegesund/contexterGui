@@ -13448,29 +13448,31 @@ fn ax_close_icon(
 
 fn response_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
     if use_press_event {
-        let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
-        if !primary_pressed {
-            return false;
-        }
-        if resp.hovered() {
-            return true;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            ui.input(|i| {
-                i.pointer
-                    .interact_pos()
-                    .or_else(|| i.pointer.latest_pos())
-                    .is_some_and(|pos| resp.rect.contains(pos))
-            })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
+        ui.input(|i| {
+            press_event_hits_response(
+                i.pointer.button_pressed(egui::PointerButton::Primary),
+                resp.hovered(),
+                i.pointer.interact_pos(),
+                resp.rect,
+                cfg!(target_os = "macos"),
+            )
+        })
     } else {
         resp.clicked()
     }
+}
+
+fn press_event_hits_response(
+    primary_pressed: bool,
+    hovered: bool,
+    interact_pos: Option<egui::Pos2>,
+    response_rect: egui::Rect,
+    allow_interact_position: bool,
+) -> bool {
+    primary_pressed
+        && (hovered
+            || (allow_interact_position
+                && interact_pos.is_some_and(|pos| response_rect.contains(pos))))
 }
 
 fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
