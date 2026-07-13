@@ -111,12 +111,15 @@ impl AccessibilityBridge {
         self.replace_freeze_until.set(Some(Instant::now() + Duration::from_millis(1200)));
     }
 
-    fn accept_text_element(&self, element: IUIAutomationElement) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
+    fn accept_text_element(&self, element: IUIAutomationElement, allow_empty: bool) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
         if !Self::is_visible_text_element(&element) {
             return None;
         }
-        let (raw, doc) = Self::try_read_raw(&element, false)?;
-        if doc.is_empty() || !Self::is_text_field(&doc) || self.should_reject_stale_doc(&doc) {
+        let (raw, doc) = Self::try_read_raw(&element, allow_empty)?;
+        let is_text_control = Self::is_text_control(&element);
+        if !Self::should_accept_document(&doc, allow_empty, is_text_control)
+            || self.should_reject_stale_doc(&doc)
+        {
             return None;
         }
         if Self::looks_like_slack_window_dump(&doc) {
@@ -151,10 +154,26 @@ impl AccessibilityBridge {
         true
     }
 
+    fn is_text_control(element: &IUIAutomationElement) -> bool {
+        unsafe {
+            element.CurrentControlType()
+                .map(|control_type| {
+                    control_type == UIA_EditControlTypeId
+                        || control_type == UIA_DocumentControlTypeId
+                })
+                .unwrap_or(false)
+        }
+    }
+
+    fn should_accept_document(doc: &str, allow_empty: bool, is_text_control: bool) -> bool {
+        Self::is_text_field(doc)
+            && (!doc.is_empty() || (allow_empty && is_text_control))
+    }
+
     fn find_text_element_from_hwnd(&self, uia: &IUIAutomation, hwnd: HWND) -> Option<(RawCursorText, String, IUIAutomationElement, Option<(i32, i32)>)> {
         unsafe {
             let root = uia.ElementFromHandle(hwnd).ok()?;
-            if let Some(found) = self.accept_text_element(root.clone()) {
+            if let Some(found) = self.accept_text_element(root.clone(), false) {
                 return Some(found);
             }
 
@@ -163,7 +182,7 @@ impl AccessibilityBridge {
             let count = descendants.Length().unwrap_or(0);
             for i in 0..count.min(100) {
                 if let Ok(desc) = descendants.GetElement(i) {
-                    if let Some(found) = self.accept_text_element(desc) {
+                    if let Some(found) = self.accept_text_element(desc, false) {
                         return Some(found);
                     }
                 }
@@ -344,7 +363,7 @@ impl AccessibilityBridge {
             if let Ok(focused) = uia.GetFocusedElement() {
                 let focused_pid = focused.CurrentProcessId().unwrap_or(0) as u32;
                 if focused_pid != our_pid && focused_pid != 0 {
-                    if let Some((raw, doc, element, caret)) = self.accept_text_element(focused) {
+                    if let Some((raw, doc, element, caret)) = self.accept_text_element(focused, true) {
                         bridge_log(&format!("Focused text field: '{}' ({} chars)",
                             {let mut e=60.min(doc.len()); while e>0 && !doc.is_char_boundary(e){e-=1;} &doc[..e]}, doc.len()));
                         self.cached_cursor.set(raw.before.chars().count());
@@ -1151,5 +1170,31 @@ fn send_string(text: &str) {
             SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         }
         bridge_log(&format!("send_string: {} chars via SendInput", text.chars().count()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AccessibilityBridge;
+
+    #[test]
+    fn focused_empty_text_control_is_authoritative() {
+        assert!(AccessibilityBridge::should_accept_document("", true, true));
+    }
+
+    #[test]
+    fn descendant_or_non_text_empty_control_is_rejected() {
+        assert!(!AccessibilityBridge::should_accept_document("", false, true));
+        assert!(!AccessibilityBridge::should_accept_document("", true, false));
+    }
+
+    #[test]
+    fn existing_non_empty_document_policy_is_preserved() {
+        assert!(AccessibilityBridge::should_accept_document("Jeg skriver.", false, false));
+        assert!(!AccessibilityBridge::should_accept_document(
+            &"x".repeat(100_000),
+            true,
+            true,
+        ));
     }
 }
