@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_reply_targets_source_tab_and_supplies_expected_word() {
+    fn replacement_replies_target_source_tab() {
         let bridge = BrowserBridge::new();
         *bridge.last_text.borrow_mut() = "Han gik til skolen.".to_string();
         *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test".to_string();
@@ -679,6 +679,20 @@ mod tests {
             r#"{"action":"replace","tabId":42,"start":4,"end":7,"text":"gikk","expected":"gik"}"#,
         );
         assert_eq!(&*bridge.last_text.borrow(), "Han gikk til skolen.");
+
+        *bridge.last_text.borrow_mut() = "Jeg liker piza.".to_string();
+        assert!(bridge.find_and_replace_in_paragraph(
+            "piza",
+            "pipa",
+            "browser:0",
+            "Jeg liker piza.",
+            10,
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&reply).expect("browser correction reply"),
+            r#"{"action":"replace","tabId":42,"start":10,"end":14,"text":"pipa","expected":"piza"}"#,
+        );
+        assert_eq!(&*bridge.last_text.borrow(), "Jeg liker pipa.");
 
         let _ = std::fs::remove_file(reply);
     }
