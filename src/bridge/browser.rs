@@ -605,7 +605,8 @@ fn has_whole_word(text: &str, word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserBridge, completed_word_from_transition};
+    use super::{BrowserBridge, completed_word_from_transition, reply_path};
+    use crate::bridge::TextBridge;
 
     #[test]
     fn completed_word_is_emitted_after_fresh_space_payload() {
@@ -653,5 +654,23 @@ mod tests {
         let (text, start, end, _) = bridge.cached_data().expect("empty payload is valid");
         assert!(text.is_empty());
         assert_eq!((start, end), (0, 0));
+    }
+
+    #[test]
+    fn completion_reply_decodes_prefix_and_supplies_expected_word() {
+        let bridge = BrowserBridge::new();
+        *bridge.last_text.borrow_mut() = "Han gik til skolen.".to_string();
+        bridge.last_cursor.set(7);
+        let reply = reply_path();
+        let _ = std::fs::remove_file(&reply);
+
+        assert!(bridge.replace_word("gik|gikk"));
+        assert_eq!(
+            std::fs::read_to_string(&reply).expect("browser replacement reply"),
+            r#"{"action":"replace","start":4,"end":7,"text":"gikk","expected":"gik"}"#,
+        );
+        assert_eq!(&*bridge.last_text.borrow(), "Han gikk til skolen.");
+
+        let _ = std::fs::remove_file(reply);
     }
 }
