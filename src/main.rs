@@ -1943,16 +1943,17 @@ impl BridgeManager {
         for (i, bridge) in self.bridges.iter().enumerate() {
             if bridge.name() == "Accessibility (macOS)" {
                 if let Some(ctx) = bridge.read_context() {
-                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
-                        if self.active_idx != i {
-                            log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
-                            self.mark_bridge_switch(i);
-                        }
-                        self.active_idx = i;
-                        self.last_user_pid = fg.app.pid;
-                        self.last_context = Some(ctx.clone());
-                        return Some(ctx);
+                    // Some(empty) is authoritative: AxMacBridge emits it for
+                    // an initialized editor after all text is deleted. None
+                    // still means that Accessibility could not read a target.
+                    if self.active_idx != i {
+                        log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
+                        self.mark_bridge_switch(i);
                     }
+                    self.active_idx = i;
+                    self.last_user_pid = fg.app.pid;
+                    self.last_context = Some(ctx.clone());
+                    return Some(ctx);
                 }
                 break;
             }
