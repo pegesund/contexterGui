@@ -224,17 +224,21 @@ impl TextBridge for BrowserBridge {
 
         let start = cursor - word_before_len;
         let end = cursor + word_after_len;
+        let old_word: String = text.chars().skip(start).take(end - start).collect();
+        let replacement = new_text
+            .split_once('|')
+            .map(|(_prefix, word)| word)
+            .unwrap_or(new_text);
 
         // Escape the replacement text for JSON
-        let escaped = new_text.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = replacement.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_old_word = old_word.replace('\\', "\\\\").replace('"', "\\\"");
         let json = format!(
-            r#"{{"action":"replace","start":{},"end":{},"text":"{}"}}"#,
-            start, end, escaped
+            r#"{{"action":"replace","start":{},"end":{},"text":"{}","expected":"{}"}}"#,
+            start, end, escaped, escaped_old_word
         );
         if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
-            // Extract the old word for freeze verification
-            let old_word: String = text.chars().skip(start).take(end - start).collect();
-            self.update_cached_text(start, end, new_text);
+            self.update_cached_text(start, end, replacement);
             self.activate_replace_freeze(&old_word);
             true
         } else {
