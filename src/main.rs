@@ -1186,6 +1186,85 @@ mod cross_language_barrier_tests {
     }
 }
 
+#[cfg(test)]
+mod bridge_manager_tests {
+    use super::{BridgeManager, ForegroundRoute};
+    use crate::bridge::{CursorContext, TextBridge};
+    use crate::platform::{AppKind, ForegroundApp, PlatformServices};
+    use std::time::Instant;
+
+    struct FixedContextBridge {
+        context: CursorContext,
+    }
+
+    impl TextBridge for FixedContextBridge {
+        fn name(&self) -> &str { "Browser" }
+        fn is_available(&self) -> bool { true }
+        fn read_context(&self) -> Option<CursorContext> { Some(self.context.clone()) }
+        fn replace_word(&self, _new_text: &str) -> bool { false }
+    }
+
+    struct TestPlatform;
+
+    impl PlatformServices for TestPlatform {
+        fn init_runtime(&self) {}
+        fn foreground_app(&self) -> ForegroundApp { ForegroundApp::default() }
+        fn classify_app(&self, _app: &ForegroundApp) -> AppKind { AppKind::Browser }
+        fn screen_size(&self) -> (f32, f32) { (1920.0, 1080.0) }
+        fn set_foreground(&self, _handle: isize) {}
+        fn check_hotkey_state(&self) -> (bool, bool) { (false, false) }
+        fn copy_to_clipboard(&self, _text: &str) {}
+        fn emoji_font_path(&self) -> Option<&str> { None }
+        fn ort_dylib_candidates(&self) -> Vec<String> { Vec::new() }
+        fn swipl_path(&self) -> &str { "" }
+        fn init_tts(&self, _lang: &dyn language::LanguageVoice) {}
+    }
+
+    #[test]
+    fn empty_browser_context_replaces_stale_context() {
+        let stale = CursorContext {
+            word: "piza".to_string(),
+            sentence: "Jeg liker piza.".to_string(),
+            ..Default::default()
+        };
+        let mut manager = BridgeManager {
+            bridges: vec![Box::new(FixedContextBridge {
+                context: CursorContext {
+                    cursor_doc_offset: Some(0),
+                    ..Default::default()
+                },
+            })],
+            last_check: Instant::now(),
+            active_idx: 0,
+            last_user_pid: 0,
+            last_user_was_browser: false,
+            last_context: Some(stale),
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: false,
+            last_browser_host_repair: None,
+        };
+        let route = ForegroundRoute::new(
+            ForegroundApp { pid: 42, ..Default::default() },
+            AppKind::Browser,
+        );
+
+        let context = manager
+            .try_browser_context(&route)
+            .expect("empty extension payload is authoritative");
+
+        assert!(context.word.is_empty());
+        assert!(context.sentence.is_empty());
+        assert_eq!(context.cursor_doc_offset, Some(0));
+        assert!(manager.last_context.as_ref().unwrap().sentence.is_empty());
+        assert!(manager.browser_extension_seen);
+        assert_eq!(manager.last_user_pid, 42);
+    }
+}
+
 /// Resolve all language data paths, preferring S3-cached files.
 struct ResolvedPaths {
     mtag_fst: PathBuf,
@@ -1607,13 +1686,11 @@ impl BridgeManager {
         self.last_user_was_browser = true;
         let browser_idx = self.bridges.iter().position(|b| b.name() == "Browser")?;
         let ctx = self.bridges[browser_idx].read_context()?;
-        if ctx.word.is_empty() && ctx.sentence.is_empty() {
-            return None;
-        }
 
-        // First non-empty browser context locks in the extension-seen flag for
-        // the session. After this point macOS never falls through to AX-mac for
-        // Chromium foregrounds.
+        // Some(empty) is authoritative: BrowserBridge uses it when the active
+        // editor was cleared. None still means that no extension payload is
+        // available. After any payload, macOS must not fall through to AX-mac
+        // for Chromium foregrounds.
         self.browser_extension_seen = true;
         if self.active_idx != browser_idx {
             log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
