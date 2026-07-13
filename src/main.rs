@@ -13475,6 +13475,25 @@ fn press_event_hits_response(
                 && interact_pos.is_some_and(|pos| response_rect.contains(pos))))
 }
 
+#[cfg(test)]
+mod response_click_tests {
+    use super::press_event_hits_response;
+
+    #[test]
+    fn macos_press_requires_a_current_interaction_position_when_not_hovered() {
+        let rect = egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(30.0, 30.0));
+
+        assert!(press_event_hits_response(
+            true,
+            false,
+            Some(egui::pos2(20.0, 20.0)),
+            rect,
+            true,
+        ));
+        assert!(!press_event_hits_response(true, false, None, rect, true));
+    }
+}
+
 fn toolbar_clicked(ui: &egui::Ui, resp: &egui::Response, use_press_event: bool) -> bool {
     response_clicked(ui, resp, use_press_event)
 }
