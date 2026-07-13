@@ -60,7 +60,19 @@ if errors:
 print('  manifest validation OK')
 PY
 
-cd "$STAGE" && zip -qr "$ZIP" .
+WINDOWS_TAR=""
+if command -v cygpath >/dev/null 2>&1 && [ -n "${WINDIR:-}" ]; then
+    WINDOWS_TAR="$(cygpath -u "$WINDIR/System32/tar.exe")"
+fi
+
+if command -v zip >/dev/null 2>&1; then
+    (cd "$STAGE" && zip -qr "$ZIP" .)
+elif [ -n "$WINDOWS_TAR" ] && [ -x "$WINDOWS_TAR" ]; then
+    (cd "$STAGE" && "$WINDOWS_TAR" -a -c -f "$ZIP" "${SHIP[@]}")
+else
+    echo "ERROR: zip is required (or Windows tar.exe when using Git Bash)"
+    exit 1
+fi
 echo "  wrote $ZIP ($(du -h "$ZIP" | cut -f1))"
 echo "  files in zip:"
 unzip -l "$ZIP" | awk 'NR>3 && $1 != "----" && $1 != "" && $4 != "" {print "    " $4}' | sed '$d'
