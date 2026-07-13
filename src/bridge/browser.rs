@@ -113,7 +113,7 @@ impl BrowserBridge {
             .map(|t| t.elapsed().as_secs() >= 5)
             .unwrap_or(false);
         if freeze > 0 && freeze_timed_out {
-            log_browser("read_data_file: freeze timed out after 5s — accepting file data");
+            crate::debug_log!("read_data_file: freeze timed out after 5s — accepting file data");
             self.replace_freeze_modified.set(0);
             self.replace_old_word.borrow_mut().clear();
             self.replace_freeze_time.set(None);
@@ -129,13 +129,13 @@ impl BrowserBridge {
                     if let Some(file_text) = extract_json_string(c, "text") {
                         let file_lower = file_text.to_lowercase();
                         if has_whole_word(&file_lower, &old_word) {
-                            log_browser(&format!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word));
+                            crate::debug_log!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word);
                             return self.cached_data();
                         }
                     }
                 }
             }
-            log_browser("read_data_file: fresh data confirmed (old word gone), clearing freeze");
+            crate::debug_log!("read_data_file: fresh data confirmed (old word gone), clearing freeze");
             self.replace_freeze_modified.set(0);
             self.replace_old_word.borrow_mut().clear();
             self.replace_freeze_time.set(None);
@@ -381,7 +381,7 @@ impl TextBridge for BrowserBridge {
         // runs and triggers prune_resolved_errors, whose empty-doc
         // branch at main.rs:3335 clears writing_errors + queues.
         if text.is_empty() {
-            log_browser("read_context: empty text — returning empty CursorContext to trigger desktop clear");
+            crate::debug_log!("read_context: empty text — returning empty CursorContext to trigger desktop clear");
             return Some(CursorContext {
                 word: String::new(),
                 sentence: String::new(),
@@ -402,8 +402,8 @@ impl TextBridge for BrowserBridge {
             after: after.to_string(),
         };
 
-        log_browser(&format!("read_context: cursor_start={} text_len={} before_len={} after_len={}",
-            cursor_start, text.len(), before.len(), after.len()));
+        crate::debug_log!("read_context: cursor_start={} text_len={} before_len={} after_len={}",
+            cursor_start, text.len(), before.len(), after.len());
         let mut ctx = build_context(&raw, caret);
         ctx.cursor_doc_offset = Some(cursor_start);
         Some(ctx)

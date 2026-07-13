@@ -3745,7 +3745,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return false;
         }
         if self.language.code() == "en" && contains_norwegian_letters(&clean) {
-            log!("Cross-language barrier: skip '{}' under English (Norwegian letter)", clean);
+            debug_log!("Cross-language barrier: skip '{}' under English (Norwegian letter)", clean);
             return true;
         }
         if clean.chars().count() < 3 {
@@ -3766,7 +3766,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             && foreign_context_score >= 2
             && active_best > 1
         {
-            log!(
+            debug_log!(
                 "Cross-language barrier: skip '{}' under English because surrounding text looks Norwegian (active_dist={}, foreign_context_score={})",
                 clean,
                 active_best,
@@ -3786,7 +3786,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 continue;
             };
             if should_skip_cross_language_match(active_best, foreign_dist, foreign_context_score) {
-                log!(
+                debug_log!(
                     "Cross-language barrier: skip '{}' for active={} because {} has '{}' at dist {} (active_dist={}, foreign_context_score={})",
                     clean,
                     self.language.code(),
@@ -5693,7 +5693,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 })
                 .unwrap_or(false);
 
-        log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
+        debug_log!("COM paragraph changed: '{}' (para={} start={})", trunc(&clean_text, 50), trunc(&para_id, 10), char_start);
         self.paragraph_texts.insert(para_id.clone(), clean_text.clone());
 
         // Clear all underlines in this paragraph range — will be re-applied for remaining errors
@@ -9139,7 +9139,7 @@ impl eframe::App for ContextApp {
                 let last = LAST_NONE_LOG.load(std::sync::atomic::Ordering::Relaxed);
                 if now_ms.wrapping_sub(last) > 1000 || last == 0 {
                     LAST_NONE_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
+                    debug_log!("read_context() returned None (bridge='{}')", self.manager.active_bridge_name());
                 }
             }
             // Update caret position — source selection and coordinate
@@ -9170,7 +9170,7 @@ impl eframe::App for ContextApp {
                         let last = LAST_MISS.load(std::sync::atomic::Ordering::Relaxed);
                         if now_ms.wrapping_sub(last) > 2000 || last == 0 {
                             LAST_MISS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                            log!("caret: no platform position, no bridge position (kind={:?})", kind);
+                            debug_log!("caret: no platform position, no bridge position (kind={:?})", kind);
                         }
                     }
                 }
@@ -9203,7 +9203,7 @@ impl eframe::App for ContextApp {
                 let full_doc_changed = full_document_bridge
                     && hash_str(&self.last_doc_text) != previous_doc_hash;
                 if full_doc_changed {
-                    log!("Full document changed without requiring a caret-context change (bridge='{}')", active_name);
+                    debug_log!("Full document changed without requiring a caret-context change (bridge='{}')", active_name);
                     if self.last_doc_text.trim().is_empty() {
                         let removed_ids: Vec<String> = self.paragraph_texts.keys()
                             .filter(|id| paragraph_id_matches_bridge(id, &active_name))
@@ -9239,7 +9239,7 @@ impl eframe::App for ContextApp {
                     self.last_known_cursor_offset = Some(off);
                 }
                 if ctx_changed {
-                log!("Context: word='{}' sentence='{}' masked={} offset={:?} para='{}'",
+                debug_log!("Context: word='{}' sentence='{}' masked={} offset={:?} para='{}'",
                     trunc(&new_ctx.word, 20), trunc(&new_ctx.sentence, 40),
                     new_ctx.masked_sentence.is_some(), new_ctx.cursor_doc_offset,
                     trunc(&new_ctx.paragraph_id, 10));
@@ -9315,7 +9315,7 @@ impl eframe::App for ContextApp {
                             if refined.sentence != new_ctx.sentence
                                 || refined.paragraph_id != new_ctx.paragraph_id
                             {
-                                log!(
+                                debug_log!(
                                     "Context refined from paragraph: word='{}' sentence='{}' para={} start={}",
                                     trunc(&refined.word, 20),
                                     trunc(&refined.sentence, 40),
@@ -9708,7 +9708,7 @@ impl eframe::App for ContextApp {
                             _ => (15, 3),
                         };
                         let ctx_tail: String = context_for_cw.chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
-                        log!("Sending CompleteWord: ctx='{}' prefix='{}' [queues: spell={} pend_bert={} gram_inflight={} gram_q={}]",
+                        debug_log!("Sending CompleteWord: ctx='{}' prefix='{}' [queues: spell={} pend_bert={} gram_inflight={} gram_q={}]",
                             ctx_tail, prefix,
                             self.spelling_queue.len(),
                             self.pending_spelling_bert.len() + self.pending_grammar_bert.len() + self.pending_consonant_bert.len(),
@@ -14424,6 +14424,9 @@ fn grouped_download_rows(items: &[downloader::DownloadProgress]) -> Vec<Download
 }
 
 fn main() -> eframe::Result {
+    let debug_mode = std::env::args().any(|arg| arg == "--debug");
+    logging::configure_debug_logging(debug_mode);
+
     // Install the log-crate forwarder so velopack's internal logging
     // (and any other dep that uses log::*) flows into our LOG_FILE.
     // Without this every velopack diagnostic during an update check is
@@ -14649,7 +14652,7 @@ Set ORT_DYLIB_PATH or place onnxruntime.dll under C:\\onnxruntime\\onnxruntime-w
 
     let mut saved = load_settings();
     let grammar_completion = !std::env::args().any(|a| a == "--no-grammar");
-    let show_debug_tab = std::env::args().any(|a| a == "--debug");
+    let show_debug_tab = debug_mode;
     let args: Vec<String> = std::env::args().collect();
     let cli_quality_forced = args.iter().any(|a| a == "--quality");
     let mut quality: u8 = {
