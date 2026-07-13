@@ -1194,11 +1194,12 @@ mod bridge_manager_tests {
     use std::time::Instant;
 
     struct FixedContextBridge {
+        name: &'static str,
         context: CursorContext,
     }
 
     impl TextBridge for FixedContextBridge {
-        fn name(&self) -> &str { "Browser" }
+        fn name(&self) -> &str { self.name }
         fn is_available(&self) -> bool { true }
         fn read_context(&self) -> Option<CursorContext> { Some(self.context.clone()) }
         fn replace_word(&self, _new_text: &str) -> bool { false }
@@ -1229,6 +1230,7 @@ mod bridge_manager_tests {
         };
         let mut manager = BridgeManager {
             bridges: vec![Box::new(FixedContextBridge {
+                name: "Browser",
                 context: CursorContext {
                     cursor_doc_offset: Some(0),
                     ..Default::default()
@@ -1261,6 +1263,54 @@ mod bridge_manager_tests {
         assert_eq!(context.cursor_doc_offset, Some(0));
         assert!(manager.last_context.as_ref().unwrap().sentence.is_empty());
         assert!(manager.browser_extension_seen);
+        assert_eq!(manager.last_user_pid, 42);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_macos_accessibility_context_replaces_stale_context() {
+        let mut manager = BridgeManager {
+            bridges: vec![Box::new(FixedContextBridge {
+                name: "Accessibility (macOS)",
+                context: CursorContext {
+                    cursor_doc_offset: Some(0),
+                    ..Default::default()
+                },
+            })],
+            last_check: Instant::now(),
+            active_idx: 0,
+            last_user_pid: 7,
+            last_user_was_browser: false,
+            last_context: Some(CursorContext {
+                word: "piza".to_string(),
+                sentence: "Jeg liker piza.".to_string(),
+                ..Default::default()
+            }),
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: false,
+            last_browser_host_repair: None,
+        };
+        let route = ForegroundRoute::new(
+            ForegroundApp {
+                pid: 42,
+                exe_name: "textedit".to_string(),
+                ..Default::default()
+            },
+            AppKind::Other,
+        );
+
+        let context = manager
+            .try_macos_ax_context(&route)
+            .expect("empty focused AX editor is authoritative");
+
+        assert!(context.word.is_empty());
+        assert!(context.sentence.is_empty());
+        assert_eq!(context.cursor_doc_offset, Some(0));
+        assert!(manager.last_context.as_ref().unwrap().sentence.is_empty());
         assert_eq!(manager.last_user_pid, 42);
     }
 }
