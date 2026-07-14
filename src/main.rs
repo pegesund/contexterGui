@@ -172,7 +172,7 @@ struct CachedSentenceVerdict {
 }
 
 const SENTENCE_CACHE_CAP: usize = 20_000;
-const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v3-prefix-rescue";
+const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v4-no-loading-fallback";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SentenceCache {
@@ -195,6 +195,10 @@ fn sentence_cache_path() -> PathBuf {
 
 fn sentence_cache_version() -> String {
     format!("{}:{}", env!("CARGO_PKG_VERSION"), SENTENCE_CACHE_SCHEMA)
+}
+
+fn sentence_cache_entry_replayable(v: &CachedSentenceVerdict) -> bool {
+    v.pending == 0
 }
 
 fn load_sentence_cache() -> SentenceCache {
@@ -1044,7 +1048,8 @@ mod cross_language_barrier_tests {
         apply_original_initial_case, error_paragraph_matches_bridge,
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
-        rescore_spelling_response, sentence_cache_key_for_language,
+        rescore_spelling_response, sentence_cache_entry_replayable,
+        sentence_cache_key_for_language, CachedSentenceVerdict,
         should_skip_cross_language_match, spelling_error_still_present, word_token_at_position,
     };
     use std::path::PathBuf;
@@ -1155,6 +1160,15 @@ mod cross_language_barrier_tests {
             sentence_cache_key_for_language("en", sentence),
             sentence_cache_key_for_language("nn", sentence)
         );
+    }
+
+    #[test]
+    fn sentence_cache_pending_entries_are_not_replayable() {
+        let complete = CachedSentenceVerdict { pending: 0, ..Default::default() };
+        let pending = CachedSentenceVerdict { pending: 1, ..Default::default() };
+
+        assert!(sentence_cache_entry_replayable(&complete));
+        assert!(!sentence_cache_entry_replayable(&pending));
     }
 
     #[test]
@@ -5934,7 +5948,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 // they were written) are skipped and re-checked normally.
                 let cached_verdict = self.sentence_cache.entries
                     .get(&sentence_cache_key_for_language(self.language.code(), sentence_text))
-                    .filter(|v| v.pending == 0)
+                    .filter(|v| sentence_cache_entry_replayable(v))
                     .cloned();
                 if let Some(verdict) = cached_verdict {
                     self.processed_sentence_hashes.insert(sent_h);
@@ -7599,6 +7613,19 @@ self.grammar_queue.clear();
                 log!("  deferred spelling push: '{}' (waiting for BERT rank, id={})",
                      deferred.word, request_id);
             } else {
+                if !self.bert_ready && self.startup_rx.is_some() {
+                    log!(
+                        "  Spelling deferred while BERT loads: '{}' (will rescan when ready)",
+                        deferred.word
+                    );
+                    if let Some(e) = self.sentence_cache.entries.get_mut(
+                        &sentence_cache_key_for_language(self.language.code(), &deferred.sentence)
+                    ) {
+                        e.pending += 1;
+                        cache_dirty = true;
+                    }
+                    continue;
+                }
                 let pipeline_fallback: Vec<String> = self.analyzer.as_ref()
                     .map(|analyzer| {
                         spelling_scorer::find_candidates_pipeline(
@@ -9086,9 +9113,11 @@ impl eframe::App for ContextApp {
                         }
                         self.load_errors.extend(errors);
                         self.startup_done.push(model_label.clone());
-                        // Force rescan — spelling was skipped while BERT was loading
+                        // Force rescan: spelling seen while BERT was loading is
+                        // marked cache-pending, so it must be rechecked once the
+                        // final ranker exists.
                         self.last_doc_hash = 0;
-                        // processed_sentence_hashes NOT cleared — only invalidate changed sentence
+                        self.processed_sentence_hashes.clear();
                         log!("Startup: {} completer ready (bert_worker spawned)", model_label);
                     }
                 }
