@@ -39,8 +39,35 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
     final_path.with_file_name(name)
 }
 
-fn reply_path() -> PathBuf {
+fn legacy_reply_path() -> PathBuf {
     std::env::temp_dir().join("spell-browser-reply.json")
+}
+
+fn reply_path_for(bridge_id: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("spell-browser-reply-{}.json", bridge_id))
+}
+
+fn payload_with_bridge_id(payload: &Value, bridge_id: u32) -> Option<Vec<u8>> {
+    let mut payload = payload.clone();
+    payload
+        .as_object_mut()?
+        .insert("bridgeId".to_string(), Value::from(bridge_id));
+    serde_json::to_vec(&payload).ok()
+}
+
+fn take_pending_reply(paths: &[PathBuf]) -> Option<Vec<u8>> {
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(data) = std::fs::read(path) {
+            let _ = std::fs::remove_file(path);
+            if !data.is_empty() {
+                return Some(data);
+            }
+        }
+    }
+    None
 }
 
 fn log_path() -> PathBuf {
@@ -138,7 +165,8 @@ fn write_message_locked(out: &mut io::Stdout, data: &[u8]) -> io::Result<()> {
 }
 
 fn main() {
-    log("Native bridge started (threaded)");
+    let bridge_id = std::process::id();
+    log(&format!("Native bridge started (threaded, bridge_id={})", bridge_id));
 
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -146,16 +174,11 @@ fn main() {
     // Immediately send any pending reply from a previous session
     // (e.g., Rust wrote reply while bridge was dead, keepalive reconnected us)
     {
-        let reply = reply_path();
-        if reply.exists() {
-            if let Ok(data) = std::fs::read(&reply) {
-                let _ = std::fs::remove_file(&reply);
-                if !data.is_empty() {
-                    log(&format!("Startup: sending pending reply: {}", String::from_utf8_lossy(&data)));
-                    if let Ok(mut out) = stdout.lock() {
-                        let _ = write_message_locked(&mut *out, &data);
-                    }
-                }
+        let reply_paths = [reply_path_for(bridge_id), legacy_reply_path()];
+        if let Some(data) = take_pending_reply(&reply_paths) {
+            log(&format!("Startup: sending pending reply: {}", String::from_utf8_lossy(&data)));
+            if let Ok(mut out) = stdout.lock() {
+                let _ = write_message_locked(&mut *out, &data);
             }
         }
     }
@@ -164,19 +187,14 @@ fn main() {
     let stdout2 = stdout.clone();
     let alive2 = alive.clone();
     std::thread::spawn(move || {
+        let reply_paths = [reply_path_for(bridge_id), legacy_reply_path()];
         while alive2.load(std::sync::atomic::Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
-            let reply = reply_path();
-            if reply.exists() {
-                if let Ok(data) = std::fs::read(&reply) {
-                    let _ = std::fs::remove_file(&reply);
-                    if !data.is_empty() {
-                        log(&format!("Reply thread sending: {}", String::from_utf8_lossy(&data)));
-                        if let Ok(mut out) = stdout2.lock() {
-                            if write_message_locked(&mut *out, &data).is_err() {
-                                break;
-                            }
-                        }
+            if let Some(data) = take_pending_reply(&reply_paths) {
+                log(&format!("Reply thread sending: {}", String::from_utf8_lossy(&data)));
+                if let Ok(mut out) = stdout2.lock() {
+                    if write_message_locked(&mut *out, &data).is_err() {
+                        break;
                     }
                 }
             }
@@ -242,7 +260,10 @@ fn main() {
                     .unwrap_or_default();
                 log(&format!("RECV url={} text='{}'", url, text_preview));
 
-                if let Err(e) = write_data_atomic(&msg) {
+                let data = parsed.as_ref()
+                    .and_then(|payload| payload_with_bridge_id(payload, bridge_id))
+                    .unwrap_or(msg);
+                if let Err(e) = write_data_atomic(&data) {
                     log(&format!("Failed to write data file: {}", e));
                 }
 
@@ -281,5 +302,19 @@ mod tests {
         let actual = std::fs::read_to_string(&final_path).unwrap();
         assert_eq!(actual, r#"{"new":true}"#);
         let _ = std::fs::remove_file(&final_path);
+    }
+
+    #[test]
+    fn text_payload_is_owned_by_the_originating_native_host() {
+        let payload: Value = serde_json::from_str(
+            r#"{"type":"textUpdate","text":"hello","tabId":42}"#,
+        ).unwrap();
+
+        let encoded = payload_with_bridge_id(&payload, 1234).expect("bridge payload");
+        let decoded: Value = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded["bridgeId"], 1234);
+        assert_eq!(decoded["tabId"], 42);
+        assert_eq!(reply_path_for(1234).file_name().unwrap(), "spell-browser-reply-1234.json");
     }
 }

@@ -24,9 +24,11 @@ fn data_path() -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-fn reply_path() -> PathBuf {
+fn reply_path_for(bridge_id: usize) -> PathBuf {
     let name = if cfg!(test) {
-        format!("spell-browser-test-{}-reply.json", std::process::id())
+        format!("spell-browser-test-{}-reply-{}.json", std::process::id(), bridge_id)
+    } else if bridge_id > 0 {
+        format!("spell-browser-reply-{}.json", bridge_id)
     } else {
         "spell-browser-reply.json".to_string()
     };
@@ -39,6 +41,7 @@ pub struct BrowserBridge {
     last_cursor: std::cell::Cell<usize>,
     last_caret: std::cell::Cell<Option<(i32, i32)>>,
     last_source: std::cell::RefCell<String>,
+    last_bridge_id: std::cell::Cell<usize>,
     pending_completed_word: std::cell::RefCell<Option<String>>,
     last_read: std::cell::Cell<Option<Instant>>,
     /// After sending a replace command, freeze reads from the file until fresh data arrives.
@@ -60,6 +63,7 @@ impl BrowserBridge {
             last_cursor: std::cell::Cell::new(0),
             last_caret: std::cell::Cell::new(None),
             last_source: std::cell::RefCell::new(String::new()),
+            last_bridge_id: std::cell::Cell::new(0),
             pending_completed_word: std::cell::RefCell::new(None),
             last_read: std::cell::Cell::new(None),
             replace_freeze_modified: std::cell::Cell::new(0),
@@ -83,6 +87,10 @@ impl BrowserBridge {
             .split_once('|')
             .and_then(|(tab_id, _url)| tab_id.parse().ok())
             .unwrap_or(0)
+    }
+
+    fn reply_path(&self) -> PathBuf {
+        reply_path_for(self.last_bridge_id.get())
     }
 
     fn read_data_file(&self) -> Option<(String, usize, usize, Option<(i32, i32)>)> {
@@ -159,9 +167,13 @@ impl BrowserBridge {
             extract_json_number(&content, "tabId").unwrap_or(0),
             extract_json_string(&content, "url").unwrap_or_default(),
         );
+        let bridge_id = extract_json_number(&content, "bridgeId").unwrap_or(0);
 
         let previous_source = self.last_source.borrow().clone();
-        if !previous_source.is_empty() && previous_source == source {
+        if !previous_source.is_empty()
+            && previous_source == source
+            && self.last_bridge_id.get() == bridge_id
+        {
             let previous_text = self.last_text.borrow();
             if let Some(word) = completed_word_from_transition(
                 &previous_text,
@@ -180,6 +192,7 @@ impl BrowserBridge {
         self.last_cursor.set(cursor_start);
         self.last_caret.set(caret);
         *self.last_source.borrow_mut() = source;
+        self.last_bridge_id.set(bridge_id);
 
         Some((text, cursor_start, cursor_end, caret))
     }
@@ -255,7 +268,7 @@ impl TextBridge for BrowserBridge {
             r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
             self.source_tab_id(), start, end, escaped, escaped_old_word
         );
-        if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
+        if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
             self.update_cached_text(start, end, replacement);
             self.activate_replace_freeze(&old_word);
             true
@@ -278,7 +291,7 @@ impl TextBridge for BrowserBridge {
                 r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
                 self.source_tab_id(), start, end, escaped_text, escaped_find
             );
-            if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
+            if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
                 self.activate_replace_freeze(find);
                 return true;
@@ -305,7 +318,7 @@ impl TextBridge for BrowserBridge {
                 r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
                 self.source_tab_id(), start, end, escaped_text, escaped_find
             );
-            if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
+            if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
                 self.activate_replace_freeze(find);
                 return true;
@@ -348,7 +361,7 @@ impl TextBridge for BrowserBridge {
                 self.source_tab_id(), start, end, escaped, find_escaped
             );
             log_browser(&format!("  reply JSON: {}", json));
-            if std::fs::write(reply_path(), json.as_bytes()).is_ok() {
+            if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
                 self.activate_replace_freeze(find);
                 let new_text = self.last_text.borrow().clone();
@@ -623,7 +636,7 @@ fn has_whole_word(text: &str, word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserBridge, completed_word_from_transition, reply_path};
+    use super::{BrowserBridge, completed_word_from_transition, reply_path_for};
     use crate::bridge::TextBridge;
 
     #[test]
@@ -679,8 +692,9 @@ mod tests {
         let bridge = BrowserBridge::new();
         *bridge.last_text.borrow_mut() = "Han gik til skolen.".to_string();
         *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test".to_string();
+        bridge.last_bridge_id.set(1234);
         bridge.last_cursor.set(7);
-        let reply = reply_path();
+        let reply = reply_path_for(1234);
         let _ = std::fs::remove_file(&reply);
 
         assert!(bridge.replace_word("gik|gikk"));
@@ -703,6 +717,7 @@ mod tests {
             r#"{"action":"replace","tabId":42,"start":10,"end":14,"text":"pipa","expected":"piza"}"#,
         );
         assert_eq!(&*bridge.last_text.borrow(), "Jeg liker pipa.");
+        assert!(reply.file_name().unwrap().to_string_lossy().contains("reply-1234"));
 
         let _ = std::fs::remove_file(reply);
     }
