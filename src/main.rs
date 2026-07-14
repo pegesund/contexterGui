@@ -526,6 +526,45 @@ fn writing_error_identity_key(e: &WritingError) -> String {
     )
 }
 
+fn same_sentence_occurrence(
+    existing_paragraph_id: &str,
+    existing_sentence: &str,
+    existing_doc_offset: usize,
+    paragraph_id: &str,
+    sentence: &str,
+    doc_offset: usize,
+) -> bool {
+    existing_doc_offset == doc_offset
+        && (existing_paragraph_id == paragraph_id
+            || (!sentence.is_empty() && existing_sentence == sentence))
+}
+
+fn sentence_occurrences_with_offsets(
+    clean_text: &str,
+    sentences: &[String],
+    char_start: usize,
+) -> Vec<(String, usize)> {
+    let clean_lower = clean_text.to_lowercase();
+    let mut search_from = 0usize;
+
+    sentences
+        .iter()
+        .map(|sentence_text| {
+            let sent_lower = sentence_text.to_lowercase();
+            let sent_offset = clean_lower[search_from..]
+                .find(&sent_lower)
+                .map(|pos| search_from + pos)
+                .unwrap_or(search_from);
+            let doc_offset = char_start
+                + clean_text[..sent_offset.min(clean_text.len())]
+                    .chars()
+                    .count();
+            search_from = sent_offset + sent_lower.len();
+            (sentence_text.clone(), doc_offset)
+        })
+        .collect()
+}
+
 fn writing_error_has_visible_panel_text(e: &WritingError) -> bool {
     match e.category {
         ErrorCategory::Spelling => {
@@ -1188,7 +1227,9 @@ mod cross_language_barrier_tests {
 
 #[cfg(test)]
 mod bridge_manager_tests {
-    use super::{BridgeManager, ForegroundRoute};
+    use super::{
+        same_sentence_occurrence, sentence_occurrences_with_offsets, BridgeManager, ForegroundRoute,
+    };
     use crate::bridge::{CursorContext, TextBridge};
     use crate::platform::{AppKind, ForegroundApp, PlatformServices};
     use std::time::Instant;
@@ -1196,6 +1237,38 @@ mod bridge_manager_tests {
     struct FixedContextBridge {
         name: &'static str,
         context: CursorContext,
+    }
+
+    #[test]
+    fn duplicate_sentences_have_distinct_document_occurrences() {
+        let sentence = "This is wrng.";
+        let text = format!("{sentence} {sentence}");
+        let sentences = vec![sentence.to_string(), sentence.to_string()];
+
+        let occurrences = sentence_occurrences_with_offsets(&text, &sentences, 10);
+
+        assert_eq!(occurrences[0].1, 10);
+        assert_eq!(occurrences[1].1, 10 + sentence.chars().count() + 1);
+        assert!(!same_sentence_occurrence(
+            "browser:0",
+            sentence,
+            occurrences[0].1,
+            "browser:0",
+            sentence,
+            occurrences[1].1,
+        ));
+    }
+
+    #[test]
+    fn sentence_occurrence_survives_paragraph_id_churn() {
+        assert!(same_sentence_occurrence(
+            "word:old",
+            "This is wrng.",
+            42,
+            "word:new",
+            "This is wrng.",
+            42,
+        ));
     }
 
     impl TextBridge for FixedContextBridge {
@@ -4207,10 +4280,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             matches!(e.category, ErrorCategory::Spelling)
                 && e.word.to_lowercase() == clean
                 && !e.ignored
-                && (e.paragraph_id == paragraph_id
-                    || (!sentence_ctx.is_empty()
-                        && e.sentence_context == sentence_ctx
-                        && e.doc_offset == doc_offset))
+                && same_sentence_occurrence(
+                    &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                    paragraph_id, sentence_ctx, doc_offset,
+                )
         }) {
             return;
         }
@@ -4246,10 +4319,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             matches!(e.category, ErrorCategory::Spelling)
                 && e.word.to_lowercase() == clean.to_lowercase()
                 && !e.ignored
-                && (e.paragraph_id == paragraph_id
-                    || (!sentence_ctx.is_empty()
-                        && e.sentence_context == sentence_ctx
-                        && e.doc_offset == doc_offset))
+                && same_sentence_occurrence(
+                    &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                    paragraph_id, sentence_ctx, doc_offset,
+                )
         });
         if already_exists {
             log!("Spelling dedup: '{}' already in para={} (same occurrence), skipping push", clean, trunc(paragraph_id, 12));
@@ -4584,7 +4657,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 let already = self.writing_errors.iter().any(|e| {
                     e.word.to_lowercase() == deferred.word.to_lowercase()
                         && e.position == deferred.position
-                        && e.paragraph_id == deferred.paragraph_id
+                        && same_sentence_occurrence(
+                            &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                            &deferred.paragraph_id, &deferred.sentence, deferred.doc_offset,
+                        )
                 });
                 // Cache regardless of the display dedup — the entry's pending
                 // counter was already decremented for this word.
@@ -4695,10 +4771,10 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 e.word.to_lowercase() == deferred.word.to_lowercase()
                     && e.position == deferred.position
                     && !e.ignored
-                    && (e.paragraph_id == deferred.paragraph_id
-                        || (!deferred.sentence.is_empty()
-                            && e.sentence_context == deferred.sentence
-                            && e.doc_offset == deferred.doc_offset))
+                    && same_sentence_occurrence(
+                        &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                        &deferred.paragraph_id, &deferred.sentence, deferred.doc_offset,
+                    )
             });
             if already { return; }
 
@@ -5728,8 +5804,14 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             }
         }
         let sentences = sentences;
-        let new_hashes: Vec<u64> = sentences.iter()
-            .map(|s| hash_str(&format!("{}|{}", para_id, s))).collect();
+        let sentence_occurrences =
+            sentence_occurrences_with_offsets(&clean_text, &sentences, char_start);
+        let new_hashes: Vec<u64> = sentence_occurrences
+            .iter()
+            .map(|(sentence, doc_offset)| {
+                hash_str(&format!("{}|{}|{}", para_id, doc_offset, sentence))
+            })
+            .collect();
 
         // Remove old sentence hashes for this paragraph
         if let Some(old_hashes) = self.paragraph_sentence_hashes.get(&para_id) {
@@ -5741,15 +5823,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
 
         // Clear stale errors for this paragraph — also clear their underlines
-        let new_sentence_set: std::collections::HashSet<String> = sentences.iter().map(|s| s.to_lowercase()).collect();
-        let para_text_lower = clean_text.to_lowercase();
         let mut to_clear: Vec<(usize, usize)> = Vec::new();
         self.writing_errors.retain(|e| {
             if e.paragraph_id != para_id { return true; }
-            if new_sentence_set.contains(&e.sentence_context.to_lowercase()) { return true; }
-            if matches!(e.category, ErrorCategory::Spelling) {
-                if para_text_lower.contains(&e.word.to_lowercase()) { return true; }
-            }
+            if sentence_occurrences.iter().any(|(sentence, doc_offset)| {
+                e.doc_offset == *doc_offset
+                    && e.sentence_context.eq_ignore_ascii_case(sentence)
+            }) { return true; }
             // Removing this error — clear its underline
             if e.underlined && e.word_doc_start < e.word_doc_end {
                 to_clear.push((e.word_doc_start, e.word_doc_end));
@@ -5772,18 +5852,8 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         // pressing space.
         let mut any_replayed = false;
         if let Some(actor) = &self.grammar_actor {
-            let clean_lower = clean_text.to_lowercase();
-            let mut search_from = 0usize;
-            for sentence_text in &sentences {
-                // Find sentence position within paragraph text
-                let sent_lower = sentence_text.to_lowercase();
-                let sent_offset = clean_lower[search_from..].find(&sent_lower)
-                    .map(|pos| search_from + pos)
-                    .unwrap_or(search_from);
-                let doc_offset = char_start + clean_text[..sent_offset.min(clean_text.len())].chars().count();
-                search_from = sent_offset + sent_lower.len();
-
-                let sent_h = hash_str(&format!("{}|{}", para_id, sentence_text));
+            for (sentence_text, doc_offset) in &sentence_occurrences {
+                let sent_h = hash_str(&format!("{}|{}|{}", para_id, doc_offset, sentence_text));
                 let is_complete = sentence_text.ends_with('.') || sentence_text.ends_with('!')
                     || sentence_text.ends_with('?') || sentence_text.ends_with(':');
 
@@ -5795,7 +5865,9 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 // Clear errors for this changed sentence
                 let sentence_lower = sentence_text.to_lowercase();
                 self.writing_errors.retain(|e| {
-                    !(e.paragraph_id == para_id && e.sentence_context.to_lowercase() == sentence_lower)
+                    !(e.paragraph_id == para_id
+                        && e.doc_offset == *doc_offset
+                        && e.sentence_context.to_lowercase() == sentence_lower)
                 });
 
                 // Normal end-of-paragraph typing still waits for the word to
@@ -5844,7 +5916,14 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                             let already = self.writing_errors.iter().any(|e| {
                                 e.word.to_lowercase() == wl
                                     && e.position == ce.position
-                                    && e.paragraph_id == para_id
+                                    && same_sentence_occurrence(
+                                        &e.paragraph_id,
+                                        &e.sentence_context,
+                                        e.doc_offset,
+                                        &para_id,
+                                        sentence_text,
+                                        *doc_offset,
+                                    )
                                     && !e.ignored
                             });
                             if already { continue; }
@@ -5856,7 +5935,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                             explanation: ce.explanation.clone(),
                             rule_name: ce.rule_name.clone(),
                             sentence_context: sentence_text.to_string(),
-                            doc_offset,
+                            doc_offset: *doc_offset,
                             position: ce.position,
                             ignored: false,
                             word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
@@ -5875,7 +5954,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
 
                 let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-                actor.check_sentence_with_doc(sentence_text, doc_offset, &para_id, 0, &self.last_doc_text, &uw);
+                actor.check_sentence_with_doc(sentence_text, *doc_offset, &para_id, 0, &self.last_doc_text, &uw);
                 self.grammar_inflight.insert(sent_h);
                 log!("Grammar send (COM): '{}' (para={} doc_off={})", trunc(sentence_text, 50), trunc(&para_id, 10), doc_offset);
             }
@@ -7047,10 +7126,10 @@ self.grammar_queue.clear();
                     matches!(e.category, ErrorCategory::Spelling)
                         && e.word.eq_ignore_ascii_case(clean)
                         && !e.ignored
-                        && (e.paragraph_id == resp.paragraph_id
-                            || (!resp.sentence.is_empty()
-                                && e.sentence_context == resp.sentence
-                                && e.doc_offset == resp.doc_offset))
+                        && same_sentence_occurrence(
+                            &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                            &resp.paragraph_id, &resp.sentence, resp.doc_offset,
+                        )
                 });
                 if already {
                     continue;
@@ -7118,10 +7197,10 @@ self.grammar_queue.clear();
                 let already_displayed = self.writing_errors.iter().any(|e| {
                     e.word.eq_ignore_ascii_case(clean)
                         && !e.ignored
-                        && (e.paragraph_id == resp.paragraph_id
-                            || (!resp.sentence.is_empty()
-                                && e.sentence_context == resp.sentence
-                                && e.doc_offset == resp.doc_offset))
+                        && same_sentence_occurrence(
+                            &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                            &resp.paragraph_id, &resp.sentence, resp.doc_offset,
+                        )
                 });
                 let already_pending = self.pending_consonant_bert.iter().any(|pending| {
                     pending.word.eq_ignore_ascii_case(&clean_lower)
@@ -7337,28 +7416,28 @@ self.grammar_queue.clear();
                     e.word.to_lowercase() == unk_word_lower
                         && e.position == unk_position
                         && !e.ignored
-                        && (e.paragraph_id == resp.paragraph_id
-                            || (!resp.sentence.is_empty()
-                                && e.sentence_context == resp.sentence
-                                && e.doc_offset == resp.doc_offset))
+                        && same_sentence_occurrence(
+                            &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                            &resp.paragraph_id, &resp.sentence, resp.doc_offset,
+                        )
                 });
                 let already_pending = self.pending_spelling_bert.iter().any(|p| {
                     p.deferred_push.as_ref().map_or(false, |d| {
                         d.word.to_lowercase() == unk_word_lower
                             && d.position == unk_position
-                            && (d.paragraph_id == resp.paragraph_id
-                                || (!resp.sentence.is_empty()
-                                    && d.sentence == resp.sentence
-                                    && d.doc_offset == resp.doc_offset))
+                            && same_sentence_occurrence(
+                                &d.paragraph_id, &d.sentence, d.doc_offset,
+                                &resp.paragraph_id, &resp.sentence, resp.doc_offset,
+                            )
                     })
                 });
                 let already_in_queue = unknown_words_to_rank.iter().any(|(d, _): &(DeferredSpellingPush, _)| {
                     d.word.to_lowercase() == unk_word_lower
                         && d.position == unk_position
-                        && (d.paragraph_id == resp.paragraph_id
-                            || (!resp.sentence.is_empty()
-                                && d.sentence == resp.sentence
-                                && d.doc_offset == resp.doc_offset))
+                        && same_sentence_occurrence(
+                            &d.paragraph_id, &d.sentence, d.doc_offset,
+                            &resp.paragraph_id, &resp.sentence, resp.doc_offset,
+                        )
                 });
                 if already_displayed {
                     // The word won't be re-queued for BERT (its verdict was
