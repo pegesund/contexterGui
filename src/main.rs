@@ -1339,6 +1339,41 @@ mod bridge_manager_tests {
         assert_eq!(manager.last_user_pid, 42);
     }
 
+    #[test]
+    fn browser_paragraph_routes_to_browser_when_word_addin_is_registered() {
+        let manager = BridgeManager {
+            bridges: vec![
+                Box::new(FixedContextBridge {
+                    name: "Word Add-in",
+                    context: CursorContext::default(),
+                }),
+                Box::new(FixedContextBridge {
+                    name: "Browser",
+                    context: CursorContext::default(),
+                }),
+            ],
+            last_check: Instant::now(),
+            active_idx: 0,
+            last_user_pid: 42,
+            last_user_was_browser: false,
+            last_context: None,
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: true,
+            last_browser_host_repair: None,
+        };
+
+        assert_eq!(
+            manager
+                .bridge_for_paragraph_id("browser:0")
+                .map(TextBridge::name),
+            Some("Browser")
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn empty_macos_accessibility_context_replaces_stale_context() {
@@ -2115,6 +2150,13 @@ impl BridgeManager {
     }
 
     fn bridge_for_paragraph_id(&self, paragraph_id: &str) -> Option<&dyn TextBridge> {
+        if paragraph_id.starts_with("browser:") {
+            return self.bridges
+                .iter()
+                .find(|b| b.name() == "Browser")
+                .map(|b| b.as_ref());
+        }
+
         #[cfg(target_os = "windows")]
         {
             if !paragraph_id.is_empty()
