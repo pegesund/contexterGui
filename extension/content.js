@@ -163,16 +163,40 @@
   // gdocs-inject.js (MAIN world) writes to #spell-data.
   // Content.js (ISOLATED world) polls it. DOM is shared between worlds.
   let lastDataVersion = "";
+
+  function resumeGDocsUpdates(reason) {
+    spellLog("Replace " + reason + " - resuming text updates");
+    replaceInProgress = false;
+    replaceStartTime = 0;
+    lastSent = "";
+    lastDataVersion = "";
+    setTimeout(pollGDocsData, 0);
+  }
+
+  function handleGDocsReplaceDone(event) {
+    const replEl = event.currentTarget;
+    const succeeded = replEl && replEl.getAttribute("data-result") === "true";
+    resumeGDocsUpdates(succeeded ? "confirmed" : "failed");
+  }
+
+  function ensureGDocsReplaceElement() {
+    let replEl = document.getElementById("spell-replace");
+    if (!replEl) {
+      replEl = document.createElement("div");
+      replEl.id = "spell-replace";
+      replEl.style.display = "none";
+      document.documentElement.appendChild(replEl);
+    }
+    replEl.addEventListener("spell-replace-done", handleGDocsReplaceDone);
+    return replEl;
+  }
+
   function pollGDocsData() {
     if (!isGoogleDocs()) return;
     if (replaceInProgress) {
-      const el = document.getElementById("spell-data");
-      const done = el && el.getAttribute("data-replace-done") === "true";
       const timedOut = Date.now() - replaceStartTime > 4000;
-      if (done || timedOut) {
-        spellLog("Replace " + (done ? "confirmed" : "timed out") + " — resuming text updates");
-        replaceInProgress = false;
-        if (el) el.removeAttribute("data-replace-done");
+      if (timedOut) {
+        resumeGDocsUpdates("timed out");
       } else {
         return;
       }
@@ -183,7 +207,7 @@
     const cursor = parseInt(el.getAttribute("data-cursor") || "0", 10);
     const caretX = parseInt(el.getAttribute("data-caret-x") || "0", 10);
     const caretY = parseInt(el.getAttribute("data-caret-y") || "0", 10);
-    if (!text) return;
+    if (text === null) return;
     const version = text + "|" + cursor + "|" + caretX + "|" + caretY;
     if (version === lastDataVersion) return;
     const data = { text: text, cursorStart: cursor, cursorEnd: cursor };
@@ -213,13 +237,7 @@
         spellLog("REPLACE FAILED: no expected text");
         return;
       }
-      let replEl = document.getElementById("spell-replace");
-      if (!replEl) {
-        replEl = document.createElement("div");
-        replEl.id = "spell-replace";
-        replEl.style.display = "none";
-        document.documentElement.appendChild(replEl);
-      }
+      const replEl = ensureGDocsReplaceElement();
       replEl.setAttribute("data-find", findText);
       replEl.setAttribute("data-replace", replaceText);
       replEl.setAttribute("data-offset", String(msg.start || 0));
