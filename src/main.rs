@@ -10696,7 +10696,10 @@ impl eframe::App for ContextApp {
                     "–", 14.0 * s, inactive,
                     self.ui_language.ui_minimize(),
                 );
-                if toolbar_clicked(ui, &minimize_resp, toolbar_mouse_down_click) {
+                // OS window state must use a completed click. The mouse-down
+                // fallback used by ordinary toolbar actions can be replayed
+                // while a minimized viewport is being restored.
+                if minimize_resp.clicked() {
                     // Drop AlwaysOnTop FIRST, otherwise Windows iconises a
                     // borderless WS_EX_TOPMOST popup without leaving a taskbar
                     // entry. The next update() frame will see is_minimised=true
