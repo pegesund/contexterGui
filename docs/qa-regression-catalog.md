@@ -88,7 +88,7 @@ if doc_text.trim().is_empty() {
 | WIN-WORD-002 | Word | A first click on correction, completion, toolbar, question, and navigation actions executes once without a focus-only click. | Manual |
 | WIN-DOCS-001 | Google Docs | Type a misspelling, verify one row, then select all and delete. The row and Tips count clear within one poll. | Manual; browser harness open |
 | WIN-NOTEPAD-001 | Notepad | Put different misspellings in two tabs. Only the active tab is visible/actionable; clearing it does not reveal the background tab until that tab is selected. | Manual; UIA harness open |
-| WIN-OVERLAY-001 | Word, Docs, Slack, Notepad | Spell stays above the writing app, preserves its caret-relative position during Spell clicks, and can be manually minimized. | Manual |
+| WIN-OVERLAY-001 | Word, Docs, Slack, Notepad | Spell stays above the writing app and preserves its caret-relative position during Spell clicks. After using Spell's minimize button and restoring it from the taskbar, clicking document text must not minimize it again. | Manual OS-window test |
 | WIN-OCR-001 | Snipping Tool | Screenshot prompt appears immediately for English, Bokmal, and Nynorsk; one capture creates one prompt; prompt remains above Spell. | Manual |
 | WIN-DOWNLOAD-001 | Initial setup | Slow/interrupted downloads retry or resume; Close cancels active setup instead of continuing in the background. | Manual packaging test |
 | WIN-UPDATE-001 | Installed release | Update applies without a raw process/DLL dialog; update toast is fully visible and localized. | Manual installed-build test |
@@ -100,8 +100,8 @@ if doc_text.trim().is_empty() {
 |---|---|---|---|
 | MAC-WORD-001 | Word | Existing errors survive Word -> other app -> Word; correction and navigation work on the first click. | `test_errors.sh`, `scripts/test-focus-errors.sh`, manual click check |
 | MAC-AX-001 | Notes, TextEdit, Slack | Type a misspelling and delete all text. Error rows and Tips clear within one poll. | Open until AX empty-context route test and GUI harness land |
-| MAC-BROWSER-001 | Google Docs | Browser errors do not inherit Word/AX state; deleting all editor text clears browser rows. | Manual |
-| MAC-OVERLAY-001 | Word, Docs, Notes, TextEdit, Slack | Clicking document text must not OS-minimize Spell. Intentional toolbar-only collapse is allowed only when the selected panel has no renderable content. | Open: requires screenshot/video plus `spell.log` to distinguish OS minimize from content-driven resize |
+| MAC-BROWSER-001 | Google Docs | Browser errors do not inherit Word/AX state; clicking a correction changes the originating browser text; duplicate occurrences remain independently actionable; deleting all editor text clears browser rows. | Paragraph-route unit test plus manual browser test |
+| MAC-OVERLAY-001 | Word, Docs, Notes, TextEdit, Slack | After using Spell's minimize button and restoring it from the Dock, clicking document text must not OS-minimize Spell again. Intentional toolbar-only collapse is allowed only when the selected panel has no renderable content. | Manual OS-window test |
 | MAC-OVERLAY-002 | All writing apps | A first click on correction, completion, and toolbar actions executes once and does not move the overlay to an unrelated screen corner. | Manual |
 | MAC-STT-001 | Word/other editor | First mic use downloads the selected-language Whisper model if absent; recording transcribes speech or reports a localized actionable error. | Manual installed-build test |
 | MAC-WORDADDIN-001 | Word | Installed signed app can install/load the add-in; an unsigned terminal build may fail certificate authorization and must explain the limitation. | Manual signed-build test |
