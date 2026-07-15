@@ -1242,7 +1242,8 @@ mod cross_language_barrier_tests {
 #[cfg(test)]
 mod bridge_manager_tests {
     use super::{
-        same_sentence_occurrence, sentence_occurrences_with_offsets, BridgeManager, ForegroundRoute,
+        addin_sentence_hash, grammar_response_sentence_hash, same_sentence_occurrence,
+        sentence_occurrences_with_offsets, BridgeManager, ForegroundRoute,
     };
     use crate::bridge::{CursorContext, TextBridge};
     use crate::platform::{AppKind, ForegroundApp, PlatformServices};
@@ -1283,6 +1284,18 @@ mod bridge_manager_tests {
             "This is wrng.",
             42,
         ));
+    }
+
+    #[test]
+    fn browser_grammar_response_keeps_occurrence_offset_in_hash() {
+        let paragraph_id = "browser:0";
+        let sentence = "Jeg liker a spisse piza.";
+        let doc_offset = 27;
+
+        assert_eq!(
+            grammar_response_sentence_hash(paragraph_id, sentence, doc_offset, false),
+            addin_sentence_hash(paragraph_id, sentence, doc_offset),
+        );
     }
 
     impl TextBridge for FixedContextBridge {
@@ -7118,13 +7131,12 @@ self.grammar_queue.clear();
             log!("Grammar response: sentence='{}' errors={} unknown={} para='{}'",
                 trunc(&resp.sentence, 40), resp.errors.len(), resp.unknown_words.len(),
                 trunc(&resp.paragraph_id, 10));
-            let sent_h = if resp.paragraph_id.is_empty() {
-                hash_str(&resp.sentence)
-            } else if self.paragraph_doc_starts.contains_key(&resp.paragraph_id) {
-                addin_sentence_hash(&resp.paragraph_id, &resp.sentence, resp.doc_offset)
-            } else {
-                hash_str(&format!("{}|{}", resp.paragraph_id, resp.sentence))
-            };
+            let sent_h = grammar_response_sentence_hash(
+                &resp.paragraph_id,
+                &resp.sentence,
+                resp.doc_offset,
+                self.paragraph_doc_starts.contains_key(&resp.paragraph_id),
+            );
 
             // Guard: discard if the paragraph is no longer tracked (app switched and
             // paragraph_sentence_hashes was cleared). The sentence-hash-still-current
@@ -8088,6 +8100,21 @@ pub(crate) fn hash_str(s: &str) -> u64 {
 
 fn addin_sentence_hash(paragraph_id: &str, sentence: &str, doc_offset: usize) -> u64 {
     hash_str(&format!("{}|{}|{}", paragraph_id, doc_offset, sentence))
+}
+
+fn grammar_response_sentence_hash(
+    paragraph_id: &str,
+    sentence: &str,
+    doc_offset: usize,
+    is_word_scoped: bool,
+) -> u64 {
+    if paragraph_id.is_empty() {
+        hash_str(sentence)
+    } else if is_word_scoped {
+        addin_sentence_hash(paragraph_id, sentence, doc_offset)
+    } else {
+        hash_str(&format!("{}|{}", paragraph_id, sentence))
+    }
 }
 
 fn split_sentences(text: &str) -> Vec<String> {
