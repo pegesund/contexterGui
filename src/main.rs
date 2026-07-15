@@ -3213,6 +3213,24 @@ fn build_right_completions(
 }
 
 impl ContextApp {
+    fn macos_word_error_scope_active(&self) -> bool {
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
+
+        let foreground = self.platform.foreground_app();
+        let foreground_kind = self.platform.classify_app(&foreground);
+        let effective_foreground = if foreground_kind == platform::AppKind::OurApp
+            && self.last_external_layout_app.pid != 0
+        {
+            &self.last_external_layout_app
+        } else {
+            &foreground
+        };
+
+        self.platform.classify_app(effective_foreground) == platform::AppKind::Word
+    }
+
     fn dedup_writing_errors(&mut self) {
         let before = self.writing_errors.len();
         if before < 2 {
@@ -6996,9 +7014,14 @@ self.grammar_queue.clear();
             std::collections::HashSet::new();
         let mut count = 0;
         let active_bridge = self.manager.active_bridge_name().to_string();
+        let macos_word_foreground = self.macos_word_error_scope_active();
         for e in &self.writing_errors {
             if e.ignored { continue; }
-            if !error_paragraph_matches_bridge(&e.paragraph_id, &active_bridge) { continue; }
+            if !error_paragraph_matches_surface(
+                &e.paragraph_id,
+                &active_bridge,
+                macos_word_foreground,
+            ) { continue; }
             if e.suggestion.is_empty() { continue; }
             if e.suggestion == "<DELETE>" { continue; }      // needs special remove flow
             if e.rule_name == "llm_correction" { continue; } // LLM owns these
@@ -8779,13 +8802,18 @@ impl eframe::App for ContextApp {
        
 
         let active_error_bridge = self.manager.active_bridge_name().to_string();
+        let macos_word_foreground = self.macos_word_error_scope_active();
 
         // Update errors JSON for /errors endpoint
         {
             let json = format!("[{}]", self.writing_errors.iter()
                 .filter(|e| {
                     !e.ignored
-                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && error_paragraph_matches_surface(
+                            &e.paragraph_id,
+                            &active_error_bridge,
+                            macos_word_foreground,
+                        )
                         && writing_error_has_visible_panel_text(e)
                 })
                 .map(|e| {
@@ -8855,7 +8883,11 @@ impl eframe::App for ContextApp {
                 self.writing_errors.iter()
                     .filter(|e| {
                         !e.ignored
-                            && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                            && error_paragraph_matches_surface(
+                                &e.paragraph_id,
+                                &active_error_bridge,
+                                macos_word_foreground,
+                            )
                             && e.rule_name != "llm_correction"
                             && writing_error_has_visible_panel_text(e)
                     })
@@ -8866,7 +8898,11 @@ impl eframe::App for ContextApp {
             let has_active_errors = self.writing_errors.iter()
                 .any(|e| {
                     !e.ignored
-                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && error_paragraph_matches_surface(
+                            &e.paragraph_id,
+                            &active_error_bridge,
+                            macos_word_foreground,
+                        )
                         && writing_error_has_visible_panel_text(e)
                 });
             let pencil_visible = in_writing_app && self.show_grammar
@@ -10168,6 +10204,7 @@ impl eframe::App for ContextApp {
         let slack_layout = fg_for_layout.exe_name.contains("slack");
         let suppress_panels_for_viewer = windows_notepad_non_prose_viewer(&fg_for_layout);
         let active_error_bridge = self.manager.active_bridge_name().to_string();
+        let macos_word_foreground = self.macos_word_error_scope_active();
         // Windows/macOS often spend the first click on activating our topmost
         // borderless popup. Count mouse-down as the action trigger there so
         // completion rows, quick-fix labels, and toolbar icons work with a
@@ -10180,7 +10217,11 @@ impl eframe::App for ContextApp {
             !suppress_panels_for_viewer && self.writing_errors.iter()
                 .any(|e| {
                     !e.ignored
-                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && error_paragraph_matches_surface(
+                            &e.paragraph_id,
+                            &active_error_bridge,
+                            macos_word_foreground,
+                        )
                         && writing_error_has_visible_panel_text(e)
                 });
 
@@ -10230,7 +10271,11 @@ impl eframe::App for ContextApp {
             let errors = self.writing_errors.iter()
                 .filter(|e| {
                     !e.ignored
-                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && error_paragraph_matches_surface(
+                            &e.paragraph_id,
+                            &active_error_bridge,
+                            macos_word_foreground,
+                        )
                         && writing_error_has_visible_panel_text(e)
                 })
                 .count();
@@ -10458,7 +10503,11 @@ impl eframe::App for ContextApp {
             || self.writing_errors.iter()
                 .any(|e| {
                     !e.ignored
-                        && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                        && error_paragraph_matches_surface(
+                            &e.paragraph_id,
+                            &active_error_bridge,
+                            macos_word_foreground,
+                        )
                         && writing_error_has_visible_panel_text(e)
                 });
 
@@ -10718,7 +10767,11 @@ impl eframe::App for ContextApp {
                     let err_count = self.writing_errors.iter()
                         .filter(|e| {
                             !e.ignored
-                                && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                                && error_paragraph_matches_surface(
+                                    &e.paragraph_id,
+                                    &active_error_bridge,
+                                    macos_word_foreground,
+                                )
                                 && e.rule_name != "llm_correction"
                                 && writing_error_has_visible_panel_text(e)
                         })
@@ -11164,7 +11217,11 @@ impl eframe::App for ContextApp {
                 !suppress_panels_for_viewer && self.writing_errors.iter()
                     .any(|e| {
                         !e.ignored
-                            && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                            && error_paragraph_matches_surface(
+                                &e.paragraph_id,
+                                &active_error_bridge,
+                                macos_word_foreground,
+                            )
                             && writing_error_has_visible_panel_text(e)
                     });
             let show_scanning = self.grammar_scanning && self.grammar_queue_total > 0;
@@ -11200,7 +11257,11 @@ impl eframe::App for ContextApp {
                     .enumerate()
                     .filter(|(_, e)| {
                         !e.ignored
-                            && error_paragraph_matches_bridge(&e.paragraph_id, &active_error_bridge)
+                            && error_paragraph_matches_surface(
+                                &e.paragraph_id,
+                                &active_error_bridge,
+                                macos_word_foreground,
+                            )
                             && writing_error_has_visible_panel_text(e)
                     })
                     .map(|(i, _)| i)
