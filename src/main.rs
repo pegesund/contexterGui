@@ -13626,9 +13626,18 @@ fn press_event_hits_response(
                 && interact_pos.is_some_and(|pos| response_rect.contains(pos))))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn mac_manual_minimize_after_focus(
+    manual_minimized: bool,
+    was_focused: bool,
+    is_focused: bool,
+) -> bool {
+    manual_minimized && !(is_focused && !was_focused)
+}
+
 #[cfg(test)]
 mod response_click_tests {
-    use super::press_event_hits_response;
+    use super::{mac_manual_minimize_after_focus, press_event_hits_response};
 
     #[test]
     fn macos_press_requires_a_current_interaction_position_when_not_hovered() {
@@ -13642,6 +13651,14 @@ mod response_click_tests {
             true,
         ));
         assert!(!press_event_hits_response(true, false, None, rect, true));
+    }
+
+    #[test]
+    fn macos_manual_minimize_clears_only_after_a_restore_focus_transition() {
+        assert!(mac_manual_minimize_after_focus(true, true, true));
+        assert!(mac_manual_minimize_after_focus(true, true, false));
+        assert!(!mac_manual_minimize_after_focus(true, false, true));
+        assert!(!mac_manual_minimize_after_focus(false, false, true));
     }
 }
 
