@@ -1293,7 +1293,7 @@ mod bridge_manager_tests {
         let doc_offset = 27;
 
         assert_eq!(
-            grammar_response_sentence_hash(paragraph_id, sentence, doc_offset, false),
+            grammar_response_sentence_hash(paragraph_id, sentence, doc_offset),
             addin_sentence_hash(paragraph_id, sentence, doc_offset),
         );
     }
@@ -7135,7 +7135,6 @@ self.grammar_queue.clear();
                 &resp.paragraph_id,
                 &resp.sentence,
                 resp.doc_offset,
-                self.paragraph_doc_starts.contains_key(&resp.paragraph_id),
             );
 
             // Guard: discard if the paragraph is no longer tracked (app switched and
@@ -8106,14 +8105,11 @@ fn grammar_response_sentence_hash(
     paragraph_id: &str,
     sentence: &str,
     doc_offset: usize,
-    is_word_scoped: bool,
 ) -> u64 {
     if paragraph_id.is_empty() {
         hash_str(sentence)
-    } else if is_word_scoped {
-        addin_sentence_hash(paragraph_id, sentence, doc_offset)
     } else {
-        hash_str(&format!("{}|{}", paragraph_id, sentence))
+        addin_sentence_hash(paragraph_id, sentence, doc_offset)
     }
 }
 
