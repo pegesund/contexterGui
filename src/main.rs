@@ -2843,6 +2843,12 @@ struct ContextApp {
     /// on a real transition (per-frame Normal raised the popup above its
     /// own Settings window because HWND_NOTOPMOST also re-orders).
     last_window_always_on_top: Option<bool>,
+    /// egui does not refresh runtime minimized state on macOS. Keep the
+    /// manual request active until the restored viewport regains focus.
+    #[cfg(target_os = "macos")]
+    mac_manual_minimized: bool,
+    #[cfg(target_os = "macos")]
+    mac_viewport_was_focused: bool,
 }
 
 /// Build left completions via BPE extension (when prefix_index has matches).
@@ -3591,6 +3597,10 @@ impl ContextApp {
             last_notified_update_version: saved_settings.last_notified_update_version.clone(),
             update_toast: None,
             last_window_always_on_top: None,
+            #[cfg(target_os = "macos")]
+            mac_manual_minimized: false,
+            #[cfg(target_os = "macos")]
+            mac_viewport_was_focused: false,
         }
     }
 
@@ -10233,6 +10243,22 @@ impl eframe::App for ContextApp {
         // create the taskbar entry, and the slightest SetWindowPos() before
         // that finishes silently restores the window off-screen with no
         // taskbar icon.
+        #[cfg(target_os = "macos")]
+        let is_minimised = {
+            let viewport_focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+            let was_manually_minimized = self.mac_manual_minimized;
+            self.mac_manual_minimized = mac_manual_minimize_after_focus(
+                self.mac_manual_minimized,
+                self.mac_viewport_was_focused,
+                viewport_focused,
+            );
+            self.mac_viewport_was_focused = viewport_focused;
+            if was_manually_minimized && !self.mac_manual_minimized {
+                log!("macOS viewport restored — resuming floating window updates");
+            }
+            self.mac_manual_minimized
+        };
+        #[cfg(not(target_os = "macos"))]
         let is_minimised = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
 
         // Re-assert AlwaysOnTop every frame so the popup stays above Word
@@ -10736,6 +10762,10 @@ impl eframe::App for ContextApp {
                     // off until the window is restored.
                     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
                     self.last_window_always_on_top = Some(false);
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.mac_manual_minimized = true;
+                    }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
 
