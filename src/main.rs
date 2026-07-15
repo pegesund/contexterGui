@@ -863,6 +863,22 @@ fn error_paragraph_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool
     paragraph_id.is_empty() || paragraph_id_matches_bridge(paragraph_id, bridge_name)
 }
 
+fn error_paragraph_matches_surface(
+    paragraph_id: &str,
+    bridge_name: &str,
+    macos_word_foreground: bool,
+) -> bool {
+    if paragraph_id.is_empty() {
+        return true;
+    }
+
+    if macos_word_foreground {
+        return is_word_scoped_paragraph_id(paragraph_id) || paragraph_id.starts_with("ax:");
+    }
+
+    error_paragraph_matches_bridge(paragraph_id, bridge_name)
+}
+
 fn spelling_error_still_present(check_text: &str, word: &str, sentence_context: &str) -> bool {
     let word_lower = word.to_lowercase();
     let word_present = check_text
@@ -1046,6 +1062,7 @@ fn reading_pos_set(analyzer: &mtag::Analyzer, word: &str) -> std::collections::H
 mod cross_language_barrier_tests {
     use super::{
         apply_original_initial_case, error_paragraph_matches_bridge,
+        error_paragraph_matches_surface,
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
         rescore_spelling_response, sentence_cache_entry_replayable,
@@ -1221,6 +1238,36 @@ mod cross_language_barrier_tests {
         assert!(paragraph_id_matches_bridge("uia:0", "Accessibility"));
         assert!(!paragraph_id_matches_bridge("browser:0", "Accessibility"));
         assert!(error_paragraph_matches_bridge("", "Browser"));
+    }
+
+    #[test]
+    fn macos_word_surface_keeps_addin_and_accessibility_errors_visible() {
+        assert!(error_paragraph_matches_surface(
+            "42",
+            "Accessibility (macOS)",
+            true,
+        ));
+        assert!(error_paragraph_matches_surface(
+            "ax:0",
+            "Word Add-in",
+            true,
+        ));
+        assert!(!error_paragraph_matches_surface(
+            "browser:0",
+            "Accessibility (macOS)",
+            true,
+        ));
+
+        assert!(!error_paragraph_matches_surface(
+            "42",
+            "Accessibility (macOS)",
+            false,
+        ));
+        assert!(!error_paragraph_matches_surface(
+            "ax:0",
+            "Word Add-in",
+            false,
+        ));
     }
 
     #[test]
