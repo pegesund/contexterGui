@@ -412,6 +412,36 @@ mod candidate_generation_tests {
 
         assert_eq!(candidates.first().map(|(word, _)| word.as_str()), Some("år"));
     }
+
+    #[test]
+    fn qa_sentence_unknown_words_have_expected_candidates() {
+        let (analyzer, fst, wordfreq) = bokmal_resources();
+        let empty_user: Vec<String> = Vec::new();
+        let empty_doc: HashMap<String, u16> = HashMap::new();
+        let cases = [
+            ("gik", "Han gik til skolen i dag.", "gikk"),
+            ("Bergeen", "Vi skal reise til Bergeen neste uke.", "bergen"),
+            ("telefoon", "Hun kjøpte en ny telefoon.", "telefon"),
+        ];
+
+        for (word, sentence, expected) in cases {
+            let candidates = find_candidates_pipeline(
+                &analyzer,
+                Some(&fst),
+                Some(&wordfreq),
+                &empty_user,
+                &empty_doc,
+                word,
+                sentence,
+                &language::BokmalLanguage,
+            );
+
+            assert!(
+                candidates.iter().any(|(candidate, _)| candidate == expected),
+                "{word} should include {expected}; got {candidates:?}"
+            );
+        }
+    }
 }
 
 /// Phase 1: Generate spelling candidates, ortho-score them, and dictionary-filter.

@@ -994,6 +994,14 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
         || (foreign_context_score >= 2 && active_dist > 1 && foreign_dist <= 2)
 }
 
+fn should_surface_unknown_spelling(
+    is_user_dictionary_word: bool,
+    is_analyzer_word: bool,
+    is_cross_language_word: bool,
+) -> bool {
+    !is_user_dictionary_word && !is_analyzer_word && !is_cross_language_word
+}
+
 fn known_word_spelling_variants_for_analyzer(
     analyzer: &mtag::Analyzer,
     language_code: &str,
@@ -1067,7 +1075,8 @@ mod cross_language_barrier_tests {
         known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
         rescore_spelling_response, sentence_cache_entry_replayable,
         sentence_cache_key_for_language, CachedSentenceVerdict,
-        should_skip_cross_language_match, spelling_error_still_present, word_token_at_position,
+        should_skip_cross_language_match, should_surface_unknown_spelling,
+        spelling_error_still_present, word_token_at_position,
     };
     use std::path::PathBuf;
 
@@ -1105,6 +1114,14 @@ mod cross_language_barrier_tests {
     #[test]
     fn keeps_clear_active_typo_inside_strong_foreign_context() {
         assert!(!should_skip_cross_language_match(1, 2, 2));
+    }
+
+    #[test]
+    fn analyzer_unknown_word_remains_actionable() {
+        assert!(should_surface_unknown_spelling(false, false, false));
+        assert!(!should_surface_unknown_spelling(true, false, false));
+        assert!(!should_surface_unknown_spelling(false, true, false));
+        assert!(!should_surface_unknown_spelling(false, false, true));
     }
 
     #[test]
@@ -4051,22 +4068,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     }
 
     fn should_surface_unknown_spelling_word(&self, word: &str, sentence_ctx: &str) -> bool {
-        if self.user_dict.as_ref().map_or(false, |ud| ud.has_word(word)) {
-            return false;
-        }
-        if self.analyzer.as_ref().map_or(false, |a| a.has_word(word)) {
-            return false;
-        }
-        if self.language.code() != "en" && self.wordfreq.as_ref().map_or(false, |wf| {
-            let freq = wf.get(&word.to_lowercase()).copied().unwrap_or(0);
-            freq >= 1000
-        }) {
-            return false;
-        }
-        if self.is_cross_language_spelling_token(word, sentence_ctx) {
-            return false;
-        }
-        true
+        should_surface_unknown_spelling(
+            self.user_dict.as_ref().map_or(false, |ud| ud.has_word(word)),
+            self.analyzer.as_ref().map_or(false, |a| a.has_word(word)),
+            self.is_cross_language_spelling_token(word, sentence_ctx),
+        )
     }
 
     fn is_known_active_word(&self, lower_word: &str) -> bool {
@@ -9191,22 +9197,6 @@ impl eframe::App for ContextApp {
                         self.prefix_index = prefix_index;
                         self.baselines = baselines;
                         self.wordfreq = wordfreq;
-                        // Retroactively remove spelling errors for words now found in
-                        // Norwegian wordfreq. Do not do this for English: the English
-                        // frequency corpus contains common misspellings, and the analyzer
-                        // result is the source of truth for spelling correctness there.
-                        if self.language.code() != "en" {
-                            if let Some(wf) = &self.wordfreq {
-                                let before = self.writing_errors.len();
-                                self.writing_errors.retain(|e| {
-                                    !(matches!(e.category, ErrorCategory::Spelling) && wf.contains_key(&e.word.to_lowercase()))
-                                });
-                                let removed = before - self.writing_errors.len();
-                                if removed > 0 {
-                                    log!("Wordfreq: removed {} false-positive spelling errors", removed);
-                                }
-                            }
-                        }
                         self.embedding_store = embedding_store;
                         if let Some(m) = model {
                             let gs = self.grammar_actor.as_ref().map(|a| a.sender_clone());
