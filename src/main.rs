@@ -172,7 +172,7 @@ struct CachedSentenceVerdict {
 }
 
 const SENTENCE_CACHE_CAP: usize = 20_000;
-const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v4-no-loading-fallback";
+const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v5-analyzer-authority";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SentenceCache {
@@ -193,16 +193,17 @@ fn sentence_cache_path() -> PathBuf {
     settings_path().with_file_name("sentence_cache.json")
 }
 
-fn sentence_cache_version() -> String {
-    format!("{}:{}", env!("CARGO_PKG_VERSION"), SENTENCE_CACHE_SCHEMA)
+fn sentence_cache_version(installed_version: Option<&str>) -> String {
+    let app_version = installed_version.unwrap_or(env!("CARGO_PKG_VERSION"));
+    format!("{}:{}", app_version, SENTENCE_CACHE_SCHEMA)
 }
 
 fn sentence_cache_entry_replayable(v: &CachedSentenceVerdict) -> bool {
     v.pending == 0
 }
 
-fn load_sentence_cache() -> SentenceCache {
-    let cur = sentence_cache_version();
+fn load_sentence_cache(installed_version: Option<&str>) -> SentenceCache {
+    let cur = sentence_cache_version(installed_version);
     // Debug builds start with a cold cache every launch so testing is
     // realistic (no verdicts leaking in from a previous run). Release keeps
     // the disk cache so documents re-open instantly across app restarts.
@@ -1074,7 +1075,8 @@ mod cross_language_barrier_tests {
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
         rescore_spelling_response, sentence_cache_entry_replayable,
-        sentence_cache_key_for_language, CachedSentenceVerdict,
+        sentence_cache_key_for_language, sentence_cache_version, CachedSentenceVerdict,
+        SENTENCE_CACHE_SCHEMA,
         should_skip_cross_language_match, should_surface_unknown_spelling,
         spelling_error_still_present, word_token_at_position,
     };
@@ -1203,6 +1205,19 @@ mod cross_language_barrier_tests {
 
         assert!(sentence_cache_entry_replayable(&complete));
         assert!(!sentence_cache_entry_replayable(&pending));
+    }
+
+    #[test]
+    fn sentence_cache_version_prefers_installed_release_version() {
+        let installed = sentence_cache_version(Some("0.1.84"));
+        let development = sentence_cache_version(None);
+
+        assert_eq!(installed, format!("0.1.84:{}", SENTENCE_CACHE_SCHEMA));
+        assert_eq!(
+            development,
+            format!("{}:{}", env!("CARGO_PKG_VERSION"), SENTENCE_CACHE_SCHEMA)
+        );
+        assert_ne!(installed, development);
     }
 
     #[test]
@@ -3403,6 +3418,11 @@ impl ContextApp {
         let platform = platform::create_platform();
         platform.init_runtime();
 
+        let update_service = std::sync::Arc::new(crate::updates::UpdateService::new());
+        let installed_version = update_service.current_version();
+        // No-op when not Velopack-installed (dev runs, plain DMG).
+        update_service.start_polling();
+
         // Auto-register the browser-companion native messaging host with
         // Chrome / Edge / Brave / Chromium. Idempotent — overwrites the
         // existing manifest + registry entry each launch so the path
@@ -3551,7 +3571,7 @@ impl ContextApp {
             paragraph_doc_starts: std::collections::HashMap::new(),
             last_para_count: 0,
             last_para_probe: Instant::now(),
-            sentence_cache: load_sentence_cache(),
+            sentence_cache: load_sentence_cache(installed_version.as_deref()),
             last_grammar_ctx_key: String::new(),
             last_known_cursor_offset: None,
             prefix_index: None,
@@ -3682,13 +3702,7 @@ impl ContextApp {
             prev_writing_fg_was_word: false,
             suppress_errors: false,
             prev_was_writing_app: None,
-            update_service: {
-                let svc = std::sync::Arc::new(crate::updates::UpdateService::new());
-                // Kick off background polling immediately. No-op when not
-                // Velopack-installed (dev runs, plain DMG) — see updates.rs.
-                svc.start_polling();
-                svc
-            },
+            update_service,
             last_notified_update_version: saved_settings.last_notified_update_version.clone(),
             update_toast: None,
             last_window_always_on_top: None,
