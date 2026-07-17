@@ -12506,6 +12506,7 @@ impl eframe::App for ContextApp {
                                         if cfg!(target_os = "windows")
                                             && self.whisper_mode == 1
                                             && self.whisper_engine.is_some()
+                                            && !should_auto_finalize_stt(self.whisper_mode)
                                             && !self.improve_running
                                         {
                                             if ui.button(egui::RichText::new(lang_for_stt.ui_improve_result()).size(14.0 * s)).clicked() {
