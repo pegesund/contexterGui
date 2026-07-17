@@ -84,12 +84,13 @@ function loadContentScript() {
   vm.runInContext(source, context, { filename: "content.js" });
 
   return {
-    createData(text, cursor = 0, paragraphStart = 0) {
+    createData(text, cursor = 0, paragraphStart = 0, selectedText = "") {
       const element = new FakeElement(elements);
       element.id = "spell-data";
       element.setAttribute("data-text", text);
       element.setAttribute("data-cursor", cursor);
       element.setAttribute("data-paragraph-start", paragraphStart);
+      element.setAttribute("data-selected-text", selectedText);
       element.setAttribute("data-caret-x", 10);
       element.setAttribute("data-caret-y", 20);
       return element;
@@ -132,4 +133,14 @@ test("Google Docs forwards an empty active paragraph", () => {
   const update = harness.messages.find(({ type }) => type === "textUpdate");
   assert.ok(update);
   assert.equal(update.text, "");
+});
+
+test("Google Docs forwards its selected text to the native bridge", () => {
+  const harness = loadContentScript();
+  harness.createData("Jeg liker piza.", 14, 32, "liker piza");
+  harness.poll();
+
+  const update = harness.messages.find(({ type }) => type === "textUpdate");
+  assert.equal(update.selectedText, "liker piza");
+  assert.equal(update.paragraphStart, 32);
 });

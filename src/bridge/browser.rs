@@ -38,6 +38,9 @@ fn reply_path_for(bridge_id: usize) -> PathBuf {
 pub struct BrowserBridge {
     last_modified: std::cell::Cell<u64>,
     last_text: std::cell::RefCell<String>,
+    // The exact browser-editor selection, supplied by the extension. This
+    // must not fall back to an unrelated desktop app's accessibility cache.
+    last_selected_text: std::cell::RefCell<Option<String>>,
     last_cursor: std::cell::Cell<usize>,
     /// Absolute start of the active browser paragraph, as published by the
     /// Docs injector. This keeps identical paragraphs distinct.
@@ -63,6 +66,7 @@ impl BrowserBridge {
         BrowserBridge {
             last_modified: std::cell::Cell::new(0),
             last_text: std::cell::RefCell::new(String::new()),
+            last_selected_text: std::cell::RefCell::new(None),
             last_cursor: std::cell::Cell::new(0),
             last_paragraph_start: std::cell::Cell::new(0),
             last_caret: std::cell::Cell::new(None),
@@ -160,6 +164,8 @@ impl BrowserBridge {
         // Parse JSON: { "text": "...", "cursorStart": N, "cursorEnd": N, ... }
         // Minimal JSON parsing to avoid adding serde dependency
         let text = extract_json_string(&content, "text")?;
+        let selected_text = extract_json_string(&content, "selectedText")
+            .filter(|selection| !selection.trim().is_empty());
         let cursor_start = extract_json_number(&content, "cursorStart").unwrap_or(text.len());
         let cursor_end = extract_json_number(&content, "cursorEnd").unwrap_or(cursor_start);
         let paragraph_start = extract_json_number(&content, "paragraphStart").unwrap_or(0);
@@ -195,6 +201,7 @@ impl BrowserBridge {
         }
 
         *self.last_text.borrow_mut() = text.clone();
+        *self.last_selected_text.borrow_mut() = selected_text;
         self.last_cursor.set(cursor_start);
         self.last_paragraph_start.set(paragraph_start);
         self.last_caret.set(caret);
@@ -437,6 +444,14 @@ impl TextBridge for BrowserBridge {
         self.pending_completed_word.borrow_mut().take()
     }
 
+    fn read_selected_text(&self) -> Option<String> {
+        // Prefer the browser's own editor selection. On Windows and macOS,
+        // platform selection caches can otherwise still contain the most
+        // recent selection from Word or another native application.
+        let _ = self.read_data_file();
+        self.last_selected_text.borrow().clone()
+    }
+
     fn read_full_document(&self) -> Option<String> {
         // Re-read file to get latest text. Pass empty text through (do not
         // collapse to None) so the desktop's try_update_doc_text sets
@@ -666,7 +681,7 @@ fn has_whole_word(text: &str, word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserBridge, completed_word_from_transition, reply_path_for};
+    use super::{BrowserBridge, completed_word_from_transition, extract_json_string, reply_path_for};
     use crate::bridge::TextBridge;
 
     #[test]
@@ -715,6 +730,19 @@ mod tests {
         let (text, start, end, _) = bridge.cached_data().expect("empty payload is valid");
         assert!(text.is_empty());
         assert_eq!((start, end), (0, 0));
+    }
+
+    #[test]
+    fn browser_selected_text_uses_extension_payload() {
+        let json = r#"{"text":"Jeg liker piza.","selectedText":"liker piza","cursorStart":14}"#;
+        assert_eq!(
+            extract_json_string(json, "selectedText"),
+            Some("liker piza".to_string())
+        );
+
+        let bridge = BrowserBridge::new();
+        *bridge.last_selected_text.borrow_mut() = Some("liker piza".to_string());
+        assert_eq!(bridge.read_selected_text(), Some("liker piza".to_string()));
     }
 
     #[test]

@@ -34,7 +34,7 @@ function paragraph(text, top) {
   });
 }
 
-function loadInjector(paragraphs, caret) {
+function loadInjector(paragraphs, caret, annotatedText = null) {
   const elements = new Map();
   const intervals = [];
   const document = {
@@ -58,13 +58,18 @@ function loadInjector(paragraphs, caret) {
     console: { log() {} },
     document,
     window: { devicePixelRatio: 1, screenX: 0, outerHeight: 900, innerHeight: 800 },
-    globalThis: {},
     Event: class Event { constructor(type) { this.type = type; } },
     InputEvent: class InputEvent { constructor(type) { this.type = type; } },
     setInterval(callback, delay) { intervals.push({ callback, delay }); return intervals.length; },
   };
-  context.globalThis = context;
   vm.createContext(context);
+  if (annotatedText) {
+    context.__annotatedText = annotatedText;
+    vm.runInContext(
+      "globalThis._docs_annotate_getAnnotatedText = async () => globalThis.__annotatedText;",
+      context,
+    );
+  }
   const source = fs.readFileSync(path.join(__dirname, "..", "gdocs-inject.js"), "utf8");
   vm.runInContext(source, context, { filename: "gdocs-inject.js" });
 
@@ -90,4 +95,19 @@ test("Google Docs keeps duplicate paragraphs distinct by DOM position", async ()
   assert.equal(data.getAttribute("data-text"), duplicate);
   assert.equal(data.getAttribute("data-cursor"), String(duplicate.length));
   assert.equal(data.getAttribute("data-paragraph-start"), String(duplicate.length + 1));
+});
+
+test("Google Docs publishes the exact annotated selection for TTS", async () => {
+  const text = "Jeg liker piza.";
+  const para = paragraph(text, 0);
+  const caret = new FakeElement({ rect: { left: 100, right: 102, top: 0, bottom: 20, height: 20, width: 2 } });
+  const annotatedText = {
+    getText() { return text; },
+    getSelection() { return [{ start: 4, end: 14 }]; },
+  };
+  const injector = loadInjector([para], caret, annotatedText);
+
+  await injector.emit();
+
+  assert.equal(injector.data().getAttribute("data-selected-text"), "liker piza");
 });

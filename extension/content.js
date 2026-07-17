@@ -204,22 +204,27 @@
     const el = document.getElementById("spell-data");
     if (!el) return;
     const text = el.getAttribute("data-text");
+    const selectedText = el.getAttribute("data-selected-text") || "";
     const cursor = parseInt(el.getAttribute("data-cursor") || "0", 10);
     const paragraphStart = parseInt(el.getAttribute("data-paragraph-start") || "0", 10);
     const caretX = parseInt(el.getAttribute("data-caret-x") || "0", 10);
     const caretY = parseInt(el.getAttribute("data-caret-y") || "0", 10);
     if (text === null) return;
-    const version = text + "|" + cursor + "|" + paragraphStart + "|" + caretX + "|" + caretY;
+    const version = text + "|" + cursor + "|" + paragraphStart + "|" + caretX + "|" + caretY + "|" + selectedText;
     if (version === lastDataVersion) return;
-    const data = { text: text, cursorStart: cursor, cursorEnd: cursor, paragraphStart: paragraphStart };
+    const data = {
+      text: text, cursorStart: cursor, cursorEnd: cursor,
+      paragraphStart: paragraphStart, selectedText: selectedText,
+    };
     lastGDocsText = data;
-    const key = text + "|" + cursor + "|" + paragraphStart;
+    const key = text + "|" + cursor + "|" + paragraphStart + "|" + selectedText;
     if (key === lastSent) return;
     spellLog("GDOCS canvas text: " + text.length + " chars, caret=(" + caretX + "," + caretY + ")");
     if (postToBackground({
       type: "textUpdate", text: text,
       cursorStart: cursor, cursorEnd: cursor,
       paragraphStart: paragraphStart,
+      selectedText: selectedText,
       caretX: caretX, caretY: caretY, url: window.location.href
     })) {
       lastSent = key;
@@ -373,7 +378,13 @@
       const { paraText, cursorInPara, paraStart } =
         extractParagraphAtCursor(el.value, el.selectionStart);
       lastParaStart = paraStart;
-      return { text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara, caretX: pos.x, caretY: pos.y };
+      const selectedText = el.selectionEnd > el.selectionStart
+        ? el.value.substring(el.selectionStart, el.selectionEnd)
+        : "";
+      return {
+        text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara,
+        selectedText, caretX: pos.x, caretY: pos.y,
+      };
     }
 
     if (el.isContentEditable) {
@@ -382,12 +393,16 @@
       const fullText = el.innerText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       let docCursor = 0;
       let caretX = 0, caretY = 0;
+      let selectedText = "";
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0);
         const preRange = document.createRange();
         preRange.selectNodeContents(el);
         preRange.setEnd(range.startContainer, range.startOffset);
         docCursor = preRange.toString().length;
+        if (!range.collapsed && el.contains(range.commonAncestorContainer)) {
+          selectedText = range.toString();
+        }
         const caretRect = range.getBoundingClientRect();
         if (caretRect && caretRect.height > 0) {
           const screenPos = viewportToScreen(caretRect.left, caretRect.bottom);
@@ -407,7 +422,10 @@
       // sendUpdate caller forwards it, the browser bridge stores "",
       // and the desktop's prune_resolved_errors() empty-doc clear at
       // main.rs:3335 fires.
-      return { text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara, caretX, caretY };
+      return {
+        text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara,
+        selectedText, caretX, caretY,
+      };
     }
 
     return null;
@@ -424,7 +442,7 @@
     // (`if (!data || !data.text) return;`) dropped those sends so the user
     // saw old errors lingering over an empty comment box.
     if (!data) return;
-    const key = data.text + "|" + data.cursorStart;
+    const key = data.text + "|" + data.cursorStart + "|" + data.selectedText;
     if (key === lastSent) return;
     activeElement = el;
     lastTextElement = el;
@@ -432,6 +450,7 @@
     if (postToBackground({
       type: "textUpdate", text: data.text,
       cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
+      selectedText: data.selectedText,
       caretX: data.caretX, caretY: data.caretY, url: window.location.href
     })) {
       lastSent = key;
@@ -458,6 +477,8 @@
         postToBackground({
           type: "textUpdate", text: lastGDocsText.text,
           cursorStart: lastGDocsText.cursorStart, cursorEnd: lastGDocsText.cursorEnd,
+          paragraphStart: lastGDocsText.paragraphStart,
+          selectedText: lastGDocsText.selectedText,
           caretX: 0, caretY: 0, url: window.location.href
         });
       } else {
@@ -473,6 +494,7 @@
     postToBackground({
       type: "textUpdate", text: data.text,
       cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
+      selectedText: data.selectedText,
       caretX: data.caretX, caretY: data.caretY, url: window.location.href
     });
   }, 2000);

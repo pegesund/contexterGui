@@ -8,6 +8,7 @@
 
   let lastEmittedText = "";
   let lastEmittedCursor = -1;
+  let lastEmittedSelectedText = "";
   let lastParaStart = 0; // document offset where the last emitted paragraph begins
 
   // --- Annotate API ---
@@ -93,6 +94,34 @@
     return text.replace(/\u00a0/g, " ");
   }
 
+  // Google Docs renders its editing surface in a canvas, so the browser
+  // Selection API does not expose the document's highlighted text. The
+  // annotated-text API is the same canonical source used by doReplace().
+  function selectedTextFromAnnotatedText(at, selection) {
+    if (!at || typeof at.getText !== "function" || !Array.isArray(selection)) return "";
+    let docText;
+    try {
+      docText = at.getText();
+    } catch (e) {
+      return "";
+    }
+    if (typeof docText !== "string") return "";
+
+    const parts = [];
+    for (const range of selection) {
+      const start = range && range.start;
+      const end = range && range.end;
+      if (!Number.isInteger(start) || !Number.isInteger(end)
+          || start < 0 || end <= start || end > docText.length) {
+        continue;
+      }
+      const part = docText.slice(start, end)
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
+      if (part.length > 0) parts.push(part);
+    }
+    return parts.join("\n");
+  }
+
   function getDomFullText() {
     try {
       const paragraphs = document.querySelectorAll(".kix-paragraphrenderer");
@@ -157,9 +186,20 @@
     // everywhere now that the selectionchange nudge above keeps it live.
     const domText = getDomFullText();
     let apiSelection = null;
+    let selectedText = "";
     let fullText = domText;
+    const at = await getAnnotatedText();
+    if (at) {
+      try {
+        const selection = at.getSelection();
+        selectedText = selectedTextFromAnnotatedText(at, selection);
+        if (fullText === null && selection && selection.length > 0
+            && typeof selection[0].start === "number") {
+          apiSelection = selection[0].start;
+        }
+      } catch (e) {}
+    }
     if (fullText === null) {
-      const at = await getAnnotatedText();
       if (!at || typeof at.getText !== "function") return;
       try {
         fullText = at.getText();
@@ -167,12 +207,6 @@
         console.log("Spell: getText() error: " + e);
         return;
       }
-      try {
-        const sel = at.getSelection();
-        if (sel && sel.length > 0 && typeof sel[0].start === "number") {
-          apiSelection = sel[0].start;
-        }
-      } catch (e) {}
     }
     if (fullText === null) return;
 
@@ -225,10 +259,14 @@
     const paraText = rawParaText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
     const cursorInPara = rawCursorInPara - ctrlBeforeCursor;
 
-    // Skip if neither paragraph text nor cursor-within-paragraph changed
-    if (paraText === lastEmittedText && cursorInPara === lastEmittedCursor) return;
+    // A new selection must be sent even when paragraph text and the caret
+    // position have not changed, otherwise Run can speak an earlier range.
+    if (paraText === lastEmittedText
+        && cursorInPara === lastEmittedCursor
+        && selectedText === lastEmittedSelectedText) return;
     lastEmittedText = paraText;
     lastEmittedCursor = cursorInPara;
+    lastEmittedSelectedText = selectedText;
 
     // Cross-world communication via DOM element
     let el = document.getElementById("spell-data");
@@ -291,6 +329,7 @@
     el.setAttribute("data-text", paraText);
     el.setAttribute("data-cursor", String(cursorInPara));
     el.setAttribute("data-paragraph-start", String(paraStart));
+    el.setAttribute("data-selected-text", selectedText);
     el.setAttribute("data-caret-x", String(caretScreenX));
     el.setAttribute("data-caret-y", String(caretScreenY));
     el.dispatchEvent(new Event("spell-update", { bubbles: false }));
