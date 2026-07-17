@@ -110,6 +110,46 @@ fn promote_short_repeated_char_anchor(
     }
 }
 
+fn is_short_prefix_completion(word_lower: &str, candidate_lower: &str) -> bool {
+    candidate_lower.starts_with(word_lower)
+        && candidate_lower.chars().count() == word_lower.chars().count() + 1
+        && levenshtein_distance(word_lower, candidate_lower) == 1
+}
+
+fn promote_short_prefix_completion_anchor(
+    word_lower: &str,
+    ranked: &mut Vec<(String, f32)>,
+    ortho_map: &HashMap<String, f32>,
+    best_ortho: f32,
+    best_dist: u32,
+) {
+    let anchor = ranked
+        .iter()
+        .enumerate()
+        .take(10)
+        .filter_map(|(idx, (candidate, _))| {
+            if idx == 0 {
+                return None;
+            }
+            let candidate_lower = candidate.to_lowercase();
+            if !is_short_prefix_completion(word_lower, &candidate_lower) {
+                return None;
+            }
+            let ortho = ortho_map.get(candidate.as_str()).copied().unwrap_or(0.0);
+            let dist = levenshtein_distance(word_lower, &candidate_lower);
+            if dist >= best_dist || ortho < 0.82 || ortho < best_ortho * 1.10 {
+                return None;
+            }
+            Some((idx, ortho))
+        })
+        .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    if let Some((anchor_idx, _)) = anchor {
+        let anchor = ranked.remove(anchor_idx);
+        ranked.insert(0, anchor);
+    }
+}
+
 fn promote_orthographic_anchor(
     word_lower: &str,
     ranked: &mut Vec<(String, f32)>,
@@ -128,6 +168,7 @@ fn promote_orthographic_anchor(
         .unwrap_or(0.0);
 
     if word_lower.chars().count() < 8 {
+        promote_short_prefix_completion_anchor(word_lower, ranked, ortho_map, best_ortho, best_dist);
         promote_short_repeated_char_anchor(word_lower, ranked, ortho_map, best_ortho, best_dist);
         return;
     }
@@ -211,6 +252,22 @@ mod orthographic_anchor_tests {
         promote_orthographic_anchor("åår", &mut ranked, &ortho_map);
 
         assert_eq!(ranked[0].0, "uår");
+    }
+
+    #[test]
+    fn promotes_short_direct_completion_over_contextual_neighbor() {
+        let mut ranked = vec![
+            ("gjoa".to_string(), 12.0),
+            ("gjekk".to_string(), 11.0),
+        ];
+        let ortho_map = HashMap::from([
+            ("gjoa".to_string(), 0.63),
+            ("gjekk".to_string(), 0.94),
+        ]);
+
+        promote_orthographic_anchor("gjek", &mut ranked, &ortho_map);
+
+        assert_eq!(ranked[0].0, "gjekk");
     }
 
     #[test]
@@ -371,17 +428,25 @@ mod candidate_generation_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    fn bokmal_resources() -> (mtag::Analyzer, fst::raw::Fst<Vec<u8>>, HashMap<String, u64>) {
+    fn norwegian_resources(dict_name: &str, wordfreq_name: &str) -> (mtag::Analyzer, fst::raw::Fst<Vec<u8>>, HashMap<String, u64>) {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let dict = base.join("../rustSpell/mtag-rs/data/fullform_bm.mfst");
+        let dict = base.join("../rustSpell/mtag-rs/data").join(dict_name);
         let training = {
             let mac = base.join("../contexter-repo/training-data");
             if mac.exists() { mac } else { base.join("../contexter/training-data") }
         };
         let analyzer = mtag::Analyzer::new(dict.to_str().unwrap()).expect("load analyzer");
         let fst = load_fst_from_mfst(dict.to_str().unwrap()).expect("load compound fst");
-        let wordfreq = nostos_cognio::wordfreq::load_wordfreq(training.join("wordfreq.tsv").as_path(), 10);
+        let wordfreq = nostos_cognio::wordfreq::load_wordfreq(training.join(wordfreq_name).as_path(), 10);
         (analyzer, fst, wordfreq)
+    }
+
+    fn bokmal_resources() -> (mtag::Analyzer, fst::raw::Fst<Vec<u8>>, HashMap<String, u64>) {
+        norwegian_resources("fullform_bm.mfst", "wordfreq.tsv")
+    }
+
+    fn nynorsk_resources() -> (mtag::Analyzer, fst::raw::Fst<Vec<u8>>, HashMap<String, u64>) {
+        norwegian_resources("fullform_nn.mfst", "wordfreq_nn.tsv")
     }
 
     #[test]
@@ -439,6 +504,20 @@ mod candidate_generation_tests {
         );
 
         assert!(candidates.iter().any(|(word, _)| word == "jeg"), "expected jeg in {candidates:?}");
+    }
+
+    #[test]
+    fn nynorsk_missing_final_consonant_includes_gjekk() {
+        let (analyzer, fst, wordfreq) = nynorsk_resources();
+        let empty_user: Vec<String> = Vec::new();
+        let empty_doc: HashMap<String, u16> = HashMap::new();
+
+        let candidates = find_candidates_pipeline(
+            &analyzer, Some(&fst), Some(&wordfreq), &empty_user, &empty_doc,
+            "gjek", "Han gjek til skulen i dag.", &language::NynorskLanguage,
+        );
+
+        assert!(candidates.iter().any(|(word, _)| word == "gjekk"), "expected gjekk in {candidates:?}");
     }
 
     #[test]
