@@ -84,11 +84,12 @@ function loadContentScript() {
   vm.runInContext(source, context, { filename: "content.js" });
 
   return {
-    createData(text, cursor = 0) {
+    createData(text, cursor = 0, paragraphStart = 0) {
       const element = new FakeElement(elements);
       element.id = "spell-data";
       element.setAttribute("data-text", text);
       element.setAttribute("data-cursor", cursor);
+      element.setAttribute("data-paragraph-start", paragraphStart);
       element.setAttribute("data-caret-x", 10);
       element.setAttribute("data-caret-y", 20);
       return element;
@@ -103,15 +104,18 @@ function loadContentScript() {
 
 test("Google Docs replacement completion immediately resumes text updates", () => {
   const harness = loadContentScript();
-  harness.createData("Jeg liker piza.", 14);
+  harness.createData("Jeg liker piza.", 14, 32);
   harness.poll();
-  harness.respond({ action: "replace", expected: "piza", text: "pipa", start: 10 });
+  const update = harness.messages.find(({ type }) => type === "textUpdate");
+  assert.equal(update.paragraphStart, 32);
+  harness.respond({ action: "replace", expected: "piza", text: "pipa", start: 10, paragraphStart: 32 });
 
   harness.messages.length = 0;
   harness.keepalive();
   assert.equal(harness.messages.at(-1).type, "keepalive");
 
   const replacement = harness.replacementElement();
+  assert.equal(replacement.getAttribute("data-paragraph-start"), "32");
   replacement.setAttribute("data-result", "true");
   replacement.dispatchEvent({ type: "spell-replace-done" });
 

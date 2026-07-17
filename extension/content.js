@@ -205,19 +205,21 @@
     if (!el) return;
     const text = el.getAttribute("data-text");
     const cursor = parseInt(el.getAttribute("data-cursor") || "0", 10);
+    const paragraphStart = parseInt(el.getAttribute("data-paragraph-start") || "0", 10);
     const caretX = parseInt(el.getAttribute("data-caret-x") || "0", 10);
     const caretY = parseInt(el.getAttribute("data-caret-y") || "0", 10);
     if (text === null) return;
-    const version = text + "|" + cursor + "|" + caretX + "|" + caretY;
+    const version = text + "|" + cursor + "|" + paragraphStart + "|" + caretX + "|" + caretY;
     if (version === lastDataVersion) return;
-    const data = { text: text, cursorStart: cursor, cursorEnd: cursor };
+    const data = { text: text, cursorStart: cursor, cursorEnd: cursor, paragraphStart: paragraphStart };
     lastGDocsText = data;
-    const key = text + "|" + cursor;
+    const key = text + "|" + cursor + "|" + paragraphStart;
     if (key === lastSent) return;
     spellLog("GDOCS canvas text: " + text.length + " chars, caret=(" + caretX + "," + caretY + ")");
     if (postToBackground({
       type: "textUpdate", text: text,
       cursorStart: cursor, cursorEnd: cursor,
+      paragraphStart: paragraphStart,
       caretX: caretX, caretY: caretY, url: window.location.href
     })) {
       lastSent = key;
@@ -241,6 +243,7 @@
       replEl.setAttribute("data-find", findText);
       replEl.setAttribute("data-replace", replaceText);
       replEl.setAttribute("data-offset", String(msg.start || 0));
+      replEl.setAttribute("data-paragraph-start", String(msg.paragraphStart || 0));
       replEl.setAttribute("data-pending", "true");
       replaceInProgress = true;
       replaceStartTime = Date.now();

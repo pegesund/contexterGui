@@ -84,20 +84,24 @@
   // Read text from the DOM mirror primarily; use the annotate API only
   // as a fallback for surfaces where no .kix-paragraphrenderer is
   // present (read-only viewers, hydration not finished).
+  function getDomParagraphText(paragraph) {
+    const spans = paragraph.querySelectorAll(".kix-wordhtmlgenerator-word-node");
+    let text = "";
+    for (const span of spans) {
+      text += span.textContent;
+    }
+    return text.replace(/\u00a0/g, " ");
+  }
+
   function getDomFullText() {
     try {
       const paragraphs = document.querySelectorAll(".kix-paragraphrenderer");
       if (paragraphs.length === 0) return null;
       const parts = [];
       for (const para of paragraphs) {
-        const spans = para.querySelectorAll(".kix-wordhtmlgenerator-word-node");
-        let paraText = "";
-        for (const span of spans) {
-          paraText += span.textContent;
-        }
         // Normalize non-breaking spaces to ASCII so downstream
         // word-splitting works the same as for textareas.
-        parts.push(paraText.replace(/ /g, " "));
+        parts.push(getDomParagraphText(para));
       }
       const joined = parts.join("\n");
       // Decision: any paragraphs present at all → trust DOM, even if
@@ -286,6 +290,7 @@
     // Send only the active paragraph + paragraph-relative cursor (iOS approach)
     el.setAttribute("data-text", paraText);
     el.setAttribute("data-cursor", String(cursorInPara));
+    el.setAttribute("data-paragraph-start", String(paraStart));
     el.setAttribute("data-caret-x", String(caretScreenX));
     el.setAttribute("data-caret-y", String(caretScreenY));
     el.dispatchEvent(new Event("spell-update", { bubbles: false }));
@@ -372,21 +377,20 @@
         }
       }
 
-      // Now find this paragraph text in fullText to get the char offset
-      // Get the full paragraph text
-      let paraText = "";
-      for (const span of spans) {
-        paraText += span.textContent;
+      // Derive the paragraph start from the DOM order. Searching for the
+      // paragraph text with indexOf maps duplicate paragraphs to the first
+      // occurrence, so a correction in the second copy can target the first
+      // copy and repeat indefinitely.
+      let paraStart = 0;
+      let foundParagraph = false;
+      for (const candidate of allParagraphs) {
+        if (candidate === para) {
+          foundParagraph = true;
+          break;
+        }
+        paraStart += getDomParagraphText(candidate).length + 1;
       }
-      // Normalize whitespace for matching
-      const paraClean = paraText.replace(/\u00a0/g, " ").trim();
-      const fullClean = fullText.replace(/\u00a0/g, " ");
-
-      if (paraClean.length === 0) return -1;
-
-      // Find paragraph start in fullText
-      const paraStart = fullClean.indexOf(paraClean);
-      if (paraStart < 0) return -1;
+      if (!foundParagraph || paraStart > fullText.length) return -1;
 
       // Cursor offset = paragraph start + text before caret within paragraph
       const beforeClean = textBefore.replace(/\u00a0/g, " ");
@@ -426,10 +430,16 @@
     const find = replEl.getAttribute("data-find");
     const replace = replEl.getAttribute("data-replace");
     const charOffset = parseInt(replEl.getAttribute("data-offset") || "0", 10);
-    doReplace(find, replace, charOffset, replEl);
+    const paragraphStart = parseInt(replEl.getAttribute("data-paragraph-start") || "0", 10);
+    doReplace(find, replace, charOffset, paragraphStart, replEl);
   }, 100);
 
-  async function doReplace(find, replace, charOffset, replEl) {
+  async function doReplace(find, replace, charOffset, paragraphStart, replEl) {
+    if (paragraphStart !== lastParaStart) {
+      console.log("Spell gdocs-inject: rejecting stale paragraph replace request");
+      if (replEl) { replEl.setAttribute("data-result", "false"); replEl.dispatchEvent(new Event("spell-replace-done")); }
+      return;
+    }
     // charOffset is paragraph-relative — convert to document-absolute for the annotate API
     const docAbsOffset = lastParaStart + charOffset;
     console.log("Spell gdocs-inject: replace '" + find + "' → '" + replace + "' paraOffset=" + charOffset + " docOffset=" + docAbsOffset);

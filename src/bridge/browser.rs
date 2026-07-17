@@ -39,6 +39,9 @@ pub struct BrowserBridge {
     last_modified: std::cell::Cell<u64>,
     last_text: std::cell::RefCell<String>,
     last_cursor: std::cell::Cell<usize>,
+    /// Absolute start of the active browser paragraph, as published by the
+    /// Docs injector. This keeps identical paragraphs distinct.
+    last_paragraph_start: std::cell::Cell<usize>,
     last_caret: std::cell::Cell<Option<(i32, i32)>>,
     last_source: std::cell::RefCell<String>,
     last_bridge_id: std::cell::Cell<usize>,
@@ -61,6 +64,7 @@ impl BrowserBridge {
             last_modified: std::cell::Cell::new(0),
             last_text: std::cell::RefCell::new(String::new()),
             last_cursor: std::cell::Cell::new(0),
+            last_paragraph_start: std::cell::Cell::new(0),
             last_caret: std::cell::Cell::new(None),
             last_source: std::cell::RefCell::new(String::new()),
             last_bridge_id: std::cell::Cell::new(0),
@@ -158,6 +162,7 @@ impl BrowserBridge {
         let text = extract_json_string(&content, "text")?;
         let cursor_start = extract_json_number(&content, "cursorStart").unwrap_or(text.len());
         let cursor_end = extract_json_number(&content, "cursorEnd").unwrap_or(cursor_start);
+        let paragraph_start = extract_json_number(&content, "paragraphStart").unwrap_or(0);
         let caret = match (extract_json_number(&content, "caretX"), extract_json_number(&content, "caretY")) {
             (Some(x), Some(y)) => Some((x as i32, y as i32)),
             _ => None,
@@ -173,6 +178,7 @@ impl BrowserBridge {
         if !previous_source.is_empty()
             && previous_source == source
             && self.last_bridge_id.get() == bridge_id
+            && self.last_paragraph_start.get() == paragraph_start
         {
             let previous_text = self.last_text.borrow();
             if let Some(word) = completed_word_from_transition(
@@ -190,6 +196,7 @@ impl BrowserBridge {
 
         *self.last_text.borrow_mut() = text.clone();
         self.last_cursor.set(cursor_start);
+        self.last_paragraph_start.set(paragraph_start);
         self.last_caret.set(caret);
         *self.last_source.borrow_mut() = source;
         self.last_bridge_id.set(bridge_id);
@@ -265,8 +272,8 @@ impl TextBridge for BrowserBridge {
         let escaped = replacement.replace('\\', "\\\\").replace('"', "\\\"");
         let escaped_old_word = old_word.replace('\\', "\\\\").replace('"', "\\\"");
         let json = format!(
-            r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-            self.source_tab_id(), start, end, escaped, escaped_old_word
+            r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}","paragraphStart":{}}}"#,
+            self.source_tab_id(), start, end, escaped, escaped_old_word, self.last_paragraph_start.get()
         );
         if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
             self.update_cached_text(start, end, replacement);
@@ -288,8 +295,8 @@ impl TextBridge for BrowserBridge {
             let escaped_text = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let escaped_find = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-                self.source_tab_id(), start, end, escaped_text, escaped_find
+                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}","paragraphStart":{}}}"#,
+                self.source_tab_id(), start, end, escaped_text, escaped_find, self.last_paragraph_start.get()
             );
             if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
@@ -315,8 +322,8 @@ impl TextBridge for BrowserBridge {
             let escaped_text = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let escaped_find = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-                self.source_tab_id(), start, end, escaped_text, escaped_find
+                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}","paragraphStart":{}}}"#,
+                self.source_tab_id(), start, end, escaped_text, escaped_find, self.last_paragraph_start.get()
             );
             if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
@@ -357,8 +364,8 @@ impl TextBridge for BrowserBridge {
             let escaped = replace.replace('\\', "\\\\").replace('"', "\\\"");
             let find_escaped = find.replace('\\', "\\\\").replace('"', "\\\"");
             let json = format!(
-                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}"}}"#,
-                self.source_tab_id(), start, end, escaped, find_escaped
+                r#"{{"action":"replace","tabId":{},"start":{},"end":{},"text":"{}","expected":"{}","paragraphStart":{}}}"#,
+                self.source_tab_id(), start, end, escaped, find_escaped, self.last_paragraph_start.get()
             );
             log_browser(&format!("  reply JSON: {}", json));
             if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
@@ -451,7 +458,30 @@ impl TextBridge for BrowserBridge {
         if para_text.trim().is_empty() {
             return None;
         }
-        Some((format!("browser:{}", para_start), para_text, para_start))
+        Some((
+            format!("browser:{}", self.last_paragraph_start.get()),
+            para_text,
+            para_start,
+        ))
+    }
+
+    fn find_and_replace_in_paragraph(
+        &self,
+        find: &str,
+        replace: &str,
+        paragraph_id: &str,
+        context: &str,
+        char_offset: usize,
+    ) -> bool {
+        let current_paragraph_id = format!("browser:{}", self.last_paragraph_start.get());
+        if paragraph_id != current_paragraph_id {
+            log_browser(&format!(
+                "REPLACE: ignoring stale browser paragraph '{}' (active '{}')",
+                paragraph_id, current_paragraph_id
+            ));
+            return false;
+        }
+        self.find_and_replace_in_context_at(find, replace, context, char_offset)
     }
 
     /// Browser/textarea: skip the word at cursor if user is typing at end of document.
@@ -694,13 +724,14 @@ mod tests {
         *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test".to_string();
         bridge.last_bridge_id.set(1234);
         bridge.last_cursor.set(7);
+        bridge.last_paragraph_start.set(19);
         let reply = reply_path_for(1234);
         let _ = std::fs::remove_file(&reply);
 
         assert!(bridge.replace_word("gik|gikk"));
         assert_eq!(
             std::fs::read_to_string(&reply).expect("browser replacement reply"),
-            r#"{"action":"replace","tabId":42,"start":4,"end":7,"text":"gikk","expected":"gik"}"#,
+            r#"{"action":"replace","tabId":42,"start":4,"end":7,"text":"gikk","expected":"gik","paragraphStart":19}"#,
         );
         assert_eq!(&*bridge.last_text.borrow(), "Han gikk til skolen.");
 
@@ -708,14 +739,22 @@ mod tests {
         assert!(bridge.find_and_replace_in_paragraph(
             "piza",
             "pipa",
-            "browser:0",
+            "browser:19",
             "Jeg liker piza.",
             10,
         ));
         assert_eq!(
             std::fs::read_to_string(&reply).expect("browser correction reply"),
-            r#"{"action":"replace","tabId":42,"start":10,"end":14,"text":"pipa","expected":"piza"}"#,
+            r#"{"action":"replace","tabId":42,"start":10,"end":14,"text":"pipa","expected":"piza","paragraphStart":19}"#,
         );
+        assert_eq!(&*bridge.last_text.borrow(), "Jeg liker pipa.");
+        assert!(!bridge.find_and_replace_in_paragraph(
+            "pipa",
+            "pizza",
+            "browser:0",
+            "Jeg liker pipa.",
+            10,
+        ));
         assert_eq!(&*bridge.last_text.borrow(), "Jeg liker pipa.");
         assert!(reply.file_name().unwrap().to_string_lossy().contains("reply-1234"));
 
