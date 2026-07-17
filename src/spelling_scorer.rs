@@ -343,7 +343,7 @@ pub fn compute_boost(
 
 fn repeated_char_repairs(word: &str, analyzer: &mtag::Analyzer) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
-    if chars.len() < 3 {
+    if chars.len() < 2 {
         return Vec::new();
     }
 
@@ -414,6 +414,34 @@ mod candidate_generation_tests {
     }
 
     #[test]
+    fn two_character_repeated_letter_typo_can_suggest_one_character_word() {
+        let (analyzer, fst, wordfreq) = bokmal_resources();
+        let empty_user: Vec<String> = Vec::new();
+        let empty_doc: HashMap<String, u16> = HashMap::new();
+
+        let candidates = find_candidates_pipeline(
+            &analyzer, Some(&fst), Some(&wordfreq), &empty_user, &empty_doc,
+            "ii", "Jg er veldig glad ii dag.", &language::BokmalLanguage,
+        );
+
+        assert!(candidates.iter().any(|(word, _)| word == "i"), "expected i in {candidates:?}");
+    }
+
+    #[test]
+    fn two_character_missing_vowel_typo_can_suggest_jeg() {
+        let (analyzer, fst, wordfreq) = bokmal_resources();
+        let empty_user: Vec<String> = Vec::new();
+        let empty_doc: HashMap<String, u16> = HashMap::new();
+
+        let candidates = find_candidates_pipeline(
+            &analyzer, Some(&fst), Some(&wordfreq), &empty_user, &empty_doc,
+            "Jg", "Jg er veldig glad i dag.", &language::BokmalLanguage,
+        );
+
+        assert!(candidates.iter().any(|(word, _)| word == "jeg"), "expected jeg in {candidates:?}");
+    }
+
+    #[test]
     fn qa_sentence_unknown_words_have_expected_candidates() {
         let (analyzer, fst, wordfreq) = bokmal_resources();
         let empty_user: Vec<String> = Vec::new();
@@ -481,6 +509,9 @@ pub fn find_candidates_pipeline(
     let word_lower = word.to_lowercase();
     let word_trigrams = trigrams(&word_lower);
     let word_first = word_lower.chars().next().unwrap_or(' ');
+    let char_count = word_lower.chars().count();
+    let min_candidate_chars = if char_count <= 2 { 1 } else { 2 };
+    let candidate_is_long_enough = |candidate: &str| candidate.chars().count() >= min_candidate_chars;
 
     let mut candidates: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
@@ -530,7 +561,7 @@ pub fn find_candidates_pipeline(
             // scorer sees, so adding all walker hits here is free.
             for r in &results {
                 let cw = r.compound_word.to_lowercase();
-                if cw == word_lower || cw.len() < 2 { continue; }
+                if cw == word_lower || !candidate_is_long_enough(&cw) { continue; }
                 if seen.insert(cw.clone()) {
                     edit_distances.insert(cw.clone(), r.total_edits.max(1));
                     compound_candidates.insert(cw.clone());
@@ -542,7 +573,7 @@ pub fn find_candidates_pipeline(
         // Source 1: Fuzzy Levenshtein (distance 2)
         for (w, dist) in analyzer.fuzzy_lookup(&word_lower, 2) {
             let wl = w.to_lowercase();
-            if wl == word_lower || wl.len() < 2 { continue; }
+            if wl == word_lower || !candidate_is_long_enough(&wl) { continue; }
             edit_distances.insert(wl.clone(), dist);
             if seen.insert(wl.clone()) { candidates.push(wl); }
         }
@@ -555,7 +586,7 @@ pub fn find_candidates_pipeline(
             for (w, dist) in analyzer.fuzzy_lookup(&truncated, 2) {
                 let wl = w.to_lowercase();
                 edit_distances.entry(wl.clone()).or_insert(dist + strip);
-                if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+                if wl != word_lower && candidate_is_long_enough(&wl) && seen.insert(wl.clone()) {
                     candidates.push(wl);
                 }
             }
@@ -569,22 +600,21 @@ pub fn find_candidates_pipeline(
         let extra = wl.len() as i32 - word_lower.len() as i32;
         if extra >= 1 && extra <= 3 {
             edit_distances.entry(wl.clone()).or_insert(extra as u32);
-            if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+            if wl != word_lower && candidate_is_long_enough(&wl) && seen.insert(wl.clone()) {
                 candidates.push(wl);
             }
         }
     }
 
     // Source 3: Prefix with last char removed
-    let char_count = word_lower.chars().count();
-    if char_count >= 3 {
+    if char_count >= 2 {
         let end_byte = word_lower.char_indices().rev().next().map(|(i, _)| i).unwrap_or(0);
         let shorter = &word_lower[..end_byte];
         for w in analyzer.prefix_lookup(shorter, 20) {
             let wl = w.to_lowercase();
             let diff = (wl.len() as i32 - word_lower.len() as i32).unsigned_abs() + 1;
             edit_distances.entry(wl.clone()).or_insert(diff);
-            if wl != word_lower && wl.len() >= 2 && seen.insert(wl.clone()) {
+            if wl != word_lower && candidate_is_long_enough(&wl) && seen.insert(wl.clone()) {
                 candidates.push(wl);
             }
         }
@@ -745,7 +775,7 @@ pub fn find_candidates_pipeline(
                         let forms = analyzer.forms_for_lemma(&r.lemma, &Pos::Subst, tag);
                         for form in forms {
                             let fl = form.to_lowercase();
-                            if fl != word_lower && fl.len() >= 2 && seen.insert(fl.clone()) {
+                            if fl != word_lower && candidate_is_long_enough(&fl) && seen.insert(fl.clone()) {
                                 let dist = levenshtein_distance(&word_lower, &fl);
                                 if dist <= 4 {
                                     edit_distances.insert(fl.clone(), dist);
