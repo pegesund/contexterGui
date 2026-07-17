@@ -172,7 +172,7 @@ struct CachedSentenceVerdict {
 }
 
 const SENTENCE_CACHE_CAP: usize = 20_000;
-const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v5-analyzer-authority";
+const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v6-grammar-unknown-authority";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SentenceCache {
@@ -997,10 +997,13 @@ fn should_skip_cross_language_match(active_dist: u32, foreign_dist: u32, foreign
 
 fn should_surface_unknown_spelling(
     is_user_dictionary_word: bool,
-    is_analyzer_word: bool,
     is_cross_language_word: bool,
 ) -> bool {
-    !is_user_dictionary_word && !is_analyzer_word && !is_cross_language_word
+    // `unknown_words` comes from the grammar actor's full token analysis. It
+    // can mark a token unknown even when Analyzer::has_word reports a guessed
+    // fallback reading. Trust the full analysis here; otherwise Norwegian
+    // typos such as "gik" and "Bergeen" are silently hidden.
+    !is_user_dictionary_word && !is_cross_language_word
 }
 
 fn known_word_spelling_variants_for_analyzer(
@@ -1074,8 +1077,9 @@ mod cross_language_barrier_tests {
         error_paragraph_matches_surface,
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
-        rescore_spelling_response, sentence_cache_entry_replayable,
-        sentence_cache_key_for_language, sentence_cache_version, CachedSentenceVerdict,
+        grammar_response_sentence_hash, rescore_spelling_response,
+        sentence_cache_entry_replayable, sentence_cache_key_for_language,
+        sentence_cache_version, CachedSentenceVerdict,
         SENTENCE_CACHE_SCHEMA,
         should_skip_cross_language_match, should_surface_unknown_spelling,
         spelling_error_still_present, word_token_at_position,
@@ -1120,10 +1124,9 @@ mod cross_language_barrier_tests {
 
     #[test]
     fn analyzer_unknown_word_remains_actionable() {
-        assert!(should_surface_unknown_spelling(false, false, false));
-        assert!(!should_surface_unknown_spelling(true, false, false));
-        assert!(!should_surface_unknown_spelling(false, true, false));
-        assert!(!should_surface_unknown_spelling(false, false, true));
+        assert!(should_surface_unknown_spelling(false, false));
+        assert!(!should_surface_unknown_spelling(true, false));
+        assert!(!should_surface_unknown_spelling(false, true));
     }
 
     #[test]
@@ -1243,6 +1246,44 @@ mod cross_language_barrier_tests {
 
         let katen = known_word_spelling_variants_for_analyzer(&analyzer, "nb", "katen");
         assert!(katen.iter().any(|candidate| candidate == "katten"), "got {katen:?}");
+    }
+
+    #[test]
+    fn qa_norwegian_bulk_text_reports_each_misspelling() {
+        let analyzer = bokmal_analyzer();
+        let text = concat!(
+            "Jeg liker å spisse piza. Han gik til skolen i dag.\n",
+            "Vi skal reise til Bergeen neste uke. Hun kjøpte en ny telefoon.\n\n",
+            "Jeg liker å spisse piza. Han gik til skolen i dag.\n",
+            "Vi skal reise til Bergeen neste uke. Hun kjøpte en ny telefoon.",
+        );
+        let tokens = analyzer.analyze(text);
+        let unknowns = nostos_cognio::grammar::find_unknown_words_with_doc(
+            &analyzer,
+            &tokens,
+            text,
+            None,
+            text,
+        );
+        let words: Vec<String> = unknowns
+            .iter()
+            .map(|unknown| unknown.word.to_lowercase())
+            .collect();
+
+        for expected in ["piza", "gik", "bergeen", "telefoon"] {
+            let count = words.iter().filter(|word| word.as_str() == expected).count();
+            assert_eq!(count, 2, "expected two {expected} occurrences; got {words:?}");
+        }
+    }
+
+    #[test]
+    fn generic_duplicate_sentences_keep_distinct_response_hashes() {
+        let sentence = "Han gik til skolen i dag.";
+
+        assert_ne!(
+            grammar_response_sentence_hash("", sentence, 0),
+            grammar_response_sentence_hash("", sentence, 80),
+        );
     }
 
     #[test]
@@ -4084,7 +4125,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     fn should_surface_unknown_spelling_word(&self, word: &str, sentence_ctx: &str) -> bool {
         should_surface_unknown_spelling(
             self.user_dict.as_ref().map_or(false, |ud| ud.has_word(word)),
-            self.analyzer.as_ref().map_or(false, |a| a.has_word(word)),
             self.is_cross_language_spelling_token(word, sentence_ctx),
         )
     }
@@ -6469,7 +6509,7 @@ self.writing_errors.clear();
         }
         let mut queue: Vec<(String, usize)> = Vec::new();
         for (trimmed, doc_offset) in &new_sentences {
-            let sent_h = hash_str(trimmed);
+            let sent_h = grammar_response_sentence_hash("", trimmed, *doc_offset);
 
             // Also skip if this occurrence already has errors recorded (re-mapped in Step 0)
             let has_errors = self.writing_errors.iter().any(|e| {
@@ -6858,7 +6898,9 @@ self.grammar_queue.clear();
                     // This sentence is new or changed — clear old errors (underlines stay if word still exists)
                     let sentence_lower = sentence_text.to_lowercase();
                     self.writing_errors.retain(|e| {
-                        !(e.paragraph_id == p.paragraph_id && e.sentence_context.to_lowercase() == sentence_lower)
+                        !(e.paragraph_id == p.paragraph_id
+                            && e.doc_offset == doc_offset
+                            && e.sentence_context.to_lowercase() == sentence_lower)
                     });
 
                     // Send to grammar actor for spelling + grammar checking.
@@ -6984,7 +7026,7 @@ self.grammar_queue.clear();
             }
 
             // Skip if already checked and clean
-            let sent_h = hash_str(&trimmed);
+            let sent_h = grammar_response_sentence_hash("", &trimmed, doc_offset);
             if self.processed_sentence_hashes.contains(&sent_h) {
                 continue;
             }
@@ -8196,11 +8238,7 @@ fn grammar_response_sentence_hash(
     sentence: &str,
     doc_offset: usize,
 ) -> u64 {
-    if paragraph_id.is_empty() {
-        hash_str(sentence)
-    } else {
-        addin_sentence_hash(paragraph_id, sentence, doc_offset)
-    }
+    addin_sentence_hash(paragraph_id, sentence, doc_offset)
 }
 
 fn split_sentences(text: &str) -> Vec<String> {
