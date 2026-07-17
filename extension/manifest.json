@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjGtnfYIRjNZJlVdPwQ7LojOGzlS7OrSpk0jPj2AZt6GVBYoUPSyYO+FORogrF15nEQkM61MXg+crnwOxie4WMkJSXEURZ9cByaiCBhQHNyKwpADUfuIo7RrGP14HCvtqPA6FTJ4ZwVcw+cgo8CZS55cNfqNA6LNyAHTEolFx6jKDaYek5pmH+FUSEtrVSGfpQrMQhOi6zvQJswILeNh0mhSxBl5sKIZmgAGxxqSSdfd1AwmbHxEJmqI+TsNfgJYYjtPOANVIbh2hdOgeA33aIPg2nNkKh+m6IR0jXti7wEaAbE4kk4roqXR7dzdimlQB5j+Dx5PkqR96GkzDSyBXwwIDAQAB",
   "name": "Spell",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Norsk staving og grammatikksjekk for nettleseren \u2014 virker i Google Dokumenter, tekstfelt og redigerbart innhold.",
   "author": "Cognio AS",
   "homepage_url": "https://cognio.no/spell",
