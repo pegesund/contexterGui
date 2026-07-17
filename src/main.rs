@@ -3285,6 +3285,23 @@ fn build_right_completions(
         .collect()
 }
 
+/// The Best STT setting downloads a fast model for live partials plus a larger
+/// final model. Only that setting should spend the extra time on a final pass.
+fn should_auto_finalize_stt(whisper_mode: u8) -> bool {
+    whisper_mode == 1
+}
+
+#[cfg(test)]
+mod stt_quality_tests {
+    use super::should_auto_finalize_stt;
+
+    #[test]
+    fn best_mode_uses_the_final_stt_model_after_recording() {
+        assert!(!should_auto_finalize_stt(0));
+        assert!(should_auto_finalize_stt(1));
+    }
+}
+
 impl ContextApp {
     fn macos_word_error_scope_active(&self) -> bool {
         if !cfg!(target_os = "macos") {
@@ -3775,7 +3792,10 @@ impl ContextApp {
             return;
         };
         let stream_eng = self.whisper_streaming.as_ref().unwrap_or(&final_eng).clone();
-        let auto_final = cfg!(target_os = "macos");
+        // "Best" downloads both the fast streaming model and the larger final
+        // model. Keep partials responsive, but do not present the streaming
+        // result as the completed transcript in that mode.
+        let auto_final = should_auto_finalize_stt(self.whisper_mode);
         match stt::start_recording(
             final_eng,
             stream_eng,
