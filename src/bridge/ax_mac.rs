@@ -15,16 +15,13 @@ use core_foundation::string::CFString;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
-/// Log each distinct trace message at most once per 3s to avoid spam.
+/// Keep AX diagnostics available in debug sessions without logging every poll.
 fn trace_once(msg: &str) {
-    use std::time::Instant;
-    static LAST: std::sync::OnceLock<Mutex<(String, Instant)>> = std::sync::OnceLock::new();
-    let slot = LAST.get_or_init(|| Mutex::new((String::new(), Instant::now() - std::time::Duration::from_secs(60))));
-    let mut g = slot.lock().unwrap();
-    if g.0 != msg || g.1.elapsed() > std::time::Duration::from_secs(3) {
+    static THROTTLE: crate::logging::LogThrottle = crate::logging::LogThrottle::new();
+    if crate::logging::debug_logging_enabled()
+        && THROTTLE.should_emit(std::time::Duration::from_secs(3))
+    {
         crate::log!("{}", msg);
-        g.0 = msg.to_string();
-        g.1 = Instant::now();
     }
 }
 

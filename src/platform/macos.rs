@@ -78,15 +78,13 @@ pub fn configure_swipl_home_env() {
     unsafe { std::env::set_var("SWI_HOME_DIR", &home); }
 }
 
-/// Log each distinct caret-trace message at most once per 3s.
+/// Keep caret diagnostics available in debug sessions without logging every poll.
 fn trace_caret(msg: &str) {
-    static LAST: std::sync::OnceLock<Mutex<(String, Instant)>> = std::sync::OnceLock::new();
-    let slot = LAST.get_or_init(|| Mutex::new((String::new(), Instant::now() - Duration::from_secs(60))));
-    let mut g = slot.lock().unwrap();
-    if g.0 != msg || g.1.elapsed() > Duration::from_secs(3) {
+    static THROTTLE: crate::logging::LogThrottle = crate::logging::LogThrottle::new();
+    if crate::logging::debug_logging_enabled()
+        && THROTTLE.should_emit(Duration::from_secs(3))
+    {
         crate::log!("{}", msg);
-        g.0 = msg.to_string();
-        g.1 = Instant::now();
     }
 }
 
@@ -527,7 +525,7 @@ impl PlatformServices for MacPlatform {
 
             match read_once() {
                 Ok((x, y)) => {
-                    crate::log!("caret OK: x={} y={}", x, y);
+                    trace_caret(&format!("caret OK: x={} y={}", x, y));
                     Some((x, y))
                 }
                 Err(first_err) => {
@@ -547,7 +545,7 @@ impl PlatformServices for MacPlatform {
                     std::thread::sleep(Duration::from_millis(25));
                     match read_once() {
                         Ok((x, y)) => {
-                            crate::log!("caret OK after AX retry: x={} y={}", x, y);
+                            trace_caret(&format!("caret OK after AX retry: x={} y={}", x, y));
                             Some((x, y))
                         }
                         Err(retry_err) => {
