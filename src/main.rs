@@ -1358,6 +1358,14 @@ mod cross_language_barrier_tests {
         assert!(error_paragraph_matches_bridge("", "Browser"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_word_scope_excludes_browser_and_accessibility_paragraphs() {
+        assert!(is_word_scoped_paragraph_id("word-paragraph"));
+        assert!(!is_word_scoped_paragraph_id("browser:0"));
+        assert!(!is_word_scoped_paragraph_id("ax:0"));
+    }
+
     #[test]
     fn macos_word_surface_keeps_addin_and_accessibility_errors_visible() {
         assert!(error_paragraph_matches_surface(
@@ -9226,14 +9234,11 @@ impl eframe::App for ContextApp {
                 // the caret directly inside find_and_replace_in_paragraph, so
                 // queuing this delayed command there can move the caret again.
                 let word_pid = self.manager.last_user_pid;
-                log!("CURSOR: fix ok, target Word pid={} (replacement='{}' para='{}')",
+                log!("CURSOR: fix ok, target pid={} (replacement='{}' para='{}')",
                     word_pid, replace, trunc(&paragraph_id, 10));
                 #[cfg(target_os = "macos")]
                 {
-                    if word_pid > 0
-                        && !paragraph_id.is_empty()
-                        && !paragraph_id.starts_with("ax:")
-                    {
+                    if word_pid > 0 && is_word_scoped_paragraph_id(&paragraph_id) {
                         let pid_copy = word_pid;
                         std::thread::spawn(move || {
                             let _ = std::process::Command::new("osascript").arg("-e")
