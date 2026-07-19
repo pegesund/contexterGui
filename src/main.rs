@@ -893,6 +893,50 @@ fn spelling_error_still_present(check_text: &str, word: &str, sentence_context: 
     sentence_lower.is_empty() || check_text.contains(&sentence_lower)
 }
 
+/// Prefer the current sentence at a tracked document offset when it is still
+/// available. A correction elsewhere in that sentence changes its full text,
+/// but must not make the other misspelled words in the sentence disappear.
+///
+/// Returns `None` when the stored offset no longer resolves to a sentence, so
+/// callers can use the stricter whole-sentence fallback for stale errors.
+fn spelling_error_still_present_at_sentence_offset(
+    paragraph_text: &str,
+    word: &str,
+    doc_offset: usize,
+    paragraph_doc_start: usize,
+) -> Option<bool> {
+    let sentence_offset = doc_offset.checked_sub(paragraph_doc_start)?;
+    let (sentence, _) = split_sentences_with_offsets(paragraph_text)
+        .into_iter()
+        .find(|(_, offset)| *offset == sentence_offset)?;
+    let word_lower = word.to_lowercase();
+    Some(sentence
+        .split_whitespace()
+        .map(clean_word_token)
+        .any(|token| token.to_lowercase() == word_lower))
+}
+
+fn spelling_error_still_present_in_tracked_paragraph(
+    paragraph_text: &str,
+    word: &str,
+    sentence_context: &str,
+    doc_offset: usize,
+    paragraph_doc_start: Option<usize>,
+) -> bool {
+    if let Some(paragraph_doc_start) = paragraph_doc_start {
+        if let Some(still_present) = spelling_error_still_present_at_sentence_offset(
+            paragraph_text,
+            word,
+            doc_offset,
+            paragraph_doc_start,
+        ) {
+            return still_present;
+        }
+    }
+
+    spelling_error_still_present(paragraph_text, word, sentence_context)
+}
+
 fn apply_original_initial_case(raw: &str, original: &str) -> String {
     let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
     if s.is_empty() {
@@ -1082,7 +1126,8 @@ mod cross_language_barrier_tests {
         sentence_cache_version, CachedSentenceVerdict,
         SENTENCE_CACHE_SCHEMA,
         should_skip_cross_language_match, should_surface_unknown_spelling,
-        spelling_error_still_present, word_token_at_position,
+        spelling_error_still_present, spelling_error_still_present_at_sentence_offset,
+        word_token_at_position,
     };
     use std::path::PathBuf;
 
@@ -1356,6 +1401,28 @@ mod cross_language_barrier_tests {
             "typo",
             "This sentence contained typo."
         ));
+    }
+
+    #[test]
+    fn spelling_error_survives_another_fix_in_the_same_sentence() {
+        let paragraph = "Jeg er veldig glad ii daag.";
+        assert_eq!(
+            spelling_error_still_present_at_sentence_offset(paragraph, "ii", 58, 58),
+            Some(true)
+        );
+        assert_eq!(
+            spelling_error_still_present_at_sentence_offset(paragraph, "daag", 58, 58),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn spelling_error_does_not_survive_from_a_different_sentence() {
+        let paragraph = "The original sentence is fixed. Another typo remains.";
+        assert_eq!(
+            spelling_error_still_present_at_sentence_offset(paragraph, "typo", 0, 0),
+            Some(false)
+        );
     }
 }
 
@@ -5685,6 +5752,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let para_texts_lower: std::collections::HashMap<&str, String> = self.paragraph_texts.iter()
             .map(|(k, v)| (k.as_str(), v.to_lowercase()))
             .collect();
+        let paragraph_doc_starts = &self.paragraph_doc_starts;
         // Effective document text — joined paragraphs, or the cached
         // last_doc_text fallback when the bridge doesn't push paragraph
         // events (browser/AX paths).
@@ -5745,10 +5813,12 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 };
                 match e.category {
                     ErrorCategory::Grammar => !check_text.contains(&e.sentence_context.to_lowercase()),
-                    ErrorCategory::Spelling => !spelling_error_still_present(
+                    ErrorCategory::Spelling => !spelling_error_still_present_in_tracked_paragraph(
                         check_text,
                         &e.word,
                         &e.sentence_context,
+                        e.doc_offset,
+                        paragraph_doc_starts.get(&e.paragraph_id).copied(),
                     ),
                     ErrorCategory::SentenceBoundary => !check_text.contains(&e.word.to_lowercase()),
                 }
@@ -5779,10 +5849,12 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             };
             let still_present = match e.category {
                 ErrorCategory::Grammar => check_text.contains(&e.sentence_context.to_lowercase()),
-                ErrorCategory::Spelling => spelling_error_still_present(
+                ErrorCategory::Spelling => spelling_error_still_present_in_tracked_paragraph(
                     check_text,
                     &e.word,
                     &e.sentence_context,
+                    e.doc_offset,
+                    paragraph_doc_starts.get(&e.paragraph_id).copied(),
                 ),
                 ErrorCategory::SentenceBoundary => check_text.contains(&e.word.to_lowercase()),
             };
