@@ -446,19 +446,45 @@
     try { return iframe.contentDocument; } catch(e) { return null; }
   }
 
-  function insertReplacementText(text) {
+  // Google Docs consumes text input through its texteventtarget paste handler.
+  // Dispatching beforeinput alone reports success even when Docs ignores it.
+  function insertReplacementPaste(text) {
     const doc = getIframeDoc();
     if (!doc) return false;
     const el = doc.querySelector("[contenteditable=true]");
     if (!el) return false;
-    el.focus();
-    const event = new InputEvent("beforeinput", {
-      inputType: "insertReplacementText",
-      data: text,
-      isComposing: false
-    });
-    el.dispatchEvent(event);
-    return true;
+    try {
+      el.focus();
+      const clipboard = new DataTransfer();
+      clipboard.setData("text/plain", text);
+      return el.dispatchEvent(new ClipboardEvent("paste", {
+        clipboardData: clipboard,
+        bubbles: true,
+        cancelable: true,
+      }));
+    } catch (e) {
+      console.log("Spell gdocs-inject: paste replacement failed: " + e);
+      return false;
+    }
+  }
+
+  async function replacementWasApplied(docOffset, replacement) {
+    const expected = replacement.toLowerCase();
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const refreshed = await getAnnotatedText();
+      try {
+        const actual = refreshed && typeof refreshed.getText === "function"
+          ? refreshed.getText().slice(docOffset, docOffset + replacement.length).toLowerCase()
+          : "";
+        if (actual === expected) return true;
+      } catch (e) {
+        console.log("Spell gdocs-inject: replacement verification failed: " + e);
+      }
+      if (attempt < 9) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    return false;
   }
 
   // Poll for replace requests from content.js (via DOM element)
@@ -513,8 +539,9 @@
       if (bestPos >= 0) {
         console.log("Spell gdocs-inject: setSelection(" + bestPos + ", " + (bestPos + find.length) + ")");
         at.setSelection(bestPos, bestPos + find.length);
-        const ok = insertReplacementText(replace);
-        console.log("Spell gdocs-inject: insertReplacementText result: " + ok);
+        const dispatched = insertReplacementPaste(replace);
+        const ok = dispatched && await replacementWasApplied(bestPos, replace);
+        console.log("Spell gdocs-inject: replacement verified: " + ok);
         // Clear lastEmittedText so next poll re-reads from annotate API
         lastEmittedText = "";
         if (replEl) { replEl.setAttribute("data-result", String(ok)); replEl.dispatchEvent(new Event("spell-replace-done")); }
