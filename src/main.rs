@@ -1374,6 +1374,11 @@ mod bridge_manager_tests {
         context: CursorContext,
     }
 
+    struct SelectedTextBridge {
+        name: &'static str,
+        selected_text: Option<&'static str>,
+    }
+
     #[test]
     fn duplicate_sentences_have_distinct_document_occurrences() {
         let sentence = "This is wrng.";
@@ -1425,6 +1430,16 @@ mod bridge_manager_tests {
         fn replace_word(&self, _new_text: &str) -> bool { false }
     }
 
+    impl TextBridge for SelectedTextBridge {
+        fn name(&self) -> &str { self.name }
+        fn is_available(&self) -> bool { true }
+        fn read_context(&self) -> Option<CursorContext> { None }
+        fn replace_word(&self, _new_text: &str) -> bool { false }
+        fn read_selected_text(&self) -> Option<String> {
+            self.selected_text.map(str::to_owned)
+        }
+    }
+
     struct TestPlatform;
 
     impl PlatformServices for TestPlatform {
@@ -1439,6 +1454,69 @@ mod bridge_manager_tests {
         fn ort_dylib_candidates(&self) -> Vec<String> { Vec::new() }
         fn swipl_path(&self) -> &str { "" }
         fn init_tts(&self, _lang: &dyn language::LanguageVoice) {}
+    }
+
+    #[test]
+    fn selected_text_does_not_use_stale_selection_from_an_inactive_bridge() {
+        let manager = BridgeManager {
+            bridges: vec![
+                Box::new(SelectedTextBridge {
+                    name: "Word Add-in",
+                    selected_text: None,
+                }),
+                Box::new(SelectedTextBridge {
+                    name: "Browser",
+                    selected_text: Some("stale browser selection"),
+                }),
+            ],
+            last_check: Instant::now(),
+            active_idx: 0,
+            last_user_pid: 0,
+            last_user_was_browser: false,
+            last_context: None,
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: false,
+            last_browser_host_repair: None,
+        };
+
+        assert_eq!(manager.read_selected_text(), None);
+    }
+
+    #[test]
+    fn selected_text_uses_browser_selection_when_browser_is_active() {
+        let manager = BridgeManager {
+            bridges: vec![
+                Box::new(SelectedTextBridge {
+                    name: "Word Add-in",
+                    selected_text: Some("stale Word selection"),
+                }),
+                Box::new(SelectedTextBridge {
+                    name: "Browser",
+                    selected_text: Some("current browser selection"),
+                }),
+            ],
+            last_check: Instant::now(),
+            active_idx: 0,
+            last_user_pid: 0,
+            last_user_was_browser: true,
+            last_context: None,
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: true,
+            last_browser_host_repair: None,
+        };
+
+        assert_eq!(
+            manager.read_selected_text().as_deref(),
+            Some("current browser selection"),
+        );
     }
 
     #[test]
@@ -2412,14 +2490,10 @@ impl BridgeManager {
         self.effective_bridge().and_then(|b| b.read_document_context())
     }
 
-    /// Read selected text from any available bridge.
+    /// Read selected text from the bridge that owns the active document.
     fn read_selected_text(&self) -> Option<String> {
-        for b in &self.bridges {
-            if let Some(text) = b.read_selected_text() {
-                return Some(text);
-            }
-        }
-        None
+        self.effective_bridge()
+            .and_then(|bridge| bridge.read_selected_text())
     }
 
     fn read_paragraph_at(&self, cursor_offset: usize) -> Option<(String, String, usize)> {
