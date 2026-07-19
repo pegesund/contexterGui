@@ -414,13 +414,7 @@ impl WindowsPlatform {
                 }
                 loop {
                     if idle_millis() < 10_000 {
-                        let sel = poll_uia_selected_text();
-                        if let Ok(mut lock) = sel_clone.lock() {
-                            if sel.is_some() {
-                                *lock = sel;
-                            }
-                            // Keep last known selection when our app gets focus
-                        }
+                        apply_selection_poll(&sel_clone, poll_uia_selected_text());
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -461,42 +455,74 @@ pub fn cached_uia() -> Option<windows::Win32::UI::Accessibility::IUIAutomation> 
     })
 }
 
+/// Returns the current external selection, or records that Spell has focus.
+///
+/// `SpellFocused` deliberately preserves the cached selection long enough for
+/// a toolbar click. An external app with no selection must instead clear the
+/// cache so Spell cannot replay text from the previous document.
+enum SelectionPoll {
+    SpellFocused,
+    External(Option<String>),
+}
+
+fn replace_cached_selection(
+    cache: &Arc<Mutex<Option<String>>>,
+    selection: Option<String>,
+) {
+    if let Ok(mut lock) = cache.lock() {
+        *lock = selection;
+    }
+}
+
+fn apply_selection_poll(cache: &Arc<Mutex<Option<String>>>, poll: SelectionPoll) {
+    match poll {
+        SelectionPoll::SpellFocused => {
+            // Keep the selection while the user clicks a Spell control.
+        }
+        SelectionPoll::External(selection) => replace_cached_selection(cache, selection),
+    }
+}
+
 /// Poll selected text from the focused UIA element using TextPattern.GetSelection.
 /// Works for Word, Notepad, Chrome, and any UIA-compliant app.
-/// Returns None if no text is selected or our app has focus.
-fn poll_uia_selected_text() -> Option<String> {
+fn poll_uia_selected_text() -> SelectionPoll {
     unsafe {
         use windows::Win32::UI::Accessibility::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
-        use windows::core::Interface;
 
         // Skip if our own window has focus
         let fg = GetForegroundWindow();
         let mut fg_pid = 0u32;
         GetWindowThreadProcessId(fg, Some(&mut fg_pid));
         if fg_pid == std::process::id() {
-            return None;
+            return SelectionPoll::SpellFocused;
         }
 
-        let uia = cached_uia()?;
-        let focused = uia.GetFocusedElement().ok()?;
+        let Some(uia) = cached_uia() else {
+            return SelectionPoll::External(None);
+        };
+        let Ok(focused) = uia.GetFocusedElement() else {
+            return SelectionPoll::External(None);
+        };
 
         // Try TextPattern (works for most apps)
         if let Ok(pattern) =
             focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
         {
-            let selection = pattern.GetSelection().ok()?;
-            let count = selection.Length().ok()?;
-            if count > 0 {
-                let range: IUIAutomationTextRange = selection.GetElement(0).ok()?;
-                let text = range.GetText(-1).ok()?.to_string();
-                let trimmed = text.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
+            if let Ok(selection) = pattern.GetSelection() {
+                if selection.Length().ok().unwrap_or_default() > 0 {
+                    if let Ok(range) = selection.GetElement(0) {
+                        if let Ok(text) = range.GetText(-1) {
+                            let trimmed = text.to_string().trim().to_string();
+                            if !trimmed.is_empty() {
+                                return SelectionPoll::External(Some(trimmed));
+                            }
+                        }
+                    }
                 }
             }
         }
-        None
+        SelectionPoll::External(None)
     }
 }
 
@@ -800,5 +826,32 @@ impl PlatformServices for WindowsPlatform {
 
     fn init_tts(&self, lang: &dyn language::LanguageVoice) {
         crate::tts::init_tts(lang);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_selection_poll, SelectionPoll};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn external_app_without_selection_clears_cached_selection() {
+        let cache = Arc::new(Mutex::new(Some("old Word selection".to_string())));
+
+        apply_selection_poll(&cache, SelectionPoll::External(None));
+
+        assert_eq!(*cache.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn spell_focus_keeps_selection_for_toolbar_click() {
+        let cache = Arc::new(Mutex::new(Some("current selection".to_string())));
+
+        apply_selection_poll(&cache, SelectionPoll::SpellFocused);
+
+        assert_eq!(
+            cache.lock().unwrap().as_deref(),
+            Some("current selection")
+        );
     }
 }
