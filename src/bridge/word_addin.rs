@@ -18,6 +18,24 @@ use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 
 pub const PORT: u16 = 3000;
+const ADDIN_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn word_addin_context_is_active(
+    context: Option<&(CursorContext, Instant)>,
+    last_activity: Option<Instant>,
+    now: Instant,
+) -> bool {
+    context.is_some()
+        && last_activity
+            .map(|activity| now.duration_since(activity) < ADDIN_ACTIVITY_TIMEOUT)
+            .unwrap_or(false)
+}
+
+fn mark_word_addin_activity(last_activity: &Arc<Mutex<Option<Instant>>>) {
+    if let Ok(mut activity) = last_activity.lock() {
+        *activity = Some(Instant::now());
+    }
+}
 
 /// Locate the bundled Word add-in static-file directory.
 ///   - Packaged .app:   <Spell.app>/Contents/Resources/word-addin/
@@ -46,6 +64,8 @@ pub struct ChangedParagraph {
 
 pub struct WordAddinBridge {
     cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>>,
+    /// Last valid context or paragraph update received from the task pane.
+    last_activity: Arc<Mutex<Option<Instant>>>,
     reply_queue: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Reset flag — set when add-in sends /reset (new document or reload)
     reset_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -73,6 +93,16 @@ pub struct WordAddinBridge {
 }
 
 impl WordAddinBridge {
+    fn cached_context_if_active(&self) -> Option<CursorContext> {
+        let context = self.cached_context.lock().ok()?.clone();
+        let activity = self.last_activity.lock().ok()?.to_owned();
+        if word_addin_context_is_active(context.as_ref(), activity, Instant::now()) {
+            context.map(|(ctx, _)| ctx)
+        } else {
+            None
+        }
+    }
+
     /// Start the HTTP server and return the bridge.
     /// Always succeeds — the add-in connects later.
     pub fn new() -> Self {
@@ -80,6 +110,7 @@ impl WordAddinBridge {
         let _ = std::fs::write("/tmp/word_addin_bridge.log", "");
         let cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>> =
             Arc::new(Mutex::new(None));
+        let last_activity: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
         // Per-document reply queues
         let reply_queue: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -97,6 +128,7 @@ impl WordAddinBridge {
         let ui_state_json: Arc<Mutex<String>> = Arc::new(Mutex::new(r#"{"fg_app":"","pencil_visible":false,"bulb_visible":false,"tips_count":0,"selected_tab":0}"#.to_string()));
 
         let ctx_clone = Arc::clone(&cached_context);
+        let activity_clone = Arc::clone(&last_activity);
         let reply_clone = Arc::clone(&reply_queue);
         let changed_clone = Arc::clone(&changed_paragraphs);
         let deleted_clone = Arc::clone(&deleted_paragraphs);
@@ -191,6 +223,7 @@ impl WordAddinBridge {
                         let peer = tcp_stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
                         log_to_file(&format!("TCP connection from {}", peer));
                         let ctx = Arc::clone(&ctx_clone);
+                        let activity = Arc::clone(&activity_clone);
                         let reply = Arc::clone(&reply_clone);
                         let changed = Arc::clone(&changed_clone);
                         let deleted = Arc::clone(&deleted_clone);
@@ -213,7 +246,7 @@ impl WordAddinBridge {
                                     Ok(conn) => {
                                         let mut tls_stream = rustls::StreamOwned::new(conn, tcp_stream);
                                         log_to_file("TLS handshake OK");
-                                        handle_request_rw(&mut tls_stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, static_dir.as_path(), &i32, &i64, &i80);
+                                        handle_request_rw(&mut tls_stream, &ctx, &activity, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, static_dir.as_path(), &i32, &i64, &i80);
                                     }
                                     Err(e) => {
                                         log_to_file(&format!("TLS accept FAILED: {}", e));
@@ -221,7 +254,7 @@ impl WordAddinBridge {
                                 }
                             } else {
                                 let mut stream = tcp_stream;
-                                handle_request_rw(&mut stream, &ctx, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, static_dir.as_path(), &i32, &i64, &i80);
+                                handle_request_rw(&mut stream, &ctx, &activity, &reply, &changed, &deleted, &reset, &doc_name, &pending_switch, &rescan_flag, &errors, &completions, &ui_state, static_dir.as_path(), &i32, &i64, &i80);
                             }
                         });
                     }
@@ -231,6 +264,7 @@ impl WordAddinBridge {
 
         WordAddinBridge {
             cached_context,
+            last_activity,
             reply_queue,
             current_doc_name,
             reset_requested,
@@ -301,24 +335,11 @@ impl TextBridge for WordAddinBridge {
     }
 
     fn is_available(&self) -> bool {
-        if let Ok(lock) = self.cached_context.lock() {
-            lock.as_ref()
-                .map(|(_, ts)| ts.elapsed() < Duration::from_secs(5))
-                .unwrap_or(false)
-        } else {
-            false
-        }
+        self.cached_context_if_active().is_some()
     }
 
     fn read_context(&self) -> Option<CursorContext> {
-        if let Ok(lock) = self.cached_context.lock() {
-            if let Some((ctx, ts)) = lock.as_ref() {
-                if ts.elapsed() < Duration::from_secs(5) {
-                    return Some(ctx.clone());
-                }
-            }
-        }
-        None
+        self.cached_context_if_active()
     }
 
     fn should_skip_word_spelling(&self, _cursor_off: usize, _word_start: usize, _word_end: usize, _doc_char_len: usize, word_at_cursor: &str) -> bool {
@@ -422,25 +443,23 @@ impl TextBridge for WordAddinBridge {
     }
 
     fn read_paragraph_at(&self, _cursor_offset: usize) -> Option<(String, String, usize)> {
-        if let Ok(lock) = self.cached_context.lock() {
-            if let Some((ctx, ts)) = lock.as_ref() {
-                if ts.elapsed() < Duration::from_secs(5) && !ctx.sentence.trim().is_empty() {
-                    let para_id = if ctx.paragraph_id.is_empty() {
-                        "word:addin".to_string()
-                    } else {
-                        ctx.paragraph_id.clone()
-                    };
-                    let cursor = ctx.cursor_doc_offset.unwrap_or(0);
-                    let word_pos = if ctx.word.is_empty() {
-                        ctx.sentence.len()
-                    } else {
-                        ctx.sentence.find(&ctx.word).unwrap_or(ctx.sentence.len())
-                    };
-                    let chars_before_cursor = ctx.sentence[..word_pos].chars().count()
-                        + ctx.word.chars().count();
-                    let start = cursor.saturating_sub(chars_before_cursor);
-                    return Some((para_id, ctx.sentence.clone(), start));
-                }
+        if let Some(ctx) = self.cached_context_if_active() {
+            if !ctx.sentence.trim().is_empty() {
+                let para_id = if ctx.paragraph_id.is_empty() {
+                    "word:addin".to_string()
+                } else {
+                    ctx.paragraph_id.clone()
+                };
+                let cursor = ctx.cursor_doc_offset.unwrap_or(0);
+                let word_pos = if ctx.word.is_empty() {
+                    ctx.sentence.len()
+                } else {
+                    ctx.sentence.find(&ctx.word).unwrap_or(ctx.sentence.len())
+                };
+                let chars_before_cursor = ctx.sentence[..word_pos].chars().count()
+                    + ctx.word.chars().count();
+                let start = cursor.saturating_sub(chars_before_cursor);
+                return Some((para_id, ctx.sentence, start));
             }
         }
         None
@@ -563,6 +582,7 @@ impl TextBridge for WordAddinBridge {
 fn handle_request_rw<S: Read + Write>(
     stream: &mut S,
     cached_context: &Arc<Mutex<Option<(CursorContext, Instant)>>>,
+    last_activity: &Arc<Mutex<Option<Instant>>>,
     reply_queue: &Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
     changed_paragraphs: &Arc<Mutex<Vec<ChangedParagraph>>>,
     deleted_paragraphs: &Arc<Mutex<Vec<String>>>,
@@ -684,6 +704,7 @@ fn handle_request_rw<S: Read + Write>(
                 if let Ok(mut lock) = cached_context.lock() {
                     *lock = Some((ctx, Instant::now()));
                 }
+                mark_word_addin_activity(last_activity);
             } else {
                 log_to_file(&format!("CONTEXT parse failed: body len={}", body.len()));
             }
@@ -776,6 +797,7 @@ fn handle_request_rw<S: Read + Write>(
                     if let Ok(mut lock) = changed_paragraphs.lock() {
                         lock.extend(sentences);
                     }
+                    mark_word_addin_activity(last_activity);
                 }
             } else {
                 log_to_file(&format!("CHANGED rejected: doc='{}'", doc_name));
@@ -1236,7 +1258,26 @@ fn parse_deleted_json(body: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_changed_json;
+    use super::{parse_changed_json, word_addin_context_is_active};
+    use crate::bridge::CursorContext;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn recent_paragraph_activity_keeps_cached_context_live() {
+        let now = Instant::now();
+        let context = (CursorContext::default(), now - Duration::from_secs(30));
+
+        assert!(word_addin_context_is_active(
+            Some(&context),
+            Some(now - Duration::from_secs(4)),
+            now,
+        ));
+        assert!(!word_addin_context_is_active(
+            Some(&context),
+            Some(now - Duration::from_secs(6)),
+            now,
+        ));
+    }
 
     #[test]
     fn parse_changed_json_keeps_empty_paragraph_with_id() {
