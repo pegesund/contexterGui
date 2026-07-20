@@ -630,8 +630,10 @@ function doUnderline(word, paragraphId, color) {
         results.load("items/font");
         return ctx.sync().then(function () {
             if (results.items.length > 0) {
-                results.items[0].font.underline = "Wave";
-                try { results.items[0].font.underlineColor = color || "#FF0000"; } catch(e) {}
+                for (var i = 0; i < results.items.length; i++) {
+                    results.items[i].font.underline = "Wave";
+                    try { results.items[i].font.underlineColor = color || "#FF0000"; } catch(e) {}
+                }
                 fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                     body: JSON.stringify({msg: "UNDERLINE OK: '" + word + "' matches=" + results.items.length + " para=" + (paragraphId || "body")})
                 }).catch(function(){});

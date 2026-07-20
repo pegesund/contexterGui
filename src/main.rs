@@ -1457,7 +1457,8 @@ mod cross_language_barrier_tests {
 #[cfg(test)]
 mod bridge_manager_tests {
     use super::{
-        addin_sentence_hash, addin_sentence_is_current, grammar_response_sentence_hash, same_sentence_occurrence,
+        addin_cursor_just_finished_word, addin_sentence_hash, addin_sentence_is_current,
+        grammar_response_sentence_hash, same_sentence_occurrence,
         sentence_occurrences_with_offsets, BridgeManager, ForegroundRoute,
     };
     use crate::bridge::{CursorContext, TextBridge};
@@ -1523,6 +1524,13 @@ mod bridge_manager_tests {
         fn is_available(&self) -> bool { true }
         fn read_context(&self) -> Option<CursorContext> { Some(self.context.clone()) }
         fn replace_word(&self, _new_text: &str) -> bool { false }
+    }
+
+    #[test]
+    fn addin_word_boundary_requires_an_actual_cursor_position() {
+        assert!(addin_cursor_just_finished_word("Jg er ", Some(6)));
+        assert!(!addin_cursor_just_finished_word("Jg er", Some(5)));
+        assert!(!addin_cursor_just_finished_word("Jg er", None));
     }
 
     impl TextBridge for SelectedTextBridge {
@@ -2896,7 +2904,7 @@ struct ContextApp {
     /// The cache key we last dispatched (avoid re-dispatching same)
     dispatched_key: String,
     last_dispatched_sentence: String,
-    pending_incomplete_sentence: Option<(String, String, Instant)>, // (sentence, para_id, timestamp)
+    pending_incomplete_sentence: Option<(String, String, usize, Instant)>, // (sentence, para_id, doc_offset, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
     /// Word Add-in paragraph start offsets. Mac Word taskpane uses synthetic
@@ -7049,14 +7057,10 @@ self.grammar_queue.clear();
                     clean_text.chars().count() < old.chars().count()
                 });
                 let discard_obsolete_work = start_changed || paragraph_shrank;
-                let cursor_just_finished_word = match p.cursor_start {
-                    Some(c) if c > 0 => {
-                        clean_text.chars().nth(c - 1) == Some(' ')
-                            || clean_text.chars().nth(c - 1) == Some('\t')
-                    }
-                    Some(_) => false,
-                    None => true,
-                };
+                let cursor_just_finished_word = addin_cursor_just_finished_word(
+                    &clean_text,
+                    p.cursor_start,
+                );
 
                 // Extract email parts to skip in spelling checks
                 let email_skip_words: std::collections::HashSet<String> = if clean_text.contains('@') {
@@ -7144,7 +7148,7 @@ self.grammar_queue.clear();
                             trunc(&p.paragraph_id, 10),
                         );
                     }
-                    if self.pending_incomplete_sentence.as_ref().map_or(false, |(_, para_id, _)| {
+                    if self.pending_incomplete_sentence.as_ref().map_or(false, |(_, para_id, _, _)| {
                         para_id == &p.paragraph_id
                     }) {
                         self.pending_incomplete_sentence = None;
@@ -7265,6 +7269,7 @@ self.grammar_queue.clear();
                         self.pending_incomplete_sentence = Some((
                             sentence_text.clone(),
                             p.paragraph_id.clone(),
+                            doc_offset,
                             Instant::now(),
                         ));
                     }
@@ -8578,6 +8583,13 @@ fn addin_sentence_hash(paragraph_id: &str, sentence: &str, doc_offset: usize) ->
     hash_str(&format!("{}|{}|{}", paragraph_id, doc_offset, sentence))
 }
 
+fn addin_cursor_just_finished_word(text: &str, cursor_start: Option<usize>) -> bool {
+    cursor_start
+        .and_then(|cursor| cursor.checked_sub(1))
+        .and_then(|index| text.chars().nth(index))
+        .is_some_and(|character| character == ' ' || character == '\t')
+}
+
 fn addin_sentence_is_current(
     current_hashes: &[u64],
     paragraph_id: &str,
@@ -9338,13 +9350,23 @@ impl eframe::App for ContextApp {
         }
 
         // Send pending incomplete sentence to grammar actor after 1s idle (user stopped typing)
-        if let Some((ref sentence, ref para_id, timestamp)) = self.pending_incomplete_sentence.clone() {
+        if let Some((ref sentence, ref para_id, doc_offset, timestamp)) = self.pending_incomplete_sentence.clone() {
             if timestamp.elapsed() >= Duration::from_millis(1000) {
-                let sent_h = hash_str(&format!("{}|{}", para_id, sentence));
-                if !self.processed_sentence_hashes.contains(&sent_h) {
+                let sent_h = addin_sentence_hash(para_id, sentence, doc_offset);
+                if !self.processed_sentence_hashes.contains(&sent_h)
+                    && !self.grammar_inflight.contains(&sent_h)
+                {
                     if let Some(actor) = &self.grammar_actor {
                         let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-                        actor.check_sentence_with_doc(sentence, 0, para_id, 0, &self.last_doc_text, &uw);
+                        actor.check_sentence_with_doc(
+                            sentence,
+                            doc_offset,
+                            para_id,
+                            0,
+                            &self.last_doc_text,
+                            &uw,
+                        );
+                        self.grammar_inflight.insert(sent_h);
                     }
                 }
                 self.pending_incomplete_sentence = None;
