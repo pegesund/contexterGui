@@ -161,7 +161,22 @@ fn create_engine(
 // --- Public free functions (unchanged API for main.rs) ---
 
 pub fn speak_word(word: &str) {
-    if let Some(e) = ENGINE.get() { e.speak(word); }
+    if let Some(e) = ENGINE.get() { e.speak(&prepare_text_for_speech(word)); }
+}
+
+fn prepare_text_for_speech(text: &str) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .map(|segment| {
+            let word = segment.trim_end_matches(char::is_whitespace);
+            let trailing_whitespace = &segment[word.len()..];
+            let core = word.trim_matches(|character: char| !character.is_alphanumeric());
+            if core == "II" {
+                format!("{}{}", word.replacen("II", "I I", 1), trailing_whitespace)
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect()
 }
 
 pub fn tts_available() -> bool {
@@ -194,6 +209,26 @@ pub fn current_voice() -> String {
 
 pub fn set_voice(name: &str) {
     if let Some(e) = ENGINE.get() { e.set_voice(name); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_text_for_speech;
+
+    #[test]
+    fn speaks_standalone_double_i_as_letters() {
+        assert_eq!(
+            prepare_text_for_speech("II openned the document yesterday."),
+            "I I openned the document yesterday.",
+        );
+        assert_eq!(prepare_text_for_speech("II."), "I I.");
+    }
+
+    #[test]
+    fn leaves_non_reported_tokens_unchanged() {
+        assert_eq!(prepare_text_for_speech("I opened it at 8:45 AM."), "I opened it at 8:45 AM.");
+        assert_eq!(prepare_text_for_speech("III is unchanged."), "III is unchanged.");
+    }
 }
 
 // --- Stub for unsupported platforms ---
