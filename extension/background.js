@@ -4,6 +4,10 @@ const NATIVE_HOST = "com.cognio.spell.bridge";
 let nativePort = null;
 let contentPorts = new Map(); // tabId -> [port, port, ...] (multiple frames per tab)
 let lastActiveTabId = null;
+// The desktop bridge can only act on one editor snapshot at a time. Keep the
+// exact content port that supplied that snapshot so a reply returns to the
+// same frame instead of every iframe in the tab.
+let latestTextPortByTab = new Map();
 
 // Send a message to every content port in a tab, pruning any that have
 // become stale (e.g. their page was moved into Chrome's back/forward
@@ -29,6 +33,19 @@ function sendToTabPorts(tabId, msg) {
   if (alive.length === 0) contentPorts.delete(tabId);
   else contentPorts.set(tabId, alive);
   disconnectNativeIfIdle();
+}
+
+function sendToLatestTextPort(tabId, msg) {
+  const port = latestTextPortByTab.get(tabId);
+  if (!port) return false;
+  try {
+    port.postMessage(msg);
+    return true;
+  } catch (_) {
+    void chrome.runtime.lastError;
+    latestTextPortByTab.delete(tabId);
+    return false;
+  }
 }
 
 function hasContentPorts() {
@@ -57,17 +74,15 @@ function connectNative() {
         console.log("Spell replace:", JSON.stringify(msg));
         const targetTabId = Number.isInteger(msg.tabId) && msg.tabId > 0 ? msg.tabId : null;
         if (targetTabId) {
-          if (contentPorts.has(targetTabId)) {
-            sendToTabPorts(targetTabId, msg);
-          } else {
-            console.warn("Spell: replacement target tab is not connected:", targetTabId);
+          if (!sendToLatestTextPort(targetTabId, msg)) {
+            console.warn("Spell: replacement target frame is not connected:", targetTabId);
           }
-        } else if (lastActiveTabId && contentPorts.has(lastActiveTabId)) {
-          sendToTabPorts(lastActiveTabId, msg);
+        } else if (lastActiveTabId && sendToLatestTextPort(lastActiveTabId, msg)) {
+          // Legacy replies have no tab ID. The latest text update is still
+          // the only safe origin because broadcasting can replace text in
+          // unrelated iframes and tabs.
         } else {
-          for (const tabId of [...contentPorts.keys()]) {
-            sendToTabPorts(tabId, msg);
-          }
+          console.warn("Spell: replacement has no active source frame");
         }
       }
     });
@@ -96,7 +111,10 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 
   port.onMessage.addListener((msg) => {
-    lastActiveTabId = tabId;
+    if (msg.type === "textUpdate" && tabId) {
+      lastActiveTabId = tabId;
+      latestTextPortByTab.set(tabId, port);
+    }
     connectNative();
     if (nativePort) {
       // Forward ALL messages (textUpdate + log) to native host
@@ -139,6 +157,9 @@ chrome.runtime.onConnect.addListener((port) => {
       const ports = contentPorts.get(tabId).filter(p => p !== port);
       if (ports.length === 0) contentPorts.delete(tabId);
       else contentPorts.set(tabId, ports);
+    }
+    if (tabId && latestTextPortByTab.get(tabId) === port) {
+      latestTextPortByTab.delete(tabId);
     }
     disconnectNativeIfIdle();
   });
