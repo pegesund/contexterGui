@@ -1457,7 +1457,8 @@ mod cross_language_barrier_tests {
 #[cfg(test)]
 mod bridge_manager_tests {
     use super::{
-        addin_cursor_just_finished_word, addin_sentence_hash, addin_sentence_is_current,
+        addin_change_matches_expected_replacement, addin_cursor_just_finished_word,
+        addin_sentence_hash, addin_sentence_is_current,
         grammar_response_sentence_hash, same_sentence_occurrence,
         sentence_occurrences_with_offsets, BridgeManager, ForegroundRoute,
     };
@@ -1531,6 +1532,22 @@ mod bridge_manager_tests {
         assert!(addin_cursor_just_finished_word("Jg er ", Some(6)));
         assert!(!addin_cursor_just_finished_word("Jg er", Some(5)));
         assert!(!addin_cursor_just_finished_word("Jg er", None));
+    }
+
+    #[test]
+    fn word_addin_replacement_echo_is_not_a_structural_delete() {
+        let before = "II reported abouut the doccument yesteerday. ";
+        let after = "II reported about the doccument yesteerday. ";
+
+        assert!(addin_change_matches_expected_replacement(
+            before, after, "abouut", "about"
+        ));
+        assert!(!addin_change_matches_expected_replacement(
+            before,
+            "II reported the doccument yesteerday. ",
+            "abouut",
+            "about",
+        ));
     }
 
     impl TextBridge for SelectedTextBridge {
@@ -2905,6 +2922,9 @@ struct ContextApp {
     dispatched_key: String,
     last_dispatched_sentence: String,
     pending_incomplete_sentence: Option<(String, String, usize, Instant)>, // (sentence, para_id, doc_offset, timestamp)
+    /// A Word Add-in replacement that is expected to echo back as a changed paragraph.
+    /// Its text may shrink, but it is not a user cut/delete.
+    pending_addin_replacement: Option<(String, String, String, Instant)>, // (paragraph_id, find, replace, timestamp)
     grammar_inflight: std::collections::HashSet<u64>, // hashes of sentences sent to grammar actor, not yet responded
     paragraph_texts: std::collections::HashMap<String, String>, // paragraph_id → latest text, for building doc text
     /// Word Add-in paragraph start offsets. Mac Word taskpane uses synthetic
@@ -3823,6 +3843,7 @@ impl ContextApp {
             dispatched_key: String::new(),
             last_dispatched_sentence: String::new(),
             pending_incomplete_sentence: None,
+            pending_addin_replacement: None,
             grammar_inflight: std::collections::HashSet::new(),
             paragraph_texts: std::collections::HashMap::new(),
             paragraph_doc_starts: std::collections::HashMap::new(),
@@ -7050,10 +7071,39 @@ self.grammar_queue.clear();
                 let clean_text: String = p.text.chars()
                     .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
                     .collect();
+                let addin_replacement_echo = self.pending_addin_replacement.as_ref().map_or(false, |
+                    (expected_paragraph_id, find, replacement, started_at)
+                | {
+                    expected_paragraph_id == &p.paragraph_id
+                        && started_at.elapsed() < Duration::from_millis(1500)
+                        && previous_text.as_ref().map_or(false, |old| {
+                            addin_change_matches_expected_replacement(
+                                old,
+                                &clean_text,
+                                find,
+                                replacement,
+                            )
+                        })
+                });
+                if addin_replacement_echo {
+                    log!(
+                        "  Word replacement echo accepted: para={} text='{}'",
+                        trunc(&p.paragraph_id, 10),
+                        trunc(&clean_text, 50),
+                    );
+                    self.pending_addin_replacement = None;
+                } else if self.pending_addin_replacement.as_ref().map_or(false, |(_, _, _, started_at)| {
+                    started_at.elapsed() >= Duration::from_millis(1500)
+                }) {
+                    self.pending_addin_replacement = None;
+                }
+
                 // A cut/delete keeps the paragraph id but shifts any surviving
                 // sentence to a new document occurrence. Unlike normal typing,
                 // queued results for the old occurrence must not be accepted.
-                let paragraph_shrank = previous_text.as_ref().map_or(false, |old| {
+                // A verified Word Add-in replacement can also shrink text; that
+                // echo must preserve the remaining errors in the paragraph.
+                let paragraph_shrank = !addin_replacement_echo && previous_text.as_ref().map_or(false, |old| {
                     clean_text.chars().count() < old.chars().count()
                 });
                 let discard_obsolete_work = start_changed || paragraph_shrank;
@@ -8556,6 +8606,15 @@ pub(crate) fn replace_word_at_position(sentence: &str, word: &str, replacement: 
     result.join(" ")
 }
 
+fn addin_change_matches_expected_replacement(
+    previous: &str,
+    current: &str,
+    find: &str,
+    replacement: &str,
+) -> bool {
+    replace_word_at_position(previous, find, replacement).trim_end() == current.trim_end()
+}
+
 /// Remove first occurrence of a word from a sentence.
 fn remove_word_from_sentence(sentence: &str, word: &str) -> String {
     let words: Vec<&str> = sentence.split_whitespace().collect();
@@ -9424,6 +9483,14 @@ impl eframe::App for ContextApp {
             };
             if ok {
                 self.last_replace_time = Instant::now();
+                if self.manager.active_bridge_name() == "Word Add-in" && !paragraph_id.is_empty() {
+                    self.pending_addin_replacement = Some((
+                        paragraph_id.clone(),
+                        find.clone(),
+                        replace.clone(),
+                        self.last_replace_time,
+                    ));
+                }
                 self.completions.clear();
                 self.open_completions.clear();
                 self.selected_completion = None;
