@@ -184,6 +184,16 @@ function onParagraphChanged(event) {
             return ctx.sync();
         }
 
+        // Use the same cursor calculation as doSelectionRead. The paragraph
+        // event normally arrives before the selection callback, so without it
+        // Rust only sees cursorStart=None and defers checks after a space.
+        var selection = ctx.document.getSelection();
+        var selectionPara = selection.paragraphs.getFirst();
+        var selectionParaStart = selectionPara.getRange("Start");
+        selection.load("start");
+        selectionPara.load("uniqueLocalId");
+        selectionParaStart.load("start");
+
         var paragraphs = [];
         for (var i = 0; i < ids.length; i++) {
             var para = ctx.document.getParagraphByUniqueLocalId(ids[i]);
@@ -191,6 +201,8 @@ function onParagraphChanged(event) {
             paragraphs.push(para);
         }
         return ctx.sync().then(function () {
+            var selectionParaId = selectionPara.uniqueLocalId;
+            var cursorInSelectionPara = selection.start - selectionParaStart.start;
             var changed = [];
             for (var i = 0; i < paragraphs.length; i++) {
                 var paraId = paragraphs[i].uniqueLocalId;
@@ -201,7 +213,13 @@ function onParagraphChanged(event) {
 
                 if (oldHash !== newHash) {
                     paragraphMap[paraId] = newHash;
-                    changed.push({ paragraphId: paraId, text: paraText, charStart: charStart });
+                    var change = { paragraphId: paraId, text: paraText, charStart: charStart };
+                    if (paraId === selectionParaId) {
+                        if (cursorInSelectionPara < 0) cursorInSelectionPara = 0;
+                        if (cursorInSelectionPara > paraText.length) cursorInSelectionPara = paraText.length;
+                        change.cursorStart = cursorInSelectionPara;
+                    }
+                    changed.push(change);
                 }
             }
             if (changed.length > 0) {
