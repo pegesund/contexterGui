@@ -573,7 +573,10 @@ fn sentence_occurrences_with_offsets(
 fn writing_error_has_visible_panel_text(e: &WritingError) -> bool {
     match e.category {
         ErrorCategory::Spelling => {
-            !e.word.trim().is_empty() || !e.suggestion.trim().is_empty()
+            let word = e.word.trim();
+            let suggestion = e.suggestion.trim();
+            !word.is_empty()
+                && (suggestion.is_empty() || spelling_correction_changes_word(word, suggestion))
         }
         ErrorCategory::Grammar => {
             !e.suggestion.trim().is_empty()
@@ -893,6 +896,14 @@ fn spelling_error_still_present(check_text: &str, word: &str, sentence_context: 
     sentence_lower.is_empty() || check_text.contains(&sentence_lower)
 }
 
+/// A spelling row with the same source and replacement cannot fix anything.
+/// Keep case-only corrections valid, because those are actionable.
+fn spelling_correction_changes_word(word: &str, suggestion: &str) -> bool {
+    let word = word.trim();
+    let suggestion = suggestion.trim();
+    !word.is_empty() && !suggestion.is_empty() && word != suggestion
+}
+
 /// Prefer the current sentence at a tracked document offset when it is still
 /// available. A correction elsewhere in that sentence changes its full text,
 /// but must not make the other misspelled words in the sentence disappear.
@@ -1126,6 +1137,7 @@ mod cross_language_barrier_tests {
         sentence_cache_version, CachedSentenceVerdict,
         SENTENCE_CACHE_SCHEMA,
         should_skip_cross_language_match, should_surface_unknown_spelling,
+        spelling_correction_changes_word,
         spelling_error_still_present, spelling_error_still_present_at_sentence_offset,
         word_token_at_position,
     };
@@ -1422,6 +1434,14 @@ mod cross_language_barrier_tests {
             spelling_error_still_present_at_sentence_offset(paragraph, "daag", 58, 58),
             Some(true)
         );
+    }
+
+    #[test]
+    fn no_op_spelling_correction_is_not_actionable() {
+        assert!(!spelling_correction_changes_word("veldig", "veldig"));
+        assert!(!spelling_correction_changes_word(" veldig ", "veldig"));
+        assert!(spelling_correction_changes_word("veldiig", "veldig"));
+        assert!(spelling_correction_changes_word("VELDIG", "veldig"));
     }
 
     #[test]
@@ -4705,6 +4725,12 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             .map(|p| p.error_idx_word == clean.to_lowercase())
             .unwrap_or(false);
         let shown_suggestion = apply_original_initial_case(&best, original_word);
+        if !shown_suggestion.is_empty()
+            && !spelling_correction_changes_word(original_word, &shown_suggestion)
+        {
+            log!("Spelling: suppressing no-op correction '{}'", original_word);
+            return;
+        }
 
         // Dedup: don't add a second spelling error for the same word in the
         // same paragraph OR at the same sentence/document offset. Mirrors the
@@ -5136,6 +5162,15 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             // the user never saw an ortho-first guess. Push it now with the
             // properly ranked suggestion and draw the underline.
             let suggestion = capitalize(best, &deferred.sentence, &deferred.word);
+            if !suggestion.is_empty()
+                && !spelling_correction_changes_word(&deferred.word, &suggestion)
+            {
+                log!(
+                    "spelling deferred push: suppressing no-op correction '{}'",
+                    deferred.word
+                );
+                return;
+            }
             // Top 5 alternates = next 4 BERT-ranked candidates (excluding the best pick).
             let top5: Vec<String> = rescored.iter().skip(1).take(5)
                 .map(|(c, _)| c.clone()).collect();
@@ -5258,12 +5293,17 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             return;
         }
         let e = self.sentence_cache.entries.entry(key).or_default();
+        let no_op_spelling = !err.is_grammar
+            && !err.suggestion.trim().is_empty()
+            && !spelling_correction_changes_word(&err.word, &err.suggestion);
         e.errors.retain(|x| {
             !(x.is_grammar == err.is_grammar
                 && x.position == err.position
                 && x.word.eq_ignore_ascii_case(&err.word))
         });
-        e.errors.push(err);
+        if !no_op_spelling {
+            e.errors.push(err);
+        }
         save_sentence_cache(&self.sentence_cache);
     }
 
@@ -5282,6 +5322,28 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let Some((best_after, _)) = filtered.first() else { return; };
         let word_lower = pending.word.to_lowercase();
         let suggestion = apply_original_initial_case(best_after, &pending.word);
+        if !suggestion.is_empty()
+            && !spelling_correction_changes_word(&pending.word, &suggestion)
+        {
+            let ck = sentence_cache_key_for_language(self.language.code(), &pending.sentence);
+            if let Some(entry) = self.sentence_cache.entries.get_mut(&ck) {
+                entry.errors.retain(|ce| {
+                    ce.is_grammar || !ce.word.eq_ignore_ascii_case(&pending.word)
+                });
+                save_sentence_cache(&self.sentence_cache);
+            }
+            self.writing_errors.retain(|e| {
+                !(matches!(e.category, ErrorCategory::Spelling)
+                    && e.word.eq_ignore_ascii_case(&pending.word)
+                    && e.paragraph_id == pending.paragraph_id
+                    && e.sentence_context == pending.sentence)
+            });
+            log!(
+                "grammar refinement: removed no-op spelling correction '{}'",
+                pending.word
+            );
+            return;
+        }
         // Mirror the upgrade into the sentence cache so replays get the
         // grammar-refined suggestion, not the raw BERT pick.
         {
@@ -5831,6 +5893,11 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         for e in &mut self.writing_errors {
             let should_remove = if e.ignored {
                 true
+            } else if matches!(e.category, ErrorCategory::Spelling)
+                && !e.suggestion.trim().is_empty()
+                && !spelling_correction_changes_word(&e.word, &e.suggestion)
+            {
+                true
             } else if !e.paragraph_id.is_empty() && !para_texts_lower.contains_key(e.paragraph_id.as_str()) {
                 // Error's paragraph no longer in cache — paragraph was deleted or document changed
                 true
@@ -5866,6 +5933,13 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         self.writing_errors.retain(|e| {
             if e.ignored {
                 log!("Pruning ignored: {:?} '{}'", e.category, trunc(&e.word, 40));
+                return false;
+            }
+            if matches!(e.category, ErrorCategory::Spelling)
+                && !e.suggestion.trim().is_empty()
+                && !spelling_correction_changes_word(&e.word, &e.suggestion)
+            {
+                log!("Pruning no-op spelling correction: '{}'", trunc(&e.word, 40));
                 return false;
             }
             if !e.paragraph_id.is_empty() && !para_texts_lower.contains_key(e.paragraph_id.as_str()) {
@@ -6299,6 +6373,16 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     let mut replayed = 0usize;
                     for ce in &verdict.errors {
                         if ce.is_grammar && !is_complete {
+                            continue;
+                        }
+                        if !ce.is_grammar
+                            && !ce.suggestion.trim().is_empty()
+                            && !spelling_correction_changes_word(&ce.word, &ce.suggestion)
+                        {
+                            log!(
+                                "Sentence cache: skipping no-op spelling correction '{}'",
+                                ce.word
+                            );
                             continue;
                         }
                         if !ce.is_grammar {
