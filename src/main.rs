@@ -1437,7 +1437,7 @@ mod cross_language_barrier_tests {
 #[cfg(test)]
 mod bridge_manager_tests {
     use super::{
-        addin_sentence_hash, grammar_response_sentence_hash, same_sentence_occurrence,
+        addin_sentence_hash, addin_sentence_is_current, grammar_response_sentence_hash, same_sentence_occurrence,
         sentence_occurrences_with_offsets, BridgeManager, ForegroundRoute,
     };
     use crate::bridge::{CursorContext, TextBridge};
@@ -1592,6 +1592,28 @@ mod bridge_manager_tests {
             manager.read_selected_text().as_deref(),
             Some("current browser selection"),
         );
+    }
+
+    #[test]
+    fn cut_moves_an_addin_sentence_to_a_new_occurrence() {
+        let paragraph_id = "word:paragraph";
+        let sentence = "Jg er veldiig glaad ii daag.";
+        let old_offset = 28;
+        let new_offset = 0;
+        let current_hashes = vec![addin_sentence_hash(paragraph_id, sentence, new_offset)];
+
+        assert!(addin_sentence_is_current(
+            &current_hashes,
+            paragraph_id,
+            sentence,
+            new_offset,
+        ));
+        assert!(!addin_sentence_is_current(
+            &current_hashes,
+            paragraph_id,
+            sentence,
+            old_offset,
+        ));
     }
 
     #[test]
@@ -6866,10 +6888,8 @@ self.grammar_queue.clear();
             let changed = bridge.drain_changed_paragraphs();
             for p in changed {
                 let para_char_start = p.char_start.unwrap_or(0);
-                let same_text = self
-                    .paragraph_texts
-                    .get(&p.paragraph_id)
-                    .map_or(false, |t| t == &p.text);
+                let previous_text = self.paragraph_texts.get(&p.paragraph_id).cloned();
+                let same_text = previous_text.as_ref().map_or(false, |t| t == &p.text);
                 let previous_start = self.paragraph_doc_starts.get(&p.paragraph_id).copied();
                 let same_start = previous_start == Some(para_char_start);
                 let start_changed = previous_start.map_or(false, |old| old != para_char_start);
@@ -6938,6 +6958,13 @@ self.grammar_queue.clear();
                 let clean_text: String = p.text.chars()
                     .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
                     .collect();
+                // A cut/delete keeps the paragraph id but shifts any surviving
+                // sentence to a new document occurrence. Unlike normal typing,
+                // queued results for the old occurrence must not be accepted.
+                let paragraph_shrank = previous_text.as_ref().map_or(false, |old| {
+                    clean_text.chars().count() < old.chars().count()
+                });
+                let discard_obsolete_work = start_changed || paragraph_shrank;
                 let cursor_just_finished_word = match p.cursor_start {
                     Some(c) if c > 0 => {
                         clean_text.chars().nth(c - 1) == Some(' ')
@@ -6975,6 +7002,15 @@ self.grammar_queue.clear();
                     ))
                     .collect();
 
+                let old_hashes = self.paragraph_sentence_hashes
+                    .get(&p.paragraph_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let obsolete_hashes: Vec<u64> = old_hashes.iter()
+                    .copied()
+                    .filter(|old_h| !new_hashes.contains(old_h))
+                    .collect();
+
                 if start_changed {
                     let before = self.writing_errors.len();
                     self.writing_errors.retain(|e| e.paragraph_id != p.paragraph_id);
@@ -6991,12 +7027,43 @@ self.grammar_queue.clear();
 
                 // Remove old sentence hashes for this paragraph from clean set
                 // and clear errors for sentences that no longer exist
-                if let Some(old_hashes) = self.paragraph_sentence_hashes.get(&p.paragraph_id) {
-                    for old_h in old_hashes {
-                        if !new_hashes.contains(old_h) {
-                            // Sentence no longer exists in this paragraph — remove hash + errors
-                            self.processed_sentence_hashes.remove(old_h);
-                        }
+                for old_h in &obsolete_hashes {
+                    // Sentence no longer exists at this occurrence — remove its
+                    // completed verdict so a moved sentence is rechecked.
+                    self.processed_sentence_hashes.remove(old_h);
+                }
+                if discard_obsolete_work && !obsolete_hashes.is_empty() {
+                    // Keep the normal typing path responsive: responses for a
+                    // growing sentence remain valid. Structural edits (cut,
+                    // delete, or a moved paragraph) are different because old
+                    // results would belong to text that no longer occupies this
+                    // document location.
+                    for old_h in &obsolete_hashes {
+                        self.grammar_inflight.remove(old_h);
+                    }
+                    let pending_before = self.pending_spelling_bert.len();
+                    self.pending_spelling_bert.retain(|pending| {
+                        pending.deferred_push.as_ref().map_or(true, |deferred| {
+                            deferred.paragraph_id != p.paragraph_id
+                                || addin_sentence_is_current(
+                                    &new_hashes,
+                                    &deferred.paragraph_id,
+                                    &deferred.sentence,
+                                    deferred.doc_offset,
+                                )
+                        })
+                    });
+                    if self.pending_spelling_bert.len() < pending_before {
+                        log!(
+                            "  Cancelled {} stale spelling jobs after structural edit for para={}",
+                            pending_before - self.pending_spelling_bert.len(),
+                            trunc(&p.paragraph_id, 10),
+                        );
+                    }
+                    if self.pending_incomplete_sentence.as_ref().map_or(false, |(_, para_id, _)| {
+                        para_id == &p.paragraph_id
+                    }) {
+                        self.pending_incomplete_sentence = None;
                     }
                 }
                 // Clear errors for sentences that are no longer in the paragraph
@@ -7015,6 +7082,26 @@ self.grammar_queue.clear();
                 let mut orphan_word_removed = false;
                 self.writing_errors.retain(|e| {
                     if e.paragraph_id != p.paragraph_id { return true; }
+                    // For a shrinking paragraph, preserve only the exact
+                    // sentence occurrence that still exists. Matching text by
+                    // itself is insufficient: a cut can move the same sentence
+                    // to a new offset, where it will be scanned again.
+                    if paragraph_shrank
+                        && !addin_sentence_is_current(
+                            &new_hashes,
+                            &e.paragraph_id,
+                            &e.sentence_context,
+                            e.doc_offset,
+                        )
+                    {
+                        orphan_word_removed = true;
+                        log!(
+                            "  Removing moved/deleted error after structural edit: word='{}' offset={}",
+                            e.word,
+                            e.doc_offset,
+                        );
+                        return false;
+                    }
                     // Exact sentence match — keep
                     let e_sent_lower = e.sentence_context.to_lowercase();
                     if new_sentence_set.contains(&e_sent_lower) { return true; }
@@ -8405,6 +8492,15 @@ pub(crate) fn hash_str(s: &str) -> u64 {
 
 fn addin_sentence_hash(paragraph_id: &str, sentence: &str, doc_offset: usize) -> u64 {
     hash_str(&format!("{}|{}|{}", paragraph_id, doc_offset, sentence))
+}
+
+fn addin_sentence_is_current(
+    current_hashes: &[u64],
+    paragraph_id: &str,
+    sentence: &str,
+    doc_offset: usize,
+) -> bool {
+    current_hashes.contains(&addin_sentence_hash(paragraph_id, sentence, doc_offset))
 }
 
 fn grammar_response_sentence_hash(
