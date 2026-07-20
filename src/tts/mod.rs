@@ -170,8 +170,14 @@ fn prepare_text_for_speech(text: &str) -> String {
             let word = segment.trim_end_matches(char::is_whitespace);
             let trailing_whitespace = &segment[word.len()..];
             let core = word.trim_matches(|character: char| !character.is_alphanumeric());
-            if core == "II" {
-                format!("{}{}", word.replacen("II", "I I", 1), trailing_whitespace)
+            if core.eq_ignore_ascii_case("ii") {
+                let core_start = word.find(core).expect("trimmed core must be part of word");
+                format!(
+                    "{}I I{}{}",
+                    &word[..core_start],
+                    &word[core_start + core.len()..],
+                    trailing_whitespace,
+                )
             } else {
                 segment.to_string()
             }
@@ -222,6 +228,9 @@ mod tests {
             "I I openned the document yesterday.",
         );
         assert_eq!(prepare_text_for_speech("II."), "I I.");
+        assert_eq!(prepare_text_for_speech("iI."), "I I.");
+        assert_eq!(prepare_text_for_speech("Ii."), "I I.");
+        assert_eq!(prepare_text_for_speech("ii."), "I I.");
     }
 
     #[test]
