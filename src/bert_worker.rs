@@ -344,6 +344,7 @@ fn worker_loop(
             }
 
             BertRequest::SpellingFull { id, word, sentence, doc_word_counts, user_dict_words } => {
+                let started_at = std::time::Instant::now();
                 // Full pipeline on the worker thread — replaces the main
                 // thread's `find_spelling_suggestions`. NO grammar call —
                 // grammar batch is dispatched async by main thread after
@@ -384,6 +385,17 @@ fn worker_loop(
                     &mut model, &ortho_candidates,
                     &context_before, &context_after, &rerank_sentence,
                 );
+                let elapsed_ms = started_at.elapsed().as_millis();
+                if crate::logging::debug_logging_enabled() && elapsed_ms >= 150 {
+                    debug_log!(
+                        "BERT perf: spelling worker id={} word='{}' worker_ms={} candidates={} queued_after={}",
+                        id,
+                        word,
+                        elapsed_ms,
+                        scored.len(),
+                        pending.len()
+                    );
+                }
                 let _ = tx.send(BertResponse::SpellingScore { id, scored_candidates: scored });
                 repaint_ctx.request_repaint();
             }

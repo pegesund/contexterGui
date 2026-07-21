@@ -2825,6 +2825,9 @@ fn escape_json_str(s: &str) -> String {
 /// Pending spelling BERT re-ranking
 struct PendingSpellingBert {
     request_id: bert_worker::RequestId,
+    /// Used only for opt-in performance diagnostics. The worker response does
+    /// not carry queue time, so the UI owns the end-to-end measurement.
+    queued_at: Instant,
     error_idx_word: String,       // word to match in writing_errors
     error_doc_offset: usize,
     candidates: Vec<(String, f32)>, // (candidate, ortho_sim)
@@ -5070,6 +5073,16 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 bert_worker::BertResponse::SpellingScore { id, scored_candidates } => {
                     if let Some(idx) = self.pending_spelling_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_spelling_bert.remove(idx);
+                        let elapsed_ms = pending.queued_at.elapsed().as_millis();
+                        if crate::logging::debug_logging_enabled() && elapsed_ms >= 500 {
+                            debug_log!(
+                                "BERT perf: spelling response id={} word='{}' end_to_end_ms={} pending_after={}",
+                                id,
+                                pending.error_idx_word,
+                                elapsed_ms,
+                                self.pending_spelling_bert.len()
+                            );
+                        }
                         let had_deferred = pending.deferred_push.is_some();
                         self.handle_spelling_bert_response(pending, &scored_candidates);
                         // A deferred push creates a brand-new WritingError that
@@ -5642,6 +5655,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 });
                 self.pending_spelling_bert.push(PendingSpellingBert {
                     request_id,
+                    queued_at: Instant::now(),
                     error_idx_word: word_lower.clone(),
                     error_doc_offset: 0,
                     candidates: passing.iter().take(30).cloned().collect(),
@@ -8187,6 +8201,7 @@ self.grammar_queue.clear();
                 }
                 self.pending_spelling_bert.push(PendingSpellingBert {
                     request_id,
+                    queued_at: Instant::now(),
                     error_idx_word: deferred.word.to_lowercase(),
                     error_doc_offset: deferred.doc_offset,
                     // Ortho scores are computed on the worker; main thread
