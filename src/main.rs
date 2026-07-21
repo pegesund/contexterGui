@@ -948,6 +948,17 @@ fn spelling_error_still_present_in_tracked_paragraph(
     spelling_error_still_present(paragraph_text, word, sentence_context)
 }
 
+/// A Word Add-in paragraph update that exactly matches Spell's own replacement
+/// only changes one spelling token. Keep the other spelling rows in that
+/// sentence while the fresh paragraph state arrives; grammar must be checked
+/// again because a replacement can change the sentence-level analysis.
+fn keep_error_during_verified_addin_replacement(
+    addin_replacement_echo: bool,
+    category: &ErrorCategory,
+) -> bool {
+    addin_replacement_echo && matches!(category, ErrorCategory::Spelling)
+}
+
 fn apply_original_initial_case(raw: &str, original: &str) -> String {
     let mut s = raw.trim_matches(|c: char| c.is_whitespace() || c.is_control()).to_string();
     if s.is_empty() {
@@ -1136,6 +1147,7 @@ mod cross_language_barrier_tests {
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
         sentence_cache_version, CachedSentenceVerdict,
         SENTENCE_CACHE_SCHEMA,
+        ErrorCategory, keep_error_during_verified_addin_replacement,
         should_skip_cross_language_match, should_surface_unknown_spelling,
         spelling_correction_changes_word,
         spelling_error_still_present, spelling_error_still_present_at_sentence_offset,
@@ -1184,6 +1196,22 @@ mod cross_language_barrier_tests {
         assert!(should_surface_unknown_spelling(false, false));
         assert!(!should_surface_unknown_spelling(true, false));
         assert!(!should_surface_unknown_spelling(false, true));
+    }
+
+    #[test]
+    fn word_addin_replacement_keeps_only_remaining_spelling_rows() {
+        assert!(keep_error_during_verified_addin_replacement(
+            true,
+            &ErrorCategory::Spelling,
+        ));
+        assert!(!keep_error_during_verified_addin_replacement(
+            true,
+            &ErrorCategory::Grammar,
+        ));
+        assert!(!keep_error_during_verified_addin_replacement(
+            false,
+            &ErrorCategory::Spelling,
+        ));
     }
 
     #[test]
@@ -7299,7 +7327,11 @@ self.grammar_queue.clear();
                     self.writing_errors.retain(|e| {
                         !(e.paragraph_id == p.paragraph_id
                             && e.doc_offset == doc_offset
-                            && e.sentence_context.to_lowercase() == sentence_lower)
+                            && e.sentence_context.to_lowercase() == sentence_lower
+                            && !keep_error_during_verified_addin_replacement(
+                                addin_replacement_echo,
+                                &e.category,
+                            ))
                     });
 
                     // Send to grammar actor for spelling + grammar checking.
