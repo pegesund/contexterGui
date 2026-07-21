@@ -100,6 +100,23 @@ pub enum BertRequest {
     },
 }
 
+fn is_background_completion(request: &BertRequest) -> bool {
+    matches!(
+        request,
+        BertRequest::Completion { .. } | BertRequest::CompleteWord { .. }
+    )
+}
+
+/// Spelling and other explicit analysis requests must not wait behind stale
+/// autocomplete work. An already-running inference is allowed to finish, but
+/// the next worker slot always goes to the first non-completion request.
+fn pop_next_request(pending: &mut std::collections::VecDeque<BertRequest>) -> Option<BertRequest> {
+    let priority_index = pending
+        .iter()
+        .position(|request| !is_background_completion(request));
+    priority_index.and_then(|index| pending.remove(index)).or_else(|| pending.pop_front())
+}
+
 /// Responses from the BERT worker thread
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionStage {
@@ -226,7 +243,7 @@ fn worker_loop(
     // SpellingFull request that arrived between two CompleteWord requests.
     let mut pending: std::collections::VecDeque<BertRequest> = std::collections::VecDeque::new();
     loop {
-        let req = if let Some(r) = pending.pop_front() {
+        let req = if let Some(r) = pop_next_request(&mut pending) {
             r
         } else {
             match rx.recv() {
@@ -679,4 +696,47 @@ fn sentence_score(model: &mut Model, sentence: &str, mask_token: &str) -> f32 {
         }
     }
     total / words.len() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completion(id: RequestId) -> BertRequest {
+        BertRequest::CompleteWord {
+            id,
+            context: String::new(),
+            prefix: String::new(),
+            capitalize: false,
+            top_n: 1,
+            max_steps: 1,
+            cache_key: String::new(),
+            masked_text: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            sentence: String::new(),
+        }
+    }
+
+    fn spelling(id: RequestId) -> BertRequest {
+        BertRequest::SpellingFull {
+            id,
+            word: "nott".to_string(),
+            sentence: "This is nott.".to_string(),
+            doc_word_counts: HashMap::new(),
+            user_dict_words: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pending_spelling_runs_before_queued_completion() {
+        let mut pending = std::collections::VecDeque::from([
+            completion(1),
+            spelling(2),
+            completion(3),
+        ]);
+
+        assert!(matches!(pop_next_request(&mut pending), Some(BertRequest::SpellingFull { id: 2, .. })));
+        assert!(matches!(pop_next_request(&mut pending), Some(BertRequest::CompleteWord { id: 1, .. })));
+        assert!(matches!(pop_next_request(&mut pending), Some(BertRequest::CompleteWord { id: 3, .. })));
+    }
 }
