@@ -24,6 +24,7 @@ GUI rows for each supported platform. A row marked `Open` is not a release claim
 | UNIT-SPELL-003 | Norwegian characters | All | With Bokmal selected, `kjore -> kjore` with `o` replaced by `o-slash`, `grot -> grot` with `o` replaced by `o-slash`, `pa -> pa` with `a-ring`, `ar -> ar` with `a-ring`, and `aar` with an initial `a-ring` ranks plain `ar` with `a-ring` above unrelated alternatives. | `src/spelling_scorer.rs`: shared spelling ranking; `src/main.rs`: spelling pipeline | Rust spelling tests; retain exact QA sentences as fixtures |
 | UNIT-SPELL-004 | Corrupted characters | All | `fiont` with `o-slash -> fint` and `tael` with `ae -> til` are evaluated in sentence context. | `src/spelling_scorer.rs`; `src/main.rs`: context spelling checks | Rust spelling tests; model-dependent top rank remains a scored assertion |
 | UNIT-SPELL-005 | Token forms | All | Supported hyphenated words remain single tokens; email, URL, abbreviation, slash, plus, hash, underscore, and alphanumeric forms are either accepted or deliberately excluded without fragment errors. | `src/main.rs`: token cleanup; language analyzers | Open fixture matrix |
+| UNIT-WORKER-001 | Spelling priority | All | A queued spelling request is selected before queued completion requests. An already running request may finish first, but background completion backlog must not delay spelling jobs. | `src/bert_worker.rs`: `worker_loop`, `pop_next_request` | `bert_worker::tests::pending_spelling_runs_before_queued_completion` |
 | UNIT-UI-001 | Error-row visibility | All | An error without a correction still has visible explanatory text; it must not render as an empty row of buttons. | `src/main.rs`: `writing_error_has_visible_panel_text` | Rust predicate coverage plus GUI row |
 
 Use ASCII descriptions in source fixtures when practical, but keep the real
@@ -43,6 +44,7 @@ Norwegian characters in test input files so encoding behavior is exercised.
 | BRIDGE-EDIT-001 | In-place edit | All | Editing an existing word is rechecked without requiring an extra trailing space after the edit debounce. | `src/main.rs`: context polling and spelling queue | Word automation coverage; non-Word GUI gap |
 | BRIDGE-DELETE-001 | Delete/cut | All | Corrected, cut, or deleted text removes its error rows and Tips count within one polling cycle. | `src/main.rs`: `try_update_doc_text`, `prune_resolved_errors` | Word automation; browser/UIA/AX rows below |
 | BRIDGE-NAV-001 | Show in document | Word | Navigation selects the exact error through the bridge that owns its paragraph. The action is hidden for bridges without navigation support. | `src/main.rs`: `BridgeManager::can_navigate_to_error`, `select_word_in_paragraph` | GUI verification |
+| BRIDGE-WORDADDIN-002 | Word Add-in replacement echo | macOS Word | After Spell replaces one misspelling, the matching Word paragraph update retains the remaining spelling rows in the same sentence. Grammar rows are re-evaluated. | `src/main.rs`: `ContextApp::update`, `keep_error_during_verified_addin_replacement` | `cross_language_barrier_tests::word_addin_replacement_keeps_only_remaining_spelling_rows` plus macOS GUI row |
 
 ### Verified bridge contracts
 
@@ -99,6 +101,7 @@ if doc_text.trim().is_empty() {
 | ID | Application | Acceptance criterion | Automation |
 |---|---|---|---|
 | MAC-WORD-001 | Word | Existing errors survive Word -> other app -> Word; correction and navigation work on the first click. | `test_errors.sh`, `scripts/test-focus-errors.sh`, manual click check |
+| MAC-WORD-002 | Word | With a sentence containing at least three misspellings, Auto Fix one spelling row. The corrected row disappears, the other spelling rows and panel remain visible, and grammar feedback is allowed to refresh. | Unit guard above plus manual Word check |
 | MAC-AX-001 | Notes, TextEdit, Slack | Type a misspelling and delete all text. Error rows and Tips clear within one poll. | Open until AX empty-context route test and GUI harness land |
 | MAC-BROWSER-001 | Google Docs | Browser errors do not inherit Word/AX state; clicking a correction changes the originating browser text; duplicate occurrences remain independently actionable; deleting all editor text clears browser rows. | Paragraph-route unit test plus manual browser test |
 | MAC-OVERLAY-001 | Word, Docs, Notes, TextEdit, Slack | After using Spell's minimize button and restoring it from the Dock, clicking document text must not OS-minimize Spell again. Intentional toolbar-only collapse is allowed only when the selected panel has no renderable content. | Manual OS-window test |
@@ -128,3 +131,19 @@ if doc_text.trim().is_empty() {
 The current GUI scripts are app-assisted integration tests, not hermetic unit
 tests. A passing Rust suite therefore does not replace the Windows and macOS
 GUI gates.
+
+## Stabilization soak gate
+
+For a release candidate, run a 90-minute writing session on Windows and macOS
+with Word and Google Docs. Every 15 minutes, paste or type five misspellings,
+apply one correction, delete one sentence, switch applications, and record:
+
+- time from word boundary to a visible spelling row;
+- Tips count before and after a correction or deletion;
+- whether a stale row, duplicate row, or panel reset occurs;
+- active bridge and the last 200 log lines if a check fails.
+
+The candidate fails the soak if suggestions stop arriving, if the panel loses
+unfixed spelling rows after a verified correction, or if stale rows remain
+after the current text has been observed by its bridge. Treat model ranking
+quality separately from bridge lifecycle failures.
