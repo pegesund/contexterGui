@@ -66,9 +66,10 @@ function disconnectNativeIfIdle() {
 function connectNative() {
   if (nativePort) return;
   try {
-    nativePort = chrome.runtime.connectNative(NATIVE_HOST);
+    const connectedPort = chrome.runtime.connectNative(NATIVE_HOST);
+    nativePort = connectedPort;
     console.log("Spell: native host connected");
-    nativePort.onMessage.addListener((msg) => {
+    connectedPort.onMessage.addListener((msg) => {
       // Forward replace actions to content script
       if (msg.action === "replace") {
         console.log("Spell replace:", JSON.stringify(msg));
@@ -86,8 +87,11 @@ function connectNative() {
         }
       }
     });
-    nativePort.onDisconnect.addListener(() => {
+    connectedPort.onDisconnect.addListener(() => {
       console.log("Spell native host disconnected:", chrome.runtime.lastError?.message);
+      // A previous host can report its disconnect after a replacement has
+      // already connected. Do not discard the newer, live host in that case.
+      if (nativePort !== connectedPort) return;
       nativePort = null;
       // Reconnect only while a content script is attached. Keeping the
       // native host open with no page-side consumer leaves native_bridge.exe

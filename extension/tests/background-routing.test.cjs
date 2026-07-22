@@ -26,20 +26,24 @@ function createContentPort(tabId, frameId) {
 
 function loadBackground() {
   const onConnect = new EventHook();
-  const nativeMessages = new EventHook();
-  const nativePort = {
-    onMessage: nativeMessages,
-    onDisconnect: new EventHook(),
-    sent: [],
-    postMessage(message) { this.sent.push(message); },
-    disconnect() {},
-  };
+  const nativePorts = [];
+  function createNativePort() {
+    const nativePort = {
+      onMessage: new EventHook(),
+      onDisconnect: new EventHook(),
+      sent: [],
+      postMessage(message) { this.sent.push(message); },
+      disconnect() {},
+    };
+    nativePorts.push(nativePort);
+    return nativePort;
+  }
   const context = {
     chrome: {
       runtime: {
         lastError: null,
         onConnect,
-        connectNative() { return nativePort; },
+        connectNative() { return createNativePort(); },
       },
       alarms: { create() {}, onAlarm: new EventHook() },
       tabs: { onActivated: new EventHook() },
@@ -51,7 +55,11 @@ function loadBackground() {
   vm.createContext(context);
   const source = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
   vm.runInContext(source, context, { filename: "background.js" });
-  return { connect: (port) => onConnect.emit(port), reply: (message) => nativeMessages.emit(message) };
+  return {
+    connect: (port) => onConnect.emit(port),
+    reply: (message) => nativePorts.at(-1).onMessage.emit(message),
+    nativePorts,
+  };
 }
 
 test("replacement reply returns only to the frame that supplied active text", () => {
@@ -98,4 +106,22 @@ test("log messages from another tab cannot redirect a legacy replacement", () =>
 
   assert.deepEqual(editor.sent, [{ action: "replace", expected: "piza", text: "pipa" }]);
   assert.equal(otherTab.sent.length, 0);
+});
+
+test("a stale native disconnect cannot discard a newer native host", () => {
+  const background = loadBackground();
+  const editor = createContentPort(42, 0);
+  background.connect(editor);
+  editor.send({ type: "textUpdate", text: "Jeg liker piza." });
+
+  const firstHost = background.nativePorts[0];
+  firstHost.onDisconnect.emit();
+  editor.send({ type: "textUpdate", text: "Jeg liker piza igjen." });
+  assert.equal(background.nativePorts.length, 2);
+
+  firstHost.onDisconnect.emit();
+  editor.send({ type: "textUpdate", text: "Tredje oppdatering." });
+
+  assert.equal(background.nativePorts.length, 2);
+  assert.equal(background.nativePorts[1].sent.length, 2);
 });
