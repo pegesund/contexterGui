@@ -282,13 +282,7 @@ fn worker_loop(
                 id, masked_text, prefix_lower, matches, mtag_candidates,
                 mtag_valid, nearby_words, wordfreq, capitalize, cancel, cache_key,
             } => {
-                {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                        .open(std::env::temp_dir().join("spell-bert.log")) {
-                        let _ = writeln!(f, "OLD Completion: prefix='{}' matches={}", prefix_lower, matches.len());
-                    }
-                }
+                debug_log!("OLD Completion: prefix='{}' matches={}", prefix_lower, matches.len());
                 if cancel.load(Ordering::Acquire) { continue; }
 
                 let logits = match model.single_forward(&masked_text) {
@@ -408,15 +402,9 @@ fn worker_loop(
                 let right_context = masked_text.split(&mask_tok).next()
                     .unwrap_or(&context).trim_end().to_string();
                 if cancel.load(Ordering::Acquire) { continue; }
-                {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                        .open(std::env::temp_dir().join("spell-bert.log")) {
-                        let _ = writeln!(f, "CompleteWord: ctx='{}' prefix='{}' wf={} analyzer={} pi={} top_n={} max_steps={}",
-                            &context, prefix,
-                            wordfreq_shared.is_some(), analyzer.is_some(), prefix_index.len(), top_n, max_steps);
-                    }
-                }
+                debug_log!("CompleteWord: ctx='{}' prefix='{}' wf={} analyzer={} pi={} top_n={} max_steps={}",
+                    &context, prefix,
+                    wordfreq_shared.is_some(), analyzer.is_some(), prefix_index.len(), top_n, max_steps);
                 let pi = &*prefix_index;
                 let fallback_fn: Option<Box<dyn Fn(&str) -> bool>> = analyzer.as_ref().map(|a| {
                     let a = Arc::clone(a);
@@ -498,14 +486,8 @@ fn worker_loop(
                         Err(_) => vec![],
                     };
                     let left_ms = left_start.elapsed().as_millis();
-                    {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                            .open(std::env::temp_dir().join("spell-bert.log")) {
-                            let _ = writeln!(f, "complete_word(prefix='{}', top_n={}, max_steps={}) → {} results in {:?}",
-                                prefix, top_n, max_steps, left.len(), t_cw.elapsed());
-                        }
-                    }
+                    debug_log!("complete_word(prefix='{}', top_n={}, max_steps={}) -> {} results in {:?}",
+                        prefix, top_n, max_steps, left.len(), t_cw.elapsed());
                     let preview_left: Vec<Completion> = if let Some(ref a) = analyzer {
                         left.iter()
                             .filter(|c| a.has_word(&c.word.to_lowercase()))
@@ -517,14 +499,8 @@ fn worker_loop(
                     };
                     if !preview_left.is_empty() && !cancel.load(Ordering::Acquire) {
                         let preview_total = total_start.elapsed().as_millis();
-                        {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                .open(std::env::temp_dir().join("spell-bert.log")) {
-                                let _ = writeln!(f, "CompleteWord preview: prefix='{}' left={} left_ms={} total_ms={}",
-                                    prefix, preview_left.len(), left_ms, preview_total);
-                            }
-                        }
+                        debug_log!("CompleteWord preview: prefix='{}' left={} left_ms={} total_ms={}",
+                            prefix, preview_left.len(), left_ms, preview_total);
                         let _ = tx.send(BertResponse::Completion {
                             id,
                             cache_key: cache_key.clone(),
@@ -561,14 +537,8 @@ fn worker_loop(
                         }
                     };
                     let right_ms = right_start.elapsed().as_millis();
-                    {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                            .open(std::env::temp_dir().join("spell-bert.log")) {
-                            let _ = writeln!(f, "complete_word(prefix='', right) → {} results in {:?}",
-                                right.len(), t_cw.elapsed());
-                        }
-                    }
+                    debug_log!("complete_word(prefix='', right) -> {} results in {:?}",
+                        right.len(), t_cw.elapsed());
                     (left, right, left_ms, right_ms)
                 };
 
@@ -616,14 +586,8 @@ fn worker_loop(
                         };
                         let grammar_ms = grammar_start.elapsed().as_millis();
                         let total_ms = total_start.elapsed().as_millis();
-                        {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                                .open(std::env::temp_dir().join("spell-bert.log")) {
-                                let _ = writeln!(f, "CompleteWord final: prefix='{}' left={} right={} left_ms={} right_ms={} dict_ms={} grammar_ms={} total_ms={}",
-                                    prefix, left_filtered.len(), right_filtered.len(), left_ms, right_ms, dict_ms, grammar_ms, total_ms);
-                            }
-                        }
+                        debug_log!("CompleteWord final: prefix='{}' left={} right={} left_ms={} right_ms={} dict_ms={} grammar_ms={} total_ms={}",
+                            prefix, left_filtered.len(), right_filtered.len(), left_ms, right_ms, dict_ms, grammar_ms, total_ms);
 
                         // Skip sending if cancelled (newer request arrived)
                         if !cancel.load(Ordering::Acquire) {
