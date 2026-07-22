@@ -13588,8 +13588,16 @@ impl eframe::App for ContextApp {
                                 }
                                 crate::updates::Status::UpToDate => {
                                     ui.add_space(4.0);
-                                    ui.label(egui::RichText::new(settings_copy.up_to_date())
-                                        .size(13.0 * s).color(on_color));
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(settings_copy.up_to_date())
+                                            .size(13.0 * s).color(on_color));
+                                        if ui.button(
+                                            egui::RichText::new(settings_copy.check_for_updates())
+                                                .size(12.0 * s),
+                                        ).clicked() {
+                                            self.update_service.check_now();
+                                        }
+                                    });
                                 }
                                 crate::updates::Status::Available { version } => {
                                     ui.add_space(4.0);
@@ -14180,6 +14188,9 @@ impl UiCopy {
     }
     fn update_check_failed(self) -> &'static str {
         if self.en() { "Could not check for updates." } else if self.nn() { "Kunne ikkje sjå etter oppdatering." } else { "Kunne ikke sjekke etter oppdatering." }
+    }
+    fn check_for_updates(self) -> &'static str {
+        if self.en() { "Check for updates" } else if self.nn() { "Sjå etter oppdatering" } else { "Sjekk etter oppdateringer" }
     }
     fn try_again(self) -> &'static str {
         if self.en() { "Try again" } else { "Prøv igjen" }
