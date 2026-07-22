@@ -117,6 +117,28 @@ fn pop_next_request(pending: &mut std::collections::VecDeque<BertRequest>) -> Op
     priority_index.and_then(|index| pending.remove(index)).or_else(|| pending.pop_front())
 }
 
+/// Preserve all analysis work, but retain only the newest queued completion of
+/// each background type. This matches the existing same-type replacement rule
+/// in `worker_loop` and prevents an interleaved stream of spelling requests
+/// from letting stale autocomplete requests accumulate in `pending`.
+fn push_pending_request(
+    pending: &mut std::collections::VecDeque<BertRequest>,
+    request: BertRequest,
+) {
+    match &request {
+        BertRequest::Completion { .. } => {
+            pending.retain(|queued| !matches!(queued, BertRequest::Completion { .. }));
+        }
+        BertRequest::CompleteWord { .. } => {
+            pending.retain(|queued| !matches!(queued, BertRequest::CompleteWord { .. }));
+        }
+        BertRequest::SpellingScore { .. }
+        | BertRequest::MlmForward { .. }
+        | BertRequest::SpellingFull { .. } => {}
+    }
+    pending.push_back(request);
+}
+
 /// Responses from the BERT worker thread
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionStage {
@@ -268,7 +290,7 @@ fn worker_loop(
                         if same_type {
                             current = newer; // Skip older, keep newer
                         } else {
-                            pending.push_back(newer);
+                            push_pending_request(&mut pending, newer);
                         }
                     }
                     Err(_) => break, // Queue empty
@@ -714,5 +736,19 @@ mod tests {
         assert!(matches!(pop_next_request(&mut pending), Some(BertRequest::SpellingFull { id: 2, .. })));
         assert!(matches!(pop_next_request(&mut pending), Some(BertRequest::CompleteWord { id: 1, .. })));
         assert!(matches!(pop_next_request(&mut pending), Some(BertRequest::CompleteWord { id: 3, .. })));
+    }
+
+    #[test]
+    fn interleaved_completions_keep_only_the_newest_of_each_type() {
+        let mut pending = std::collections::VecDeque::new();
+        push_pending_request(&mut pending, completion(1));
+        push_pending_request(&mut pending, spelling(2));
+        push_pending_request(&mut pending, completion(3));
+        push_pending_request(&mut pending, spelling(4));
+
+        assert_eq!(pending.len(), 3);
+        assert!(matches!(pending.pop_front(), Some(BertRequest::SpellingFull { id: 2, .. })));
+        assert!(matches!(pending.pop_front(), Some(BertRequest::CompleteWord { id: 3, .. })));
+        assert!(matches!(pending.pop_front(), Some(BertRequest::SpellingFull { id: 4, .. })));
     }
 }
