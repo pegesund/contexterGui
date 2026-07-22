@@ -3550,9 +3550,17 @@ fn completion_search_budget(quality: u8) -> (usize, usize) {
     }
 }
 
+/// Background autocomplete shares the single BERT worker with spelling and
+/// grammar analysis, so correction work takes precedence while it is pending.
+fn background_completion_yields_to_analysis(pending: [bool; 8]) -> bool {
+    pending.into_iter().any(|is_pending| is_pending)
+}
+
 #[cfg(test)]
 mod stt_quality_tests {
-    use super::{completion_search_budget, should_auto_finalize_stt};
+    use super::{
+        background_completion_yields_to_analysis, completion_search_budget, should_auto_finalize_stt,
+    };
 
     #[test]
     fn best_mode_uses_the_final_stt_model_after_recording() {
@@ -3565,6 +3573,17 @@ mod stt_quality_tests {
         assert_eq!(completion_search_budget(0), (5, 1));
         assert_eq!(completion_search_budget(1), (5, 1));
         assert_eq!(completion_search_budget(2), (5, 3));
+    }
+
+    #[test]
+    fn background_completion_yields_while_correction_analysis_is_pending() {
+        assert!(!background_completion_yields_to_analysis([false; 8]));
+        assert!(background_completion_yields_to_analysis([
+            false, false, true, false, false, false, false, false,
+        ]));
+        assert!(background_completion_yields_to_analysis([
+            false, false, false, false, false, false, false, true,
+        ]));
     }
 }
 
@@ -10435,9 +10454,22 @@ impl eframe::App for ContextApp {
                     }
                 }
 
-                // Dispatch after 150ms idle
+                let analysis_pending = background_completion_yields_to_analysis([
+                    !self.spelling_queue.is_empty(),
+                    !self.pending_spelling_bert.is_empty(),
+                    !self.pending_spelling_grammar.is_empty(),
+                    !self.pending_grammar_bert.is_empty(),
+                    !self.pending_consonant_bert.is_empty(),
+                    !self.pending_consonant_checks.is_empty(),
+                    !self.grammar_queue.is_empty(),
+                    !self.grammar_inflight.is_empty(),
+                ]);
+
+                // Dispatch after 150ms idle, but never add background work
+                // ahead of spelling or grammar analysis on the single worker.
                 if needs_completion
                     && self.last_context_change.elapsed() >= Duration::from_millis(150)
+                    && !analysis_pending
                 {
                     if let Some(worker) = &mut self.bert_worker {
                         // Pre-fetch on main thread (fast, uses analyzer)
