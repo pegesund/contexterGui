@@ -28,6 +28,11 @@ const RELEASES_REPO_URL: &str = "https://github.com/pegesund/spell_binaries";
 /// Concentrate's PreLoginUpdateGate cadence and is gentle on the GitHub API
 /// rate limit (60 unauthenticated req/hr per IP — we use ~4/day).
 const POLL_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const REMOTE_EMPTY_MESSAGE: &str = "Update feed is unavailable. Please try again later.";
+
+fn remote_empty_status() -> Status {
+    Status::Error { message: REMOTE_EMPTY_MESSAGE.to_string() }
+}
 
 /// Snapshot of what the UI needs to render.
 #[derive(Debug, Clone)]
@@ -184,7 +189,7 @@ impl UpdateService {
                      channel name doesn't match the .nupkg's <channel> tag)"
                 );
                 *inner.pending.lock().unwrap() = None;
-                Self::set_status(inner, Status::UpToDate);
+                Self::set_status(inner, remote_empty_status());
             }
             Err(e) => {
                 crate::log!("UpdateService::run_check — ERROR: {}", e);
@@ -231,5 +236,18 @@ impl UpdateService {
 impl Default for UpdateService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_remote_is_not_reported_as_up_to_date() {
+        match remote_empty_status() {
+            Status::Error { message } => assert_eq!(message, REMOTE_EMPTY_MESSAGE),
+            status => panic!("expected update-feed error, got {status:?}"),
+        }
     }
 }
