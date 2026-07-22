@@ -6145,19 +6145,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 // Queue for grammar checking
                 self.grammar_queue.push((sent_trimmed.to_string(), *char_start));
 
-                // Queue words for spelling
-                let mut word_pos = *char_start;
-                for word in sent_trimmed.split_whitespace() {
-                    let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
-                    if !clean.is_empty() && clean.len() >= 2 {
-                        self.spelling_queue.push(SpellingQueueItem {
-                            word: clean.to_string(),
-                            sentence_ctx: sent_trimmed.to_string(),
-                            paragraph_id: para_id.clone(),
-                        });
-                    }
-                    word_pos += word.len() + 1;
-                }
             }
             self.paragraph_sentence_hashes.insert(para_id.clone(), new_hashes);
         }
@@ -6911,22 +6898,6 @@ self.writing_errors.clear();
             let cursor_off = self.context.cursor_doc_offset.unwrap_or(0);
             let doc_char_len = doc_text.chars().count();
 
-            // Spelling: queue words for sentences not yet known-clean
-            // Bridge decides whether to skip the word at cursor
-            if !has_errors {
-                let mut char_pos = *doc_offset;
-                for word in trimmed.split_whitespace() {
-                    let clean = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{00ab}' || c == '\u{00bb}');
-                    let word_start = char_pos;
-                    let word_end = char_pos + word.chars().count();
-                    char_pos = word_end + 1; // +1 for the space
-                    if clean.is_empty() { continue; }
-                    if self.manager.should_skip_word_spelling(cursor_off, word_start, word_end, doc_char_len, &self.context.word) {
-                        continue;
-                    }
-                    self.spelling_queue.push(SpellingQueueItem { word: clean.to_string(), sentence_ctx: trimmed.clone(), paragraph_id: String::new() });
-                }
-            }
             if has_errors {
                 log!("  SKIP (has errors): '{}'", trunc(trimmed, 60));
                 continue;
