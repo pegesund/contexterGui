@@ -8,6 +8,11 @@ let lastActiveTabId = null;
 // exact content port that supplied that snapshot so a reply returns to the
 // same frame instead of every iframe in the tab.
 let latestTextPortByTab = new Map();
+let latestTextPortByFrame = new Map();
+
+function frameKey(tabId, frameId) {
+  return `${tabId}:${frameId}`;
+}
 
 // Send a message to every content port in a tab, pruning any that have
 // become stale (e.g. their page was moved into Chrome's back/forward
@@ -48,6 +53,22 @@ function sendToLatestTextPort(tabId, msg) {
   }
 }
 
+function sendToTextPort(tabId, frameId, msg) {
+  if (!Number.isInteger(frameId)) return sendToLatestTextPort(tabId, msg);
+  const key = frameKey(tabId, frameId);
+  const port = latestTextPortByFrame.get(key);
+  if (!port) return false;
+  try {
+    port.postMessage(msg);
+    return true;
+  } catch (_) {
+    void chrome.runtime.lastError;
+    latestTextPortByFrame.delete(key);
+    if (latestTextPortByTab.get(tabId) === port) latestTextPortByTab.delete(tabId);
+    return false;
+  }
+}
+
 function hasContentPorts() {
   for (const ports of contentPorts.values()) {
     if (ports.length > 0) return true;
@@ -75,7 +96,7 @@ function connectNative() {
         console.log("Spell replace:", JSON.stringify(msg));
         const targetTabId = Number.isInteger(msg.tabId) && msg.tabId > 0 ? msg.tabId : null;
         if (targetTabId) {
-          if (!sendToLatestTextPort(targetTabId, msg)) {
+          if (!sendToTextPort(targetTabId, msg.frameId, msg)) {
             console.warn("Spell: replacement target frame is not connected:", targetTabId);
           }
         } else if (lastActiveTabId && sendToLatestTextPort(lastActiveTabId, msg)) {
@@ -109,6 +130,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "spell-content") return;
 
   const tabId = port.sender?.tab?.id;
+  const frameId = Number.isInteger(port.sender?.frameId) ? port.sender.frameId : 0;
   if (tabId) {
     if (!contentPorts.has(tabId)) contentPorts.set(tabId, []);
     contentPorts.get(tabId).push(port);
@@ -118,11 +140,15 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg.type === "textUpdate" && tabId) {
       lastActiveTabId = tabId;
       latestTextPortByTab.set(tabId, port);
+      latestTextPortByFrame.set(frameKey(tabId, frameId), port);
     }
     connectNative();
     if (nativePort) {
       // Forward ALL messages (textUpdate + log) to native host
-      if (msg.type === "textUpdate") msg.tabId = tabId;
+      if (msg.type === "textUpdate") {
+        msg.tabId = tabId;
+        msg.frameId = frameId;
+      }
       try {
         nativePort.postMessage(msg);
       } catch (e) {
@@ -164,6 +190,9 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     if (tabId && latestTextPortByTab.get(tabId) === port) {
       latestTextPortByTab.delete(tabId);
+    }
+    if (tabId && latestTextPortByFrame.get(frameKey(tabId, frameId)) === port) {
+      latestTextPortByFrame.delete(frameKey(tabId, frameId));
     }
     disconnectNativeIfIdle();
   });

@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn text_payload_is_owned_by_the_originating_native_host() {
         let payload: Value = serde_json::from_str(
-            r#"{"type":"textUpdate","text":"hello","tabId":42}"#,
+            r#"{"type":"textUpdate","text":"hello","tabId":42,"frameId":7}"#,
         ).unwrap();
 
         let encoded = payload_with_bridge_id(&payload, 1234).expect("bridge payload");
@@ -315,6 +315,7 @@ mod tests {
 
         assert_eq!(decoded["bridgeId"], 1234);
         assert_eq!(decoded["tabId"], 42);
+        assert_eq!(decoded["frameId"], 7);
         assert_eq!(reply_path_for(1234).file_name().unwrap(), "spell-browser-reply-1234.json");
     }
 }

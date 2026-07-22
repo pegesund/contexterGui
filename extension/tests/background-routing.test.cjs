@@ -72,11 +72,26 @@ test("replacement reply returns only to the frame that supplied active text", ()
   background.connect(unrelatedFrame);
 
   editorIframe.send({ type: "textUpdate", text: "Jeg liker piza." });
-  background.reply({ action: "replace", tabId: 42, expected: "piza", text: "pipa" });
+  background.reply({ action: "replace", tabId: 42, frameId: 7, expected: "piza", text: "pipa" });
 
   assert.equal(documentFrame.sent.length, 0);
   assert.equal(unrelatedFrame.sent.length, 0);
-  assert.deepEqual(editorIframe.sent, [{ action: "replace", tabId: 42, expected: "piza", text: "pipa" }]);
+  assert.deepEqual(editorIframe.sent, [{ action: "replace", tabId: 42, frameId: 7, expected: "piza", text: "pipa" }]);
+});
+
+test("replacement reply uses its source frame after another frame publishes text", () => {
+  const background = loadBackground();
+  const editorIframe = createContentPort(42, 7);
+  const unrelatedFrame = createContentPort(42, 9);
+  background.connect(editorIframe);
+  background.connect(unrelatedFrame);
+
+  editorIframe.send({ type: "textUpdate", text: "Jeg liker piza." });
+  unrelatedFrame.send({ type: "textUpdate", text: "Other editor." });
+  background.reply({ action: "replace", tabId: 42, frameId: 7, expected: "piza", text: "pipa" });
+
+  assert.deepEqual(editorIframe.sent, [{ action: "replace", tabId: 42, frameId: 7, expected: "piza", text: "pipa" }]);
+  assert.equal(unrelatedFrame.sent.length, 0);
 });
 
 test("legacy replacement reply uses the latest active editor frame without broadcasting", () => {
