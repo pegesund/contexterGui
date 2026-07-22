@@ -3541,14 +3541,30 @@ fn should_auto_finalize_stt(whisper_mode: u8) -> bool {
     whisper_mode == 1
 }
 
+/// Candidate budget for background word completion. Keep the active worker
+/// path aligned with the legacy completer's documented quality policy.
+fn completion_search_budget(quality: u8) -> (usize, usize) {
+    match quality {
+        0 | 1 => (5, 1),
+        _ => (5, 3),
+    }
+}
+
 #[cfg(test)]
 mod stt_quality_tests {
-    use super::should_auto_finalize_stt;
+    use super::{completion_search_budget, should_auto_finalize_stt};
 
     #[test]
     fn best_mode_uses_the_final_stt_model_after_recording() {
         assert!(!should_auto_finalize_stt(0));
         assert!(should_auto_finalize_stt(1));
+    }
+
+    #[test]
+    fn completion_budget_respects_the_selected_quality() {
+        assert_eq!(completion_search_budget(0), (5, 1));
+        assert_eq!(completion_search_budget(1), (5, 1));
+        assert_eq!(completion_search_budget(2), (5, 3));
     }
 }
 
@@ -8475,11 +8491,7 @@ self.grammar_queue.clear();
 
                 // Quality controls BPE extension depth and candidate count
                 // 0: single-token only (~200ms), 1: 1 step (~800ms), 2: full (~2s)
-                let (top_n, max_steps) = match self.quality {
-                    0 => (5, 1),
-                    1 => (5, 1),
-                    _ => (5, 3),
-                };
+                let (top_n, max_steps) = completion_search_budget(self.quality);
 
                 let t_bert = Instant::now();
                 match complete_word(
@@ -10495,11 +10507,7 @@ impl eframe::App for ContextApp {
                             let sentence = &self.context.sentence;
                             sentence.strip_suffix(prefix).unwrap_or(sentence).trim_end().to_string()
                         };
-                        let (top_n, max_steps) = match self.quality {
-                            0 => (15, 1),
-                            1 => (15, 1),
-                            _ => (15, 3),
-                        };
+                        let (top_n, max_steps) = completion_search_budget(self.quality);
                         let ctx_tail: String = context_for_cw.chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
                         debug_log!("Sending CompleteWord: ctx='{}' prefix='{}' [queues: spell={} pend_bert={} gram_inflight={} gram_q={}]",
                             ctx_tail, prefix,
