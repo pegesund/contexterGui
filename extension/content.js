@@ -26,6 +26,7 @@
   let replaceStartTime = 0;
   let lastParaStart = 0;
   const editorIds = new WeakMap();
+  const editorsById = new Map();
   let nextEditorId = 1;
 
   function editorSessionId(el) {
@@ -33,6 +34,7 @@
     if (!id) {
       id = "editor-" + nextEditorId++;
       editorIds.set(el, id);
+      editorsById.set(id, el);
     }
     return id;
   }
@@ -269,14 +271,21 @@
       return;
     }
 
-    const el = activeElement || lastTextElement;
-    if (!el) return;
+    const editorId = msg.editorId || "";
+    const el = editorId ? editorsById.get(editorId) : (activeElement || lastTextElement);
+    if (!el || (editorId && !el.isConnected)) {
+      spellLog("REPLACE FAILED: source editor is not available");
+      return;
+    }
     const replacement = msg.text;
     const expected = msg.expected || "";
 
     // msg.start / msg.end are paragraph-relative; convert to document-absolute
-    let start = lastParaStart + (msg.start || 0);
-    let end   = lastParaStart + (msg.end   || 0);
+    const paragraphStart = Number.isInteger(msg.paragraphStart)
+      ? msg.paragraphStart
+      : lastParaStart;
+    let start = paragraphStart + (msg.start || 0);
+    let end   = paragraphStart + (msg.end   || 0);
 
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
       const val = el.value;

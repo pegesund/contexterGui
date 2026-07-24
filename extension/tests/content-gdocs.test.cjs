@@ -144,3 +144,13 @@ test("Google Docs forwards its selected text to the native bridge", () => {
   assert.equal(update.selectedText, "liker piza");
   assert.equal(update.paragraphStart, 32);
 });
+
+test("generic replacement targets the source editor and reply paragraph offset", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
+
+  assert.match(source, /const editorsById = new Map\(\);/);
+  assert.match(source, /editorsById\.set\(id, el\)/);
+  assert.match(source, /const editorId = msg\.editorId \|\| "";/);
+  assert.match(source, /editorsById\.get\(editorId\)/);
+  assert.match(source, /Number\.isInteger\(msg\.paragraphStart\)/);
+});
