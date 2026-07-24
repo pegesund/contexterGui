@@ -878,16 +878,11 @@ fn error_paragraph_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool
 fn error_paragraph_matches_surface(
     paragraph_id: &str,
     bridge_name: &str,
-    macos_word_foreground: bool,
+    _macos_word_foreground: bool,
 ) -> bool {
-    if paragraph_id.is_empty() {
-        return true;
-    }
-
-    if macos_word_foreground {
-        return is_word_scoped_paragraph_id(paragraph_id) || paragraph_id.starts_with("ax:");
-    }
-
+    // The Word Add-in and macOS Accessibility fallback are independent
+    // routes. Showing both sources while Word is foreground mixes document
+    // events from the Add-in with AX's transient text snapshot.
     error_paragraph_matches_bridge(paragraph_id, bridge_name)
 }
 
