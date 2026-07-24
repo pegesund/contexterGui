@@ -863,6 +863,14 @@ fn paragraph_id_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
     }
 }
 
+/// All but the trailing offset identifies one browser editor route. The offset
+/// changes as the caret moves, while a tab/frame/editor switch must reset
+/// browser-owned error state.
+fn browser_route_key(paragraph_id: &str) -> Option<&str> {
+    let route_and_offset = paragraph_id.strip_prefix("browser:")?;
+    route_and_offset.rsplit_once(':').map(|(route, _)| route)
+}
+
 fn error_paragraph_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
     paragraph_id.is_empty() || paragraph_id_matches_bridge(paragraph_id, bridge_name)
 }
@@ -1142,7 +1150,8 @@ mod cross_language_barrier_tests {
         apply_original_initial_case, error_paragraph_matches_bridge,
         error_paragraph_matches_surface,
         find_word_doc_range_at_position, has_mixed_non_titlecase,
-        known_word_spelling_variants_for_analyzer, paragraph_id_matches_bridge,
+        browser_route_key, known_word_spelling_variants_for_analyzer,
+        paragraph_id_matches_bridge,
         grammar_response_sentence_hash, rescore_spelling_response,
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
         sentence_cache_version, CachedSentenceVerdict,
@@ -1396,6 +1405,18 @@ mod cross_language_barrier_tests {
         assert!(paragraph_id_matches_bridge("uia:0", "Accessibility"));
         assert!(!paragraph_id_matches_bridge("browser:0", "Accessibility"));
         assert!(error_paragraph_matches_bridge("", "Browser"));
+    }
+
+    #[test]
+    fn browser_route_key_ignores_only_paragraph_offset() {
+        assert_eq!(
+            browser_route_key("browser:1234:42:7:1:19"),
+            Some("1234:42:7:1"),
+        );
+        assert_ne!(
+            browser_route_key("browser:1234:42:7:1:19"),
+            browser_route_key("browser:1234:42:7:2:19"),
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -2243,7 +2264,10 @@ impl BridgeManager {
         // available. After any payload, macOS must not fall through to AX-mac
         // for Chromium foregrounds.
         self.browser_extension_seen = true;
-        if self.active_idx != browser_idx {
+        let browser_route_changed = self.active_idx == browser_idx
+            && self.last_context.as_ref().and_then(|previous| browser_route_key(&previous.paragraph_id))
+                != browser_route_key(&ctx.paragraph_id);
+        if self.active_idx != browser_idx || browser_route_changed {
             log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
             self.mark_bridge_switch(browser_idx);
         }

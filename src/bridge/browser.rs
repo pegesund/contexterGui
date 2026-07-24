@@ -49,6 +49,10 @@ pub struct BrowserBridge {
     last_source: std::cell::RefCell<String>,
     last_bridge_id: std::cell::Cell<usize>,
     last_frame_id: std::cell::Cell<usize>,
+    /// Changes whenever the extension moves to a different tab/frame/editor.
+    /// Paragraph offsets repeat across those surfaces, so they are not an
+    /// error identity by themselves.
+    route_generation: std::cell::Cell<u64>,
     pending_completed_word: std::cell::RefCell<Option<String>>,
     last_read: std::cell::Cell<Option<Instant>>,
     /// After sending a replace command, freeze reads from the file until fresh data arrives.
@@ -74,6 +78,7 @@ impl BrowserBridge {
             last_source: std::cell::RefCell::new(String::new()),
             last_bridge_id: std::cell::Cell::new(0),
             last_frame_id: std::cell::Cell::new(0),
+            route_generation: std::cell::Cell::new(0),
             pending_completed_word: std::cell::RefCell::new(None),
             last_read: std::cell::Cell::new(None),
             replace_freeze_modified: std::cell::Cell::new(0),
@@ -105,6 +110,17 @@ impl BrowserBridge {
 
     fn source_frame_id(&self) -> usize {
         self.last_frame_id.get()
+    }
+
+    fn current_paragraph_id(&self) -> String {
+        format!(
+            "browser:{}:{}:{}:{}:{}",
+            self.last_bridge_id.get(),
+            self.source_tab_id(),
+            self.last_frame_id.get(),
+            self.route_generation.get(),
+            self.last_paragraph_start.get(),
+        )
     }
 
     fn read_data_file(&self) -> Option<(String, usize, usize, Option<(i32, i32)>)> {
@@ -180,14 +196,27 @@ impl BrowserBridge {
             _ => None,
         };
         let source = format!(
-            "{}|{}",
+            "{}|{}|{}|{}",
             extract_json_number(&content, "tabId").unwrap_or(0),
             extract_json_string(&content, "url").unwrap_or_default(),
+            extract_json_string(&content, "editorKind").unwrap_or_else(|| "legacy".to_string()),
+            extract_json_string(&content, "editorId").unwrap_or_else(|| "legacy".to_string()),
         );
         let bridge_id = extract_json_number(&content, "bridgeId").unwrap_or(0);
         let frame_id = extract_json_number(&content, "frameId").unwrap_or(0);
 
         let previous_source = self.last_source.borrow().clone();
+        let route_changed = !previous_source.is_empty()
+            && (previous_source != source
+                || self.last_bridge_id.get() != bridge_id
+                || self.last_frame_id.get() != frame_id);
+        if route_changed {
+            self.route_generation.set(self.route_generation.get().saturating_add(1));
+            log_browser(&format!(
+                "Browser route changed: '{}' -> '{}' (bridge={} frame={})",
+                previous_source, source, bridge_id, frame_id
+            ));
+        }
         if !previous_source.is_empty()
             && previous_source == source
             && self.last_bridge_id.get() == bridge_id
@@ -442,6 +471,7 @@ impl TextBridge for BrowserBridge {
             cursor_start, text.len(), before.len(), after.len());
         let mut ctx = build_context(&raw, caret);
         ctx.cursor_doc_offset = Some(cursor_start);
+        ctx.paragraph_id = self.current_paragraph_id();
         Some(ctx)
     }
 
@@ -483,7 +513,7 @@ impl TextBridge for BrowserBridge {
             return None;
         }
         Some((
-            format!("browser:{}", self.last_paragraph_start.get()),
+            self.current_paragraph_id(),
             para_text,
             para_start,
         ))
@@ -497,7 +527,7 @@ impl TextBridge for BrowserBridge {
         context: &str,
         char_offset: usize,
     ) -> bool {
-        let current_paragraph_id = format!("browser:{}", self.last_paragraph_start.get());
+        let current_paragraph_id = self.current_paragraph_id();
         if paragraph_id != current_paragraph_id {
             log_browser(&format!(
                 "REPLACE: ignoring stale browser paragraph '{}' (active '{}')",
@@ -758,7 +788,7 @@ mod tests {
     fn replacement_replies_target_source_tab() {
         let bridge = BrowserBridge::new();
         *bridge.last_text.borrow_mut() = "Han gik til skolen.".to_string();
-        *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test".to_string();
+        *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test|google-docs".to_string();
         bridge.last_bridge_id.set(1234);
         bridge.last_frame_id.set(7);
         bridge.last_cursor.set(7);
@@ -777,7 +807,7 @@ mod tests {
         assert!(bridge.find_and_replace_in_paragraph(
             "piza",
             "pipa",
-            "browser:19",
+            "browser:1234:42:7:0:19",
             "Jeg liker piza.",
             10,
         ));
@@ -789,7 +819,7 @@ mod tests {
         assert!(!bridge.find_and_replace_in_paragraph(
             "pipa",
             "pizza",
-            "browser:0",
+            "browser:1234:42:7:0:0",
             "Jeg liker pipa.",
             10,
         ));
@@ -797,5 +827,19 @@ mod tests {
         assert!(reply.file_name().unwrap().to_string_lossy().contains("reply-1234"));
 
         let _ = std::fs::remove_file(reply);
+    }
+
+    #[test]
+    fn paragraph_id_is_scoped_to_browser_route() {
+        let bridge = BrowserBridge::new();
+        *bridge.last_source.borrow_mut() = "42|https://docs.google.com/document/d/test|google-docs".to_string();
+        bridge.last_bridge_id.set(1234);
+        bridge.last_frame_id.set(7);
+        bridge.last_paragraph_start.set(19);
+
+        assert_eq!(bridge.current_paragraph_id(), "browser:1234:42:7:0:19");
+
+        bridge.route_generation.set(1);
+        assert_eq!(bridge.current_paragraph_id(), "browser:1234:42:7:1:19");
     }
 }

@@ -25,6 +25,17 @@
   let replaceInProgress = false;
   let replaceStartTime = 0;
   let lastParaStart = 0;
+  const editorIds = new WeakMap();
+  let nextEditorId = 1;
+
+  function editorSessionId(el) {
+    let id = editorIds.get(el);
+    if (!id) {
+      id = "editor-" + nextEditorId++;
+      editorIds.set(el, id);
+    }
+    return id;
+  }
 
   function extractParagraphAtCursor(text, cursorPos) {
     const cursor = Math.max(0, Math.min(cursorPos, text.length));
@@ -225,7 +236,8 @@
       cursorStart: cursor, cursorEnd: cursor,
       paragraphStart: paragraphStart,
       selectedText: selectedText,
-      caretX: caretX, caretY: caretY, url: window.location.href
+      caretX: caretX, caretY: caretY, url: window.location.href,
+      editorKind: "google-docs"
     })) {
       lastSent = key;
       lastDataVersion = version;
@@ -384,6 +396,8 @@
       return {
         text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara,
         selectedText, caretX: pos.x, caretY: pos.y,
+        editorKind: "html-form",
+        editorId: editorSessionId(el),
       };
     }
 
@@ -425,6 +439,8 @@
       return {
         text: paraText, cursorStart: cursorInPara, cursorEnd: cursorInPara,
         selectedText, caretX, caretY,
+        editorKind: "contenteditable",
+        editorId: editorSessionId(el),
       };
     }
 
@@ -442,7 +458,7 @@
     // (`if (!data || !data.text) return;`) dropped those sends so the user
     // saw old errors lingering over an empty comment box.
     if (!data) return;
-    const key = data.text + "|" + data.cursorStart + "|" + data.selectedText;
+    const key = data.editorId + "|" + data.text + "|" + data.cursorStart + "|" + data.selectedText;
     if (key === lastSent) return;
     activeElement = el;
     lastTextElement = el;
@@ -451,7 +467,8 @@
       type: "textUpdate", text: data.text,
       cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
       selectedText: data.selectedText,
-      caretX: data.caretX, caretY: data.caretY, url: window.location.href
+      caretX: data.caretX, caretY: data.caretY, url: window.location.href,
+      editorKind: data.editorKind, editorId: data.editorId
     })) {
       lastSent = key;
     }
@@ -479,7 +496,8 @@
           cursorStart: lastGDocsText.cursorStart, cursorEnd: lastGDocsText.cursorEnd,
           paragraphStart: lastGDocsText.paragraphStart,
           selectedText: lastGDocsText.selectedText,
-          caretX: 0, caretY: 0, url: window.location.href
+          caretX: 0, caretY: 0, url: window.location.href,
+          editorKind: "google-docs"
         });
       } else {
         postToBackground({ type: "keepalive" });
@@ -495,7 +513,8 @@
       type: "textUpdate", text: data.text,
       cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
       selectedText: data.selectedText,
-      caretX: data.caretX, caretY: data.caretY, url: window.location.href
+      caretX: data.caretX, caretY: data.caretY, url: window.location.href,
+      editorKind: data.editorKind, editorId: data.editorId
     });
   }, 2000);
 })();
