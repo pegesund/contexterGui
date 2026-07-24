@@ -556,6 +556,7 @@ function doReplace(expected, replacement, paragraphId) {
             } else {
                 scope = ctx.document.body;
             }
+            scope.load("text");
             var results = scope.search(expected, { matchCase: false });
             results.load("items");
             return ctx.sync().then(function () {
@@ -577,8 +578,22 @@ function doReplace(expected, replacement, paragraphId) {
                         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
                             body: JSON.stringify({msg: "REPLACE insert sync: " + (t3 - t2) + "ms (total=" + (t3 - t0) + "ms)"})
                         }).catch(function(){});
-                        // onParagraphChanged will fire automatically and send POST /changed.
-                        // No need to call rescanAll() which queues more Word.run operations.
+                        // Send the verified post-replacement paragraph immediately.
+                        // This follows the completion replacement path below and avoids
+                        // waiting for an Office paragraph-change event behind queued
+                        // underline operations.
+                        var paraId = paragraphId || "";
+                        if (paraId) {
+                            var charStart = paragraphStartFor(paraId);
+                            var updatedText = scope.text;
+                            paragraphMap[paraId] = paragraphFingerprint(updatedText, charStart);
+                            sendChangedParagraphs([{
+                                paragraphId: paraId,
+                                text: updatedText,
+                                charStart: charStart,
+                                spellReplacement: true
+                            }]);
+                        }
                     });
                 }
             });

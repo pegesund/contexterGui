@@ -60,6 +60,8 @@ pub struct ChangedParagraph {
     pub char_start: Option<usize>,
     /// Cursor offset inside this paragraph — used to derive word/sentence for suggestions.
     pub cursor_start: Option<usize>,
+    /// True when the task pane posts the paragraph immediately after a Spell replacement.
+    pub spell_replacement: bool,
 }
 
 pub struct WordAddinBridge {
@@ -1154,6 +1156,22 @@ fn extract_json_number(json: &str, key: &str) -> Option<usize> {
     num_str.parse().ok()
 }
 
+/// Extract a boolean value from the small JSON payloads sent by the Word task pane.
+fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = json.find(&pattern)?;
+    let after_key = &json[key_pos + pattern.len()..];
+    let after_colon = after_key.trim_start().strip_prefix(':')?;
+    let value = after_colon.trim_start();
+    if value.starts_with("true") {
+        Some(true)
+    } else if value.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -1188,11 +1206,18 @@ fn parse_changed_json(body: &str) -> Option<Vec<ChangedParagraph>> {
         let text = clean_word_text(&extract_json_string(obj, "text").unwrap_or_default());
         let char_start = extract_json_number(obj, "charStart");
         let cursor_start = extract_json_number(obj, "cursorStart");
+        let spell_replacement = extract_json_bool(obj, "spellReplacement").unwrap_or(false);
 
         // Empty text with a paragraph id is meaningful: the paragraph was
         // cleared by delete/cut, and main.rs must see it to prune stale errors.
         if !text.is_empty() || !paragraph_id.is_empty() {
-            results.push(ChangedParagraph { paragraph_id, text, char_start, cursor_start });
+            results.push(ChangedParagraph {
+                paragraph_id,
+                text,
+                char_start,
+                cursor_start,
+                spell_replacement,
+            });
         }
 
         pos = obj_end;
@@ -1290,6 +1315,17 @@ mod tests {
         assert_eq!(paragraphs[0].text, "");
         assert_eq!(paragraphs[0].char_start, Some(42));
         assert_eq!(paragraphs[0].cursor_start, Some(0));
+        assert!(!paragraphs[0].spell_replacement);
+    }
+
+    #[test]
+    fn parse_changed_json_marks_spell_replacement_echo() {
+        let body = r#"{"type":"changed","paragraphs":[{"paragraphId":"p1","text":"Jeg liker pipa.","charStart":0,"spellReplacement":true}]}"#;
+
+        let paragraphs = parse_changed_json(body).expect("changed paragraph");
+
+        assert_eq!(paragraphs.len(), 1);
+        assert!(paragraphs[0].spell_replacement);
     }
 
     #[test]

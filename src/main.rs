@@ -7120,10 +7120,10 @@ self.grammar_queue.clear();
                     .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
                     .collect();
                 let addin_replacement_echo = self.pending_addin_replacement.as_ref().map_or(false, |
-                    (expected_paragraph_id, find, replacement, started_at)
+                    (expected_paragraph_id, find, replacement, _started_at)
                 | {
-                    expected_paragraph_id == &p.paragraph_id
-                        && started_at.elapsed() < Duration::from_millis(1500)
+                    p.spell_replacement
+                        && expected_paragraph_id == &p.paragraph_id
                         && previous_text.as_ref().map_or(false, |old| {
                             addin_change_matches_expected_replacement(
                                 old,
@@ -7140,9 +7140,15 @@ self.grammar_queue.clear();
                         trunc(&clean_text, 50),
                     );
                     self.pending_addin_replacement = None;
-                } else if self.pending_addin_replacement.as_ref().map_or(false, |(_, _, _, started_at)| {
-                    started_at.elapsed() >= Duration::from_millis(1500)
+                } else if self.pending_addin_replacement.as_ref().map_or(false, |(expected_paragraph_id, _, _, _)| {
+                    expected_paragraph_id == &p.paragraph_id
                 }) {
+                    log!(
+                        "  Word replacement echo rejected: para={} explicit={} text='{}'",
+                        trunc(&p.paragraph_id, 10),
+                        p.spell_replacement,
+                        trunc(&clean_text, 50),
+                    );
                     self.pending_addin_replacement = None;
                 }
 
