@@ -58,8 +58,13 @@ pub struct BrowserBridge {
     /// After sending a replace command, freeze reads from the file until fresh data arrives.
     /// The file still contains pre-replace text; re-reading it would undo the cached fix.
     replace_freeze_modified: std::cell::Cell<u64>,
-    /// The word being replaced — used to verify fresh data doesn't still contain it.
+    /// The word being replaced — retained for diagnostic logging.
     replace_old_word: std::cell::RefCell<String>,
+    /// Paragraph-relative range and text for the replacement that owns the freeze.
+    /// A paragraph can legitimately contain the same misspelling more than once,
+    /// so a whole-paragraph old-word check cannot confirm this replacement.
+    replace_start: std::cell::Cell<usize>,
+    replace_replacement: std::cell::RefCell<String>,
     /// When the freeze was activated — timeout after 5 seconds.
     replace_freeze_time: std::cell::Cell<Option<Instant>>,
     /// Browser route that owns the pending replacement. A replacement in one
@@ -86,6 +91,8 @@ impl BrowserBridge {
             last_read: std::cell::Cell::new(None),
             replace_freeze_modified: std::cell::Cell::new(0),
             replace_old_word: std::cell::RefCell::new(String::new()),
+            replace_start: std::cell::Cell::new(0),
+            replace_replacement: std::cell::RefCell::new(String::new()),
             replace_freeze_time: std::cell::Cell::new(None),
             replace_freeze_source: std::cell::RefCell::new(String::new()),
         }
@@ -188,18 +195,27 @@ impl BrowserBridge {
         } else if freeze > 0 && modified <= freeze {
             return self.cached_data();
         } else if freeze > 0 {
-            // File is newer than freeze — but verify the old word is actually gone.
-            let old_word = self.replace_old_word.borrow().clone();
-            if !old_word.is_empty() {
+            // File is newer than freeze — verify that this replacement landed at
+            // its exact paragraph-relative span. Other occurrences of the old
+            // word can still exist in the same paragraph.
+            let replacement = self.replace_replacement.borrow().clone();
+            if !replacement.is_empty() {
                 if let Some(file_text) = extract_json_string(&content, "text") {
-                    let file_lower = file_text.to_lowercase();
-                    if has_whole_word(&file_lower, &old_word) {
-                        crate::debug_log!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word);
+                    if !text_matches_at_char_offset(
+                        &file_text,
+                        self.replace_start.get(),
+                        &replacement,
+                    ) {
+                        crate::debug_log!(
+                            "read_data_file: fresh data does not yet contain replacement '{}' at {} — keeping freeze",
+                            replacement,
+                            self.replace_start.get(),
+                        );
                         return self.cached_data();
                     }
                 }
             }
-            crate::debug_log!("read_data_file: fresh data confirmed (old word gone), clearing freeze");
+            crate::debug_log!("read_data_file: fresh data confirmed at replacement span, clearing freeze");
             self.clear_replace_freeze();
         }
 
@@ -272,9 +288,12 @@ impl BrowserBridge {
     }
 
     /// Freeze file reads — the on-disk file still has pre-replace text.
-    /// Only allow reads again when fresh data arrives without the old word.
-    fn activate_replace_freeze(&self, old_word: &str) {
+    /// Only allow reads again when fresh data contains the replacement at its
+    /// paragraph-relative span.
+    fn activate_replace_freeze(&self, old_word: &str, start: usize, replacement: &str) {
         *self.replace_old_word.borrow_mut() = old_word.to_lowercase();
+        self.replace_start.set(start);
+        *self.replace_replacement.borrow_mut() = replacement.to_lowercase();
         let modified = std::fs::metadata(data_path())
             .ok()
             .and_then(|m| m.modified().ok())
@@ -295,6 +314,8 @@ impl BrowserBridge {
     fn clear_replace_freeze(&self) {
         self.replace_freeze_modified.set(0);
         self.replace_old_word.borrow_mut().clear();
+        self.replace_start.set(0);
+        self.replace_replacement.borrow_mut().clear();
         self.replace_freeze_time.set(None);
         self.replace_freeze_source.borrow_mut().clear();
     }
@@ -358,7 +379,7 @@ impl TextBridge for BrowserBridge {
         );
         if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
             self.update_cached_text(start, end, replacement);
-            self.activate_replace_freeze(&old_word);
+            self.activate_replace_freeze(&old_word, start, replacement);
             true
         } else {
             false
@@ -382,7 +403,7 @@ impl TextBridge for BrowserBridge {
             );
             if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
-                self.activate_replace_freeze(find);
+                self.activate_replace_freeze(find, start, replace);
                 return true;
             }
         }
@@ -410,7 +431,7 @@ impl TextBridge for BrowserBridge {
             );
             if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
-                self.activate_replace_freeze(find);
+                self.activate_replace_freeze(find, start, replace);
                 return true;
             }
         }
@@ -454,7 +475,7 @@ impl TextBridge for BrowserBridge {
             log_browser(&format!("  reply JSON: {}", json));
             if std::fs::write(self.reply_path(), json.as_bytes()).is_ok() {
                 self.update_cached_text(start, end, replace);
-                self.activate_replace_freeze(find);
+                self.activate_replace_freeze(find, start, replace);
                 let new_text = self.last_text.borrow().clone();
                 log_browser(&format!("  text AFTER replace: '{}'", new_text));
                 return true;
@@ -741,26 +762,20 @@ fn extract_json_number(json: &str, key: &str) -> Option<usize> {
     num_str.parse().ok()
 }
 
-/// Check if a whole word exists in text (not as substring of a longer word)
-fn has_whole_word(text: &str, word: &str) -> bool {
-    let mut pos = 0;
-    while let Some(idx) = text[pos..].find(word) {
-        let abs = pos + idx;
-        let before_ok = abs == 0 || !text[..abs].ends_with(|c: char| c.is_alphanumeric());
-        let after_pos = abs + word.len();
-        let after_ok = after_pos >= text.len() || !text[after_pos..].starts_with(|c: char| c.is_alphanumeric());
-        if before_ok && after_ok {
-            return true;
-        }
-        pos = abs + 1;
-    }
-    false
+fn text_matches_at_char_offset(text: &str, start: usize, expected: &str) -> bool {
+    text.chars()
+        .skip(start)
+        .take(expected.chars().count())
+        .collect::<String>()
+        .to_lowercase()
+        == expected.to_lowercase()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{BrowserBridge, completed_word_from_transition, data_path, extract_json_string, reply_path_for};
     use crate::bridge::TextBridge;
+    use std::time::Instant;
 
     #[test]
     fn completed_word_is_emitted_after_fresh_space_payload() {
@@ -888,6 +903,31 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(reply);
+    }
+
+    #[test]
+    fn replacement_freeze_accepts_fresh_duplicate_words_after_one_is_corrected() {
+        let bridge = BrowserBridge::new();
+        bridge.last_modified.set(1);
+        *bridge.last_text.borrow_mut() = "pipa piza".to_string();
+        bridge.replace_freeze_modified.set(1);
+        bridge.replace_freeze_time.set(Some(Instant::now()));
+        bridge.replace_start.set(0);
+        *bridge.replace_replacement.borrow_mut() = "pipa".to_string();
+        *bridge.replace_freeze_source.borrow_mut() =
+            "42|https://docs.google.com/document/d/test|google-docs|legacy|7|0".to_string();
+
+        let data = data_path();
+        std::fs::write(
+            &data,
+            r#"{"text":"pipa piza","cursorStart":4,"cursorEnd":4,"paragraphStart":0,"tabId":42,"frameId":0,"bridgeId":7,"url":"https://docs.google.com/document/d/test","editorKind":"google-docs"}"#,
+        ).expect("browser data");
+
+        let (text, _, _, _) = bridge.read_data_file().expect("fresh duplicate data");
+        assert_eq!(text, "pipa piza");
+        assert_eq!(bridge.replace_freeze_modified.get(), 0);
+
+        let _ = std::fs::remove_file(data);
     }
 
     #[test]
