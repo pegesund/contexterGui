@@ -1428,15 +1428,25 @@ mod cross_language_barrier_tests {
     }
 
     #[test]
-    fn macos_word_surface_keeps_addin_and_accessibility_errors_visible() {
-        assert!(error_paragraph_matches_surface(
+    fn macos_word_surface_keeps_addin_and_accessibility_errors_isolated() {
+        assert!(!error_paragraph_matches_surface(
             "42",
             "Accessibility (macOS)",
             true,
         ));
-        assert!(error_paragraph_matches_surface(
+        assert!(!error_paragraph_matches_surface(
             "ax:0",
             "Word Add-in",
+            true,
+        ));
+        assert!(error_paragraph_matches_surface(
+            "42",
+            "Word Add-in",
+            true,
+        ));
+        assert!(error_paragraph_matches_surface(
+            "ax:0",
+            "Accessibility (macOS)",
             true,
         ));
         assert!(!error_paragraph_matches_surface(
