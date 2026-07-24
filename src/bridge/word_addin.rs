@@ -37,6 +37,10 @@ fn mark_word_addin_activity(last_activity: &Arc<Mutex<Option<Instant>>>) {
     }
 }
 
+fn word_addin_request_matches_active_document(active_document: &str, request_document: &str) -> bool {
+    !request_document.is_empty() && active_document == request_document
+}
+
 /// Locate the bundled Word add-in static-file directory.
 ///   - Packaged .app:   <Spell.app>/Contents/Resources/word-addin/
 ///   - Dev (cargo run): <repo>/contexterGui/word-addin/  (caller's fallback)
@@ -66,7 +70,7 @@ pub struct ChangedParagraph {
 
 pub struct WordAddinBridge {
     cached_context: Arc<Mutex<Option<(CursorContext, Instant)>>>,
-    /// Last valid context or paragraph update received from the task pane.
+    /// Last verified request from the active Word task pane.
     last_activity: Arc<Mutex<Option<Instant>>>,
     reply_queue: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Reset flag — set when add-in sends /reset (new document or reload)
@@ -727,6 +731,18 @@ fn handle_request_rw<S: Read + Write>(
             } else {
                 String::new()
             };
+            // pollReplies is the task pane's steady liveness signal. Keep the
+            // cached add-in context eligible only when the polling document is
+            // the document currently accepted by this bridge. Without this,
+            // a user pausing in Word for five seconds routes through AX-mac,
+            // mixing the add-in's external paragraph pipeline with AX scans.
+            let active_doc_is_polling = current_doc_name
+                .lock()
+                .map(|current| word_addin_request_matches_active_document(&current, &req_doc))
+                .unwrap_or(false);
+            if active_doc_is_polling {
+                mark_word_addin_activity(last_activity);
+            }
             // On first /reply poll after app start, ask the add-in to rescan.
             // This handles: app restarted while Word + add-in were already running.
             if !rescan_sent.load(std::sync::atomic::Ordering::Relaxed) && !req_doc.is_empty() {
@@ -1283,7 +1299,10 @@ fn parse_deleted_json(body: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_changed_json, word_addin_context_is_active};
+    use super::{
+        parse_changed_json, word_addin_context_is_active,
+        word_addin_request_matches_active_document,
+    };
     use crate::bridge::CursorContext;
     use std::time::{Duration, Instant};
 
@@ -1302,6 +1321,19 @@ mod tests {
             Some(now - Duration::from_secs(6)),
             now,
         ));
+    }
+
+    #[test]
+    fn reply_poll_only_refreshes_the_active_word_document() {
+        assert!(word_addin_request_matches_active_document(
+            "word-document-a",
+            "word-document-a",
+        ));
+        assert!(!word_addin_request_matches_active_document(
+            "word-document-a",
+            "word-document-b",
+        ));
+        assert!(!word_addin_request_matches_active_document("word-document-a", ""));
     }
 
     #[test]
