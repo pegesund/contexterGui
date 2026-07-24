@@ -62,6 +62,9 @@ pub struct BrowserBridge {
     replace_old_word: std::cell::RefCell<String>,
     /// When the freeze was activated — timeout after 5 seconds.
     replace_freeze_time: std::cell::Cell<Option<Instant>>,
+    /// Browser route that owns the pending replacement. A replacement in one
+    /// editor must never delay fresh text from another tab, frame, or editor.
+    replace_freeze_source: std::cell::RefCell<String>,
 }
 
 impl BrowserBridge {
@@ -84,6 +87,7 @@ impl BrowserBridge {
             replace_freeze_modified: std::cell::Cell::new(0),
             replace_old_word: std::cell::RefCell::new(String::new()),
             replace_freeze_time: std::cell::Cell::new(None),
+            replace_freeze_source: std::cell::RefCell::new(String::new()),
         }
     }
 
@@ -143,18 +147,33 @@ impl BrowserBridge {
             return self.cached_data();
         }
 
+        let content = std::fs::read_to_string(&path).ok()?;
+        let incoming_source = format!(
+            "{}|{}|{}|{}|{}|{}",
+            extract_json_number(&content, "tabId").unwrap_or(0),
+            extract_json_string(&content, "url").unwrap_or_default(),
+            extract_json_string(&content, "editorKind").unwrap_or_else(|| "legacy".to_string()),
+            extract_json_string(&content, "editorId").unwrap_or_else(|| "legacy".to_string()),
+            extract_json_number(&content, "bridgeId").unwrap_or(0),
+            extract_json_number(&content, "frameId").unwrap_or(0),
+        );
+
         // After a replace, the file still contains pre-replace text until the
         // extension writes fresh data. Skip re-reading stale file — use cached
         // (post-replace) text instead.
+        let freeze = self.replace_freeze_modified.get();
+        let freeze_source = self.replace_freeze_source.borrow().clone();
+        if freeze > 0 && !freeze_source.is_empty() && incoming_source != freeze_source {
+            log_browser("read_data_file: route changed during replace freeze — accepting new route data");
+            self.clear_replace_freeze();
+        }
         let freeze = self.replace_freeze_modified.get();
         let freeze_timed_out = freeze > 0 && self.replace_freeze_time.get()
             .map(|t| t.elapsed().as_secs() >= 5)
             .unwrap_or(false);
         if freeze > 0 && freeze_timed_out {
             crate::debug_log!("read_data_file: freeze timed out after 5s — accepting file data");
-            self.replace_freeze_modified.set(0);
-            self.replace_old_word.borrow_mut().clear();
-            self.replace_freeze_time.set(None);
+            self.clear_replace_freeze();
             // Fall through to read the file normally
         } else if freeze > 0 && modified <= freeze {
             return self.cached_data();
@@ -162,26 +181,19 @@ impl BrowserBridge {
             // File is newer than freeze — but verify the old word is actually gone.
             let old_word = self.replace_old_word.borrow().clone();
             if !old_word.is_empty() {
-                let content = std::fs::read_to_string(&path).ok();
-                if let Some(ref c) = content {
-                    if let Some(file_text) = extract_json_string(c, "text") {
-                        let file_lower = file_text.to_lowercase();
-                        if has_whole_word(&file_lower, &old_word) {
-                            crate::debug_log!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word);
-                            return self.cached_data();
-                        }
+                if let Some(file_text) = extract_json_string(&content, "text") {
+                    let file_lower = file_text.to_lowercase();
+                    if has_whole_word(&file_lower, &old_word) {
+                        crate::debug_log!("read_data_file: 'fresh' data still has '{}' — keeping freeze", old_word);
+                        return self.cached_data();
                     }
                 }
             }
             crate::debug_log!("read_data_file: fresh data confirmed (old word gone), clearing freeze");
-            self.replace_freeze_modified.set(0);
-            self.replace_old_word.borrow_mut().clear();
-            self.replace_freeze_time.set(None);
+            self.clear_replace_freeze();
         }
 
         self.last_modified.set(modified);
-
-        let content = std::fs::read_to_string(&path).ok()?;
 
         // Parse JSON: { "text": "...", "cursorStart": N, "cursorEnd": N, ... }
         // Minimal JSON parsing to avoid adding serde dependency
@@ -262,6 +274,19 @@ impl BrowserBridge {
         log_browser(&format!("activate_replace_freeze: frozen at modified={}, word='{}'", modified, old_word));
         self.replace_freeze_modified.set(modified);
         self.replace_freeze_time.set(Some(Instant::now()));
+        *self.replace_freeze_source.borrow_mut() = format!(
+            "{}|{}|{}",
+            self.last_source.borrow(),
+            self.last_bridge_id.get(),
+            self.last_frame_id.get(),
+        );
+    }
+
+    fn clear_replace_freeze(&self) {
+        self.replace_freeze_modified.set(0);
+        self.replace_old_word.borrow_mut().clear();
+        self.replace_freeze_time.set(None);
+        self.replace_freeze_source.borrow_mut().clear();
     }
 
     /// Update the cached text to reflect a replacement we just sent to the extension.
@@ -720,7 +745,7 @@ fn has_whole_word(text: &str, word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserBridge, completed_word_from_transition, extract_json_string, reply_path_for};
+    use super::{BrowserBridge, completed_word_from_transition, data_path, extract_json_string, reply_path_for};
     use crate::bridge::TextBridge;
 
     #[test]
@@ -841,5 +866,31 @@ mod tests {
 
         bridge.route_generation.set(1);
         assert_eq!(bridge.current_paragraph_id(), "browser:1234:42:7:1:19");
+    }
+
+    #[test]
+    fn replacement_freeze_does_not_hold_updates_from_a_different_browser_route() {
+        let bridge = BrowserBridge::new();
+        bridge.last_modified.set(1);
+        *bridge.last_text.borrow_mut() = "old editor text".to_string();
+        bridge.last_cursor.set(15);
+        bridge.replace_freeze_modified.set(1);
+        bridge.replace_freeze_time.set(Some(Instant::now()));
+        *bridge.replace_old_word.borrow_mut() = "piza".to_string();
+        *bridge.replace_freeze_source.borrow_mut() =
+            "1|https://docs.google.com/document/d/old|google-docs|legacy|7|0".to_string();
+
+        let data = data_path();
+        std::fs::write(
+            &data,
+            r#"{"text":"new editor text","cursorStart":15,"cursorEnd":15,"paragraphStart":0,"tabId":2,"frameId":0,"bridgeId":7,"url":"https://docs.google.com/document/d/new","editorKind":"google-docs"}"#,
+        ).expect("browser data");
+
+        let (text, _, _, _) = bridge.read_data_file().expect("new route data");
+        assert_eq!(text, "new editor text");
+        assert_eq!(bridge.replace_freeze_modified.get(), 0);
+        assert!(bridge.replace_freeze_source.borrow().is_empty());
+
+        let _ = std::fs::remove_file(data);
     }
 }
