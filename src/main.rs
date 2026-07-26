@@ -1736,6 +1736,44 @@ mod bridge_manager_tests {
     }
 
     #[test]
+    fn browser_editor_change_is_a_route_switch() {
+        let mut manager = BridgeManager {
+            bridges: vec![Box::new(SelectedTextBridge {
+                name: "Browser",
+                selected_text: None,
+            })],
+            last_check: Instant::now(),
+            active_idx: 0,
+            last_user_pid: 0,
+            last_user_was_browser: true,
+            last_context: None,
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            active_route_key: String::new(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: true,
+            last_browser_host_repair: None,
+        };
+        let first = CursorContext {
+            paragraph_id: "browser:10:2:0:1:0".to_string(),
+            ..Default::default()
+        };
+        let second = CursorContext {
+            paragraph_id: "browser:10:2:0:2:0".to_string(),
+            ..Default::default()
+        };
+
+        manager.activate_context_route(0, &first, 900);
+        manager.activate_context_route(0, &second, 900);
+
+        assert!(manager.bridge_switched);
+        assert_eq!(manager.bridge_switch_from, "browser:10:2:0:1");
+        assert_eq!(manager.bridge_switch_to, "browser:10:2:0:2");
+    }
+
+    #[test]
     fn cut_moves_an_addin_sentence_to_a_new_occurrence() {
         let paragraph_id = "word:paragraph";
         let sentence = "Jg er veldiig glaad ii daag.";
