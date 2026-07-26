@@ -874,16 +874,16 @@ fn browser_route_key(paragraph_id: &str) -> Option<&str> {
 /// Route ownership is stricter than bridge ownership. A Browser bridge can
 /// serve many tabs and editor instances, while macOS Word Add-in and AX are
 /// separate producers even when they target the same foreground application.
-fn route_key_for_context(bridge_name: &str, paragraph_id: &str) -> String {
+fn route_key_for_context(bridge_name: &str, paragraph_id: &str, owner_pid: u32) -> String {
     match bridge_name {
         "Browser" => browser_route_key(paragraph_id)
             .map(|route| format!("browser:{route}"))
             .unwrap_or_else(|| "browser:unknown".to_string()),
-        "Word COM" => "windows:word-com".to_string(),
-        "Word Add-in" => "macos:word-addin".to_string(),
-        "Accessibility (macOS)" => "macos:accessibility".to_string(),
-        "Accessibility" => "windows:accessibility".to_string(),
-        other => format!("bridge:{other}"),
+        "Word COM" => format!("windows:word-com:{owner_pid}"),
+        "Word Add-in" => format!("macos:word-addin:{owner_pid}"),
+        "Accessibility (macOS)" => format!("macos:accessibility:{owner_pid}"),
+        "Accessibility" => format!("windows:accessibility:{owner_pid}"),
+        other => format!("bridge:{other}:{owner_pid}"),
     }
 }
 
@@ -1433,20 +1433,24 @@ mod cross_language_barrier_tests {
     #[test]
     fn route_identity_keeps_editor_surfaces_separate() {
         assert_eq!(
-            route_key_for_context("Browser", "browser:1234:42:7:1:19"),
+            route_key_for_context("Browser", "browser:1234:42:7:1:19", 999),
             "browser:1234:42:7:1",
         );
         assert_ne!(
-            route_key_for_context("Browser", "browser:1234:42:7:1:19"),
-            route_key_for_context("Browser", "browser:1234:42:7:2:19"),
+            route_key_for_context("Browser", "browser:1234:42:7:1:19", 999),
+            route_key_for_context("Browser", "browser:1234:42:7:2:19", 999),
         );
         assert_ne!(
-            route_key_for_context("Word Add-in", "42"),
-            route_key_for_context("Accessibility (macOS)", "ax:0"),
+            route_key_for_context("Word Add-in", "42", 101),
+            route_key_for_context("Accessibility (macOS)", "ax:0", 101),
         );
         assert_ne!(
-            route_key_for_context("Word COM", "42"),
-            route_key_for_context("Accessibility", "uia:0"),
+            route_key_for_context("Word COM", "42", 101),
+            route_key_for_context("Accessibility", "uia:0", 101),
+        );
+        assert_ne!(
+            route_key_for_context("Accessibility", "uia:0", 101),
+            route_key_for_context("Accessibility", "uia:0", 202),
         );
     }
 
@@ -2186,8 +2190,12 @@ impl BridgeManager {
         }
     }
 
-    fn activate_context_route(&mut self, new_idx: usize, context: &CursorContext) {
-        let next_route = route_key_for_context(self.bridges[new_idx].name(), &context.paragraph_id);
+    fn activate_context_route(&mut self, new_idx: usize, context: &CursorContext, owner_pid: u32) {
+        let next_route = route_key_for_context(
+            self.bridges[new_idx].name(),
+            &context.paragraph_id,
+            owner_pid,
+        );
         if !self.active_route_key.is_empty() && self.active_route_key != next_route {
             self.bridge_switch_from = self.active_route_key.clone();
             self.bridge_switch_to = next_route.clone();
@@ -2196,6 +2204,14 @@ impl BridgeManager {
         }
         self.active_idx = new_idx;
         self.active_route_key = next_route;
+    }
+
+    fn route_owner_pid(&self, fg: &ForegroundRoute) -> u32 {
+        if fg.our_window_focused && self.last_user_pid != 0 {
+            self.last_user_pid
+        } else {
+            fg.app.pid
+        }
     }
 
     fn maybe_late_connect_word_bridge(&mut self) {
@@ -2292,7 +2308,8 @@ impl BridgeManager {
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
                         }
-                        self.activate_context_route(i, &ctx);
+                        let owner_pid = self.route_owner_pid(fg);
+                        self.activate_context_route(i, &ctx, owner_pid);
                         // Only record fg_pid as "last user pid" when it isn't
                         // OUR app. Our app gets focus when the user clicks a
                         // suggestion; if we record that, we lose the real
@@ -2326,7 +2343,8 @@ impl BridgeManager {
         if self.active_idx != browser_idx || browser_route_changed {
             log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
         }
-        self.activate_context_route(browser_idx, &ctx);
+        let owner_pid = self.route_owner_pid(fg);
+        self.activate_context_route(browser_idx, &ctx, owner_pid);
         self.last_user_pid = fg.app.pid;
         self.last_context = Some(ctx.clone());
         Some(ctx)
@@ -2355,7 +2373,8 @@ impl BridgeManager {
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
                         }
-                        self.activate_context_route(i, &ctx);
+                        let owner_pid = self.route_owner_pid(fg);
+                        self.activate_context_route(i, &ctx, owner_pid);
                         self.last_user_pid = fg.app.pid;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
@@ -2414,7 +2433,8 @@ impl BridgeManager {
                     // expose a blank focused element for the first focus poll.
                     // Falling through would return Word/previous-app context
                     // and make Spell look stuck until another app switch.
-                    self.activate_context_route(i, &ctx);
+                    let owner_pid = self.route_owner_pid(fg);
+                    self.activate_context_route(i, &ctx, owner_pid);
                     self.last_user_pid = fg.app.pid;
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
@@ -2486,7 +2506,8 @@ impl BridgeManager {
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Accessibility (macOS) for Word fallback", self.bridges[self.active_idx].name());
                         }
-                        self.activate_context_route(i, &ctx);
+                        let owner_pid = self.route_owner_pid(fg);
+                        self.activate_context_route(i, &ctx, owner_pid);
                         self.last_user_pid = fg.app.pid;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
@@ -2521,7 +2542,8 @@ impl BridgeManager {
                     if self.active_idx != i {
                         log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
                     }
-                    self.activate_context_route(i, &ctx);
+                    let owner_pid = self.route_owner_pid(fg);
+                    self.activate_context_route(i, &ctx, owner_pid);
                     self.last_user_pid = fg.app.pid;
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
