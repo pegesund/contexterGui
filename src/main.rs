@@ -871,6 +871,22 @@ fn browser_route_key(paragraph_id: &str) -> Option<&str> {
     route_and_offset.rsplit_once(':').map(|(route, _)| route)
 }
 
+/// Route ownership is stricter than bridge ownership. A Browser bridge can
+/// serve many tabs and editor instances, while macOS Word Add-in and AX are
+/// separate producers even when they target the same foreground application.
+fn route_key_for_context(bridge_name: &str, paragraph_id: &str) -> String {
+    match bridge_name {
+        "Browser" => browser_route_key(paragraph_id)
+            .map(|route| format!("browser:{route}"))
+            .unwrap_or_else(|| "browser:unknown".to_string()),
+        "Word COM" => "windows:word-com".to_string(),
+        "Word Add-in" => "macos:word-addin".to_string(),
+        "Accessibility (macOS)" => "macos:accessibility".to_string(),
+        "Accessibility" => "windows:accessibility".to_string(),
+        other => format!("bridge:{other}"),
+    }
+}
+
 fn error_paragraph_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
     paragraph_id.is_empty() || paragraph_id_matches_bridge(paragraph_id, bridge_name)
 }
@@ -1145,7 +1161,7 @@ mod cross_language_barrier_tests {
         apply_original_initial_case, error_paragraph_matches_bridge,
         error_paragraph_matches_surface,
         find_word_doc_range_at_position, has_mixed_non_titlecase,
-        browser_route_key, known_word_spelling_variants_for_analyzer,
+        browser_route_key, route_key_for_context, known_word_spelling_variants_for_analyzer,
         paragraph_id_matches_bridge,
         grammar_response_sentence_hash, rescore_spelling_response,
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
@@ -1414,6 +1430,26 @@ mod cross_language_barrier_tests {
         );
     }
 
+    #[test]
+    fn route_identity_keeps_editor_surfaces_separate() {
+        assert_eq!(
+            route_key_for_context("Browser", "browser:1234:42:7:1:19"),
+            "browser:1234:42:7:1",
+        );
+        assert_ne!(
+            route_key_for_context("Browser", "browser:1234:42:7:1:19"),
+            route_key_for_context("Browser", "browser:1234:42:7:2:19"),
+        );
+        assert_ne!(
+            route_key_for_context("Word Add-in", "42"),
+            route_key_for_context("Accessibility (macOS)", "ax:0"),
+        );
+        assert_ne!(
+            route_key_for_context("Word COM", "42"),
+            route_key_for_context("Accessibility", "uia:0"),
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_word_scope_excludes_browser_and_accessibility_paragraphs() {
@@ -1651,6 +1687,7 @@ mod bridge_manager_tests {
             bridge_switched: false,
             bridge_switch_from: String::new(),
             bridge_switch_to: String::new(),
+            active_route_key: String::new(),
             platform: Box::new(TestPlatform),
             lang_word_id: 1044,
             browser_extension_seen: false,
@@ -1681,6 +1718,7 @@ mod bridge_manager_tests {
             bridge_switched: false,
             bridge_switch_from: String::new(),
             bridge_switch_to: String::new(),
+            active_route_key: String::new(),
             platform: Box::new(TestPlatform),
             lang_word_id: 1044,
             browser_extension_seen: true,
@@ -1738,6 +1776,7 @@ mod bridge_manager_tests {
             bridge_switched: false,
             bridge_switch_from: String::new(),
             bridge_switch_to: String::new(),
+            active_route_key: String::new(),
             platform: Box::new(TestPlatform),
             lang_word_id: 1044,
             browser_extension_seen: false,
@@ -1781,6 +1820,7 @@ mod bridge_manager_tests {
             bridge_switched: false,
             bridge_switch_from: String::new(),
             bridge_switch_to: String::new(),
+            active_route_key: String::new(),
             platform: Box::new(TestPlatform),
             lang_word_id: 1044,
             browser_extension_seen: true,
@@ -1818,6 +1858,7 @@ mod bridge_manager_tests {
             bridge_switched: false,
             bridge_switch_from: String::new(),
             bridge_switch_to: String::new(),
+            active_route_key: String::new(),
             platform: Box::new(TestPlatform),
             lang_word_id: 1044,
             browser_extension_seen: false,
@@ -2056,6 +2097,10 @@ struct BridgeManager {
     bridge_switched: bool,
     bridge_switch_from: String,
     bridge_switch_to: String,
+    /// Last verified producer/editor route. This is intentionally not just a
+    /// bridge name: Browser has one bridge for many editors, and macOS Word
+    /// Add-in/AX must not share lifecycle state.
+    active_route_key: String,
     /// Platform abstraction for OS-specific services
     platform: Box<dyn platform::PlatformServices>,
     /// Windows Word COM language ID for the active language (from LanguageVoice trait)
@@ -2130,6 +2175,7 @@ impl BridgeManager {
             bridge_switched: false,
             bridge_switch_from: String::new(),
             bridge_switch_to: String::new(),
+            active_route_key: String::new(),
             platform,
             lang_word_id,
             // If a recent data file was present at startup, the extension
@@ -2140,10 +2186,16 @@ impl BridgeManager {
         }
     }
 
-    fn mark_bridge_switch(&mut self, new_idx: usize) {
-        self.bridge_switch_from = self.bridges[self.active_idx].name().to_string();
-        self.bridge_switch_to = self.bridges[new_idx].name().to_string();
-        self.bridge_switched = true;
+    fn activate_context_route(&mut self, new_idx: usize, context: &CursorContext) {
+        let next_route = route_key_for_context(self.bridges[new_idx].name(), &context.paragraph_id);
+        if !self.active_route_key.is_empty() && self.active_route_key != next_route {
+            self.bridge_switch_from = self.active_route_key.clone();
+            self.bridge_switch_to = next_route.clone();
+            self.bridge_switched = true;
+            log!("Route switch: {} → {}", self.bridge_switch_from, self.bridge_switch_to);
+        }
+        self.active_idx = new_idx;
+        self.active_route_key = next_route;
     }
 
     fn maybe_late_connect_word_bridge(&mut self) {
@@ -2239,9 +2291,8 @@ impl BridgeManager {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
-                            self.mark_bridge_switch(i);
                         }
-                        self.active_idx = i;
+                        self.activate_context_route(i, &ctx);
                         // Only record fg_pid as "last user pid" when it isn't
                         // OUR app. Our app gets focus when the user clicks a
                         // suggestion; if we record that, we lose the real
@@ -2274,9 +2325,8 @@ impl BridgeManager {
                 != browser_route_key(&ctx.paragraph_id);
         if self.active_idx != browser_idx || browser_route_changed {
             log!("Bridge switch: {} → Browser", self.bridges[self.active_idx].name());
-            self.mark_bridge_switch(browser_idx);
         }
-        self.active_idx = browser_idx;
+        self.activate_context_route(browser_idx, &ctx);
         self.last_user_pid = fg.app.pid;
         self.last_context = Some(ctx.clone());
         Some(ctx)
@@ -2304,9 +2354,8 @@ impl BridgeManager {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Word COM", self.bridges[self.active_idx].name());
-                            self.mark_bridge_switch(i);
                         }
-                        self.active_idx = i;
+                        self.activate_context_route(i, &ctx);
                         self.last_user_pid = fg.app.pid;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
@@ -2359,20 +2408,14 @@ impl BridgeManager {
                 }
             }
             if let Some(i) = accessibility_idx {
-                if self.active_idx != i {
-                    log!("Bridge switch: {} → Accessibility (kind={:?})",
-                        self.bridges[self.active_idx].name(), fg.kind);
-                    self.mark_bridge_switch(i);
-                }
-                self.active_idx = i;
-                self.last_user_pid = fg.app.pid;
-
                 if let Some(ctx) = self.bridges[i].read_context() {
                     // Returning this even when the text is momentarily empty is
                     // important on Windows: modern Notepad/Sticky Notes can
                     // expose a blank focused element for the first focus poll.
                     // Falling through would return Word/previous-app context
                     // and make Spell look stuck until another app switch.
+                    self.activate_context_route(i, &ctx);
+                    self.last_user_pid = fg.app.pid;
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
                 }
@@ -2442,9 +2485,8 @@ impl BridgeManager {
                     if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Accessibility (macOS) for Word fallback", self.bridges[self.active_idx].name());
-                            self.mark_bridge_switch(i);
                         }
-                        self.active_idx = i;
+                        self.activate_context_route(i, &ctx);
                         self.last_user_pid = fg.app.pid;
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
@@ -2478,9 +2520,8 @@ impl BridgeManager {
                     // still means that Accessibility could not read a target.
                     if self.active_idx != i {
                         log!("Bridge switch: {} → Accessibility (macOS)", self.bridges[self.active_idx].name());
-                        self.mark_bridge_switch(i);
                     }
-                    self.active_idx = i;
+                    self.activate_context_route(i, &ctx);
                     self.last_user_pid = fg.app.pid;
                     self.last_context = Some(ctx.clone());
                     return Some(ctx);
@@ -3657,9 +3698,10 @@ impl ContextApp {
         }
     }
 
-    /// Reset all error/spelling/grammar state when the user switches to a
-    /// different app or document, so stale results don't bleed across contexts.
-    fn clear_for_app_switch(&mut self) {
+    /// Clear analysis and replacement work owned by the previous editor route.
+    /// The manager context is deliberately retained: callers that already read
+    /// a fresh context must not lose it while rejecting stale async work.
+    fn clear_route_analysis_state(&mut self) {
         self.writing_errors.clear();
         self.context = Default::default();
         self.spelling_queue.clear();
@@ -3692,6 +3734,23 @@ impl ContextApp {
         // treated as stale and discarded (the guard checks this map).
         self.paragraph_sentence_hashes.clear();
         self.grammar_inflight.clear();
+        self.prolog_checked_hashes.clear();
+        self.llm_checked_hashes.clear();
+        self.llm_waiting = false;
+        self.pending_incomplete_sentence = None;
+        self.pending_addin_replacement = None;
+        self.pending_fix = None;
+        self.fix_queue.clear();
+        self.pending_cursor_place = None;
+        self.pending_consonant_checks.clear();
+        self.focused_error_idx = None;
+        self.last_spell_checked_word.clear();
+    }
+
+    /// Reset all error/spelling/grammar state when the user switches to a
+    /// different app or document, so stale results don't bleed across contexts.
+    fn clear_for_app_switch(&mut self) {
+        self.clear_route_analysis_state();
         self.manager.clear_context();
         self.last_poll = Instant::now()
             .checked_sub(self.poll_interval)
@@ -9102,21 +9161,10 @@ impl eframe::App for ContextApp {
                 let has_state_to_clear = !self.writing_errors.is_empty()
                     || !self.paragraph_texts.is_empty()
                     || !self.last_doc_text.is_empty();
-                // Word detours are special: the user constantly glances at
-                // Spell / a terminal / Slack and comes right back, and the
-                // bridge-switch handler deliberately KEEPS Word error state
-                // for exactly that reason (keep_word_errors). This clear ran
-                // before that handler and wiped everything anyway — in-flight
-                // grammar responses for Word paragraphs then got discarded as
-                // "paragraph gone", so after a reconnect + tab-out the errors
-                // for already-checked sentences never came back. When either
-                // side of the switch is Word, do a PARTIAL clear instead:
-                // keep Word-scoped state and drop only the other app's
-                // (uia:/ax:/browser:) state. The display layer hides Word
-                // errors while a non-Word app is focused.
-                let involves_word = now_word || self.prev_writing_fg_was_word;
-                if switching_between_writing_surfaces && has_state_to_clear && involves_word {
+                if switching_between_writing_surfaces && has_state_to_clear {
                     let before = self.writing_errors.len();
+                    self.manager.clear_all_error_underlines();
+                    self.clear_route_analysis_state();
                     self.writing_errors.retain(|e| is_word_scoped_paragraph_id(&e.paragraph_id));
                     let dropped_hashes: Vec<u64> = self.paragraph_sentence_hashes.iter()
                         .filter(|(id, _)| !is_word_scoped_paragraph_id(id))
@@ -9147,9 +9195,9 @@ impl eframe::App for ContextApp {
                     self.last_spell_checked_word.clear();
                     self.last_known_cursor_offset = None;
                     self.focused_error_idx = None;
-                    log!("Cross-app Word detour ({}→{}) — kept {} Word errors, dropped {} non-Word",
+                    log!("Cross-app writing switch ({}→{}) — cleared {} route-owned errors",
                         self.prev_writing_fg_pid, fg.pid,
-                        self.writing_errors.len(), before - self.writing_errors.len());
+                        before);
                 } else if switching_between_writing_surfaces && has_state_to_clear {
                     log!("Cross-app writing switch ({}→{}) — clearing {} errors + {} paragraphs",
                         self.prev_writing_fg_pid, fg.pid,
@@ -10063,7 +10111,10 @@ impl eframe::App for ContextApp {
                 let ctx_changed = new_ctx.word != self.context.word
                     || new_ctx.sentence != self.context.sentence
                     || new_ctx.masked_sentence != self.context.masked_sentence
-                    || full_doc_changed;
+                    || full_doc_changed
+                    // Route ownership changes even when the visible text is
+                    // identical (for example Word Add-in to macOS AX).
+                    || self.manager.bridge_switched;
                 // Track cursor offset for paragraph scanning when our window has focus
                 if let Some(off) = new_ctx.cursor_doc_offset {
                     self.last_known_cursor_offset = Some(off);
@@ -10078,50 +10129,13 @@ impl eframe::App for ContextApp {
                     self.manager.bridge_switched = false;
                     let from = std::mem::take(&mut self.manager.bridge_switch_from);
                     let to = std::mem::take(&mut self.manager.bridge_switch_to);
-                    let from_word = from.contains("Word");
-                    let to_word = to.contains("Word");
-                    // Keep Word errors whenever EITHER end was Word — so a
-                    // detour Word → Slack → Word doesn't drop them in the
-                    // middle hop. The display layer hides them outside Word.
-                    let keep_word_errors = from_word || to_word;
                     log!("Bridge switched {} → {} — {} errors, {} spelling queue, {} pending BERT, {} grammar queue",
                         from, to, self.writing_errors.len(), self.spelling_queue.len(),
                         self.pending_spelling_bert.len(), self.grammar_queue.len());
-                    self.spelling_queue.clear();
-                    self.grammar_queue.clear();
-                    self.grammar_queue_total = 0;
-                    self.completions.clear();
-                    self.open_completions.clear();
-                    self.last_completed_prefix.clear();
-                    self.last_dispatched_sentence.clear();
-                    self.grammar_scanning = false;
-                    if keep_word_errors {
-                        // Bridge switch WITH keep_word_errors means the user is
-                        // still working with a Word doc — the pending BERT/
-                        // grammar_refine items in flight belong to that doc.
-                        // Clearing them here previously threw away every typo
-                        // whose BERT rank hadn't landed yet: after pasting 10
-                        // lines, the actor produced 26 unknown-word candidates,
-                        // BERT ranked 2 before Word momentarily lost focus, and
-                        // the remaining 24 pending items got wiped so no
-                        // underline ever appeared. Hold them; responses stay
-                        // valid because the target paragraphs are still there.
-                        log!("Bridge switch kept Word error state ({} pending BERT held)",
-                            self.pending_spelling_bert.len());
-                    } else {
-                        self.pending_spelling_bert.clear();
-                        self.pending_spelling_grammar.clear();
-                        self.pending_grammar_bert.clear();
-                        self.pending_consonant_bert.clear();
-                        self.writing_errors.clear();
-                        self.processed_sentence_hashes.clear();
-                        self.paragraph_sentence_hashes.clear();
-                        self.paragraph_texts.clear();
-                        self.paragraph_doc_starts.clear();
-                        self.last_para_count = 0;
-                        self.last_doc_text.clear();
-                        self.last_doc_hash = 0;
-                    }
+                    // The queue, cache, and replacement state all belong to
+                    // the previous verified route. Never retain it merely
+                    // because both route labels happen to contain "Word".
+                    self.clear_route_analysis_state();
                     // Do NOT reset last_sentence_count to 0 — that causes a
                     // false "major doc change" on the very next read, which
                     // clears the BERT queue before results arrive.
