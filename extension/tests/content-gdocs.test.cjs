@@ -154,3 +154,12 @@ test("generic replacement targets the source editor and reply paragraph offset",
   assert.match(source, /editorsById\.get\(editorId\)/);
   assert.match(source, /Number\.isInteger\(msg\.paragraphStart\)/);
 });
+
+test("generic editor updates preserve their paragraph offset", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
+
+  assert.match(source, /editorKind: "html-form",\s*editorId: editorSessionId\(el\),\s*paragraphStart: paraStart/);
+  assert.match(source, /editorKind: "contenteditable",\s*editorId: editorSessionId\(el\),\s*paragraphStart: paraStart/);
+  assert.match(source, /data\.editorId \+ "\\|" \+ data\.paragraphStart \+ "\\|" \+ data\.text/);
+  assert.match(source, /editorKind: data\.editorKind, editorId: data\.editorId,\s*paragraphStart: data\.paragraphStart/);
+});

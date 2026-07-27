@@ -407,6 +407,7 @@
         selectedText, caretX: pos.x, caretY: pos.y,
         editorKind: "html-form",
         editorId: editorSessionId(el),
+        paragraphStart: paraStart,
       };
     }
 
@@ -450,6 +451,7 @@
         selectedText, caretX, caretY,
         editorKind: "contenteditable",
         editorId: editorSessionId(el),
+        paragraphStart: paraStart,
       };
     }
 
@@ -467,7 +469,7 @@
     // (`if (!data || !data.text) return;`) dropped those sends so the user
     // saw old errors lingering over an empty comment box.
     if (!data) return;
-    const key = data.editorId + "|" + data.text + "|" + data.cursorStart + "|" + data.selectedText;
+    const key = data.editorId + "|" + data.paragraphStart + "|" + data.text + "|" + data.cursorStart + "|" + data.selectedText;
     if (key === lastSent) return;
     activeElement = el;
     lastTextElement = el;
@@ -477,7 +479,8 @@
       cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
       selectedText: data.selectedText,
       caretX: data.caretX, caretY: data.caretY, url: window.location.href,
-      editorKind: data.editorKind, editorId: data.editorId
+      editorKind: data.editorKind, editorId: data.editorId,
+      paragraphStart: data.paragraphStart
     })) {
       lastSent = key;
     }
@@ -523,7 +526,8 @@
       cursorStart: data.cursorStart, cursorEnd: data.cursorEnd,
       selectedText: data.selectedText,
       caretX: data.caretX, caretY: data.caretY, url: window.location.href,
-      editorKind: data.editorKind, editorId: data.editorId
+      editorKind: data.editorKind, editorId: data.editorId,
+      paragraphStart: data.paragraphStart
     });
   }, 2000);
 })();
