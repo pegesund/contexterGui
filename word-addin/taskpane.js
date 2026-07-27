@@ -573,6 +573,9 @@ function doReplace(expected, replacement, paragraphId) {
                     // Collapse selection to the end of the replacement so the cursor
                     // lands after the new word (ready for the user to keep typing).
                     newRange.select("End");
+                    // scope.text was loaded before the edit. Reload it so the
+                    // spellReplacement payload is the post-edit paragraph.
+                    scope.load("text");
                     return ctx.sync().then(function () {
                         var t3 = Date.now();
                         fetch(BRIDGE_URL + "/log", { method: "POST", headers: {"Content-Type":"application/json"},
