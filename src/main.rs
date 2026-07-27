@@ -3010,6 +3010,7 @@ struct PendingConsonantBert {
     variants: Vec<String>,
     sentence_ctx: String,
     doc_offset: usize,
+    paragraph_id: String,
     // sentences[0] = original, sentences[1..] = variants
 }
 
@@ -4915,10 +4916,22 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                         all_variants.push(a.clone());
                     }
                 }
-                self.send_consonant_bert(&clean, all_variants, sentence_ctx, doc_offset);
+                self.send_consonant_bert(
+                    &clean,
+                    all_variants,
+                    sentence_ctx,
+                    paragraph_id,
+                    doc_offset,
+                );
             } else if !consonant_alts.is_empty() {
                 // Consonant confusion only (no kt/gt)
-                self.send_consonant_bert(&clean, consonant_alts.clone(), sentence_ctx, doc_offset);
+                self.send_consonant_bert(
+                    &clean,
+                    consonant_alts.clone(),
+                    sentence_ctx,
+                    paragraph_id,
+                    doc_offset,
+                );
             }
 
             return;
@@ -5061,10 +5074,26 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     }
 
     /// Send consonant confusion check to BERT worker for async sentence scoring.
-    fn send_consonant_bert(&mut self, word: &str, variants: Vec<String>, sentence_ctx: &str, doc_offset: usize) {
+    fn send_consonant_bert(
+        &mut self,
+        word: &str,
+        variants: Vec<String>,
+        sentence_ctx: &str,
+        paragraph_id: &str,
+        doc_offset: usize,
+    ) {
         if !self.bert_ready { return; }
-        // Skip if already flagged for this position
-        if self.writing_errors.iter().any(|e| e.sentence_context == sentence_ctx && e.doc_offset == doc_offset && !e.ignored) {
+        // A sentence may have several independently actionable spelling errors.
+        // Only suppress this exact word occurrence, not every error in the sentence.
+        if self.writing_errors.iter().any(|e| {
+            matches!(e.category, ErrorCategory::Spelling)
+                && e.word.eq_ignore_ascii_case(word)
+                && !e.ignored
+                && same_sentence_occurrence(
+                    &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                    paragraph_id, sentence_ctx, doc_offset,
+                )
+        }) {
             return;
         }
         let worker = match &mut self.bert_worker {
@@ -5102,6 +5131,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             variants,
             sentence_ctx: sentence_ctx.to_string(),
             doc_offset,
+            paragraph_id: paragraph_id.to_string(),
         });
     }
 
@@ -5672,18 +5702,56 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         if let Some((best, s_best)) = best_alt {
             if *s_best > orig_score {
                 let best = best.clone();
-                let corrected_sentence = pending.sentence_ctx.replacen(&pending.word, &best, 1);
-                self.pending_consonant_checks.push(WritingError {
-                    category: ErrorCategory::Grammar,
-                    word: pending.sentence_ctx.clone(),
-                    suggestion: corrected_sentence,
-                    explanation: format!("«{}» → «{}» (enkel/dobbel konsonant)", pending.word, best),
-                    rule_name: format!("consonant_confusion:{}:{}", pending.word, best),
+                let suggestion = apply_original_initial_case(&best, &pending.word);
+                if !spelling_correction_changes_word(&pending.word, &suggestion) {
+                    return;
+                }
+                let already = self.writing_errors.iter().any(|e| {
+                    matches!(e.category, ErrorCategory::Spelling)
+                        && e.word.eq_ignore_ascii_case(&pending.word)
+                        && !e.ignored
+                        && same_sentence_occurrence(
+                            &e.paragraph_id, &e.sentence_context, e.doc_offset,
+                            &pending.paragraph_id, &pending.sentence_ctx, pending.doc_offset,
+                        )
+                });
+                if already {
+                    return;
+                }
+                let top_candidates: Vec<String> = scored_candidates.iter()
+                    .filter(|(candidate, _)| candidate != &pending.word && candidate != &best)
+                    .take(5)
+                    .map(|(candidate, _)| candidate.clone())
+                    .collect();
+                let explanation = format!(
+                    "«{}» → «{}» (enkel/dobbel konsonant)",
+                    pending.word, best
+                );
+                self.cache_sentence_spelling(&pending.sentence_ctx, CachedSentenceError {
+                    is_grammar: false,
+                    word: pending.word.clone(),
+                    suggestion: suggestion.clone(),
+                    explanation: explanation.clone(),
+                    rule_name: "stavefeil_variant_bert".to_string(),
+                    error_word: String::new(),
+                    position: 0,
+                    top_candidates: top_candidates.clone(),
+                });
+                log!("known-word spelling variant: '{}' → '{}' (BERT-ranked)", pending.word, suggestion);
+                self.writing_errors.push(WritingError {
+                    category: ErrorCategory::Spelling,
+                    word: pending.word,
+                    suggestion,
+                    explanation,
+                    rule_name: "stavefeil_variant_bert".to_string(),
                     sentence_context: pending.sentence_ctx,
                     doc_offset: pending.doc_offset,
                     position: 0,
                     ignored: false,
-                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false, paragraph_id: String::new(), error_word: String::new(), top_candidates: vec![],
+                    word_doc_start: 0, word_doc_end: 0, underlined: false, pinned: false,
+                    paragraph_id: pending.paragraph_id,
+                    error_word: String::new(),
+                    top_candidates,
                 });
             }
         }
@@ -7858,7 +7926,7 @@ self.grammar_queue.clear();
         // via `actor`), processed after it ends so we can call &mut self
         // methods like find_spelling_suggestions.
         let mut unknown_words_to_rank: Vec<(DeferredSpellingPush, Vec<String>)> = Vec::new();
-        let mut known_variant_checks_to_send: Vec<(String, Vec<String>, String, usize)> = Vec::new();
+        let mut known_variant_checks_to_send: Vec<(String, Vec<String>, String, String, usize)> = Vec::new();
         let mut cache_dirty = false;
 
         while let Some(resp) = actor.try_recv() {
@@ -8022,9 +8090,10 @@ self.grammar_queue.clear();
                         && pending.sentence_ctx == resp.sentence
                         && pending.doc_offset == resp.doc_offset
                 });
-                let already_queued = known_variant_checks_to_send.iter().any(|(word, _, sentence, doc_offset)| {
+                let already_queued = known_variant_checks_to_send.iter().any(|(word, _, sentence, paragraph_id, doc_offset)| {
                     word.eq_ignore_ascii_case(&clean_lower)
                         && sentence == &resp.sentence
+                        && paragraph_id == &resp.paragraph_id
                         && *doc_offset == resp.doc_offset
                 });
                 if already_displayed || already_pending || already_queued {
@@ -8040,6 +8109,7 @@ self.grammar_queue.clear();
                     clean_lower,
                     variants,
                     resp.sentence.clone(),
+                    resp.paragraph_id.clone(),
                     resp.doc_offset,
                 ));
                 added_known_variant_check = true;
@@ -8329,8 +8399,8 @@ self.grammar_queue.clear();
         // off the main thread, so this loop no longer blocks rendering.
         // If BERT isn't ready we fall back to the grammar checker's fuzzy
         // suggestion so the user still sees an underline immediately.
-        for (word, variants, sentence, doc_offset) in known_variant_checks_to_send {
-            self.send_consonant_bert(&word, variants, &sentence, doc_offset);
+        for (word, variants, sentence, paragraph_id, doc_offset) in known_variant_checks_to_send {
+            self.send_consonant_bert(&word, variants, &sentence, &paragraph_id, doc_offset);
         }
 
         let user_dict_words_snapshot: Vec<String> = self.user_dict.as_ref()
