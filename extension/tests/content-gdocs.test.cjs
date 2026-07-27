@@ -155,6 +155,15 @@ test("generic replacement targets the source editor and reply paragraph offset",
   assert.match(source, /Number\.isInteger\(msg\.paragraphStart\)/);
 });
 
+test("generic replacement uses the value setter matching the source form control", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
+
+  assert.match(source, /const valuePrototype = el\.tagName === "TEXTAREA"/);
+  assert.match(source, /\? window\.HTMLTextAreaElement\.prototype/);
+  assert.match(source, /: window\.HTMLInputElement\.prototype;/);
+  assert.match(source, /Object\.getOwnPropertyDescriptor\(valuePrototype, 'value'\)\?\.set/);
+});
+
 test("generic editor updates preserve their paragraph offset", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
 

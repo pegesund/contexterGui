@@ -293,8 +293,10 @@
         const idx = val.toLowerCase().indexOf(expected.toLowerCase(), Math.max(0, start - 5));
         if (idx >= 0 && idx <= start + 10) { start = idx; end = idx + expected.length; }
       }
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-        || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      const valuePrototype = el.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const nativeSetter = Object.getOwnPropertyDescriptor(valuePrototype, 'value')?.set;
       const newVal = val.substring(0, start) + replacement + val.substring(end);
       if (nativeSetter) nativeSetter.call(el, newVal);
       else el.value = newVal;
