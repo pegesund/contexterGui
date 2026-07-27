@@ -1877,6 +1877,65 @@ mod bridge_manager_tests {
         );
     }
 
+    #[test]
+    fn empty_word_addin_context_remains_on_the_word_addin_route() {
+        let mut manager = BridgeManager {
+            bridges: vec![
+                Box::new(FixedContextBridge {
+                    name: "Word Add-in",
+                    context: CursorContext {
+                        cursor_doc_offset: Some(0),
+                        ..Default::default()
+                    },
+                }),
+                Box::new(FixedContextBridge {
+                    name: "Accessibility (macOS)",
+                    context: CursorContext {
+                        word: "stale".to_string(),
+                        sentence: "Stale accessibility snapshot.".to_string(),
+                        ..Default::default()
+                    },
+                }),
+            ],
+            last_check: Instant::now(),
+            active_idx: 1,
+            last_user_pid: 7,
+            last_user_was_browser: false,
+            last_context: Some(CursorContext {
+                word: "stale".to_string(),
+                sentence: "Stale accessibility snapshot.".to_string(),
+                ..Default::default()
+            }),
+            bridge_switched: false,
+            bridge_switch_from: String::new(),
+            bridge_switch_to: String::new(),
+            active_route_key: "macos:accessibility:42".to_string(),
+            platform: Box::new(TestPlatform),
+            lang_word_id: 1044,
+            browser_extension_seen: false,
+            last_browser_host_repair: None,
+        };
+        let route = ForegroundRoute::new(
+            ForegroundApp {
+                pid: 42,
+                exe_name: "Microsoft Word".to_string(),
+                ..Default::default()
+            },
+            AppKind::Word,
+        );
+
+        let context = manager
+            .try_word_addin_context(&route)
+            .expect("an empty active Add-in context is authoritative");
+
+        assert!(context.word.is_empty());
+        assert!(context.sentence.is_empty());
+        assert_eq!(context.cursor_doc_offset, Some(0));
+        assert_eq!(manager.active_bridge_name(), "Word Add-in");
+        assert_eq!(manager.active_route_key, "macos:word-addin:42");
+        assert!(manager.last_context.as_ref().unwrap().sentence.is_empty());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn empty_macos_accessibility_context_replaces_stale_context() {
@@ -2342,7 +2401,10 @@ impl BridgeManager {
         for (i, bridge) in self.bridges.iter().enumerate() {
             if bridge.name() == "Word Add-in" {
                 if let Some(ctx) = bridge.read_context() {
-                    if !ctx.word.is_empty() || !ctx.sentence.is_empty() {
+                    // The Add-in may report an empty selection while its
+                    // paragraph-change stream is still active. That is an
+                    // authoritative Word state, not a reason to fall through
+                    // to the independent AX snapshot route.
                         if self.active_idx != i {
                             log!("Bridge switch: {} → Word Add-in", self.bridges[self.active_idx].name());
                         }
@@ -2357,7 +2419,6 @@ impl BridgeManager {
                         }
                         self.last_context = Some(ctx.clone());
                         return Some(ctx);
-                    }
                 }
                 break;
             }
