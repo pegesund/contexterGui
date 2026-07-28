@@ -164,6 +164,16 @@ pub fn speak_word(word: &str) {
     if let Some(e) = ENGINE.get() { e.speak(&prepare_text_for_speech(word)); }
 }
 
+/// Speak a document selection with common symbols made explicit. This is kept
+/// separate from word/suggestion playback so normal suggestion pronunciation
+/// remains unchanged.
+pub fn speak_selected_text(text: &str, language_code: &str) {
+    if let Some(e) = ENGINE.get() {
+        let prepared = prepare_text_for_speech(text);
+        e.speak(&expand_selection_symbols(&prepared, language_code));
+    }
+}
+
 fn prepare_text_for_speech(text: &str) -> String {
     text.split_inclusive(char::is_whitespace)
         .map(|segment| {
@@ -183,6 +193,38 @@ fn prepare_text_for_speech(text: &str) -> String {
             }
         })
         .collect()
+}
+
+fn expand_selection_symbols(text: &str, language_code: &str) -> String {
+    let names = match language_code {
+        "nb" => ("komma", "punktum", "venstre parentes", "høyre parentes", "venstre klammeparentes", "høyre klammeparentes", "pluss"),
+        "nn" => ("komma", "punktum", "venstre parentes", "høgre parentes", "venstre krøllparentes", "høgre krøllparentes", "pluss"),
+        _ => ("comma", "period", "open parenthesis", "close parenthesis", "open brace", "close brace", "plus"),
+    };
+
+    let mut expanded = String::with_capacity(text.len());
+    for character in text.chars() {
+        let spoken = match character {
+            ',' => Some(names.0),
+            '.' => Some(names.1),
+            '(' => Some(names.2),
+            ')' => Some(names.3),
+            '{' => Some(names.4),
+            '}' => Some(names.5),
+            '+' => Some(names.6),
+            _ => None,
+        };
+        if let Some(spoken) = spoken {
+            if !expanded.ends_with(char::is_whitespace) && !expanded.is_empty() {
+                expanded.push(' ');
+            }
+            expanded.push_str(spoken);
+            expanded.push(' ');
+        } else {
+            expanded.push(character);
+        }
+    }
+    expanded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn tts_available() -> bool {
@@ -219,7 +261,7 @@ pub fn set_voice(name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_text_for_speech;
+    use super::{expand_selection_symbols, prepare_text_for_speech};
 
     #[test]
     fn speaks_standalone_double_i_as_letters() {
@@ -237,6 +279,30 @@ mod tests {
     fn leaves_non_reported_tokens_unchanged() {
         assert_eq!(prepare_text_for_speech("I opened it at 8:45 AM."), "I opened it at 8:45 AM.");
         assert_eq!(prepare_text_for_speech("III is unchanged."), "III is unchanged.");
+    }
+
+    #[test]
+    fn speaks_common_selected_symbols_in_english() {
+        assert_eq!(
+            expand_selection_symbols("Hello, world. (test) + {}", "en"),
+            "Hello comma world period open parenthesis test close parenthesis plus open brace close brace",
+        );
+    }
+
+    #[test]
+    fn speaks_common_selected_symbols_in_bokmal() {
+        assert_eq!(
+            expand_selection_symbols("Hei, verden. (test) + {}", "nb"),
+            "Hei komma verden punktum venstre parentes test høyre parentes pluss venstre klammeparentes høyre klammeparentes",
+        );
+    }
+
+    #[test]
+    fn speaks_common_selected_symbols_in_nynorsk() {
+        assert_eq!(
+            expand_selection_symbols("Hei, verd. (test) + {}", "nn"),
+            "Hei komma verd punktum venstre parentes test høgre parentes pluss venstre krøllparentes høgre krøllparentes",
+        );
     }
 }
 

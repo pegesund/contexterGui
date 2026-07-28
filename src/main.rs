@@ -11524,7 +11524,7 @@ impl eframe::App for ContextApp {
                                 let trimmed = text.trim();
                                 log!("Selected text: '{}'", trimmed);
                                 if !trimmed.is_empty() {
-                                    tts::speak_word(trimmed);
+                                    tts::speak_selected_text(trimmed, self.language.code());
                                 }
                             }
                             None => {
