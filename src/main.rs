@@ -172,7 +172,9 @@ struct CachedSentenceVerdict {
 }
 
 const SENTENCE_CACHE_CAP: usize = 20_000;
-const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v6-grammar-unknown-authority";
+// v7 invalidates persisted verdicts produced before the current Nynorsk
+// ranking behavior. Cached suggestions are replayed ahead of live scoring.
+const SENTENCE_CACHE_SCHEMA: &str = "lang-key-v7-fresh-spelling-ranking";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SentenceCache {
@@ -1353,6 +1355,17 @@ mod cross_language_barrier_tests {
             format!("{}:{}", env!("CARGO_PKG_VERSION"), SENTENCE_CACHE_SCHEMA)
         );
         assert_ne!(installed, development);
+    }
+
+    #[test]
+    fn sentence_cache_version_rejects_pre_ranking_refresh_verdicts() {
+        let current = sentence_cache_version(Some("0.2.11"));
+
+        assert_ne!(
+            current,
+            "0.2.11:lang-key-v6-grammar-unknown-authority",
+            "a persisted v6 verdict must not override the current spelling ranker"
+        );
     }
 
     #[test]
