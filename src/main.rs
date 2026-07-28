@@ -202,6 +202,31 @@ fn sentence_cache_entry_replayable(v: &CachedSentenceVerdict) -> bool {
     v.pending == 0
 }
 
+/// A spelling correction inserted by Spell is authoritative for the short
+/// bridge-echo window. Remove only the cached consonant-variant verdict for
+/// that inserted token so an older self-correction cannot be replayed.
+fn remove_cached_variant_output(
+    cache: &mut SentenceCache,
+    lang_code: &str,
+    replacement: &str,
+) -> usize {
+    let prefix = format!("{}:", lang_code);
+    let mut removed = 0usize;
+    for (key, verdict) in &mut cache.entries {
+        if !key.starts_with(&prefix) {
+            continue;
+        }
+        let before = verdict.errors.len();
+        verdict.errors.retain(|error| {
+            error.is_grammar
+                || error.rule_name != "stavefeil_variant_bert"
+                || !error.word.eq_ignore_ascii_case(replacement)
+        });
+        removed += before - verdict.errors.len();
+    }
+    removed
+}
+
 fn load_sentence_cache(installed_version: Option<&str>) -> SentenceCache {
     let cur = sentence_cache_version(installed_version);
     // Debug builds start with a cold cache every launch so testing is
@@ -1165,7 +1190,8 @@ mod cross_language_barrier_tests {
         paragraph_id_matches_bridge,
         grammar_response_sentence_hash, rescore_spelling_response,
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
-        sentence_cache_version, CachedSentenceVerdict,
+        sentence_cache_version, remove_cached_variant_output, CachedSentenceError,
+        CachedSentenceVerdict, SentenceCache,
         SENTENCE_CACHE_SCHEMA,
         ErrorCategory, keep_error_during_verified_addin_replacement,
         RecentSpellReplacement,
@@ -1456,33 +1482,87 @@ mod cross_language_barrier_tests {
     }
 
     #[test]
-    fn spell_replacement_echo_is_scoped_to_its_exact_route_sentence_and_word() {
+    fn spell_replacement_echo_is_scoped_to_route_paragraph_offset_and_word() {
         let now = std::time::Instant::now();
         let marker = RecentSpellReplacement {
             route_key: "macos:word-addin:42".to_string(),
             paragraph_id: "paragraph-7".to_string(),
-            sentence_context: "Jeg liker å spise pipa.".to_string(),
             doc_offset: 12,
             replacement: "pipa".to_string(),
             recorded_at: now,
         };
 
         assert!(marker.matches(
-            "macos:word-addin:42", "paragraph-7", "Jeg liker å spise pipa.", 12,
+            "macos:word-addin:42", "paragraph-7", 12,
             "pipa", now,
         ));
         assert!(!marker.matches(
-            "browser:1:2:3:4", "paragraph-7", "Jeg liker å spise pipa.", 12,
+            "browser:1:2:3:4", "paragraph-7", 12,
             "pipa", now,
         ));
         assert!(!marker.matches(
-            "macos:word-addin:42", "paragraph-7", "Jeg liker å spise pipa.", 12,
+            "macos:word-addin:42", "paragraph-7", 12,
             "spise", now,
         ));
         assert!(!marker.matches(
-            "macos:word-addin:42", "paragraph-7", "Jeg liker å spise pipa.", 13,
+            "macos:word-addin:42", "paragraph-7", 13,
             "pipa", now,
         ));
+    }
+
+    #[test]
+    fn spell_replacement_purges_only_cached_variant_output_for_that_token() {
+        let mut cache = SentenceCache::default();
+        cache.entries.insert(
+            sentence_cache_key_for_language("nb", "sentence-one"),
+            CachedSentenceVerdict {
+                errors: vec![
+                    CachedSentenceError {
+                        is_grammar: false,
+                        word: "pipa".to_string(),
+                        suggestion: "pippa".to_string(),
+                        explanation: String::new(),
+                        rule_name: "stavefeil_variant_bert".to_string(),
+                        error_word: String::new(),
+                        position: 0,
+                        top_candidates: vec![],
+                    },
+                    CachedSentenceError {
+                        is_grammar: false,
+                        word: "spisse".to_string(),
+                        suggestion: "spise".to_string(),
+                        explanation: String::new(),
+                        rule_name: "stavefeil_variant_bert".to_string(),
+                        error_word: String::new(),
+                        position: 0,
+                        top_candidates: vec![],
+                    },
+                ],
+                pending: 0,
+            },
+        );
+        cache.entries.insert(
+            sentence_cache_key_for_language("en", "sentence-two"),
+            CachedSentenceVerdict {
+                errors: vec![CachedSentenceError {
+                    is_grammar: false,
+                    word: "pipa".to_string(),
+                    suggestion: "pippa".to_string(),
+                    explanation: String::new(),
+                    rule_name: "stavefeil_variant_bert".to_string(),
+                    error_word: String::new(),
+                    position: 0,
+                    top_candidates: vec![],
+                }],
+                pending: 0,
+            },
+        );
+
+        assert_eq!(remove_cached_variant_output(&mut cache, "nb", "pipa"), 1);
+        let bokmal = cache.entries.get("nb:sentence-one").unwrap();
+        assert_eq!(bokmal.errors.len(), 1);
+        assert_eq!(bokmal.errors[0].word, "spisse");
+        assert_eq!(cache.entries["en:sentence-two"].errors.len(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -3113,7 +3193,6 @@ struct PendingConsonantBert {
 struct RecentSpellReplacement {
     route_key: String,
     paragraph_id: String,
-    sentence_context: String,
     doc_offset: usize,
     replacement: String,
     recorded_at: Instant,
@@ -3124,7 +3203,6 @@ impl RecentSpellReplacement {
         &self,
         route_key: &str,
         paragraph_id: &str,
-        sentence_context: &str,
         doc_offset: usize,
         word: &str,
         now: Instant,
@@ -3133,7 +3211,6 @@ impl RecentSpellReplacement {
             && self.route_key == route_key
             && self.paragraph_id == paragraph_id
             && self.doc_offset == doc_offset
-            && self.sentence_context.eq_ignore_ascii_case(sentence_context)
             && self.replacement.eq_ignore_ascii_case(word)
     }
 }
@@ -3847,13 +3924,11 @@ mod stt_quality_tests {
 impl ContextApp {
     fn remember_spell_replacement(
         &mut self,
-        find: &str,
         replacement: &str,
-        sentence_context: &str,
         paragraph_id: &str,
         doc_offset: usize,
     ) {
-        if sentence_context.is_empty() {
+        if replacement.is_empty() {
             return;
         }
         let now = Instant::now();
@@ -3863,18 +3938,29 @@ impl ContextApp {
         self.recent_spell_replacements.push(RecentSpellReplacement {
             route_key: self.manager.active_route_key.clone(),
             paragraph_id: paragraph_id.to_string(),
-            sentence_context: replace_word_at_position(sentence_context, find, replacement),
             doc_offset,
             replacement: replacement.to_string(),
             recorded_at: now,
         });
+        let removed = remove_cached_variant_output(
+            &mut self.sentence_cache,
+            self.language.code(),
+            replacement,
+        );
+        if removed > 0 {
+            save_sentence_cache(&self.sentence_cache);
+            log!(
+                "Removed {} cached consonant-variant verdict(s) for Spell replacement '{}'.",
+                removed,
+                replacement,
+            );
+        }
     }
 
     fn is_recent_spell_replacement_output(
         &self,
         route_key: &str,
         word: &str,
-        sentence_context: &str,
         paragraph_id: &str,
         doc_offset: usize,
     ) -> bool {
@@ -3882,7 +3968,6 @@ impl ContextApp {
         self.recent_spell_replacements.iter().any(|marker| marker.matches(
             route_key,
             paragraph_id,
-            sentence_context,
             doc_offset,
             word,
             now,
@@ -5864,7 +5949,6 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         if self.is_recent_spell_replacement_output(
             &pending.route_key,
             &pending.word,
-            &pending.sentence_ctx,
             &pending.paragraph_id,
             pending.doc_offset,
         ) {
@@ -8266,7 +8350,6 @@ self.grammar_queue.clear();
                 if self.is_recent_spell_replacement_output(
                     &active_route_key,
                     clean,
-                    &resp.sentence,
                     &resp.paragraph_id,
                     resp.doc_offset,
                 ) {
@@ -9951,9 +10034,7 @@ impl eframe::App for ContextApp {
             if ok {
                 self.last_replace_time = Instant::now();
                 self.remember_spell_replacement(
-                    &find,
                     &replace,
-                    &context,
                     &paragraph_id,
                     doc_offset,
                 );
