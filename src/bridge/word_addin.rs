@@ -102,9 +102,27 @@ impl WordAddinBridge {
     fn cached_context_if_active(&self) -> Option<CursorContext> {
         let context = self.cached_context.lock().ok()?.clone();
         let activity = self.last_activity.lock().ok()?.to_owned();
-        if word_addin_context_is_active(context.as_ref(), activity, Instant::now()) {
+        let now = Instant::now();
+        if word_addin_context_is_active(context.as_ref(), activity, now) {
             context.map(|(ctx, _)| ctx)
         } else {
+            // This makes an Add-in to Accessibility fallback diagnosable without
+            // producing production log noise on every UI frame.
+            static INACTIVE_LOG_THROTTLE: crate::logging::LogThrottle =
+                crate::logging::LogThrottle::new();
+            if crate::logging::debug_logging_enabled()
+                && INACTIVE_LOG_THROTTLE.should_emit(Duration::from_secs(5))
+            {
+                let age_ms = activity
+                    .map(|last| now.duration_since(last).as_millis().to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                crate::debug_log!(
+                    "Word Add-in context unavailable: cached={} activity_age_ms={} timeout_ms={}",
+                    context.is_some(),
+                    age_ms,
+                    ADDIN_ACTIVITY_TIMEOUT.as_millis(),
+                );
+            }
             None
         }
     }
