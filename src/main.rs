@@ -5486,7 +5486,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             ),
         );
         for (candidate, final_score) in &rescored {
-            log!(
+            debug_log!(
                 "  spelling BERT: '{}' source={} final={:.3}",
                 candidate,
                 if worker_already_applied_ortho { "worker-ortho" } else { "main-ortho" },
@@ -5758,7 +5758,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         let best_alt = scored_candidates.iter()
             .find(|(c, _)| c != &pending.word && pending.variants.contains(c));
         for (candidate, score) in scored_candidates {
-            log!("consonant BERT: '{}' orig={:.2}, '{}' score={:.2}", pending.word, orig_score, candidate, score);
+            debug_log!("consonant BERT: '{}' orig={:.2}, '{}' score={:.2}", pending.word, orig_score, candidate, score);
         }
         if let Some((best, s_best)) = best_alt {
             if *s_best > orig_score {
