@@ -504,7 +504,10 @@ impl TextBridge for BrowserBridge {
         // Return an empty CursorContext (word/sentence/masked all blank)
         // so the desktop's "no word, no context" branch at main.rs:~6622
         // runs and triggers prune_resolved_errors, whose empty-doc
-        // branch at main.rs:3335 clears writing_errors + queues.
+        // branch at main.rs:3335 clears writing_errors + queues. Keep the
+        // editor route, though: Google Docs can publish an empty active
+        // paragraph between regular updates, and an empty paragraph must not
+        // be mistaken for a switch to a different browser editor.
         if text.is_empty() {
             crate::debug_log!("read_context: empty text — returning empty CursorContext to trigger desktop clear");
             return Some(CursorContext {
@@ -513,7 +516,7 @@ impl TextBridge for BrowserBridge {
                 masked_sentence: None,
                 caret_pos: caret,
                 cursor_doc_offset: Some(0),
-                paragraph_id: String::new(),
+                paragraph_id: self.current_paragraph_id(),
             });
         }
 
@@ -823,6 +826,24 @@ mod tests {
         let (text, start, end, _) = bridge.cached_data().expect("empty payload is valid");
         assert!(text.is_empty());
         assert_eq!((start, end), (0, 0));
+    }
+
+    #[test]
+    fn empty_browser_context_retains_its_editor_route() {
+        let bridge = BrowserBridge::new();
+        bridge.last_modified.set(1);
+        bridge.last_read.set(Some(Instant::now()));
+        bridge.last_cursor.set(0);
+        bridge.last_text.borrow_mut().clear();
+        *bridge.last_source.borrow_mut() =
+            "42|https://docs.google.com/document/d/test|google-docs|legacy".to_string();
+        bridge.last_bridge_id.set(1234);
+        bridge.last_frame_id.set(7);
+        bridge.route_generation.set(2);
+        bridge.last_paragraph_start.set(19);
+
+        let context = bridge.read_context().expect("empty browser context");
+        assert_eq!(context.paragraph_id, "browser:1234:42:7:2:19");
     }
 
     #[test]
