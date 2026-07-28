@@ -1168,6 +1168,7 @@ mod cross_language_barrier_tests {
         sentence_cache_version, CachedSentenceVerdict,
         SENTENCE_CACHE_SCHEMA,
         ErrorCategory, keep_error_during_verified_addin_replacement,
+        RecentSpellReplacement,
         should_skip_cross_language_match, should_surface_unknown_spelling,
         spelling_correction_changes_word,
         spelling_error_still_present, spelling_error_still_present_at_sentence_offset,
@@ -1452,6 +1453,36 @@ mod cross_language_barrier_tests {
             route_key_for_context("Accessibility", "uia:0", 101),
             route_key_for_context("Accessibility", "uia:0", 202),
         );
+    }
+
+    #[test]
+    fn spell_replacement_echo_is_scoped_to_its_exact_route_sentence_and_word() {
+        let now = std::time::Instant::now();
+        let marker = RecentSpellReplacement {
+            route_key: "macos:word-addin:42".to_string(),
+            paragraph_id: "paragraph-7".to_string(),
+            sentence_context: "Jeg liker å spise pipa.".to_string(),
+            doc_offset: 12,
+            replacement: "pipa".to_string(),
+            recorded_at: now,
+        };
+
+        assert!(marker.matches(
+            "macos:word-addin:42", "paragraph-7", "Jeg liker å spise pipa.", 12,
+            "pipa", now,
+        ));
+        assert!(!marker.matches(
+            "browser:1:2:3:4", "paragraph-7", "Jeg liker å spise pipa.", 12,
+            "pipa", now,
+        ));
+        assert!(!marker.matches(
+            "macos:word-addin:42", "paragraph-7", "Jeg liker å spise pipa.", 12,
+            "spise", now,
+        ));
+        assert!(!marker.matches(
+            "macos:word-addin:42", "paragraph-7", "Jeg liker å spise pipa.", 13,
+            "pipa", now,
+        ));
     }
 
     #[cfg(target_os = "macos")]
@@ -3072,7 +3103,39 @@ struct PendingConsonantBert {
     sentence_ctx: String,
     doc_offset: usize,
     paragraph_id: String,
+    route_key: String,
     // sentences[0] = original, sentences[1..] = variants
+}
+
+/// A successful Spell replacement can immediately echo through a bridge and
+/// re-enter the valid-word consonant checker. Keep that acknowledgement scoped
+/// to the exact editor sentence so user-entered words are still evaluated.
+struct RecentSpellReplacement {
+    route_key: String,
+    paragraph_id: String,
+    sentence_context: String,
+    doc_offset: usize,
+    replacement: String,
+    recorded_at: Instant,
+}
+
+impl RecentSpellReplacement {
+    fn matches(
+        &self,
+        route_key: &str,
+        paragraph_id: &str,
+        sentence_context: &str,
+        doc_offset: usize,
+        word: &str,
+        now: Instant,
+    ) -> bool {
+        now.duration_since(self.recorded_at) <= Duration::from_secs(3)
+            && self.route_key == route_key
+            && self.paragraph_id == paragraph_id
+            && self.doc_offset == doc_offset
+            && self.sentence_context.eq_ignore_ascii_case(sentence_context)
+            && self.replacement.eq_ignore_ascii_case(word)
+    }
 }
 
 // --- egui app ---
@@ -3318,6 +3381,8 @@ struct ContextApp {
     pending_grammar_bert: Vec<PendingGrammarBert>,
     /// Pending async BERT scoring for consonant confusion
     pending_consonant_bert: Vec<PendingConsonantBert>,
+    /// Successful Spell replacements awaiting their short-lived bridge echo.
+    recent_spell_replacements: Vec<RecentSpellReplacement>,
     /// Pending async grammar-filter refinement (post-BERT spelling)
     pending_spelling_grammar: Vec<PendingSpellingGrammar>,
     /// Suggestion window: (misspelled_word, candidates)
@@ -3780,6 +3845,50 @@ mod stt_quality_tests {
 }
 
 impl ContextApp {
+    fn remember_spell_replacement(
+        &mut self,
+        find: &str,
+        replacement: &str,
+        sentence_context: &str,
+        paragraph_id: &str,
+        doc_offset: usize,
+    ) {
+        if sentence_context.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        self.recent_spell_replacements.retain(|marker| {
+            now.duration_since(marker.recorded_at) <= Duration::from_secs(3)
+        });
+        self.recent_spell_replacements.push(RecentSpellReplacement {
+            route_key: self.manager.active_route_key.clone(),
+            paragraph_id: paragraph_id.to_string(),
+            sentence_context: replace_word_at_position(sentence_context, find, replacement),
+            doc_offset,
+            replacement: replacement.to_string(),
+            recorded_at: now,
+        });
+    }
+
+    fn is_recent_spell_replacement_output(
+        &self,
+        route_key: &str,
+        word: &str,
+        sentence_context: &str,
+        paragraph_id: &str,
+        doc_offset: usize,
+    ) -> bool {
+        let now = Instant::now();
+        self.recent_spell_replacements.iter().any(|marker| marker.matches(
+            route_key,
+            paragraph_id,
+            sentence_context,
+            doc_offset,
+            word,
+            now,
+        ))
+    }
+
     fn macos_word_error_scope_active(&self) -> bool {
         if !cfg!(target_os = "macos") {
             return false;
@@ -3831,6 +3940,7 @@ impl ContextApp {
         self.pending_spelling_grammar.clear();
         self.pending_grammar_bert.clear();
         self.pending_consonant_bert.clear();
+        self.recent_spell_replacements.clear();
         self.grammar_queue.clear();
         self.grammar_queue_total = 0;
         self.processed_sentence_hashes.clear();
@@ -4214,6 +4324,7 @@ impl ContextApp {
             pending_spelling_bert: Vec::new(),
             pending_grammar_bert: Vec::new(),
             pending_consonant_bert: Vec::new(),
+            recent_spell_replacements: Vec::new(),
             pending_spelling_grammar: Vec::new(),
             suggestion_window: None,
             suggestion_selection: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -5193,6 +5304,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
             sentence_ctx: sentence_ctx.to_string(),
             doc_offset,
             paragraph_id: paragraph_id.to_string(),
+            route_key: self.manager.active_route_key.clone(),
         });
     }
 
@@ -5749,6 +5861,22 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
     /// Handle BERT spelling score response for consonant confusion.
     fn handle_consonant_bert_response(&mut self, pending: PendingConsonantBert, scored_candidates: &[(String, f32)]) {
         if scored_candidates.is_empty() { return; }
+        if self.is_recent_spell_replacement_output(
+            &pending.route_key,
+            &pending.word,
+            &pending.sentence_ctx,
+            &pending.paragraph_id,
+            pending.doc_offset,
+        ) {
+            log!(
+                "Skipping known-word variant for Spell replacement echo: '{}' route='{}' para='{}' offset={}",
+                pending.word,
+                pending.route_key,
+                trunc(&pending.paragraph_id, 10),
+                pending.doc_offset,
+            );
+            return;
+        }
         // scored_candidates is sorted best-first; first entry with the original word is the orig score
         let orig_score = scored_candidates.iter()
             .find(|(c, _)| c == &pending.word)
@@ -8134,6 +8262,22 @@ self.grammar_queue.clear();
                 if !self.bert_ready {
                     continue;
                 }
+                let active_route_key = self.manager.active_route_key.clone();
+                if self.is_recent_spell_replacement_output(
+                    &active_route_key,
+                    clean,
+                    &resp.sentence,
+                    &resp.paragraph_id,
+                    resp.doc_offset,
+                ) {
+                    log!(
+                        "Skipping known-word variant dispatch for Spell replacement echo: '{}' para='{}' offset={}",
+                        clean,
+                        trunc(&resp.paragraph_id, 10),
+                        resp.doc_offset,
+                    );
+                    continue;
+                }
                 let variants = self.spelling_variants_for_suppressed_token(clean, &resp.sentence);
                 if variants.is_empty() {
                     continue;
@@ -9806,6 +9950,13 @@ impl eframe::App for ContextApp {
             };
             if ok {
                 self.last_replace_time = Instant::now();
+                self.remember_spell_replacement(
+                    &find,
+                    &replace,
+                    &context,
+                    &paragraph_id,
+                    doc_offset,
+                );
                 if self.manager.active_bridge_name() == "Word Add-in" && !paragraph_id.is_empty() {
                     self.pending_addin_replacement = Some((
                         paragraph_id.clone(),
