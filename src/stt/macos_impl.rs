@@ -94,6 +94,7 @@ pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String
         let done = Arc::new(AtomicBool::new(false));
 
         let request_ptr: Arc<Mutex<*mut Object>> = Arc::new(Mutex::new(std::ptr::null_mut()));
+        let last_partial: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
         unsafe {
             let locale = {
@@ -119,7 +120,6 @@ pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String
 
             let tx = result_tx.clone();
             let d = done.clone();
-            let last_partial: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
             let last_partial2 = last_partial.clone();
             let callback = ConcreteBlock::new(move |result: *mut Object, error: *mut Object| {
                 if !error.is_null() {
@@ -129,12 +129,14 @@ pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String
                     stt_log(&format!("STT error: {}", s));
                     // On error, use last partial as final result
                     let fallback = last_partial2.lock().unwrap().clone();
-                    if !fallback.is_empty() {
-                        let _ = tx.send(TranscribeResult { text: fallback, partial: false });
-                    } else {
-                        let _ = tx.send(TranscribeResult { text: format!("Feil: {}", s), partial: false });
+                    if !d.swap(true, Ordering::AcqRel) {
+                        let text = if fallback.is_empty() {
+                            format!("Feil: {}", s)
+                        } else {
+                            fallback
+                        };
+                        let _ = tx.send(TranscribeResult { text, partial: false });
                     }
-                    d.store(true, Ordering::Relaxed);
                     return;
                 }
                 if !result.is_null() {
@@ -153,8 +155,9 @@ pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String
                         } else {
                             s
                         };
-                        let _ = tx.send(TranscribeResult { text, partial: false });
-                        d.store(true, Ordering::Relaxed);
+                        if !d.swap(true, Ordering::AcqRel) {
+                            let _ = tx.send(TranscribeResult { text, partial: false });
+                        }
                     } else {
                         // Track last partial
                         if !s.is_empty() {
@@ -296,10 +299,29 @@ pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String
             }
         }
 
-        // Wait for final result (up to 10 seconds)
+        // Final SFSpeech callbacks are delivered on this worker's run loop.
+        // Keep pumping it after endAudio instead of blocking it with sleep.
         for _ in 0..100 {
             if done.load(Ordering::Relaxed) { break; }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            unsafe {
+                core_foundation::runloop::CFRunLoop::run_in_mode(
+                    core_foundation::runloop::kCFRunLoopDefaultMode,
+                    std::time::Duration::from_millis(100),
+                    true,
+                );
+            }
+        }
+
+        // The callback is retained by SFSpeech, so the receiver would otherwise
+        // remain open forever when macOS never emits a final callback.
+        if !done.swap(true, Ordering::AcqRel) {
+            let fallback = last_partial.lock().unwrap().clone();
+            let text = if fallback.is_empty() {
+                "Feil: talegjenkjenning fullfÃ¸rte ikke".to_string()
+            } else {
+                fallback
+            };
+            let _ = result_tx.send(TranscribeResult { text, partial: false });
         }
 
         MIC_RECORDING.store(false, Ordering::Relaxed);
