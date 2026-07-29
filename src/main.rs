@@ -5533,6 +5533,20 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                             let existing: std::collections::HashSet<String> = self.completions.iter()
                                 .map(|c| c.word.to_lowercase()).collect();
 
+                            // Words already typed in the active sentence before the
+                            // cursor. Re-suggesting one of these is almost never what
+                            // the user wants — "…liker å spille fotball om s" used to
+                            // put "spille" (from this very sentence) above BERT's
+                            // contextually perfect "sommeren". Doc/user-dict injection
+                            // exists for re-typing names and domain terms from OTHER
+                            // parts of the document, so same-sentence words are out.
+                            let sentence_words: std::collections::HashSet<String> =
+                                self.context.sentence.to_lowercase()
+                                    .split(|c: char| !c.is_alphanumeric() && c != '-')
+                                    .filter(|w| !w.is_empty())
+                                    .map(|w| w.to_string())
+                                    .collect();
+
                             // Inject document words (sorted by count, highest first)
                             log!("Doc inject: prefix='{}' doc_word_counts={} entries, matches: {:?}",
                                 prefix, self.doc_word_counts.len(),
@@ -5540,11 +5554,21 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                                     .filter(|(w, _)| w.starts_with(&prefix))
                                     .take(5).collect::<Vec<_>>());
                             let mut doc_matches: Vec<(&String, &u16)> = self.doc_word_counts.iter()
-                                .filter(|(w, count)| **count >= 1 && w.starts_with(&prefix) && w.len() > prefix.len() && !existing.contains(w.as_str()))
+                                .filter(|(w, count)| **count >= 1 && w.starts_with(&prefix) && w.len() > prefix.len()
+                                    && !existing.contains(w.as_str())
+                                    && !sentence_words.contains(w.as_str()))
                                 .collect();
                             doc_matches.sort_by(|a, b| b.1.cmp(a.1));
                             let after_period = self.context.sentence.trim().is_empty()
                                 || self.context.word.chars().next().map_or(false, |c| c.is_uppercase());
+                            // Doc words supplement BERT's ranking, they don't override
+                            // it: insert BELOW BERT's top-2 so a strong contextual pick
+                            // keeps the first slots, while doc words stay visible when
+                            // the BERT list is sparse (names like "Trussel" give 0-1
+                            // BERT candidates, so doc words still land on top there).
+                            // The old insert(0) with a fabricated 50+count score put
+                            // any prefix-matching doc word above everything.
+                            let mut insert_at = self.completions.len().min(2);
                             for (dw, count) in doc_matches.into_iter().take(3) {
                                 // Restore original casing from paragraph_texts
                                 let mut word = self.paragraph_texts.values()
@@ -5557,17 +5581,22 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                                     let mut chars = word.chars();
                                     word = chars.next().unwrap().to_uppercase().to_string() + chars.as_str();
                                 }
-                                self.completions.insert(0, nostos_cognio::complete::Completion {
+                                self.completions.insert(insert_at, nostos_cognio::complete::Completion {
                                     word, score: 50.0 + *count as f32, elapsed_ms: 0.0,
                                 });
+                                insert_at += 1;
                             }
 
-                            // Inject user dict words
+                            // Inject user dict words — personal words the user added
+                            // explicitly, so they keep top placement, but the
+                            // same-sentence guard applies to them too.
                             if let Some(ud) = &self.user_dict {
                                 let existing: std::collections::HashSet<String> = self.completions.iter()
                                     .map(|c| c.word.to_lowercase()).collect();
                                 for uw in ud.list_words() {
-                                    if uw.starts_with(&prefix) && uw.len() > prefix.len() && !existing.contains(&uw) {
+                                    if uw.starts_with(&prefix) && uw.len() > prefix.len()
+                                        && !existing.contains(&uw)
+                                        && !sentence_words.contains(&uw) {
                                         self.completions.insert(0, nostos_cognio::complete::Completion {
                                             word: uw, score: 100.0, elapsed_ms: 0.0,
                                         });
