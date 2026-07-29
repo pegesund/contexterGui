@@ -3215,6 +3215,8 @@ struct PendingSpellingGrammar {
     paragraph_id: String,
     sentence: String,
     bert_ranked: Vec<(String, f32)>,
+    /// Route that owned the post-BERT grammar refinement request.
+    route_key: String,
 }
 
 /// Pending consonant confusion BERT scoring
@@ -5871,6 +5873,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                         paragraph_id: deferred.paragraph_id.clone(),
                         sentence: deferred.sentence.clone(),
                         bert_ranked,
+                        route_key: self.manager.active_route_key.clone(),
                     });
                 }
             }
@@ -8279,6 +8282,18 @@ self.grammar_queue.clear();
             while let Some(batch) = actor.try_recv_batch() {
                 if let Some(idx) = self.pending_spelling_grammar.iter().position(|p| p.request_id == batch.request_id) {
                     let pending = self.pending_spelling_grammar.remove(idx);
+                    if !async_response_matches_active_route(
+                        &self.manager.active_route_key,
+                        &pending.route_key,
+                    ) {
+                        log!(
+                            "Stale spelling grammar refinement discarded: route response='{}' active='{}' word='{}'",
+                            pending.route_key,
+                            self.manager.active_route_key,
+                            pending.word,
+                        );
+                        continue;
+                    }
                     batch_refinements.push((pending, batch.results));
                 }
             }
