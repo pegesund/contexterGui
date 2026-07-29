@@ -16,8 +16,8 @@ path = "src/lib.rs"
 # screen reader (they use TTS for content, not navigation), so the loss
 # of VoiceOver integration is acceptable for v1.
 # To re-enable later (after upstream fix): default-features = true
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-egui = "0.33"
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.34"
 anyhow = "1"
 redb = "2"
 dirs = "6"

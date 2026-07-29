@@ -4634,7 +4634,7 @@ impl ContextApp {
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
                     stt::WhisperEngine::load(&dll_dir, &model_path, &*lang0, &*ui_lang0)
-                        .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                        .map(|mut e| { e.set_threads(6); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
         } else {
@@ -4650,16 +4650,20 @@ impl ContextApp {
             let final_path = downloader::whisper_model_path(&lang_code, final_model)
                 .to_string_lossy()
                 .to_string();
+            // Thread split: the streaming (base) and medium lanes transcribe
+            // CONCURRENTLY during recording — give base 4 and medium 8 so
+            // they share the CPU without starving each other. (Effective only
+            // with a whisper.dll exporting spell_whisper_full_threads.)
             std::thread::spawn(move || {
                 let _ = tx2.send(WhisperLoadItem::Streaming(
                     stt::WhisperEngine::load(&dll2, &streaming_path, &*lang1, &*ui_lang1)
-                        .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                        .map(|mut e| { e.set_threads(4); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
                     stt::WhisperEngine::load(&dll_dir, &final_path, &*lang2, &*ui_lang2)
-                        .map(|e| Box::new(e) as Box<dyn stt::SttEngine>)
+                        .map(|mut e| { e.set_threads(8); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
         }
@@ -9676,6 +9680,11 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 }
 
 impl eframe::App for ContextApp {
+    // eframe 0.34 requires `ui` but still calls the deprecated `update`
+    // right before it — all rendering stays in `update` (Context-based
+    // panels). Migrating to the root-Ui API is 0.35 work.
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // App-switch detection runs unconditionally at the very top of every frame,
         // before any processing or drawing, so stale errors are cleared immediately.
@@ -11366,7 +11375,7 @@ impl eframe::App for ContextApp {
         // Process scroll FIRST so `s` has the updated value for everything below.
         let scroll_delta = ctx.input(|i| {
             if i.modifiers.ctrl || i.modifiers.command {
-                i.raw_scroll_delta.y
+                i.smooth_scroll_delta.y
             } else {
                 0.0
             }
@@ -15379,6 +15388,8 @@ fn run_language_picker() -> Option<String> {
     }
 
     impl eframe::App for PickerApp {
+        fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             ctx.set_visuals(egui::Visuals::light());
 
@@ -15480,6 +15491,8 @@ fn run_performance_picker(lang_code: &str) -> (u8, String) {
     }
 
     impl eframe::App for PickerApp {
+        fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             ctx.set_visuals(egui::Visuals::light());
 
@@ -15617,6 +15630,8 @@ fn run_download_window(lang_code: &str) -> bool {
     }
 
     impl eframe::App for DownloadApp {
+        fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             ctx.set_visuals(egui::Visuals::light());
 
