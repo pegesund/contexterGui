@@ -1208,7 +1208,7 @@ mod cross_language_barrier_tests {
         should_skip_cross_language_match, should_surface_unknown_spelling,
         spelling_correction_changes_word,
         spelling_error_still_present, spelling_error_still_present_at_sentence_offset,
-        word_token_at_position,
+        word_token_at_position, BridgeManager,
     };
     use std::path::PathBuf;
 
@@ -1269,6 +1269,14 @@ mod cross_language_barrier_tests {
             false,
             &ErrorCategory::Spelling,
         ));
+    }
+
+    #[test]
+    fn reconnects_only_disconnected_word_com_bridge() {
+        assert!(BridgeManager::word_com_needs_reconnect("Word COM", false, false));
+        assert!(!BridgeManager::word_com_needs_reconnect("Word COM", false, true));
+        assert!(!BridgeManager::word_com_needs_reconnect("Accessibility", false, false));
+        assert!(!BridgeManager::word_com_needs_reconnect("Word COM", true, false));
     }
 
     #[test]
@@ -2459,6 +2467,14 @@ impl BridgeManager {
         }
     }
 
+    fn word_com_needs_reconnect(
+        bridge_name: &str,
+        has_context: bool,
+        connection_healthy: bool,
+    ) -> bool {
+        bridge_name == "Word COM" && !has_context && !connection_healthy
+    }
+
     fn maybe_late_connect_word_bridge(&mut self) {
         let fg_app_kind = self.platform.classify_app(&self.platform.foreground_app());
         let word_is_fg = fg_app_kind == platform::AppKind::Word;
@@ -2613,6 +2629,7 @@ impl BridgeManager {
 
     fn try_word_context(&mut self, fg: &ForegroundRoute) -> Option<CursorContext> {
         self.last_user_was_browser = false;
+        let mut disconnected_com_idx = None;
         for (i, bridge) in self.bridges.iter().enumerate() {
             if bridge.name().contains("Word") {
                 if let Some(ctx) = bridge.read_context() {
@@ -2627,8 +2644,17 @@ impl BridgeManager {
                         return Some(ctx);
                     }
                 }
+                if Self::word_com_needs_reconnect(bridge.name(), false, bridge.connection_healthy()) {
+                    disconnected_com_idx = Some(i);
+                }
                 break;
             }
+        }
+        if let Some(index) = disconnected_com_idx {
+            log!("Word COM bridge lost its automation connection; removing stale bridge so late-connect can retry");
+            self.bridges.remove(index);
+            self.active_idx = self.active_idx.min(self.bridges.len().saturating_sub(1));
+            self.clear_context();
         }
         None
     }

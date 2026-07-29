@@ -509,6 +509,10 @@ impl TextBridge for WordComBridge {
         true
     }
 
+    fn connection_healthy(&self) -> bool {
+        self.get_app().is_some()
+    }
+
     fn read_context(&self) -> Option<CursorContext> {
         // ONLY read text if Word has a visible blinking caret.
         // No caret = our window has focus = skip COM calls (BridgeManager returns cached context).

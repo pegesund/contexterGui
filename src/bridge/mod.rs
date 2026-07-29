@@ -34,6 +34,11 @@ pub trait TextBridge {
     /// Can this bridge connect to the currently focused application?
     fn is_available(&self) -> bool;
 
+    /// Whether this bridge still has a live connection to its target application.
+    fn connection_healthy(&self) -> bool {
+        true
+    }
+
     /// Read the current word, sentence, and caret position.
     fn read_context(&self) -> Option<CursorContext>;
 
