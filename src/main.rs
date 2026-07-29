@@ -5636,6 +5636,18 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                         self.handle_grammar_bert_response(pending, &scored_candidates);
                     } else if let Some(idx) = self.pending_consonant_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_consonant_bert.remove(idx);
+                        if !async_response_matches_active_route(
+                            &self.manager.active_route_key,
+                            &pending.route_key,
+                        ) {
+                            log!(
+                                "Stale consonant BERT response discarded: route response='{}' active='{}' word='{}'",
+                                pending.route_key,
+                                self.manager.active_route_key,
+                                pending.word,
+                            );
+                            continue;
+                        }
                         self.handle_consonant_bert_response(pending, &scored_candidates);
                     }
                 }
