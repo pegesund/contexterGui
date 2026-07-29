@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 
 
 static MIC_RECORDING: AtomicBool = AtomicBool::new(false);
+// The UI may hide a recording before Whisper finishes its current blocking
+// transcription. Keep a separate lease so that cannot start a second worker.
+static MIC_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Saved audio from last recording — for re-transcription with final model
 static SAVED_AUDIO: Mutex<Option<Vec<f32>>> = Mutex::new(None);
 
@@ -15,7 +18,16 @@ struct RecordingStateGuard;
 impl Drop for RecordingStateGuard {
     fn drop(&mut self) {
         MIC_RECORDING.store(false, Ordering::Relaxed);
+        MIC_SESSION_ACTIVE.store(false, Ordering::Release);
     }
+}
+
+fn begin_recording_session() -> Result<RecordingStateGuard, String> {
+    MIC_SESSION_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "Already recording".to_string())?;
+    MIC_RECORDING.store(true, Ordering::Release);
+    Ok(RecordingStateGuard)
 }
 
 /// Trait for speech-to-text engines.
@@ -49,6 +61,8 @@ pub fn is_recording() -> bool {
 }
 
 pub fn force_stop() {
+    // This is intentionally UI-only. The worker owns MIC_SESSION_ACTIVE until
+    // it observes MicHandle::stop and exits after its current Whisper call.
     MIC_RECORDING.store(false, Ordering::Relaxed);
 }
 
@@ -95,19 +109,15 @@ pub fn start_recording(
     auto_final: bool,
     no_audio_msg: String,
 ) -> Result<MicHandle, String> {
-    if MIC_RECORDING.load(Ordering::Relaxed) {
-        return Err("Already recording".into());
-    }
+    let recording_guard = begin_recording_session()?;
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (result_tx, result_rx) = mpsc::channel();
 
     let stop_clone = stop_flag.clone();
 
-    MIC_RECORDING.store(true, Ordering::Relaxed);
-
     std::thread::spawn(move || {
-        let _recording_guard = RecordingStateGuard;
+        let _recording_guard = recording_guard;
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
@@ -361,5 +371,29 @@ fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
             mic_log(&format!("Resample error: {}", e));
             input.to_vec()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static RECORDING_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn hiding_recording_ui_does_not_release_active_worker_session() {
+        let _test_lock = RECORDING_STATE_TEST_LOCK.lock().unwrap();
+        MIC_RECORDING.store(false, Ordering::Relaxed);
+        MIC_SESSION_ACTIVE.store(false, Ordering::Relaxed);
+
+        let recording_guard = begin_recording_session().expect("first session starts");
+        assert!(is_recording());
+
+        force_stop();
+        assert!(!is_recording());
+        assert!(begin_recording_session().is_err());
+
+        drop(recording_guard);
+        assert!(begin_recording_session().is_ok());
     }
 }
