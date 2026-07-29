@@ -12,7 +12,12 @@ set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
-set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+
+# CI ships a portable DLL (no -march=native): it must run on every user CPU.
+# Local dev builds can opt in to native codegen (AVX2/FMA on modern x86) with
+# -DSPELL_WHISPER_NATIVE=ON — medium-q5 transcription is several times faster.
+option(SPELL_WHISPER_NATIVE "Build ggml with native CPU optimizations" OFF)
+set(GGML_NATIVE ${SPELL_WHISPER_NATIVE} CACHE BOOL "" FORCE)
 
 add_subdirectory("${WHISPER_CPP_DIR}" "${CMAKE_BINARY_DIR}/whisper.cpp" EXCLUDE_FROM_ALL)
 

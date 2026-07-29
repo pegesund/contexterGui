@@ -8,6 +8,7 @@ type WhisperContext = c_void;
 type FnInit = unsafe extern "C" fn(*const c_char) -> *mut WhisperContext;
 type FnFree = unsafe extern "C" fn(*mut WhisperContext);
 type FnFull = unsafe extern "C" fn(*mut WhisperContext, *const c_float, c_int, *const c_char) -> c_int;
+type FnFullThreads = unsafe extern "C" fn(*mut WhisperContext, *const c_float, c_int, *const c_char, c_int) -> c_int;
 type FnSegments = unsafe extern "C" fn(*mut WhisperContext) -> c_int;
 type FnSegmentText = unsafe extern "C" fn(*mut WhisperContext, c_int) -> *const c_char;
 
@@ -17,6 +18,12 @@ pub struct WhisperEngine {
     ctx: *mut WhisperContext,
     fn_free: FnFree,
     fn_full: FnFull,
+    /// Newer DLLs export a thread-count variant; None on older DLLs (falls
+    /// back to fn_full's hardcoded 4 threads).
+    fn_full_threads: Option<FnFullThreads>,
+    /// Threads for whisper_full. Set per engine so the streaming (base) and
+    /// final (medium) lanes can share the CPU without starving each other.
+    n_threads: c_int,
     fn_n_segments: FnSegments,
     fn_segment_text: FnSegmentText,
     /// BCP-47 language code for Whisper transcription (e.g. "nb", "en")
@@ -62,6 +69,8 @@ impl WhisperEngine {
                 .map_err(|e| format!("spell_whisper_init_from_file not found: {}", e))?;
             let fn_free: FnFree = *lib.get::<FnFree>(b"spell_whisper_free").unwrap();
             let fn_full: FnFull = *lib.get::<FnFull>(b"spell_whisper_full").unwrap();
+            let fn_full_threads: Option<FnFullThreads> =
+                lib.get::<FnFullThreads>(b"spell_whisper_full_threads").ok().map(|s| *s);
             let fn_n_segments: FnSegments = *lib.get::<FnSegments>(b"spell_whisper_full_n_segments").unwrap();
             let fn_segment_text: FnSegmentText = *lib.get::<FnSegmentText>(b"spell_whisper_full_get_segment_text").unwrap();
 
@@ -87,12 +96,20 @@ impl WhisperEngine {
                 ctx,
                 fn_free,
                 fn_full,
+                fn_full_threads,
+                n_threads: 4,
                 fn_n_segments,
                 fn_segment_text,
                 stt_lang_code: CString::new(model_lang.stt_language_code()).unwrap_or_default(),
                 no_speech_msg: ui_lang.ui_no_speech_recognized().to_string(),
             })
         }
+    }
+
+    /// Set the whisper_full thread count (effective only with a DLL that
+    /// exports `spell_whisper_full_threads`; older DLLs stay at 4).
+    pub fn set_threads(&mut self, n: usize) {
+        self.n_threads = n.clamp(1, 16) as c_int;
     }
 }
 
@@ -102,12 +119,21 @@ impl SttEngine for WhisperEngine {
             mic_log(&format!("Whisper: transcribing {} samples ({:.1}s)...", audio.len(), audio.len() as f64 / 16000.0));
             let start = std::time::Instant::now();
 
-            let ret = (self.fn_full)(
-                self.ctx,
-                audio.as_ptr(),
-                audio.len() as c_int,
-                self.stt_lang_code.as_ptr(),
-            );
+            let ret = match self.fn_full_threads {
+                Some(f) => f(
+                    self.ctx,
+                    audio.as_ptr(),
+                    audio.len() as c_int,
+                    self.stt_lang_code.as_ptr(),
+                    self.n_threads,
+                ),
+                None => (self.fn_full)(
+                    self.ctx,
+                    audio.as_ptr(),
+                    audio.len() as c_int,
+                    self.stt_lang_code.as_ptr(),
+                ),
+            };
             if ret != 0 {
                 return format!("Feil: Whisper-transkribering feilet (kode {})", ret);
             }

@@ -213,6 +213,101 @@ pub fn start_recording(
 
         mic_log("Microphone: recording started");
 
+        // ── Medium lane (auto_final only) ─────────────────────────────────
+        // The final (medium) model chews through the recording IN PARALLEL
+        // with the base streaming lane, segment by segment, so the wait on
+        // stop shrinks from "whole recording × medium speed" to "last
+        // segment × medium speed". Segments are cut at the quietest point
+        // near the 30s mark so we split between words, not inside them.
+        // The lane owns the FINAL result in this mode; the main loop below
+        // only does streaming partials.
+        let medium_lane: Option<std::thread::JoinHandle<()>> = if auto_final {
+            let lane_buf = audio_buf.clone();
+            let lane_stop = stop_clone.clone();
+            let lane_engine = final_engine.clone();
+            let lane_tx = result_tx.clone();
+            let lane_no_audio = no_audio_msg.clone();
+            // 20s segments: with small-q5 at ~2× realtime the lane stays
+            // caught up, and the tail after stop is ≤20s of audio ≈ ≤10s
+            // transcribe, typically ~5s.
+            let segment_samples = sample_rate as usize * 20;
+            let sr = sample_rate;
+            Some(std::thread::spawn(move || {
+                let mut done: usize = 0;
+                let mut parts: Vec<String> = Vec::new();
+
+                let transcribe_range = |from: usize, to: usize| -> String {
+                    let raw: Vec<f32> = {
+                        let buf = lane_buf.lock().unwrap();
+                        buf[from..to.min(buf.len())].to_vec()
+                    };
+                    if raw.is_empty() {
+                        return String::new();
+                    }
+                    // Cheap silence gate: don't run the model on dead air
+                    // (its "no speech" placeholder would otherwise land in
+                    // the middle of the assembled text).
+                    let max_abs = raw.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                    if max_abs < 1e-3 {
+                        return String::new();
+                    }
+                    let audio_16k = if sr != 16000 { resample(&raw, sr, 16000) } else { raw };
+                    let start = std::time::Instant::now();
+                    let text = {
+                        let eng = lock_engine(&lane_engine, "medium-lane");
+                        eng.transcribe(&audio_16k)
+                    };
+                    mic_log(&format!(
+                        "Medium lane: segment {:.1}s-{:.1}s transcribed in {:.1}s",
+                        from as f64 / sr as f64, to as f64 / sr as f64,
+                        start.elapsed().as_secs_f64()));
+                    text
+                };
+
+                loop {
+                    if lane_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let available = { lane_buf.lock().unwrap().len() };
+                    if available >= done + segment_samples {
+                        // Cut at the quietest 20ms frame within the last 3s
+                        // of the segment window.
+                        let target = done + segment_samples;
+                        let cut = {
+                            let buf = lane_buf.lock().unwrap();
+                            find_quiet_cut(&buf, target.saturating_sub(sr as usize * 3), target, sr as usize / 50)
+                        };
+                        let text = transcribe_range(done, cut);
+                        if !text.trim().is_empty() {
+                            parts.push(text.trim().to_string());
+                        }
+                        done = cut;
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }
+
+                // Tail after stop: whatever the lane hasn't processed yet.
+                let total = { lane_buf.lock().unwrap().len() };
+                if total == 0 {
+                    let _ = lane_tx.send(TranscribeResult { text: lane_no_audio, partial: false });
+                    return;
+                }
+                if total > done {
+                    let text = transcribe_range(done, total);
+                    if !text.trim().is_empty() {
+                        parts.push(text.trim().to_string());
+                    }
+                }
+                let assembled = parts.join(" ");
+                let final_text = if assembled.trim().is_empty() { lane_no_audio } else { assembled };
+                mic_log(&format!("Medium lane: final assembled ({} chars)", final_text.len()));
+                let _ = lane_tx.send(TranscribeResult { text: final_text, partial: false });
+            }))
+        } else {
+            None
+        };
+
         let first_chunk_samples = sample_rate as usize * 2;
         let chunk_interval_samples = sample_rate as usize * 2;
         let mut last_transcribed_len: usize = 0;
@@ -261,6 +356,14 @@ pub fn start_recording(
         MIC_RECORDING.store(false, Ordering::Relaxed);
         mic_log("Microphone: recording stopped");
 
+        // auto_final mode: the medium lane owns the final result — it has
+        // already transcribed everything except the tail, and sends the
+        // assembled text on its own channel clone. Just wait for it.
+        if let Some(lane) = medium_lane {
+            let _ = lane.join();
+            return;
+        }
+
         let raw_audio = {
             let buf = audio_buf.lock().unwrap();
             buf.clone()
@@ -280,23 +383,18 @@ pub fn start_recording(
             raw_audio
         };
 
-        mic_log(&format!("Microphone: final transcribe {:.1}s (auto_final={})...",
-            audio_16k.len() as f64 / 16000.0, auto_final));
+        mic_log(&format!("Microphone: final transcribe {:.1}s (quick pass)...",
+            audio_16k.len() as f64 / 16000.0));
         let final_start = std::time::Instant::now();
-        let text = if auto_final {
-            let eng = lock_engine(&final_engine, "final");
-            eng.transcribe(&audio_16k)
-        } else {
+        let text = {
             // Use streaming engine for quick result — user can click "Forbedre" later
             let eng = lock_engine(&streaming_engine, "streaming");
             eng.transcribe(&audio_16k)
         };
         mic_log(&format!("STT final result in {:.1}s: '{}'", final_start.elapsed().as_secs_f64(), text));
         // Save audio for later re-transcription with final model
-        if !auto_final {
-            if let Ok(mut buf) = SAVED_AUDIO.lock() {
-                *buf = Some(audio_16k);
-            }
+        if let Ok(mut buf) = SAVED_AUDIO.lock() {
+            *buf = Some(audio_16k);
         }
         let _ = result_tx.send(TranscribeResult { text, partial: false });
     });
@@ -329,6 +427,28 @@ pub fn improve_with_final_model(
 }
 
 /// Log to the shared log file
+/// Find the quietest 20ms-ish frame in `buf[from..to]` and return the sample
+/// index at its center — used to cut whisper segments between words instead
+/// of through them. Falls back to `to` when the range is degenerate.
+fn find_quiet_cut(buf: &[f32], from: usize, to: usize, frame_len: usize) -> usize {
+    let to = to.min(buf.len());
+    if from >= to || frame_len == 0 || to - from < frame_len * 2 {
+        return to;
+    }
+    let mut best_start = to - frame_len;
+    let mut best_energy = f32::MAX;
+    let mut i = from;
+    while i + frame_len <= to {
+        let energy: f32 = buf[i..i + frame_len].iter().map(|s| s * s).sum();
+        if energy < best_energy {
+            best_energy = energy;
+            best_start = i;
+        }
+        i += frame_len;
+    }
+    best_start + frame_len / 2
+}
+
 fn mic_log(msg: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("spell.log");

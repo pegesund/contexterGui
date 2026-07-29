@@ -14,20 +14,31 @@ SPELL_EXPORT void spell_whisper_free(whisper_context * ctx) {
     whisper_free(ctx);
 }
 
-SPELL_EXPORT int spell_whisper_full(
+SPELL_EXPORT int spell_whisper_full_threads(
     whisper_context * ctx,
     const float * samples,
     int n_samples,
-    const char * language
+    const char * language,
+    int n_threads
 ) {
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.n_threads = 4;
+    params.n_threads = n_threads > 0 ? n_threads : 4;
     params.print_special = false;
     params.print_progress = false;
     params.print_realtime = false;
     params.print_timestamps = false;
     params.language = language;
     return whisper_full(ctx, params, samples, n_samples);
+}
+
+// Kept for ABI compatibility with binaries that predate the threads variant.
+SPELL_EXPORT int spell_whisper_full(
+    whisper_context * ctx,
+    const float * samples,
+    int n_samples,
+    const char * language
+) {
+    return spell_whisper_full_threads(ctx, samples, n_samples, language, 4);
 }
 
 SPELL_EXPORT int spell_whisper_full_n_segments(whisper_context * ctx) {
