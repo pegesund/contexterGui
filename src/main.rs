@@ -917,7 +917,7 @@ fn route_key_for_context(bridge_name: &str, paragraph_id: &str, owner_pid: u32) 
 /// Grammar work is asynchronous, so paragraph identity alone is insufficient
 /// when two editor routes can emit similarly-shaped paragraphs. A response is
 /// only allowed to update the currently owned route.
-fn grammar_response_matches_active_route(active_route_key: &str, response_route_key: &str) -> bool {
+fn async_response_matches_active_route(active_route_key: &str, response_route_key: &str) -> bool {
     !active_route_key.is_empty() && active_route_key == response_route_key
 }
 
@@ -1197,7 +1197,7 @@ mod cross_language_barrier_tests {
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         browser_route_key, route_key_for_context, known_word_spelling_variants_for_analyzer,
         paragraph_id_matches_bridge,
-        grammar_response_matches_active_route,
+        async_response_matches_active_route,
         grammar_response_sentence_hash, rescore_spelling_response,
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
         sentence_cache_version, remove_cached_variant_output, CachedSentenceError,
@@ -1503,16 +1503,16 @@ mod cross_language_barrier_tests {
     }
 
     #[test]
-    fn grammar_responses_are_scoped_to_the_active_route() {
-        assert!(grammar_response_matches_active_route(
+    fn async_responses_are_scoped_to_the_active_route() {
+        assert!(async_response_matches_active_route(
             "macos:word-addin:42",
             "macos:word-addin:42",
         ));
-        assert!(!grammar_response_matches_active_route(
+        assert!(!async_response_matches_active_route(
             "macos:word-addin:42",
             "macos:accessibility:42",
         ));
-        assert!(!grammar_response_matches_active_route(
+        assert!(!async_response_matches_active_route(
             "browser:1234:42:7:1",
             "browser:1234:42:7:2",
         ));
@@ -3170,6 +3170,9 @@ struct PendingSpellingBert {
     error_idx_word: String,       // word to match in writing_errors
     error_doc_offset: usize,
     candidates: Vec<(String, f32)>, // (candidate, ortho_sim)
+    /// Route that owned the request when it was dispatched. BERT runs on a
+    /// worker, so a result may arrive after the active editor has changed.
+    route_key: String,
     /// When Some(...), the WritingError doesn't exist yet and should be
     /// pushed once BERT ranks the candidates. Lets us defer underline +
     /// suggestion display until the result is ranked, so the user never
@@ -3193,6 +3196,8 @@ struct PendingGrammarBert {
     sentence_context: String,
     doc_offset: usize,
     candidates: Vec<(String, String, String)>, // (corrected_sentence, explanation, rule_name)
+    /// Route that owned this grammar correction ranking request.
+    route_key: String,
 }
 
 /// Pending grammar-filter refinement after a SpellingFull BERT response.
@@ -5581,6 +5586,19 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 bert_worker::BertResponse::SpellingScore { id, scored_candidates } => {
                     if let Some(idx) = self.pending_spelling_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_spelling_bert.remove(idx);
+                        if !async_response_matches_active_route(
+                            &self.manager.active_route_key,
+                            &pending.route_key,
+                        ) {
+                            self.settle_spelling_bert_cache_pending(&pending);
+                            log!(
+                                "Stale spelling BERT response discarded: route response='{}' active='{}' word='{}'",
+                                pending.route_key,
+                                self.manager.active_route_key,
+                                pending.error_idx_word,
+                            );
+                            continue;
+                        }
                         let elapsed_ms = pending.queued_at.elapsed().as_millis();
                         if crate::logging::debug_logging_enabled() && elapsed_ms >= 500 {
                             debug_log!(
@@ -5602,6 +5620,17 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                         }
                     } else if let Some(idx) = self.pending_grammar_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_grammar_bert.remove(idx);
+                        if !async_response_matches_active_route(
+                            &self.manager.active_route_key,
+                            &pending.route_key,
+                        ) {
+                            log!(
+                                "Stale grammar BERT response discarded: route response='{}' active='{}'",
+                                pending.route_key,
+                                self.manager.active_route_key,
+                            );
+                            continue;
+                        }
                         self.handle_grammar_bert_response(pending, &scored_candidates);
                     } else if let Some(idx) = self.pending_consonant_bert.iter().position(|p| p.request_id == id) {
                         let pending = self.pending_consonant_bert.remove(idx);
@@ -5625,17 +5654,22 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
         }
     }
 
-    /// Handle BERT spelling score response for spelling re-ranking.
-    fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scored_candidates: &[(String, f32)]) {
-        // The BERT leg for this sentence's word has completed (whatever the
-        // outcome) — count down the sentence-cache pending counter so the
-        // entry becomes replayable once every queued word has resolved.
+    /// Mark a deferred spelling request complete without surfacing a result.
+    fn settle_spelling_bert_cache_pending(&mut self, pending: &PendingSpellingBert) {
         if let Some(d) = &pending.deferred_push {
             let ck = sentence_cache_key_for_language(self.language.code(), &d.sentence);
             if let Some(e) = self.sentence_cache.entries.get_mut(&ck) {
                 e.pending = e.pending.saturating_sub(1);
             }
         }
+    }
+
+    /// Handle BERT spelling score response for spelling re-ranking.
+    fn handle_spelling_bert_response(&mut self, pending: PendingSpellingBert, scored_candidates: &[(String, f32)]) {
+        // The BERT leg for this sentence's word has completed (whatever the
+        // outcome) — count down the sentence-cache pending counter so the
+        // entry becomes replayable once every queued word has resolved.
+        self.settle_spelling_bert_cache_pending(&pending);
         if scored_candidates.is_empty() {
             // Worker couldn't produce any candidate (compound_walker found
             // nothing for gibberish-like input, BERT returned -inf for all,
@@ -6220,6 +6254,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     error_idx_word: word_lower.clone(),
                     error_doc_offset: 0,
                     candidates: passing.iter().take(30).cloned().collect(),
+                    route_key: self.manager.active_route_key.clone(),
                     deferred_push: None,
                 });
                 log!("  sent {} candidates for BERT spelling score (id={})",
@@ -6401,6 +6436,7 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                     sentence_context: sentence.to_string(),
                     doc_offset: 0, // set by caller
                     candidates: valid_candidates.clone(),
+                    route_key: self.manager.active_route_key.clone(),
                 });
                 log!("  Grammar: sent {} candidates for BERT spelling score (id={})", valid_candidates.len(), request_id);
             }
@@ -8277,7 +8313,7 @@ self.grammar_queue.clear();
                 resp.doc_offset,
             );
 
-            if !grammar_response_matches_active_route(
+            if !async_response_matches_active_route(
                 &self.manager.active_route_key,
                 &resp.route_key,
             ) {
@@ -8801,6 +8837,7 @@ self.grammar_queue.clear();
                     // doesn't see them. handle_spelling_bert_response only
                     // uses the BERT-scored result so this is fine empty.
                     candidates: Vec::new(),
+                    route_key: self.manager.active_route_key.clone(),
                     deferred_push: Some(deferred.clone()),
                 });
                 log!("  deferred spelling push: '{}' (waiting for BERT rank, id={})",
