@@ -19,6 +19,9 @@ pub struct GrammarCheckRequest {
     pub sentence: String,
     pub doc_offset: usize,
     pub paragraph_id: String,
+    /// The editor route that owned this request when it was dispatched.
+    /// The UI uses it to reject results that arrive after a route switch.
+    pub route_key: String,
     pub sentence_index: usize,
     pub doc_text: String,
     pub user_words: Vec<String>,
@@ -65,6 +68,8 @@ pub struct GrammarCheckResponse {
     pub sentence: String,
     pub doc_offset: usize,
     pub paragraph_id: String,
+    /// Echoes the request owner so async results remain route-scoped.
+    pub route_key: String,
     pub sentence_index: usize,
     pub errors: Vec<GrammarError>,
     pub unknown_words: Vec<UnknownWord>,
@@ -95,15 +100,16 @@ impl GrammarActorHandle {
 
     /// Send a sentence for checking (non-blocking)
     pub fn check_sentence(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize) {
-        self.check_sentence_with_doc(sentence, doc_offset, paragraph_id, sentence_index, "", &[])
+        self.check_sentence_with_doc(sentence, doc_offset, paragraph_id, sentence_index, "", &[], "")
     }
 
-    pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str, user_words: &[String]) {
+    pub fn check_sentence_with_doc(&self, sentence: &str, doc_offset: usize, paragraph_id: &str, sentence_index: usize, doc_text: &str, user_words: &[String], route_key: &str) {
         crate::log!("ACTOR ASYNC SEND: '{}'", sentence);
         let _ = self.sender.send(ActorMessage::Async(GrammarCheckRequest {
             sentence: sentence.to_string(),
             doc_offset,
             paragraph_id: paragraph_id.to_string(),
+            route_key: route_key.to_string(),
             doc_text: doc_text.to_string(),
             sentence_index,
             user_words: user_words.to_vec(),
@@ -280,6 +286,7 @@ pub fn spawn_grammar_actor_with_loader(
                             sentence: req.sentence,
                             doc_offset: req.doc_offset,
                             paragraph_id: req.paragraph_id,
+                            route_key: req.route_key,
                             sentence_index: req.sentence_index,
                             errors: result.errors,
                             unknown_words: result.unknown_words,

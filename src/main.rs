@@ -914,6 +914,13 @@ fn route_key_for_context(bridge_name: &str, paragraph_id: &str, owner_pid: u32) 
     }
 }
 
+/// Grammar work is asynchronous, so paragraph identity alone is insufficient
+/// when two editor routes can emit similarly-shaped paragraphs. A response is
+/// only allowed to update the currently owned route.
+fn grammar_response_matches_active_route(active_route_key: &str, response_route_key: &str) -> bool {
+    !active_route_key.is_empty() && active_route_key == response_route_key
+}
+
 fn error_paragraph_matches_bridge(paragraph_id: &str, bridge_name: &str) -> bool {
     paragraph_id.is_empty() || paragraph_id_matches_bridge(paragraph_id, bridge_name)
 }
@@ -1190,6 +1197,7 @@ mod cross_language_barrier_tests {
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         browser_route_key, route_key_for_context, known_word_spelling_variants_for_analyzer,
         paragraph_id_matches_bridge,
+        grammar_response_matches_active_route,
         grammar_response_sentence_hash, rescore_spelling_response,
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
         sentence_cache_version, remove_cached_variant_output, CachedSentenceError,
@@ -1492,6 +1500,22 @@ mod cross_language_barrier_tests {
             route_key_for_context("Accessibility", "uia:0", 101),
             route_key_for_context("Accessibility", "uia:0", 202),
         );
+    }
+
+    #[test]
+    fn grammar_responses_are_scoped_to_the_active_route() {
+        assert!(grammar_response_matches_active_route(
+            "macos:word-addin:42",
+            "macos:word-addin:42",
+        ));
+        assert!(!grammar_response_matches_active_route(
+            "macos:word-addin:42",
+            "macos:accessibility:42",
+        ));
+        assert!(!grammar_response_matches_active_route(
+            "browser:1234:42:7:1",
+            "browser:1234:42:7:2",
+        ));
     }
 
     #[test]
@@ -7033,7 +7057,15 @@ C:\\onnxruntime\\onnxruntime-win-x64-1.24.4\\lib\\onnxruntime.dll"
                 }
 
                 let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-                actor.check_sentence_with_doc(sentence_text, *doc_offset, &para_id, 0, &self.last_doc_text, &uw);
+                actor.check_sentence_with_doc(
+                    sentence_text,
+                    *doc_offset,
+                    &para_id,
+                    0,
+                    &self.last_doc_text,
+                    &uw,
+                    &self.manager.active_route_key,
+                );
                 self.grammar_inflight.insert(sent_h);
                 log!("Grammar send (COM): '{}' (para={} doc_off={})", trunc(sentence_text, 50), trunc(&para_id, 10), doc_offset);
             }
@@ -7869,7 +7901,15 @@ self.grammar_queue.clear();
                     if is_complete || first_seen || just_finished_word {
                         let mut uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
                         uw.extend(email_skip_words.iter().cloned());
-                        actor.check_sentence_with_doc(sentence_text, doc_offset, &p.paragraph_id, 0, &self.last_doc_text, &uw);
+                        actor.check_sentence_with_doc(
+                            sentence_text,
+                            doc_offset,
+                            &p.paragraph_id,
+                            0,
+                            &self.last_doc_text,
+                            &uw,
+                            &self.manager.active_route_key,
+                        );
                         self.grammar_inflight.insert(sent_h);
                         self.pending_incomplete_sentence = None;
                     } else {
@@ -7993,7 +8033,15 @@ self.grammar_queue.clear();
 
             log!("Grammar send: '{}' (offset={})", trunc(&trimmed, 60), doc_offset);
             let uw = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-            actor.check_sentence_with_doc(&trimmed, doc_offset, "", 0, &self.last_doc_text, &uw);
+            actor.check_sentence_with_doc(
+                &trimmed,
+                doc_offset,
+                "",
+                0,
+                &self.last_doc_text,
+                &uw,
+                &self.manager.active_route_key,
+            );
             sent_count += 1;
         }
         if self.grammar_queue.is_empty() {
@@ -8228,6 +8276,20 @@ self.grammar_queue.clear();
                 &resp.sentence,
                 resp.doc_offset,
             );
+
+            if !grammar_response_matches_active_route(
+                &self.manager.active_route_key,
+                &resp.route_key,
+            ) {
+                log!(
+                    "Stale grammar response discarded: route response='{}' active='{}' para={}",
+                    resp.route_key,
+                    self.manager.active_route_key,
+                    trunc(&resp.paragraph_id, 10),
+                );
+                self.grammar_inflight.remove(&sent_h);
+                continue;
+            }
 
             // Guard: discard if the paragraph is no longer tracked (app switched and
             // paragraph_sentence_hashes was cleared). The sentence-hash-still-current
@@ -9987,6 +10049,7 @@ impl eframe::App for ContextApp {
                             0,
                             &self.last_doc_text,
                             &uw,
+                            &self.manager.active_route_key,
                         );
                         self.grammar_inflight.insert(sent_h);
                     }
