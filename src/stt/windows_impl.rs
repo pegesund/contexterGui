@@ -24,6 +24,9 @@ pub struct WhisperEngine {
     /// Threads for whisper_full. Set per engine so the streaming (base) and
     /// final (medium) lanes can share the CPU without starving each other.
     n_threads: c_int,
+    /// Model file stem (e.g. "ggml-nb-whisper-small-q5") — identifies the
+    /// engine in timing logs so slow-machine reports say WHICH model was slow.
+    model_name: String,
     fn_n_segments: FnSegments,
     fn_segment_text: FnSegmentText,
     /// BCP-47 language code for Whisper transcription (e.g. "nb", "en")
@@ -83,13 +86,18 @@ impl WhisperEngine {
                     }
                 })?;
 
-            mic_log(&format!("Whisper: loading model from {}...", model_path));
+            let model_name = std::path::Path::new(model_path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| model_path.to_string());
+
+            mic_log(&format!("Whisper[{}]: loading model from {}...", model_name, model_path));
             let start = std::time::Instant::now();
             let ctx = fn_init(model_c.as_ptr());
             if ctx.is_null() {
                 return Err(ui_lang.ui_whisper_model_load_failed().into());
             }
-            mic_log(&format!("Whisper: model loaded in {:.1}s", start.elapsed().as_secs_f64()));
+            mic_log(&format!("Whisper[{}]: model loaded in {:.1}s", model_name, start.elapsed().as_secs_f64()));
 
             Ok(WhisperEngine {
                 _lib: lib,
@@ -98,6 +106,7 @@ impl WhisperEngine {
                 fn_full,
                 fn_full_threads,
                 n_threads: 4,
+                model_name,
                 fn_n_segments,
                 fn_segment_text,
                 stt_lang_code: CString::new(model_lang.stt_language_code()).unwrap_or_default(),
@@ -116,7 +125,9 @@ impl WhisperEngine {
 impl SttEngine for WhisperEngine {
     fn transcribe(&self, audio: &[f32]) -> String {
         unsafe {
-            mic_log(&format!("Whisper: transcribing {} samples ({:.1}s)...", audio.len(), audio.len() as f64 / 16000.0));
+            let audio_secs = audio.len() as f64 / 16000.0;
+            mic_log(&format!("Whisper[{}]: transcribing {:.1}s audio ({} threads)...",
+                self.model_name, audio_secs, self.n_threads));
             let start = std::time::Instant::now();
 
             let ret = match self.fn_full_threads {
@@ -138,8 +149,11 @@ impl SttEngine for WhisperEngine {
                 return format!("Feil: Whisper-transkribering feilet (kode {})", ret);
             }
 
-            let elapsed = start.elapsed();
-            mic_log(&format!("Whisper: transcription took {:.1}s", elapsed.as_secs_f64()));
+            let elapsed = start.elapsed().as_secs_f64();
+            let realtime_factor = if elapsed > 0.0 { audio_secs / elapsed } else { 0.0 };
+            mic_log(&format!(
+                "Whisper[{}]: {:.1}s audio transcribed in {:.1}s ({:.1}x realtime)",
+                self.model_name, audio_secs, elapsed, realtime_factor));
 
             let n_segments = (self.fn_n_segments)(self.ctx);
             let mut result = String::new();

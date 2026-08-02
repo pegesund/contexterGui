@@ -18,6 +18,20 @@ const S3_ACCESS_KEY: &str = "cd59e2c4bbbd7bd29951f126d87a096a";
 const S3_SECRET_KEY: &str = "3f28f3941d0d20aaa829ef17c50fe4e7";
 const S3_REGION: &str = "eu2";
 const S3_HOST: &str = "eu2.contabostorage.com";
+
+/// Minimal OpenVINO runtime for CPU inference of IR models (see
+/// `nostos_cognio::model::find_openvino_libs_dir`). Version-pinned S3 prefix
+/// so a future OpenVINO upgrade is a new prefix + new file list, and old app
+/// versions keep downloading the set they were built against.
+const OPENVINO_RUNTIME_S3_PREFIX: &str = "runtime/openvino-win-2026.0";
+const OPENVINO_RUNTIME_DLLS: &[&str] = &[
+    "openvino_c.dll",
+    "openvino.dll",
+    "openvino_ir_frontend.dll",
+    "openvino_intel_cpu_plugin.dll",
+    "tbb12.dll",
+    "tbbbind_2_5.dll",
+];
 const S3_NETLOC: &str = "eu2.contabostorage.com:443";
 const DOWNLOAD_MAX_ATTEMPTS: usize = 6;
 const DOWNLOAD_RETRY_BASE_MS: u64 = 750;
@@ -713,6 +727,22 @@ pub fn language_files(lang_code: &str, model_size: &str) -> Vec<DownloadItem> {
                     local_path: ov_dir.join(format!("{}.bin", ov_stem)),
                     label: "Ytelsesdata".into(),
                 });
+
+                // OpenVINO RUNTIME (minimal DLL set, ~60 MB) — previously the
+                // backend only worked on dev machines with a pip-installed
+                // openvino; end users silently fell back to ORT (half speed).
+                // Intel-gated: the runtime is useless on AMD.
+                // find_openvino_libs_dir() checks this dir FIRST.
+                if nostos_cognio::model::is_intel_cpu() {
+                    let rt_dir = base.join("runtime/openvino");
+                    for name in OPENVINO_RUNTIME_DLLS {
+                        items.push(DownloadItem {
+                            s3_key: format!("{}/{}", OPENVINO_RUNTIME_S3_PREFIX, name),
+                            local_path: rt_dir.join(name),
+                            label: "Intel-akselerasjon".into(),
+                        });
+                    }
+                }
             }
         }
     }
