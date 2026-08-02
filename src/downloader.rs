@@ -930,19 +930,24 @@ pub fn whisper_files(lang_code: &str, mode: u8) -> Vec<DownloadItem> {
                     label: "Talemodell (rask)".into(),
                 });
             } else {
-                // Beste: base + small-q5 (small keeps up with the recording in
-                // the parallel final lane; medium was ~1× realtime and made
-                // the user wait the whole recording's length after stop)
+                // Beste (mode 1): base + small-q5 (small keeps up with the
+                // recording in the parallel final lane; medium was ~1×
+                // realtime and made the user wait the whole recording's
+                // length after stop).
+                // Sky (mode 2): base only — the final pass runs on our
+                // STT proxy server, no local final model needed.
                 items.push(DownloadItem {
                     s3_key: "models/whisper/nb/ggml-nb-whisper-base.bin".into(),
                     local_path: whisper_model_path(lang_code, "ggml-nb-whisper-base.bin"),
                     label: "Talemodell (strøyming)".into(),
                 });
-                items.push(DownloadItem {
-                    s3_key: "models/whisper/nb/ggml-nb-whisper-small-q5.bin".into(),
-                    local_path: whisper_model_path(lang_code, "ggml-nb-whisper-small-q5.bin"),
-                    label: "Talemodell (beste)".into(),
-                });
+                if mode != 2 {
+                    items.push(DownloadItem {
+                        s3_key: "models/whisper/nb/ggml-nb-whisper-small-q5.bin".into(),
+                        local_path: whisper_model_path(lang_code, "ggml-nb-whisper-small-q5.bin"),
+                        label: "Talemodell (beste)".into(),
+                    });
+                }
             }
         }
         "en" => {

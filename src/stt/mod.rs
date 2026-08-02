@@ -7,6 +7,12 @@ use std::sync::{Arc, Mutex};
 
 
 static MIC_RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// Set once the medium lane measures itself slower than ~1.2x realtime on
+/// this machine: the lane then loses the race against the recording every
+/// time AND steals CPU from the streaming lane, so future recordings skip
+/// it entirely (streaming text becomes the final). Reset on app restart.
+static LANE_TOO_SLOW: AtomicBool = AtomicBool::new(false);
 // The UI may hide a recording before Whisper finishes its current blocking
 // transcription. Keep a separate lease so that cannot start a second worker.
 static MIC_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -47,11 +53,15 @@ pub struct TranscribeResult {
 /// Handle for controlling microphone recording + transcription
 pub struct MicHandle {
     stop_flag: Arc<AtomicBool>,
+    stop_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     pub result_rx: mpsc::Receiver<TranscribeResult>,
 }
 
 impl MicHandle {
     pub fn stop(&self) {
+        if let Ok(mut at) = self.stop_at.lock() {
+            at.get_or_insert_with(std::time::Instant::now);
+        }
         self.stop_flag.store(true, Ordering::Release);
         // Flip the UI's recording indicator IMMEDIATELY. The worker thread
         // may be stuck inside a whisper call for a long time on slow CPUs
@@ -99,6 +109,9 @@ mod windows_impl;
 #[cfg(target_os = "windows")]
 pub use windows_impl::WhisperEngine;
 
+mod cloud;
+pub use cloud::CloudSttEngine;
+
 #[cfg(target_os = "macos")]
 mod macos_impl;
 #[cfg(target_os = "macos")]
@@ -119,9 +132,12 @@ pub fn start_recording(
     let recording_guard = begin_recording_session()?;
 
     let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_at: Arc<std::sync::Mutex<Option<std::time::Instant>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let (result_tx, result_rx) = mpsc::channel();
 
     let stop_clone = stop_flag.clone();
+    let stop_at_clone = stop_at.clone();
 
     std::thread::spawn(move || {
         let _recording_guard = recording_guard;
@@ -230,7 +246,10 @@ pub fn start_recording(
         // only does streaming partials.
         let lane_done = Arc::new(AtomicBool::new(false));
         let lane_discard = Arc::new(AtomicBool::new(false));
-        let medium_lane: Option<std::thread::JoinHandle<()>> = if auto_final {
+        let lane_gave_up = Arc::new(AtomicBool::new(false));
+        let medium_lane: Option<std::thread::JoinHandle<()>> = if auto_final
+            && !LANE_TOO_SLOW.load(Ordering::Acquire)
+        {
             let lane_buf = audio_buf.clone();
             let lane_stop = stop_clone.clone();
             let lane_engine = final_engine.clone();
@@ -243,6 +262,7 @@ pub fn start_recording(
             let sr = sample_rate;
             let done_flag = lane_done.clone();
             let discard_flag = lane_discard.clone();
+            let gave_up_flag = lane_gave_up.clone();
             Some(std::thread::spawn(move || {
                 let mut done: usize = 0;
                 let mut parts: Vec<String> = Vec::new();
@@ -288,7 +308,23 @@ pub fn start_recording(
                             let buf = lane_buf.lock().unwrap();
                             find_quiet_cut(&buf, target.saturating_sub(sr as usize * 3), target, sr as usize / 50)
                         };
+                        let seg_start = std::time::Instant::now();
                         let text = transcribe_range(done, cut);
+                        // Self-measurement on the first segment: below ~1.2x
+                        // realtime the lane can never catch up with the
+                        // recording AND it starves the streaming lane's CPU.
+                        // Give up for the rest of this app session — the
+                        // streaming text becomes the final instead.
+                        let seg_secs = (cut - done) as f64 / sr as f64;
+                        let factor = seg_secs / seg_start.elapsed().as_secs_f64().max(0.001);
+                        if factor < 1.2 {
+                            mic_log(&format!(
+                                "Medium lane: {:.1}x realtime on this machine — giving up (streaming text will be the final)",
+                                factor));
+                            LANE_TOO_SLOW.store(true, Ordering::Release);
+                            gave_up_flag.store(true, Ordering::Release);
+                            return;
+                        }
                         if !text.trim().is_empty() {
                             parts.push(text.trim().to_string());
                         }
@@ -308,7 +344,20 @@ pub fn start_recording(
                     return;
                 }
                 if total > done {
+                    let tail_start = std::time::Instant::now();
                     let text = transcribe_range(done, total);
+                    // Short recordings never ran an in-loop segment, so the
+                    // tail is the first (and only) measurement opportunity —
+                    // teach the rest of the session even though this result
+                    // is already computed and will be delivered if in time.
+                    let tail_secs = (total - done) as f64 / sr as f64;
+                    let factor = tail_secs / tail_start.elapsed().as_secs_f64().max(0.001);
+                    if factor < 1.2 && !LANE_TOO_SLOW.load(Ordering::Acquire) {
+                        mic_log(&format!(
+                            "Medium lane: tail ran {:.1}x realtime — future recordings use streaming text as final",
+                            factor));
+                        LANE_TOO_SLOW.store(true, Ordering::Release);
+                    }
                     if !text.trim().is_empty() {
                         parts.push(text.trim().to_string());
                     }
@@ -391,9 +440,17 @@ pub fn start_recording(
         // result when it eventually lands. Fast machines finish the tail
         // within the grace window and never hit the fallback.
         if let Some(lane) = medium_lane {
-            const GRACE_MS: u64 = 10_000;
-            let wait_start = std::time::Instant::now();
-            while wait_start.elapsed().as_millis() < GRACE_MS as u128 {
+            const GRACE_MS: u128 = 10_000;
+            // Grace is measured from when the user PRESSED stop, not from
+            // when this thread finally got here — an in-flight streaming
+            // partial can eat tens of seconds on slow machines, and the
+            // user's wait budget started at the button press.
+            let pressed_at = stop_at_clone.lock().ok()
+                .and_then(|g| *g)
+                .unwrap_or_else(std::time::Instant::now);
+            while pressed_at.elapsed().as_millis() < GRACE_MS
+                && !lane_gave_up.load(Ordering::Acquire)
+            {
                 if lane_done.load(Ordering::Acquire) {
                     let _ = lane.join();
                     return;
@@ -420,6 +477,33 @@ pub fn start_recording(
             let _ = result_tx.send(TranscribeResult { text: fallback, partial: false });
             // Don't join: the lane finishes (and discards) on its own time.
             drop(lane);
+            return;
+        }
+
+        // auto_final but no lane: this machine already measured the final
+        // model slower than realtime (LANE_TOO_SLOW) — the streaming text
+        // IS the final, delivered instantly.
+        if auto_final {
+            let fallback = if !last_partial_text.trim().is_empty() {
+                last_partial_text
+            } else {
+                // Recording shorter than the first partial threshold — one
+                // quick base pass over the (tiny) buffer.
+                let raw_audio = { audio_buf.lock().unwrap().clone() };
+                if raw_audio.is_empty() {
+                    no_audio_msg
+                } else {
+                    let audio_16k = if sample_rate != 16000 {
+                        resample(&raw_audio, sample_rate, 16000)
+                    } else {
+                        raw_audio
+                    };
+                    let eng = lock_engine(&streaming_engine, "streaming");
+                    eng.transcribe(&audio_16k)
+                }
+            };
+            mic_log("Microphone: final model known-slow on this machine — streaming text delivered as final");
+            let _ = result_tx.send(TranscribeResult { text: fallback, partial: false });
             return;
         }
 
@@ -458,7 +542,7 @@ pub fn start_recording(
         let _ = result_tx.send(TranscribeResult { text, partial: false });
     });
 
-    Ok(MicHandle { stop_flag, result_rx })
+    Ok(MicHandle { stop_flag, stop_at, result_rx })
 }
 
 /// Re-transcribe saved audio with the final (large) model.

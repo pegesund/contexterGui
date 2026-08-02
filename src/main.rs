@@ -82,6 +82,21 @@ struct UserSettings {
     /// ModernBERT regardless.
     #[serde(default = "default_model_size")]
     model_size: String,
+    /// Cloud STT proxy base URL (our server; it holds the Google credentials
+    /// — clients never see a Google token). Non-empty + whisper_mode 2 =
+    /// cloud transcription: local base model streams live text, the cloud
+    /// does the final pass. Intended for slow machines.
+    #[serde(default)]
+    stt_cloud_url: String,
+    /// Shared app key sent as X-Spell-Key to the STT proxy (rotatable
+    /// server-side; not a Google credential).
+    #[serde(default)]
+    stt_cloud_key: String,
+    /// DEV ONLY: Google STT v1 API key for direct-to-Google transcription
+    /// without the proxy. Extractable from the machine — never distribute
+    /// to pupils. Used when non-empty and stt_cloud_url is empty.
+    #[serde(default)]
+    stt_google_api_key: String,
 }
 
 fn default_true() -> bool { true }
@@ -108,6 +123,9 @@ impl Default for UserSettings {
             show_grammar: true,
             last_notified_update_version: String::new(),
             model_size: "base".into(),
+            stt_cloud_url: String::new(),
+            stt_cloud_key: String::new(),
+            stt_google_api_key: String::new(),
         }
     }
 }
@@ -3940,9 +3958,10 @@ fn build_right_completions(
 }
 
 /// The Best STT setting downloads a fast model for live partials plus a larger
-/// final model. Only that setting should spend the extra time on a final pass.
+/// final model; cloud mode streams locally and finalizes via the proxy.
+/// Both spend the extra time on a final pass; mode 0 (tiny) does not.
 fn should_auto_finalize_stt(whisper_mode: u8) -> bool {
-    whisper_mode == 1
+    whisper_mode == 1 || whisper_mode == 2
 }
 
 /// Candidate budget for background word completion. Keep the active worker
@@ -4634,6 +4653,41 @@ impl ContextApp {
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
                     stt::WhisperEngine::load(&dll_dir, &model_path, &*lang0, &*ui_lang0)
+                        .map(|mut e| { e.set_threads(6); Box::new(e) as Box<dyn stt::SttEngine> })
+                ));
+            });
+        } else if mode == 2 {
+            // Cloud mode: local base model streams live text; the FINAL pass
+            // goes to the cloud. Proxy when stt_cloud_url is set (production
+            // — server holds the Google credentials); otherwise the DEV-only
+            // google-direct backend with stt_google_api_key. The parallel-
+            // lane machinery works unchanged — cloud segments measure well
+            // above the 1.2x give-up threshold.
+            let settings = load_settings();
+            let cloud = if !settings.stt_cloud_url.is_empty() {
+                stt::CloudSttEngine::new(
+                    &settings.stt_cloud_url,
+                    &settings.stt_cloud_key,
+                    self.language.stt_language_code(),
+                    self.ui_language.ui_no_speech_recognized(),
+                )
+            } else {
+                log!("CloudSTT: DEV mode — direct to Google with API key from settings");
+                stt::CloudSttEngine::new_google_direct(
+                    &settings.stt_google_api_key,
+                    self.language.stt_language_code(),
+                    self.ui_language.ui_no_speech_recognized(),
+                )
+            };
+            let _ = tx.send(WhisperLoadItem::Final(Ok(Box::new(cloud) as Box<dyn stt::SttEngine>)));
+            let lang1 = self.language.clone();
+            let ui_lang1 = self.ui_language.clone();
+            let streaming_path = downloader::whisper_model_path(&lang_code, streaming_model)
+                .to_string_lossy()
+                .to_string();
+            std::thread::spawn(move || {
+                let _ = tx.send(WhisperLoadItem::Streaming(
+                    stt::WhisperEngine::load(&dll_dir, &streaming_path, &*lang1, &*ui_lang1)
                         .map(|mut e| { e.set_threads(6); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
@@ -13787,6 +13841,12 @@ impl eframe::App for ContextApp {
 
             let mut new_quality = quality;
             let mut new_whisper_mode = whisper_mode;
+            let stt_cloud_url_for_settings = {
+                let s = load_settings();
+                // "Sky (server)" is offered when EITHER a proxy URL or a dev
+                // Google API key is configured.
+                if !s.stt_cloud_url.is_empty() { s.stt_cloud_url } else { s.stt_google_api_key }
+            };
             let mut new_speak_on_space = speak_on_space;
             let hover_zoom_prev = self.hover_zoom;
             let mut new_hover_zoom = hover_zoom_prev;
@@ -13949,6 +14009,21 @@ impl eframe::App for ContextApp {
                                     egui::RichText::new(lang_for_settings.ui_stt_best_model()).size(body),
                                 ).clicked() {
                                     new_whisper_mode = 1;
+                                }
+                                // Cloud STT — only offered when a proxy URL is
+                                // configured (stt_cloud_url in settings.json).
+                                // Intended for slow machines: local base model
+                                // streams live text, our server does the final
+                                // pass (it holds the Google credentials — no
+                                // tokens on pupil machines).
+                                if !stt_cloud_url_for_settings.is_empty() {
+                                    ui.add_space(6.0);
+                                    if ui.selectable_label(
+                                        new_whisper_mode == 2,
+                                        egui::RichText::new("Sky (server)").size(body),
+                                    ).clicked() {
+                                        new_whisper_mode = 2;
+                                    }
                                 }
                             });
 
