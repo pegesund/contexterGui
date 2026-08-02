@@ -159,6 +159,42 @@ fn save_settings(s: &UserSettings) {
     }
 }
 
+/// Cloud-STT endpoint/credentials. Primary source is the S3-distributed
+/// config file (fetched at startup by `downloader::refresh_stt_cloud_config`
+/// — never in git/CI/binaries, rotatable without a release); non-empty
+/// values in the local settings.json override it for dev machines.
+#[derive(Default, Clone, serde::Deserialize)]
+struct CloudSttConfig {
+    #[serde(default)]
+    stt_cloud_url: String,
+    #[serde(default)]
+    stt_cloud_key: String,
+    #[serde(default)]
+    stt_google_api_key: String,
+}
+
+impl CloudSttConfig {
+    fn is_configured(&self) -> bool {
+        !self.stt_cloud_url.is_empty() || !self.stt_google_api_key.is_empty()
+    }
+}
+
+fn load_stt_cloud_config() -> CloudSttConfig {
+    let mut cfg: CloudSttConfig = std::fs::read_to_string(downloader::stt_cloud_config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let s = load_settings();
+    if !s.stt_cloud_url.is_empty() {
+        cfg.stt_cloud_url = s.stt_cloud_url;
+        cfg.stt_cloud_key = s.stt_cloud_key;
+    }
+    if !s.stt_google_api_key.is_empty() {
+        cfg.stt_google_api_key = s.stt_google_api_key;
+    }
+    cfg
+}
+
 // ── Sentence verdict cache ──────────────────────────────────────────────
 // Caches the FINAL per-sentence check result (grammar errors + BERT-ranked
 // spelling suggestions), keyed by normalized sentence text. Keying by text
@@ -4663,18 +4699,18 @@ impl ContextApp {
             // google-direct backend with stt_google_api_key. The parallel-
             // lane machinery works unchanged — cloud segments measure well
             // above the 1.2x give-up threshold.
-            let settings = load_settings();
-            let cloud = if !settings.stt_cloud_url.is_empty() {
+            let cloud_cfg = load_stt_cloud_config();
+            let cloud = if !cloud_cfg.stt_cloud_url.is_empty() {
                 stt::CloudSttEngine::new(
-                    &settings.stt_cloud_url,
-                    &settings.stt_cloud_key,
+                    &cloud_cfg.stt_cloud_url,
+                    &cloud_cfg.stt_cloud_key,
                     self.language.stt_language_code(),
                     self.ui_language.ui_no_speech_recognized(),
                 )
             } else {
-                log!("CloudSTT: DEV mode — direct to Google with API key from settings");
+                log!("CloudSTT: DEV mode — direct to Google with API key");
                 stt::CloudSttEngine::new_google_direct(
-                    &settings.stt_google_api_key,
+                    &cloud_cfg.stt_google_api_key,
                     self.language.stt_language_code(),
                     self.ui_language.ui_no_speech_recognized(),
                 )
@@ -13841,12 +13877,9 @@ impl eframe::App for ContextApp {
 
             let mut new_quality = quality;
             let mut new_whisper_mode = whisper_mode;
-            let stt_cloud_url_for_settings = {
-                let s = load_settings();
-                // "Sky (server)" is offered when EITHER a proxy URL or a dev
-                // Google API key is configured.
-                if !s.stt_cloud_url.is_empty() { s.stt_cloud_url } else { s.stt_google_api_key }
-            };
+            // "Sky (server)" is offered when the S3-distributed config (or a
+            // local settings.json override) provides a cloud endpoint.
+            let stt_cloud_available = load_stt_cloud_config().is_configured();
             let mut new_speak_on_space = speak_on_space;
             let hover_zoom_prev = self.hover_zoom;
             let mut new_hover_zoom = hover_zoom_prev;
@@ -14016,7 +14049,7 @@ impl eframe::App for ContextApp {
                                 // streams live text, our server does the final
                                 // pass (it holds the Google credentials — no
                                 // tokens on pupil machines).
-                                if !stt_cloud_url_for_settings.is_empty() {
+                                if stt_cloud_available {
                                     ui.add_space(6.0);
                                     if ui.selectable_label(
                                         new_whisper_mode == 2,
@@ -16096,6 +16129,10 @@ fn main() -> eframe::Result {
     platform::macos::configure_swipl_home_env();
     #[cfg(target_os = "windows")]
     platform::windows::configure_swipl_home_env();
+
+    // Refresh the S3-distributed cloud-STT config in the background — the
+    // settings UI and mode-2 engine read the cached file whenever needed.
+    std::thread::spawn(downloader::refresh_stt_cloud_config);
 
     let setup_platform = platform::create_platform();
 

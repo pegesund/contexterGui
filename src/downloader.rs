@@ -1061,6 +1061,35 @@ fn log_download_session_start(total_items: usize) {
     let _ = writeln!(f, "─── per-item results ───");
 }
 
+/// On-disk cache of the S3-distributed cloud-STT config.
+pub fn stt_cloud_config_path() -> PathBuf {
+    data_dir().join("config/stt_cloud.json")
+}
+
+/// Fetch `config/stt_cloud.json` from S3 and cache it locally. The file
+/// carries the cloud-STT endpoint/credentials (proxy URL + app key, or the
+/// dev Google API key) so client machines get cloud transcription WITHOUT
+/// manual settings editing — and without the secret ever touching git, CI
+/// or the shipped binaries. Rotating/revoking = replacing the S3 object;
+/// every client picks it up on next start. Offline starts keep the cache.
+pub fn refresh_stt_cloud_config() {
+    match fetch_s3_string_with_doh_fallback("config/stt_cloud.json", 600) {
+        Ok(body) => {
+            let path = stt_cloud_config_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&path, &body) {
+                Ok(()) => log::info!("CloudSTT config refreshed from S3 ({} bytes)", body.len()),
+                Err(e) => log::warn!("CloudSTT config write failed: {}", e),
+            }
+        }
+        Err(e) => {
+            log::warn!("CloudSTT config fetch failed (keeping cache if any): {}", e);
+        }
+    }
+}
+
 pub fn download_missing(items: Vec<DownloadItem>) -> SharedProgress {
     download_missing_with_cancel(items, Arc::new(AtomicBool::new(false)))
 }

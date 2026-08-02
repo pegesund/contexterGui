@@ -10,3 +10,6 @@ word-addin/fullchain.pem.*
 /extension/dist
 .DS_Store
 **/.DS_Store
+
+# Cloud STT config carries the dev API key — lives on S3 + %APPDATA%, never in git
+stt_cloud.json
