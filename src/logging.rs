@@ -8,11 +8,36 @@ static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 pub static LOG_FILE: std::sync::LazyLock<Mutex<std::fs::File>> = std::sync::LazyLock::new(|| {
     let path = std::env::temp_dir().join("spell.log");
     eprintln!("Logging to: {}", path.display());
-    let f = std::fs::OpenOptions::new()
+    // Truncate once at startup (fresh log per run), then reopen in APPEND
+    // mode. The STT worker threads log through a separate append handle
+    // (stt::mic_log); a plain write handle here tracks its own file offset
+    // and OVERWRITES their appended bytes — whole whisper timing lines
+    // vanished from user-submitted logs. Append handles always write at
+    // EOF, so the two writers interleave instead of clobbering.
+    let _ = std::fs::OpenOptions::new()
         .create(true).write(true).truncate(true)
+        .open(&path);
+    let f = std::fs::OpenOptions::new()
+        .create(true).append(true)
         .open(&path).expect("failed to open log file");
     Mutex::new(f)
 });
+
+/// Wall-clock timestamp `HH:MM:SS.mmm` (UTC) — makes it possible to answer
+/// "how long was the recording / how long did the hang last" from user logs.
+pub fn log_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs_of_day = now.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+        now.subsec_millis()
+    )
+}
 
 #[macro_export]
 macro_rules! log {
@@ -20,7 +45,7 @@ macro_rules! log {
         let msg = format!($($arg)*);
         if let Ok(mut f) = $crate::logging::LOG_FILE.lock() {
             use std::io::Write;
-            let _ = writeln!(f, "{}", msg);
+            let _ = writeln!(f, "[{}] {}", $crate::logging::log_timestamp(), msg);
             let _ = f.flush();
         }
     }};
@@ -97,7 +122,8 @@ impl log::Log for FileLogger {
         if let Ok(mut f) = LOG_FILE.lock() {
             let _ = writeln!(
                 f,
-                "[{} {}] {}",
+                "[{}] [{} {}] {}",
+                log_timestamp(),
                 record.level(),
                 record.target(),
                 record.args()

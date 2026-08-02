@@ -53,6 +53,13 @@ pub struct MicHandle {
 impl MicHandle {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
+        // Flip the UI's recording indicator IMMEDIATELY. The worker thread
+        // may be stuck inside a whisper call for a long time on slow CPUs
+        // (it only observes stop_flag between calls) — without this the
+        // stop button looked dead for up to a minute on weak machines.
+        // The worker still owns MIC_SESSION_ACTIVE until it really exits,
+        // so a new session cannot start on top of the old stream.
+        MIC_RECORDING.store(false, Ordering::Relaxed);
     }
 }
 
@@ -221,6 +228,8 @@ pub fn start_recording(
         // near the 30s mark so we split between words, not inside them.
         // The lane owns the FINAL result in this mode; the main loop below
         // only does streaming partials.
+        let lane_done = Arc::new(AtomicBool::new(false));
+        let lane_discard = Arc::new(AtomicBool::new(false));
         let medium_lane: Option<std::thread::JoinHandle<()>> = if auto_final {
             let lane_buf = audio_buf.clone();
             let lane_stop = stop_clone.clone();
@@ -232,6 +241,8 @@ pub fn start_recording(
             // transcribe, typically ~5s.
             let segment_samples = sample_rate as usize * 20;
             let sr = sample_rate;
+            let done_flag = lane_done.clone();
+            let discard_flag = lane_discard.clone();
             Some(std::thread::spawn(move || {
                 let mut done: usize = 0;
                 let mut parts: Vec<String> = Vec::new();
@@ -290,7 +301,10 @@ pub fn start_recording(
                 // Tail after stop: whatever the lane hasn't processed yet.
                 let total = { lane_buf.lock().unwrap().len() };
                 if total == 0 {
-                    let _ = lane_tx.send(TranscribeResult { text: lane_no_audio, partial: false });
+                    done_flag.store(true, Ordering::Release);
+                    if !discard_flag.load(Ordering::Acquire) {
+                        let _ = lane_tx.send(TranscribeResult { text: lane_no_audio, partial: false });
+                    }
                     return;
                 }
                 if total > done {
@@ -299,9 +313,18 @@ pub fn start_recording(
                         parts.push(text.trim().to_string());
                     }
                 }
+                // The recording thread only waits a grace period for us — on
+                // slow machines it has already delivered the streaming text
+                // as the final and set the discard flag; our (very late)
+                // result must then be dropped, not shown on top.
+                if discard_flag.load(Ordering::Acquire) {
+                    mic_log("Medium lane: result discarded (grace period expired, streaming text already delivered)");
+                    return;
+                }
                 let assembled = parts.join(" ");
                 let final_text = if assembled.trim().is_empty() { lane_no_audio } else { assembled };
                 mic_log(&format!("Medium lane: final assembled ({} chars)", final_text.len()));
+                done_flag.store(true, Ordering::Release);
                 let _ = lane_tx.send(TranscribeResult { text: final_text, partial: false });
             }))
         } else {
@@ -312,6 +335,9 @@ pub fn start_recording(
         let chunk_interval_samples = sample_rate as usize * 2;
         let mut last_transcribed_len: usize = 0;
         let mut next_threshold = first_chunk_samples;
+        // Latest streaming text — the fallback final on machines where the
+        // medium lane can't finish within the post-stop grace period.
+        let mut last_partial_text = String::new();
 
         loop {
             if stop_clone.load(Ordering::Acquire) {
@@ -346,6 +372,7 @@ pub fn start_recording(
                 mic_log(&format!("Microphone: partial result in {:.1}s: '{}'",
                     start.elapsed().as_secs_f64(), &text[..text.len().min(80)]));
 
+                last_partial_text = text.clone();
                 let _ = result_tx.send(TranscribeResult { text, partial: true });
                 last_transcribed_len = current_len;
                 next_threshold = current_len + chunk_interval_samples;
@@ -357,10 +384,42 @@ pub fn start_recording(
         mic_log("Microphone: recording stopped");
 
         // auto_final mode: the medium lane owns the final result — it has
-        // already transcribed everything except the tail, and sends the
-        // assembled text on its own channel clone. Just wait for it.
+        // already transcribed everything except the tail. Give it a GRACE
+        // PERIOD; on machines where the model runs slower than realtime the
+        // lane can be minutes away, and the user must not wait: deliver the
+        // latest streaming text as the final instead and discard the lane's
+        // result when it eventually lands. Fast machines finish the tail
+        // within the grace window and never hit the fallback.
         if let Some(lane) = medium_lane {
-            let _ = lane.join();
+            const GRACE_MS: u64 = 10_000;
+            let wait_start = std::time::Instant::now();
+            while wait_start.elapsed().as_millis() < GRACE_MS as u128 {
+                if lane_done.load(Ordering::Acquire) {
+                    let _ = lane.join();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            // Grace expired — discard-first ordering closes the race: the
+            // lane checks the flag right before sending its final.
+            lane_discard.store(true, Ordering::Release);
+            if lane_done.load(Ordering::Acquire) {
+                // Lane slipped in just under the wire — its final is on the
+                // channel; nothing more to do.
+                let _ = lane.join();
+                return;
+            }
+            mic_log(&format!(
+                "Microphone: medium lane still busy after {}s grace — delivering streaming text as final",
+                GRACE_MS / 1000));
+            let fallback = if last_partial_text.trim().is_empty() {
+                no_audio_msg
+            } else {
+                last_partial_text
+            };
+            let _ = result_tx.send(TranscribeResult { text: fallback, partial: false });
+            // Don't join: the lane finishes (and discards) on its own time.
+            drop(lane);
             return;
         }
 
@@ -453,7 +512,7 @@ fn mic_log(msg: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("spell.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", msg);
+        let _ = writeln!(f, "[{}] {}", crate::logging::log_timestamp(), msg);
     }
 }
 
