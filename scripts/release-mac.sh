@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build, sign, notarize the Mac DMG for Spell, then (optionally) upload to
-# pegesund/spell_binaries as a release asset under tag v<VERSION>.
+# the configured releases repo as a release asset under tag v<VERSION>.
 #
 # Usage:
 #   bash scripts/release-mac.sh [VERSION] [options]
@@ -26,7 +26,7 @@
 #   bash scripts/release-mac.sh --patch --no-upload     # local-only release build
 #
 # Requires:
-#   - gh CLI authenticated with write access to pegesund/spell_binaries
+#   - gh CLI authenticated with write access to the configured releases repo
 #   - Xcode + Cognio Developer ID cert + Cognio-Notary keychain profile
 set -euo pipefail
 
@@ -34,7 +34,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
-RELEASES_REPO="pegesund/spell_binaries"
+RELEASES_REPO="${SPELL_RELEASES_REPO:-pegesund/spell_binaries}"
+DEFAULT_RELEASES_REPO="pegesund/spell_binaries"
+RELEASE_CHANNEL="${SPELL_RELEASES_CHANNEL:-osx-$(uname -m)}"
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 EXPLICIT_VERSION=""
@@ -74,6 +76,15 @@ if [ -z "$EXPLICIT_VERSION" ] && [ -z "$BUMP" ]; then
 fi
 if [ -n "$EXPLICIT_VERSION" ] && [ -n "$BUMP" ]; then
     echo "ERROR: pass either an explicit version OR a bump flag, not both"; exit 2
+fi
+
+# Tag pushes trigger the shared Windows CI workflow. For municipality-specific
+# feeds, require an explicit opt-out so we don't accidentally publish Windows
+# artifacts to the default repo via the tag-triggered path.
+if [ "$RELEASES_REPO" != "$DEFAULT_RELEASES_REPO" ] && $DO_TAG_PUSH; then
+    echo "ERROR: non-default releases repo '$RELEASES_REPO' cannot be used with tag-push enabled."
+    echo "Run with --no-tag-push, then trigger the Windows workflow manually with releases_repo=$RELEASES_REPO."
+    exit 2
 fi
 
 # ── Resolve version ──────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ NOTARIZE=true
 MAKE_DMG=true
 ARCH="$(uname -m)"   # arm64 on Apple Silicon, x86_64 on Intel
 VERSION="${SPELL_VERSION:-0.1.0}"
+RELEASE_CHANNEL="${SPELL_RELEASES_CHANNEL:-osx-${ARCH}}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -197,6 +198,7 @@ if $SIGN && ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$S
 fi
 echo "  arch:           $ARCH"
 echo "  version:        $VERSION"
+echo "  release channel:$RELEASE_CHANNEL"
 echo "  swipl home:     $SWIPL_HOME"
 echo "  sign:           $SIGN"
 echo "  notarize:       $NOTARIZE"
@@ -385,7 +387,7 @@ VPK_ARGS=(
     --packVersion "$VERSION"
     --packDir "$APP"
     --mainExe "$APP_NAME"
-    --channel "osx-${ARCH}"
+    --channel "$RELEASE_CHANNEL"
     --outputDir "$VELO_OUT"
 )
 if $SIGN; then

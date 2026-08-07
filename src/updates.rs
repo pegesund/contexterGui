@@ -1,7 +1,7 @@
 //! Velopack-backed auto-update service.
 //!
 //! Mirrors `ConcentrateDotNet/Services/Updates/UpdateService.cs`:
-//!   - GithubSource against the binaries repo (`pegesund/spell_binaries`)
+//!   - GithubSource against the configured binaries repo
 //!   - Polls on startup + every 6h
 //!   - Returns Available(version) so the UI can render a banner
 //!   - Download + apply + restart on user click
@@ -21,9 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use velopack::sources::GithubSource;
-use velopack::{UpdateCheck, UpdateInfo, UpdateManager};
+use velopack::{UpdateCheck, UpdateInfo, UpdateManager, UpdateOptions};
 
-const RELEASES_REPO_URL: &str = "https://github.com/pegesund/spell_binaries";
+const DEFAULT_RELEASES_REPO: &str = "pegesund/spell_binaries";
+const DEFAULT_RELEASES_CHANNEL: &str = "";
 /// Re-check at this cadence after the initial startup poll. 6 hours matches
 /// Concentrate's PreLoginUpdateGate cadence and is gentle on the GitHub API
 /// rate limit (60 unauthenticated req/hr per IP — we use ~4/day).
@@ -66,6 +67,8 @@ pub struct UpdateService {
 
 struct Inner {
     status: Mutex<Status>,
+    releases_repo_url: String,
+    releases_channel: Option<String>,
     /// `None` outside of an Available/Ready state. Held so the UI's
     /// "Last ned" / "Start på nytt" button can hand it back to apply.
     pending: Mutex<Option<UpdateInfo>>,
@@ -76,17 +79,67 @@ struct Inner {
 }
 
 impl UpdateService {
+    fn resolve_releases_repo() -> String {
+        let raw = std::env::var("SPELL_RELEASES_REPO")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                option_env!("SPELL_RELEASES_REPO")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| DEFAULT_RELEASES_REPO.to_string());
+
+        if raw.starts_with("https://") || raw.starts_with("http://") {
+            raw
+        } else {
+            format!("https://github.com/{}", raw.trim_matches('/'))
+        }
+    }
+
+    fn resolve_releases_channel() -> Option<String> {
+        std::env::var("SPELL_RELEASES_CHANNEL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                option_env!("SPELL_RELEASES_CHANNEL")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                if DEFAULT_RELEASES_CHANNEL.is_empty() {
+                    None
+                } else {
+                    Some(DEFAULT_RELEASES_CHANNEL.to_string())
+                }
+            })
+    }
+
     /// Build a service. If the app isn't Velopack-installed (dev runs,
     /// manual DMG), the constructor still succeeds but every operation is
     /// a no-op and `status()` reports `NotInstalled` — caller can construct
     /// unconditionally and the UI hides itself based on `status()`.
     pub fn new() -> Self {
-        crate::log!("UpdateService::new() — repo={}", RELEASES_REPO_URL);
-        let source = GithubSource::new(RELEASES_REPO_URL, None, false);
+        let releases_repo_url = Self::resolve_releases_repo();
+        let releases_channel = Self::resolve_releases_channel();
+        crate::log!("UpdateService::new() — repo={}", releases_repo_url);
+        crate::log!(
+            "UpdateService::new() — channel={}",
+            releases_channel.as_deref().unwrap_or("<manifest default>")
+        );
+        let source = GithubSource::new(&releases_repo_url, None, false);
+        let options = releases_channel
+            .as_ref()
+            .map(|channel| UpdateOptions {
+                ExplicitChannel: Some(channel.clone()),
+                ..UpdateOptions::default()
+            });
         // None options → defaults; None locator → auto-locate which fails
         // (returns Err) when this exe isn't sitting inside a Velopack-managed
         // app bundle. We treat that as the "NotInstalled" sentinel.
-        let manager_result = UpdateManager::new(source, None, None);
+        let manager_result = UpdateManager::new(source, options, None);
         match &manager_result {
             Ok(m) => crate::log!(
                 "UpdateService: Velopack manager OK — current_version={}",
@@ -109,6 +162,8 @@ impl UpdateService {
         Self {
             inner: Arc::new(Inner {
                 status: Mutex::new(initial),
+                releases_repo_url,
+                releases_channel,
                 pending: Mutex::new(None),
                 manager,
                 current_version,
@@ -124,6 +179,14 @@ impl UpdateService {
     /// Velopack install — the UI falls back to `env!("CARGO_PKG_VERSION")`.
     pub fn current_version(&self) -> Option<String> {
         self.inner.current_version.clone()
+    }
+
+    pub fn releases_repo_url(&self) -> &str {
+        &self.inner.releases_repo_url
+    }
+
+    pub fn releases_channel(&self) -> Option<&str> {
+        self.inner.releases_channel.as_deref()
     }
 
     /// Spawns the polling thread. Idempotent — safe to call once at startup.

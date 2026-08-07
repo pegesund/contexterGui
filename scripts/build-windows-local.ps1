@@ -2,23 +2,96 @@
 # without downloading deps (assumes SWI-Prolog, ONNX runtime, whisper.dll,
 # Velopack CLI are already on this machine).
 #
-# Usage:  pwsh -File scripts/build-windows-local.ps1 -Version 0.1.37
+# Usage:  pwsh -File scripts/build-windows-local.ps1 -Version 0.1.37 [-ReleasesRepo pegesund/spell_binaries] [-ReleaseChannel win]
 #
 # Produces dist/releases/win/Spell-Setup.exe + delta + RELEASES manifest.
 
 param(
     [string]$Version = "0.1.37-local",
-    [string]$OnnxDll = "C:\Users\pette\dev\contexter\onnxruntime\onnxruntime-win-x64-1.23.0\lib\onnxruntime.dll",
+    [string]$OnnxDll = "",
     [string]$SwiplHome = "C:\Program Files\swipl",
-    [string]$WhisperDir = "C:\Users\pette\dev\contexter\whisper-build\bin\Release"
+    [string]$WhisperDir = "",
+    [string]$ReleasesRepo = "pegesund/spell_binaries",
+    [string]$ReleaseChannel = "win"
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
+$env:SPELL_RELEASES_REPO = $ReleasesRepo
+$env:SPELL_RELEASES_CHANNEL = $ReleaseChannel
+
+function Resolve-OnnxDll {
+    param([string]$RequestedPath)
+
+    if ($RequestedPath -and (Test-Path $RequestedPath)) {
+        return (Resolve-Path $RequestedPath).Path
+    }
+
+    $candidates = @(
+        $env:ORT_DYLIB_PATH,
+        (Join-Path $repoRoot "..\onnxruntime\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll"),
+        (Join-Path $repoRoot "..\..\onnxruntime\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll"),
+        "C:\onnxruntime\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll",
+        "C:\onnxruntime\onnxruntime-win-x64-1.23.0\lib\onnxruntime.dll",
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Extensions\Microsoft\CopilotUpgradeAgent\ServiceHub\Services\runtimes\win-x64\native\onnxruntime.dll",
+        "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\Extensions\Microsoft\CopilotUpgradeAgent\ServiceHub\Services\runtimes\win-x64\native\onnxruntime.dll"
+    ) | Where-Object { $_ -and $_.Trim() -ne "" }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+function Resolve-WhisperDll {
+    param([string]$RequestedPath)
+
+    $candidates = @()
+    if ($RequestedPath -and $RequestedPath.Trim() -ne "") {
+        if (Test-Path $RequestedPath -PathType Container) {
+            $candidates += (Join-Path $RequestedPath "whisper.dll")
+        } else {
+            $candidates += $RequestedPath
+        }
+    }
+
+    $candidates += @(
+        (Join-Path $repoRoot "whisper-build\bin\Release\whisper.dll"),
+        (Join-Path $repoRoot "..\whisper-build\bin\Release\whisper.dll"),
+        (Join-Path $repoRoot "..\..\whisper-build\bin\Release\whisper.dll"),
+        "C:\whisper-build\bin\Release\whisper.dll"
+    )
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+$resolvedOnnxDll = Resolve-OnnxDll -RequestedPath $OnnxDll
+if (-not $resolvedOnnxDll) {
+    Write-Error "Could not locate onnxruntime.dll automatically. Pass -OnnxDll <full-path>."
+    exit 1
+}
+
+$resolvedWhisperDll = Resolve-WhisperDll -RequestedPath $WhisperDir
+if (-not $resolvedWhisperDll) {
+    Write-Error "Could not locate whisper.dll automatically. Pass -WhisperDir <dir-or-full-dll-path>."
+    exit 1
+}
 
 Write-Host "=== Build spell.exe + native_bridge.exe ==="
-$env:ORT_DYLIB_PATH = $OnnxDll
+$env:ORT_DYLIB_PATH = $resolvedOnnxDll
+Write-Host "Using ONNX Runtime: $resolvedOnnxDll"
+Write-Host "Using Whisper runtime: $resolvedWhisperDll"
+Write-Host "Using release feed: $ReleasesRepo (channel: $ReleaseChannel)"
 cargo build --release --bin spell --bin native_bridge
 if ($LASTEXITCODE -ne 0) { Write-Error "cargo build failed"; exit 1 }
 
@@ -80,7 +153,7 @@ foreach ($item in @("boot.prc", "library", "boot")) {
 }
 
 Write-Host "=== Copy ONNX Runtime ==="
-Copy-Item $OnnxDll "$frameworks\"
+Copy-Item $resolvedOnnxDll "$frameworks\"
 
 Write-Host "=== Copy MSVC runtime ==="
 $vcDeps = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
@@ -95,11 +168,8 @@ foreach ($dep in $vcDeps) {
 }
 
 Write-Host "=== Copy Whisper DLLs ==="
-if (-not (Test-Path "$WhisperDir\whisper.dll")) {
-    Write-Error "whisper.dll not at $WhisperDir -- build whisper-build first or pass -WhisperDir"
-    exit 1
-}
-Get-ChildItem "$WhisperDir\*.dll" | ForEach-Object {
+$resolvedWhisperDir = Split-Path $resolvedWhisperDll -Parent
+Get-ChildItem "$resolvedWhisperDir\*.dll" | ForEach-Object {
     Copy-Item $_.FullName "$frameworks\"
 }
 
@@ -124,6 +194,7 @@ New-Item -Force -ItemType Directory -Path $outputDir | Out-Null
     --packVersion $Version `
     --packDir $bundleDir `
     --mainExe "Spell.exe" `
+    --channel $ReleaseChannel `
     --icon "assets\Spell.ico" `
     --packTitle "Spell" `
     --packAuthors "Cognio AS" `

@@ -1,7 +1,7 @@
 name: Release (Windows)
 
-# Builds the Windows Spell.exe bundle and uploads it to pegesund/spell_binaries
-# as a release asset under tag v<VERSION>.
+# Builds the Windows Spell.exe bundle and uploads it to the configured releases
+# repo as a release asset under tag v<VERSION>.
 #
 # Mac builds run locally via scripts/release-mac.sh (Xcode + Apple Developer ID
 # cannot run in CI without burning notarization-API-key secrets).
@@ -17,6 +17,16 @@ on:
         description: 'Semver version, e.g. 0.1.0 (no leading "v"). Must match X.Y.Z.'
         required: true
         default: '0.1.0'
+        type: string
+      releases_repo:
+        description: 'GitHub repo that should receive release artifacts, e.g. pegesund/spell_binaries_nittedal'
+        required: false
+        default: 'pegesund/spell_binaries'
+        type: string
+      release_channel:
+        description: 'Velopack update channel to publish, e.g. win or win-nittedal-auto'
+        required: false
+        default: 'win'
         type: string
   push:
     tags:
@@ -59,6 +69,30 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION"   >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
+
+      - name: Resolve releases repo
+        id: releases_repo
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.releases_repo }}" ]; then
+            RELEASES_REPO="${{ github.event.inputs.releases_repo }}"
+          else
+            RELEASES_REPO="${{ env.RELEASES_REPO }}"
+          fi
+          echo "repo=$RELEASES_REPO" >> "$GITHUB_OUTPUT"
+          echo "Resolved releases repo: $RELEASES_REPO"
+
+      - name: Resolve release channel
+        id: release_channel
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.release_channel }}" ]; then
+            RELEASE_CHANNEL="${{ github.event.inputs.release_channel }}"
+          else
+            RELEASE_CHANNEL="win"
+          fi
+          echo "channel=$RELEASE_CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "Resolved release channel: $RELEASE_CHANNEL"
 
       - name: Checkout sibling source repos (private)
         # contexterGui's Cargo.toml has path deps to sibling repos:
@@ -223,6 +257,9 @@ jobs:
 
       - name: Cargo build (release)
         shell: pwsh
+        env:
+          SPELL_RELEASES_REPO: ${{ steps.releases_repo.outputs.repo }}
+          SPELL_RELEASES_CHANNEL: ${{ steps.release_channel.outputs.channel }}
         run: |
           cargo build --release --bin spell --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -241,6 +278,9 @@ jobs:
       - name: Cargo build download diagnostic
         id: download_diag
         shell: pwsh
+        env:
+          SPELL_RELEASES_REPO: ${{ steps.releases_repo.outputs.repo }}
+          SPELL_RELEASES_CHANNEL: ${{ steps.release_channel.outputs.channel }}
         run: |
           cargo build --release --bin test_download --target x86_64-pc-windows-msvc
           $diagDir = "dist\diagnostics"
@@ -577,6 +617,7 @@ jobs:
               --packVersion $version `
               --packDir $bundleDir `
               --mainExe "Spell.exe" `
+              --channel "${{ steps.release_channel.outputs.channel }}" `
               --icon "assets\Spell.ico" `
               --packTitle "Spell" `
               --packAuthors "Cognio AS" `
@@ -598,13 +639,14 @@ jobs:
           $tag = "${{ steps.ver.outputs.tag }}"
           $version = "${{ steps.ver.outputs.version }}"
           $outputDir = "${{ steps.vpk.outputs.output_dir }}"
+          $releasesRepo = "${{ steps.releases_repo.outputs.repo }}"
 
           # Create release if it doesn't exist (Mac script may have already created it).
-          gh release view $tag --repo ${{ env.RELEASES_REPO }} 2>$null
+          gh release view $tag --repo $releasesRepo 2>$null
           if ($LASTEXITCODE -ne 0) {
               Write-Host "Creating new release $tag"
               gh release create $tag `
-                  --repo ${{ env.RELEASES_REPO }} `
+                  --repo $releasesRepo `
                   --title "Spell $version" `
                   --notes "Auto-generated. Mac DMG uploaded by release-mac.sh; Windows Setup.exe + delta updates by release-windows.yml CI."
           } else {
@@ -618,17 +660,17 @@ jobs:
           #   RELEASES              — version manifest (auto-update reads this)
           Get-ChildItem $outputDir | ForEach-Object {
               Write-Host "Uploading $($_.Name)"
-              gh release upload $tag $_.FullName --repo ${{ env.RELEASES_REPO }} --clobber
+              gh release upload $tag $_.FullName --repo $releasesRepo --clobber
           }
 
           $diagExe = Join-Path "${{ steps.download_diag.outputs.diag_dir }}" "SpellDownloadDiagnostic.exe"
           if (Test-Path $diagExe) {
               Write-Host "Uploading SpellDownloadDiagnostic.exe"
-              gh release upload $tag $diagExe --repo ${{ env.RELEASES_REPO }} --clobber
+              gh release upload $tag $diagExe --repo $releasesRepo --clobber
           } else {
               Write-Host "SpellDownloadDiagnostic.exe not found at $diagExe — skipping release upload"
           }
-          Write-Host "https://github.com/${{ env.RELEASES_REPO }}/releases/tag/$tag"
+          Write-Host "https://github.com/$releasesRepo/releases/tag/$tag"
 
       - name: Upload bundle artifact (CI debugging)
         if: always() && steps.vpk.outputs.output_dir != ''
