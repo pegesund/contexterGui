@@ -11598,7 +11598,8 @@ impl eframe::App for ContextApp {
         // toolbar-only state small; the old 90 px floor made the popup look
         // like an empty panel was still open.
         let base_h = if bulb_visible {
-            58.0
+            // +18 for the "Fullfør ordet / Neste ord" heading row.
+            76.0
         } else if pencil_visible {
             60.0
         } else if suggestion_status_visible {
