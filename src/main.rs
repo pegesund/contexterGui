@@ -11902,6 +11902,8 @@ impl eframe::App for ContextApp {
         let ocr_is_busy = self.ocr_receiver.is_some();
         egui::TopBottomPanel::top("toolbar").frame(toolbar_frame).show(ctx, |ui| {
             let header_resp = ui.horizontal(|ui| {
+                // Same gap between every toolbar icon.
+                ui.spacing_mut().item_spacing.x = 6.0 * s;
                 let sep = egui::Color32::from_rgb(180, 170, 140);
                 let active = egui::Color32::from_rgb(0, 70, 160);
                 let inactive = egui::Color32::from_rgb(100, 100, 100);
@@ -11945,7 +11947,9 @@ impl eframe::App for ContextApp {
                 } else if has_grammar {
                     egui::Color32::from_rgb(220, 50, 50)
                 } else {
-                    egui::Color32::from_rgb(0, 160, 60)
+                    // Clean: same blue as the other active icons; red stays
+                    // reserved for "you have errors".
+                    active
                 };
                 let pen_resp = ax_icon(ui,
                     "\u{270F}", 16.0 * s, pen_color,
@@ -11998,7 +12002,7 @@ impl eframe::App for ContextApp {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     let mic_resp = ax_icon(ui,
-                        "\u{1F3A4}", 13.0 * s, mic_color,
+                        "\u{1F3A4}", 16.0 * s, mic_color,
                         self.ui_language.ui_speech_recognition(),
                     );
                     if toolbar_clicked(ui, &mic_resp, toolbar_mouse_down_click) {
@@ -12040,7 +12044,7 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     let speak_resp = ax_icon(ui,
-                        "▶", 14.0 * s, inactive,
+                        "▶", 16.0 * s, inactive,
                         self.ui_language.ui_read_selected_text(),
                     );
                     if toolbar_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
@@ -12119,11 +12123,7 @@ impl eframe::App for ContextApp {
                 }
 
                 // 📌 Follow cursor toggle
-                let pin_color = if self.follow_cursor {
-                    egui::Color32::from_rgb(0, 120, 60)
-                } else {
-                    egui::Color32::from_rgb(160, 160, 160)
-                };
+                let pin_color = if self.follow_cursor { active } else { inactive };
                 // Phase 14: UI strings come from the runtime-selected
                 // language stored on ContextApp.
                 let pin_tooltip = if self.follow_cursor {
@@ -12132,7 +12132,7 @@ impl eframe::App for ContextApp {
                     self.ui_language.ui_pin_cursor_off()
                 };
                 let pin_resp = ax_icon(ui,
-                    "\u{1F4CC}", 14.0 * s, pin_color,
+                    "\u{1F4CC}", 16.0 * s, pin_color,
                     pin_tooltip,
                 );
                 if toolbar_clicked(ui, &pin_resp, toolbar_mouse_down_click) {
@@ -12177,7 +12177,7 @@ impl eframe::App for ContextApp {
 
                 // ▁ Minimize
                 let minimize_resp = ax_icon(ui,
-                    "–", 14.0 * s, inactive,
+                    "–", 16.0 * s, inactive,
                     self.ui_language.ui_minimize(),
                 );
                 // OS window state must use a completed click. The mouse-down
@@ -12370,7 +12370,23 @@ impl eframe::App for ContextApp {
                     let has_right_only = !self.open_completions.is_empty() && self.completions.is_empty();
 
                     let has_tts = tts::tts_available();
-                    let icon_w: f32 = if has_tts { 18.0 * s } else { 0.0 };
+                    let icon_w: f32 = if has_tts { 22.0 * s } else { 0.0 };
+                    // Column headings, so pupils can tell "finish this word"
+                    // from "next word".
+                    let (head_complete, head_next) = match self.ui_language.code() {
+                        "en" => ("Complete word", "Next word"),
+                        _ => ("Fullfør ordet", "Neste ord"),
+                    };
+                    let heading = |ui: &mut egui::Ui, text: &str, w: f32| {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 16.0 * s), egui::Sense::hover());
+                        ui.painter().text(
+                            egui::pos2(rect.min.x + icon_w, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            text.to_uppercase(),
+                            egui::FontId::proportional(9.5 * s),
+                            theme.muted,
+                        );
+                    };
                     let completions_hover_zoom = self.hover_zoom;
                     let render_row = |ui: &mut egui::Ui, comp: &Completion, _idx: usize, is_selected: bool, is_top: bool, col_width: f32| -> (bool, bool) {
                         let marker = if is_selected { "▸ " } else { "  " };
@@ -12394,9 +12410,12 @@ impl eframe::App for ContextApp {
                             })
                         } else { resp };
                         if is_selected {
-                            ui.painter().rect_filled(rect, 2.0, theme.info);
+                            ui.painter().rect_filled(rect, 4.0, theme.info);
                         } else if hovered {
-                            ui.painter().rect_filled(rect, 2.0, tint_bg(theme.bg, theme.info, 0.15));
+                            ui.painter().rect_filled(rect, 4.0, tint_bg(theme.bg, theme.info, 0.15));
+                        } else if is_top {
+                            // Best suggestion: soft green chip, not just green text.
+                            ui.painter().rect_filled(rect, 4.0, tint_bg(theme.bg, theme.ok, 0.12));
                         }
 
                         // Speaker icon at the left edge, vertically centered
@@ -12405,7 +12424,7 @@ impl eframe::App for ContextApp {
                             let icon_fg = if is_selected { egui::Color32::from_rgba_premultiplied(230, 230, 230, 255) }
                                 else { theme.muted };
                             let icon_center = egui::pos2(rect.min.x + icon_w * 0.5, rect.center().y);
-                            ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(9.0 * s), icon_fg);
+                            ui.painter().text(icon_center, egui::Align2::CENTER_CENTER, "🔊", egui::FontId::proportional(12.0 * s), icon_fg);
 
                             // Check if click was in the icon area
                             if response_clicked(ui, &resp, toolbar_mouse_down_click) {
@@ -12435,6 +12454,11 @@ impl eframe::App for ContextApp {
                         let avail_w = ui.available_width();
                         let col_w = (avail_w - 2.0) / 2.0;
                         let max_rows = self.completions.len().max(self.open_completions.len());
+                        ui.horizontal(|ui| {
+                            heading(ui, head_complete, col_w);
+                            ui.add_space(2.0);
+                            heading(ui, head_next, col_w);
+                        });
                         for row in 0..max_rows {
                             ui.horizontal(|ui| {
                                 if row < self.completions.len() {
@@ -12458,6 +12482,7 @@ impl eframe::App for ContextApp {
                     } else if has_right_only {
                         // No prefix typed — show right column (next-word predictions) as single list
                         let avail_w = ui.available_width();
+                        heading(ui, head_next, avail_w);
                         for (i, comp) in self.open_completions.iter().enumerate() {
                             let is_sel = sel == Some(i);
                             let is_top = i == 0 && sel.is_none();
@@ -13959,11 +13984,20 @@ impl eframe::App for ContextApp {
                                     (2u8, settings_copy.settings_tab_display()),
                                     (3u8, settings_copy.settings_tab_language()),
                                 ];
+                                ui.spacing_mut().item_spacing.x = 6.0 * s;
+                                ui.spacing_mut().button_padding = egui::vec2(14.0 * s, 4.0 * s);
                                 for (idx, label) in tabs.iter() {
-                                    if ui.selectable_label(
-                                        settings_tab == *idx,
-                                        egui::RichText::new(*label).size(body).strong(),
-                                    ).clicked() {
+                                    // Pill tabs: the active one is filled, the
+                                    // others are outlined, so all read as tabs.
+                                    let selected = settings_tab == *idx;
+                                    let text = egui::RichText::new(*label).size(body * 0.85).strong()
+                                        .color(if selected { egui::Color32::WHITE } else { active_color });
+                                    let btn = egui::Button::new(text)
+                                        .fill(if selected { active_color } else { egui::Color32::TRANSPARENT })
+                                        .stroke(egui::Stroke::new(1.0, active_color))
+                                        .corner_radius(14.0)
+                                        .min_size(egui::vec2(0.0, 30.0 * s));
+                                    if ui.add(btn).clicked() {
                                         settings_tab = *idx;
                                     }
                                 }
@@ -14015,10 +14049,13 @@ impl eframe::App for ContextApp {
                             ui.label(egui::RichText::new(lang_for_settings.ui_user_dict()).size(heading).strong().color(label_color));
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(settings_copy.words_count(dict_count)).size(body).color(active_color));
+                                // Plain text (not link-blue) plus a normal-sized button,
+                                // matching the other buttons in Settings.
+                                ui.label(egui::RichText::new(settings_copy.words_count(dict_count)).size(body * 0.85).color(label_color));
+                                ui.add_space(8.0);
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new(lang_for_settings.ui_edit()).size(body)
-                                )).clicked() {
+                                    egui::RichText::new(lang_for_settings.ui_edit()).size(15.0 * s)
+                                ).min_size(egui::vec2(0.0, 28.0 * s))).clicked() {
                                     open_userdict = true;
                                 }
                             });
@@ -14308,9 +14345,9 @@ impl eframe::App for ContextApp {
                                 }
                             }
 
+                            // Technical detail: only shown on hover over the version line below.
+                            let bridge_detail = format!("{}: {}", settings_copy.bridge(), bridge_name);
                             ui.add_space(12.0);
-                            ui.label(egui::RichText::new(format!("{}: {}", settings_copy.bridge(), bridge_name))
-                                .size(14.0 * s).color(off_color));
 
                             // ── Version + auto-update banner ───────────────
                             // The displayed version prefers Velopack's
@@ -14325,7 +14362,7 @@ impl eframe::App for ContextApp {
                                 egui::RichText::new(format!("Spell {} — Cognio AS", version_str))
                                     .size(14.0 * s)
                                     .color(off_color),
-                            );
+                            ).on_hover_text(&bridge_detail);
 
                             // Banner (only when there's something to surface).
                             // Status::NotInstalled is the only state we hide
@@ -15047,6 +15084,8 @@ fn ax_icon(
     let resp = resp.on_hover_text(label);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        // Soft rounded highlight so it is clear the icon is a button.
+        ui.painter().rect_filled(rect, 6.0, color.gamma_multiply(0.12));
     }
     ui.painter().text(
         rect.center(),
@@ -15326,7 +15365,7 @@ fn run_word_addin_wizard() -> bool {
 
     let options = eframe::NativeOptions {
         viewport: spell_viewport_builder()
-            .with_inner_size([520.0, 480.0])
+            .with_inner_size([520.0, 300.0])
             .with_decorations(true)
             .with_title("Spell — Word-integrasjon"),
         ..Default::default()
@@ -15335,12 +15374,25 @@ fn run_word_addin_wizard() -> bool {
     struct WizardApp {
         phase: Arc<Mutex<Phase>>,
         dismissed: Arc<Mutex<bool>>,
+        /// Window height last requested, so the window fits each phase's content.
+        height: f32,
     }
 
     impl eframe::App for WizardApp {
+        fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             ctx.set_visuals(egui::Visuals::light());
             let phase = self.phase.lock().map(|p| p.clone()).unwrap_or(Phase::Initial);
+            let wanted = match phase {
+                Phase::Initial | Phase::Installing => 300.0,
+                Phase::Error(_) => 340.0,
+                Phase::Done => 480.0,
+            };
+            if (wanted - self.height).abs() > 0.5 {
+                self.height = wanted;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(520.0, wanted)));
+            }
 
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(28.0))
@@ -15360,7 +15412,8 @@ fn run_word_addin_wizard() -> bool {
                                     .size(14.5).color(egui::Color32::from_rgb(80, 80, 80)));
                                 ui.add_space(28.0);
                                 ui.horizontal(|ui| {
-                                    ui.add_space(40.0);
+                                    // Centre the two buttons (130 + 12 + 200 wide).
+                                    ui.add_space(((ui.available_width() - 342.0) / 2.0).max(0.0));
                                     if ui.add_sized([130.0, 36.0],
                                         egui::Button::new(egui::RichText::new("Hopp over").size(15.0)),
                                     ).clicked() {
@@ -15371,6 +15424,7 @@ fn run_word_addin_wizard() -> bool {
                                     if ui.add_sized([200.0, 36.0],
                                         egui::Button::new(
                                             egui::RichText::new("Installer integrasjon").size(15.0).strong()
+                                                .color(egui::Color32::WHITE)
                                         ).fill(egui::Color32::from_rgb(40, 110, 200)),
                                     ).clicked() {
                                         // Run setup in a background thread. The osascript admin
@@ -15440,7 +15494,7 @@ fn run_word_addin_wizard() -> bool {
                                     .size(13.0).color(egui::Color32::from_rgb(120, 60, 60)));
                                 ui.add_space(20.0);
                                 ui.horizontal(|ui| {
-                                    ui.add_space(80.0);
+                                    ui.add_space(((ui.available_width() - 232.0) / 2.0).max(0.0));
                                     if ui.add_sized([110.0, 32.0],
                                         egui::Button::new("Prøv igjen"),
                                     ).clicked() {
@@ -15468,6 +15522,7 @@ fn run_word_addin_wizard() -> bool {
         Box::new(move |_cc| Ok(Box::new(WizardApp {
             phase: phase_for_app,
             dismissed: dismissed_for_app,
+            height: 300.0,
         }) as Box<dyn eframe::App>)),
     );
 

@@ -306,7 +306,7 @@ pub fn start_recording_live(stt_language_code: &str) -> Result<MicHandle, String
         stt_log("Recording stopped");
     });
 
-    Ok(MicHandle { stop_flag, result_rx })
+    Ok(MicHandle { stop_flag, stop_at: Arc::new(std::sync::Mutex::new(None)), result_rx })
 }
 
 /// Append f32 audio samples to an SFSpeechAudioBufferRecognitionRequest
