@@ -18,12 +18,18 @@ Required:
     SPELL_APP_KEY=<secret>   clients must send it as X-Spell-Key. The proxy
                              refuses to start without it.
 Optional:
+    SPELL_MAX_CONCURRENT=200 Google calls in flight per worker; beyond that
+                             requests get 503 at once instead of queueing.
     SPELL_RATE_PER_MIN=300   max requests per client IP per minute (a whole
                              school often shares one public IP).
 
 Run:
     pip install -r requirements.txt
     uvicorn stt_proxy:app --host 0.0.0.0 --port 8790
+
+Fully async: while one request waits on Google (2-5 s), the worker keeps
+serving others, so a single worker handles hundreds of parallel dictations.
+The work per request is tiny (validate WAV, forward, return JSON).
 
 Wire format (matches CloudSttEngine):
     POST /transcribe
@@ -34,6 +40,7 @@ Wire format (matches CloudSttEngine):
     GET /health -> {"ok": true, "backend": "..."}
 """
 
+import asyncio
 import base64
 import hmac
 import os
@@ -60,6 +67,7 @@ class Config:
         self.project = env.get("SPELL_GCP_PROJECT", "")
         self.location = env.get("SPELL_GCP_LOCATION", "europe-west4")
         self.rate_per_min = int(env.get("SPELL_RATE_PER_MIN", "300"))
+        self.max_concurrent = int(env.get("SPELL_MAX_CONCURRENT", "200"))
 
     @property
     def backend(self) -> str:
@@ -123,7 +131,20 @@ class RateLimiter:
             return True
 
 
-def recognize_v1(api_key: str, pcm: bytes, lang: str) -> str:
+_http: httpx.AsyncClient = None
+
+
+def http() -> httpx.AsyncClient:
+    """One pooled async client for all Google v1 calls (reuses TLS)."""
+    global _http
+    if _http is None:
+        _http = httpx.AsyncClient(
+            timeout=30,
+            limits=httpx.Limits(max_connections=400, max_keepalive_connections=100))
+    return _http
+
+
+async def recognize_v1(api_key: str, pcm: bytes, lang: str) -> str:
     body = {
         "config": {
             "encoding": "LINEAR16",
@@ -135,7 +156,7 @@ def recognize_v1(api_key: str, pcm: bytes, lang: str) -> str:
         "audio": {"content": base64.b64encode(pcm).decode("ascii")},
     }
     # Key in a header, not the URL, so it never lands in access logs.
-    r = httpx.post(GOOGLE_V1_URL, json=body, headers={"X-Goog-Api-Key": api_key}, timeout=30)
+    r = await http().post(GOOGLE_V1_URL, json=body, headers={"X-Goog-Api-Key": api_key})
     if r.status_code != 200:
         raise RuntimeError(f"google v1 HTTP {r.status_code}")
     results = r.json().get("results", [])
@@ -149,7 +170,7 @@ def recognize_v1(api_key: str, pcm: bytes, lang: str) -> str:
 _v2_client = None
 
 
-def recognize_v2(cfg: Config, wav: bytes, lang: str) -> str:
+async def recognize_v2(cfg: Config, wav: bytes, lang: str) -> str:
     global _v2_client
     from google.api_core.client_options import ClientOptions
     from google.cloud import speech_v2
@@ -157,7 +178,7 @@ def recognize_v2(cfg: Config, wav: bytes, lang: str) -> str:
 
     if _v2_client is None:
         endpoint = None if cfg.location == "global" else f"{cfg.location}-speech.googleapis.com"
-        _v2_client = speech_v2.SpeechClient(
+        _v2_client = speech_v2.SpeechAsyncClient(
             client_options=ClientOptions(api_endpoint=endpoint) if endpoint else None)
     config = cloud_speech.RecognitionConfig(
         auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
@@ -170,22 +191,23 @@ def recognize_v2(cfg: Config, wav: bytes, lang: str) -> str:
         config=config,
         content=wav,
     )
-    resp = _v2_client.recognize(request=req)
+    resp = await _v2_client.recognize(request=req, timeout=30)
     return " ".join(
         r.alternatives[0].transcript.strip() for r in resp.results if r.alternatives
     ).strip()
 
 
 def create_app(cfg: Config = None, recognizer=None) -> FastAPI:
-    """`recognizer(wav, pcm, lang) -> str` can be injected for tests."""
+    """`async recognizer(wav, pcm, lang) -> str` can be injected for tests."""
     cfg = cfg or Config()
     cfg.check()
     limiter = RateLimiter(cfg.rate_per_min)
+    in_flight = asyncio.Semaphore(cfg.max_concurrent)
 
-    def default_recognizer(wav: bytes, pcm: bytes, lang: str) -> str:
+    async def default_recognizer(wav: bytes, pcm: bytes, lang: str) -> str:
         if cfg.backend == "google-v2":
-            return recognize_v2(cfg, wav, lang)
-        return recognize_v1(cfg.api_key, pcm, lang)
+            return await recognize_v2(cfg, wav, lang)
+        return await recognize_v1(cfg.api_key, pcm, lang)
 
     recognize = recognizer or default_recognizer
     app = FastAPI()
@@ -201,6 +223,10 @@ def create_app(cfg: Config = None, recognizer=None) -> FastAPI:
         client_ip = request.client.host if request.client else "?"
         if not limiter.allow(client_ip):
             raise HTTPException(status_code=429, detail="too many requests")
+        # Refuse oversized uploads before reading them into memory.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_WAV_BYTES:
+            raise HTTPException(status_code=413, detail="audio too long")
         wav = await request.body()
         if len(wav) > MAX_WAV_BYTES:
             raise HTTPException(status_code=413, detail="audio too long")
@@ -213,8 +239,11 @@ def create_app(cfg: Config = None, recognizer=None) -> FastAPI:
         lang = LANG_MAP.get(x_spell_lang.split("-")[0].lower(), x_spell_lang)
         if lang not in ALLOWED_LANGS:
             raise HTTPException(status_code=400, detail="unsupported language")
+        if in_flight.locked():
+            raise HTTPException(status_code=503, detail="busy, try again")
         try:
-            text = recognize(wav, pcm, lang)
+            async with in_flight:
+                text = await recognize(wav, pcm, lang)
         except Exception:
             # Never echo provider errors (they may contain request details).
             raise HTTPException(status_code=502, detail="speech provider error")
