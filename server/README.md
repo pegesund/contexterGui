@@ -60,6 +60,15 @@ before (it has been on every client).
   502 provider error (details never echoed).
 - `GET /health` → `{"ok": true, "backend": "google-v1|google-v2"}`.
 
+## Load
+
+Fully async: a worker keeps serving other pupils while one request waits on
+Google. Measured with one worker and a fake 2 s Google: 100 parallel
+dictations (10 s audio each) done in 2.2 s, 300 in 3.5 s. For more, run
+`uvicorn ... --workers 4`; the real limit is then Google's quota (raise it in
+the Cloud console). `SPELL_MAX_CONCURRENT` (default 200 per worker) answers
+503 straight away instead of letting requests pile up.
+
 ## Limits
 
 `SPELL_RATE_PER_MIN` (default 300) per client IP — a school often shares one

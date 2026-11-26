@@ -1,6 +1,8 @@
 """Tests for stt_proxy with a fake speech backend (no network)."""
+import asyncio
 import os
 import struct
+import time
 
 os.environ["SPELL_PROXY_NO_APP"] = "1"
 
@@ -22,7 +24,7 @@ def make_client(rate=30, recognizer=None):
     cfg = stt_proxy.Config({"SPELL_APP_KEY": "k1", "SPELL_GOOGLE_API_KEY": "g", "SPELL_RATE_PER_MIN": str(rate)})
     calls = []
 
-    def fake(w, pcm, lang):
+    async def fake(w, pcm, lang):
         calls.append((len(pcm), lang))
         return "hei verden"
 
@@ -83,7 +85,7 @@ def test_rate_limit_per_ip():
 
 
 def test_provider_error_is_not_echoed():
-    def boom(w, pcm, lang):
+    async def boom(w, pcm, lang):
         raise RuntimeError("secret detail key=abc")
     c, _ = make_client(recognizer=boom)
     r = post(c, wav())
@@ -112,11 +114,60 @@ def test_v1_sends_key_in_header_not_url(monkeypatch):
         def json(self):
             return {"results": [{"alternatives": [{"transcript": " hei "}]}]}
 
-    def fake_post(url, json, headers, timeout):
-        seen.update(url=url, headers=headers, json=json)
-        return R()
+    class FakeClient:
+        async def post(self, url, json, headers):
+            seen.update(url=url, headers=headers, json=json)
+            return R()
 
-    monkeypatch.setattr(stt_proxy.httpx, "post", fake_post)
-    assert stt_proxy.recognize_v1("APIKEY", b"\x00\x00" * 10, "nb-NO") == "hei"
+    monkeypatch.setattr(stt_proxy, "http", lambda: FakeClient())
+    assert asyncio.run(stt_proxy.recognize_v1("APIKEY", b"\x00\x00" * 10, "nb-NO")) == "hei"
     assert "APIKEY" not in seen["url"] and seen["headers"]["X-Goog-Api-Key"] == "APIKEY"
     assert seen["json"]["config"]["languageCode"] == "nb-NO"
+
+
+def test_requests_run_concurrently_not_one_at_a_time():
+    """50 requests that each wait 1 s on 'Google' must finish in ~1 s, not 50 s."""
+    import httpx as hx
+
+    async def slow(w, pcm, lang):
+        await asyncio.sleep(1.0)
+        return "ok"
+
+    cfg = stt_proxy.Config({"SPELL_APP_KEY": "k1", "SPELL_GOOGLE_API_KEY": "g", "SPELL_RATE_PER_MIN": "1000"})
+    app = stt_proxy.create_app(cfg, slow)
+
+    async def run():
+        transport = hx.ASGITransport(app=app)
+        async with hx.AsyncClient(transport=transport, base_url="http://t") as c:
+            start = time.monotonic()
+            rs = await asyncio.gather(*[
+                c.post("/transcribe", content=wav(), headers={"X-Spell-Key": "k1", "X-Spell-Lang": "nb"})
+                for _ in range(50)])
+            return time.monotonic() - start, [r.status_code for r in rs]
+
+    elapsed, codes = asyncio.run(run())
+    assert codes == [200] * 50
+    assert elapsed < 5, f"took {elapsed:.1f}s: requests are being serialised"
+
+
+def test_overload_returns_503_instead_of_queueing():
+    import httpx as hx
+
+    async def slow(w, pcm, lang):
+        await asyncio.sleep(0.5)
+        return "ok"
+
+    cfg = stt_proxy.Config({"SPELL_APP_KEY": "k1", "SPELL_GOOGLE_API_KEY": "g",
+                            "SPELL_RATE_PER_MIN": "1000", "SPELL_MAX_CONCURRENT": "5"})
+    app = stt_proxy.create_app(cfg, slow)
+
+    async def run():
+        transport = hx.ASGITransport(app=app)
+        async with hx.AsyncClient(transport=transport, base_url="http://t") as c:
+            rs = await asyncio.gather(*[
+                c.post("/transcribe", content=wav(), headers={"X-Spell-Key": "k1"})
+                for _ in range(20)])
+            return [r.status_code for r in rs]
+
+    codes = asyncio.run(run())
+    assert codes.count(200) >= 5 and 503 in codes and set(codes) <= {200, 503}
