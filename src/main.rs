@@ -4689,7 +4689,7 @@ impl ContextApp {
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
                     stt::WhisperEngine::load(&dll_dir, &model_path, &*lang0, &*ui_lang0)
-                        .map(|mut e| { e.set_threads(6); Box::new(e) as Box<dyn stt::SttEngine> })
+                        .map(|mut e| { e.set_threads(stt::whisper_threads(6)); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
         } else if mode == 2 {
@@ -4724,7 +4724,7 @@ impl ContextApp {
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Streaming(
                     stt::WhisperEngine::load(&dll_dir, &streaming_path, &*lang1, &*ui_lang1)
-                        .map(|mut e| { e.set_threads(6); Box::new(e) as Box<dyn stt::SttEngine> })
+                        .map(|mut e| { e.set_threads(stt::whisper_threads(6)); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
         } else {
@@ -4747,13 +4747,13 @@ impl ContextApp {
             std::thread::spawn(move || {
                 let _ = tx2.send(WhisperLoadItem::Streaming(
                     stt::WhisperEngine::load(&dll2, &streaming_path, &*lang1, &*ui_lang1)
-                        .map(|mut e| { e.set_threads(4); Box::new(e) as Box<dyn stt::SttEngine> })
+                        .map(|mut e| { e.set_threads(stt::whisper_threads(4)); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
             std::thread::spawn(move || {
                 let _ = tx.send(WhisperLoadItem::Final(
                     stt::WhisperEngine::load(&dll_dir, &final_path, &*lang2, &*ui_lang2)
-                        .map(|mut e| { e.set_threads(8); Box::new(e) as Box<dyn stt::SttEngine> })
+                        .map(|mut e| { e.set_threads(stt::whisper_threads(8)); Box::new(e) as Box<dyn stt::SttEngine> })
                 ));
             });
         }
