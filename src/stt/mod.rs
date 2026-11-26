@@ -13,6 +13,26 @@ static MIC_RECORDING: AtomicBool = AtomicBool::new(false);
 /// time AND steals CPU from the streaming lane, so future recordings skip
 /// it entirely (streaming text becomes the final). Reset on app restart.
 static LANE_TOO_SLOW: AtomicBool = AtomicBool::new(false);
+/// Set when a streaming partial ran slower than realtime on this machine.
+/// Live partials re-transcribe the whole recording every 2 s, so below
+/// realtime they snowball (each pass longer than the last) and starve the
+/// CPU. Once set, recordings skip live partials and transcribe once at stop.
+static STREAMING_TOO_SLOW: AtomicBool = AtomicBool::new(false);
+
+/// Whisper thread count for a model: never more than the CPU has. A 2-core
+/// Pentium asked for 4 + 8 threads ran ~100x slower than realtime.
+static SKIP_LIVE_PARTIALS: AtomicBool = AtomicBool::new(false);
+
+/// Weak CPUs (see cpu_check.rs): don't run live partials at all — the whole
+/// recording is transcribed once at stop (by the cloud in cloud mode).
+pub fn set_skip_live_partials(skip: bool) {
+    SKIP_LIVE_PARTIALS.store(skip, Ordering::Release);
+}
+
+pub fn whisper_threads(want: usize) -> usize {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    want.min(cores).max(1)
+}
 // The UI may hide a recording before Whisper finishes its current blocking
 // transcription. Keep a separate lease so that cannot start a second worker.
 static MIC_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -249,6 +269,7 @@ pub fn start_recording(
         let lane_gave_up = Arc::new(AtomicBool::new(false));
         let medium_lane: Option<std::thread::JoinHandle<()>> = if auto_final
             && !LANE_TOO_SLOW.load(Ordering::Acquire)
+            && !STREAMING_TOO_SLOW.load(Ordering::Acquire)
         {
             let lane_buf = audio_buf.clone();
             let lane_stop = stop_clone.clone();
@@ -298,6 +319,15 @@ pub fn start_recording(
                 loop {
                     if lane_stop.load(Ordering::Acquire) {
                         break;
+                    }
+                    // Even the small streaming model can't keep up here, so
+                    // the bigger final model certainly can't: stop competing
+                    // for the CPU and let the streaming text be the final.
+                    if STREAMING_TOO_SLOW.load(Ordering::Acquire) {
+                        mic_log("Medium lane: streaming model is slower than realtime on this machine — giving up");
+                        LANE_TOO_SLOW.store(true, Ordering::Release);
+                        gave_up_flag.store(true, Ordering::Release);
+                        return;
                     }
                     let available = { lane_buf.lock().unwrap().len() };
                     if available >= done + segment_samples {
@@ -399,7 +429,9 @@ pub fn start_recording(
                 buf.len()
             };
 
-            if current_len >= next_threshold && current_len > last_transcribed_len {
+            if !STREAMING_TOO_SLOW.load(Ordering::Acquire)
+                && !SKIP_LIVE_PARTIALS.load(Ordering::Acquire)
+                && current_len >= next_threshold && current_len > last_transcribed_len {
                 let raw_audio = {
                     let buf = audio_buf.lock().unwrap();
                     buf.clone()
@@ -411,15 +443,24 @@ pub fn start_recording(
                     raw_audio
                 };
 
+                let audio_16k_len_secs = audio_16k.len() as f64 / 16000.0;
                 mic_log(&format!("Microphone: streaming transcribe {:.1}s of audio...",
-                    audio_16k.len() as f64 / 16000.0));
+                    audio_16k_len_secs));
                 let start = std::time::Instant::now();
                 let text = {
                     let eng = lock_engine(&streaming_engine, "streaming");
                     eng.transcribe(&audio_16k)
                 };
+                let took = start.elapsed().as_secs_f64();
                 mic_log(&format!("Microphone: partial result in {:.1}s: '{}'",
-                    start.elapsed().as_secs_f64(), &text[..text.len().min(80)]));
+                    took, &text[..text.len().min(80)]));
+                let audio_secs = audio_16k_len_secs;
+                if took > audio_secs {
+                    mic_log(&format!(
+                        "Microphone: streaming {:.2}x realtime — no more live partials; transcribing once at stop",
+                        audio_secs / took.max(0.001)));
+                    STREAMING_TOO_SLOW.store(true, Ordering::Release);
+                }
 
                 last_partial_text = text.clone();
                 let _ = result_tx.send(TranscribeResult { text, partial: true });
@@ -469,7 +510,11 @@ pub fn start_recording(
             mic_log(&format!(
                 "Microphone: medium lane still busy after {}s grace — delivering streaming text as final",
                 GRACE_MS / 1000));
-            let fallback = if last_partial_text.trim().is_empty() {
+            let fallback = if STREAMING_TOO_SLOW.load(Ordering::Acquire) {
+                // Live partials stopped mid-recording, so the last one is
+                // stale: one pass over the whole recording instead.
+                full_streaming_pass(&audio_buf, sample_rate, &streaming_engine, &no_audio_msg)
+            } else if last_partial_text.trim().is_empty() {
                 no_audio_msg
             } else {
                 last_partial_text
@@ -484,7 +529,9 @@ pub fn start_recording(
         // model slower than realtime (LANE_TOO_SLOW) — the streaming text
         // IS the final, delivered instantly.
         if auto_final {
-            let fallback = if !last_partial_text.trim().is_empty() {
+            let fallback = if !last_partial_text.trim().is_empty()
+                && !STREAMING_TOO_SLOW.load(Ordering::Acquire)
+            {
                 last_partial_text
             } else {
                 // Recording shorter than the first partial threshold — one
@@ -543,6 +590,23 @@ pub fn start_recording(
     });
 
     Ok(MicHandle { stop_flag, stop_at, result_rx })
+}
+
+/// One streaming-model pass over everything recorded so far.
+fn full_streaming_pass(
+    audio_buf: &Arc<Mutex<Vec<f32>>>,
+    sample_rate: u32,
+    engine: &Arc<Mutex<Box<dyn SttEngine>>>,
+    no_audio_msg: &str,
+) -> String {
+    let raw = { audio_buf.lock().unwrap().clone() };
+    if raw.is_empty() {
+        return no_audio_msg.to_string();
+    }
+    let audio_16k = if sample_rate != 16000 { resample(&raw, sample_rate, 16000) } else { raw };
+    mic_log(&format!("Microphone: one pass over {:.1}s of audio (slow machine)", audio_16k.len() as f64 / 16000.0));
+    let eng = lock_engine(engine, "streaming");
+    eng.transcribe(&audio_16k)
 }
 
 /// Re-transcribe saved audio with the final (large) model.
