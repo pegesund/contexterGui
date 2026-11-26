@@ -1,107 +1,232 @@
 #!/usr/bin/env python3
-"""Spell STT proxy — server-to-server bridge to Google Cloud Speech-to-Text.
+"""Spell STT proxy — server-to-server bridge to Google Speech-to-Text.
 
 Pupil machines POST audio here; THIS server holds the Google credentials.
-Clients only know the URL and a rotatable app key — no Google tokens ever
-leave the server (see src/stt/cloud.rs for the client side).
+Clients only know the proxy URL and a rotatable app key, so no Google
+credential ever ships in Spell (see src/stt/cloud.rs for the client side).
 
-Setup:
-    pip install fastapi uvicorn google-cloud-speech
-    export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-    export SPELL_APP_KEY=<choose-a-secret>          # optional but recommended
+Credentials (server only, pick one):
+    GOOGLE_APPLICATION_CREDENTIALS=/path/sa.json   Speech v2, chirp_2 model,
+        SPELL_GCP_PROJECT=<project id>             processed in the EU
+                                                   (SPELL_GCP_LOCATION,
+                                                   default europe-west4).
+    SPELL_GOOGLE_API_KEY=<api key>                 Speech v1 REST
+                                                   (latest_long model).
+    A service account wins when both are set.
+
+Required:
+    SPELL_APP_KEY=<secret>   clients must send it as X-Spell-Key. The proxy
+                             refuses to start without it.
+Optional:
+    SPELL_RATE_PER_MIN=300   max requests per client IP per minute (a whole
+                             school often shares one public IP).
+
+Run:
+    pip install -r requirements.txt
     uvicorn stt_proxy:app --host 0.0.0.0 --port 8790
-
-Google setup (one-time):
-    1. Google Cloud Console → new project → enable "Cloud Speech-to-Text API".
-    2. IAM → Service accounts → create → role "Cloud Speech Client".
-    3. Keys → add key → JSON → download → point GOOGLE_APPLICATION_CREDENTIALS at it.
-    EU data residency: use the eu region endpoint (set below) so pupil audio
-    is processed in the EU — relevant for the school DPAs.
 
 Wire format (matches CloudSttEngine):
     POST /transcribe
-      Content-Type: audio/wav        (16 kHz mono s16le WAV from the client)
-      X-Spell-Lang: nb-NO | nn-NO | en-US  (falls back to nb-NO)
-      X-Spell-Key:  <app key>        (checked iff SPELL_APP_KEY is set)
-    → 200 {"text": "..."}
+      Content-Type: audio/wav   (16 kHz mono 16-bit PCM WAV)
+      X-Spell-Lang: no|nb|nn|en or nb-NO|nn-NO|en-US (default nb-NO)
+      X-Spell-Key:  <app key>
+    -> 200 {"text": "..."}
+    GET /health -> {"ok": true, "backend": "..."}
 """
 
+import base64
+import hmac
 import os
+import struct
+import threading
+import time
+from collections import defaultdict, deque
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from google.api_core.client_options import ClientOptions
-from google.cloud import speech_v2
-from google.cloud.speech_v2.types import cloud_speech
 
-APP_KEY = os.environ.get("SPELL_APP_KEY", "")
-PROJECT = os.environ.get("SPELL_GCP_PROJECT", "")  # set to your project id
-# EU processing for GDPR: audio handled in europe-west4.
-LOCATION = os.environ.get("SPELL_GCP_LOCATION", "europe-west4")
-
-LANG_MAP = {
-    "no": "nb-NO",
-    "nb": "nb-NO",
-    "nn": "nn-NO",
-    "en": "en-US",
-}
-
-app = FastAPI()
-
-_client = None
+LANG_MAP = {"no": "nb-NO", "nb": "nb-NO", "nn": "nn-NO", "en": "en-US"}
+ALLOWED_LANGS = {"nb-NO", "nn-NO", "en-US"}
+# Google sync recognize handles ~60 s; 16 kHz mono s16 = 32 KB/s.
+MAX_WAV_BYTES = 70 * 32000 + 44
+GOOGLE_V1_URL = "https://speech.googleapis.com/v1/speech:recognize"
 
 
-def client() -> speech_v2.SpeechClient:
-    global _client
-    if _client is None:
-        endpoint = f"{LOCATION}-speech.googleapis.com" if LOCATION != "global" else None
-        _client = speech_v2.SpeechClient(
-            client_options=ClientOptions(api_endpoint=endpoint) if endpoint else None
-        )
-    return _client
+class Config:
+    def __init__(self, env=os.environ):
+        self.app_key = env.get("SPELL_APP_KEY", "")
+        self.api_key = env.get("SPELL_GOOGLE_API_KEY", "")
+        self.sa_path = env.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        self.project = env.get("SPELL_GCP_PROJECT", "")
+        self.location = env.get("SPELL_GCP_LOCATION", "europe-west4")
+        self.rate_per_min = int(env.get("SPELL_RATE_PER_MIN", "300"))
+
+    @property
+    def backend(self) -> str:
+        if self.sa_path:
+            return "google-v2"
+        if self.api_key:
+            return "google-v1"
+        return "none"
+
+    def check(self):
+        if not self.app_key:
+            raise RuntimeError("SPELL_APP_KEY must be set")
+        if self.backend == "none":
+            raise RuntimeError("set GOOGLE_APPLICATION_CREDENTIALS or SPELL_GOOGLE_API_KEY")
+        if self.backend == "google-v2" and not self.project:
+            raise RuntimeError("SPELL_GCP_PROJECT must be set with a service account")
 
 
-@app.post("/transcribe")
-async def transcribe(
-    request: Request,
-    x_spell_lang: str = Header(default="nb-NO"),
-    x_spell_key: str = Header(default=""),
-):
-    if APP_KEY and x_spell_key != APP_KEY:
-        raise HTTPException(status_code=403, detail="bad app key")
+def parse_wav(wav: bytes) -> bytes:
+    """Return the PCM payload of a 16 kHz mono 16-bit PCM WAV, or raise."""
+    if len(wav) < 44 or wav[0:4] != b"RIFF" or wav[8:12] != b"WAVE":
+        raise ValueError("not a WAV file")
+    pos = 12
+    fmt_ok = False
+    while pos + 8 <= len(wav):
+        cid = wav[pos:pos + 4]
+        size = struct.unpack("<I", wav[pos + 4:pos + 8])[0]
+        body = wav[pos + 8:pos + 8 + size]
+        if cid == b"fmt ":
+            if len(body) < 16:
+                raise ValueError("bad fmt chunk")
+            audio_fmt, channels, rate, _, _, bits = struct.unpack("<HHIIHH", body[:16])
+            if (audio_fmt, channels, rate, bits) != (1, 1, 16000, 16):
+                raise ValueError("expected 16 kHz mono 16-bit PCM")
+            fmt_ok = True
+        elif cid == b"data":
+            if not fmt_ok:
+                raise ValueError("data before fmt")
+            return body
+        pos += 8 + size + (size & 1)
+    raise ValueError("no data chunk")
 
-    wav = await request.body()
-    if len(wav) < 100:
-        return {"text": ""}
-    # Google STT v2 sync limit is ~1 min audio / 10 MB; our recordings are
-    # dictation-length. Larger payloads would need batch/streaming — reject
-    # loudly instead of failing opaquely.
-    if len(wav) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="audio too long for sync recognize")
 
-    lang = LANG_MAP.get(x_spell_lang.split("-")[0].lower(), x_spell_lang)
+class RateLimiter:
+    """Sliding one-minute window per client IP."""
 
+    def __init__(self, per_min: int):
+        self.per_min = per_min
+        self.hits = defaultdict(deque)
+        self.lock = threading.Lock()
+
+    def allow(self, key: str, now: float = None) -> bool:
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            q = self.hits[key]
+            while q and now - q[0] > 60:
+                q.popleft()
+            if len(q) >= self.per_min:
+                return False
+            q.append(now)
+            return True
+
+
+def recognize_v1(api_key: str, pcm: bytes, lang: str) -> str:
+    body = {
+        "config": {
+            "encoding": "LINEAR16",
+            "sampleRateHertz": 16000,
+            "languageCode": lang,
+            "enableAutomaticPunctuation": True,
+            "model": "latest_long",
+        },
+        "audio": {"content": base64.b64encode(pcm).decode("ascii")},
+    }
+    # Key in a header, not the URL, so it never lands in access logs.
+    r = httpx.post(GOOGLE_V1_URL, json=body, headers={"X-Goog-Api-Key": api_key}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"google v1 HTTP {r.status_code}")
+    results = r.json().get("results", [])
+    return " ".join(
+        res["alternatives"][0]["transcript"].strip()
+        for res in results
+        if res.get("alternatives")
+    ).strip()
+
+
+_v2_client = None
+
+
+def recognize_v2(cfg: Config, wav: bytes, lang: str) -> str:
+    global _v2_client
+    from google.api_core.client_options import ClientOptions
+    from google.cloud import speech_v2
+    from google.cloud.speech_v2.types import cloud_speech
+
+    if _v2_client is None:
+        endpoint = None if cfg.location == "global" else f"{cfg.location}-speech.googleapis.com"
+        _v2_client = speech_v2.SpeechClient(
+            client_options=ClientOptions(api_endpoint=endpoint) if endpoint else None)
     config = cloud_speech.RecognitionConfig(
         auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
         language_codes=[lang],
         model="chirp_2",
-        features=cloud_speech.RecognitionFeatures(
-            enable_automatic_punctuation=True,
-        ),
+        features=cloud_speech.RecognitionFeatures(enable_automatic_punctuation=True),
     )
     req = cloud_speech.RecognizeRequest(
-        recognizer=f"projects/{PROJECT}/locations/{LOCATION}/recognizers/_",
+        recognizer=f"projects/{cfg.project}/locations/{cfg.location}/recognizers/_",
         config=config,
         content=wav,
     )
-    resp = client().recognize(request=req)
-    text = " ".join(
-        r.alternatives[0].transcript.strip()
-        for r in resp.results
-        if r.alternatives
+    resp = _v2_client.recognize(request=req)
+    return " ".join(
+        r.alternatives[0].transcript.strip() for r in resp.results if r.alternatives
     ).strip()
-    return {"text": text}
 
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
+def create_app(cfg: Config = None, recognizer=None) -> FastAPI:
+    """`recognizer(wav, pcm, lang) -> str` can be injected for tests."""
+    cfg = cfg or Config()
+    cfg.check()
+    limiter = RateLimiter(cfg.rate_per_min)
+
+    def default_recognizer(wav: bytes, pcm: bytes, lang: str) -> str:
+        if cfg.backend == "google-v2":
+            return recognize_v2(cfg, wav, lang)
+        return recognize_v1(cfg.api_key, pcm, lang)
+
+    recognize = recognizer or default_recognizer
+    app = FastAPI()
+
+    @app.post("/transcribe")
+    async def transcribe(
+        request: Request,
+        x_spell_lang: str = Header(default="nb-NO"),
+        x_spell_key: str = Header(default=""),
+    ):
+        if not hmac.compare_digest(x_spell_key.encode(), cfg.app_key.encode()):
+            raise HTTPException(status_code=403, detail="bad app key")
+        client_ip = request.client.host if request.client else "?"
+        if not limiter.allow(client_ip):
+            raise HTTPException(status_code=429, detail="too many requests")
+        wav = await request.body()
+        if len(wav) > MAX_WAV_BYTES:
+            raise HTTPException(status_code=413, detail="audio too long")
+        try:
+            pcm = parse_wav(wav)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not pcm:
+            return {"text": ""}
+        lang = LANG_MAP.get(x_spell_lang.split("-")[0].lower(), x_spell_lang)
+        if lang not in ALLOWED_LANGS:
+            raise HTTPException(status_code=400, detail="unsupported language")
+        try:
+            text = recognize(wav, pcm, lang)
+        except Exception:
+            # Never echo provider errors (they may contain request details).
+            raise HTTPException(status_code=502, detail="speech provider error")
+        return {"text": text}
+
+    @app.get("/health")
+    async def health():
+        return {"ok": True, "backend": cfg.backend}
+
+    return app
+
+
+# uvicorn stt_proxy:app — tests import the module with SPELL_PROXY_NO_APP=1.
+if os.environ.get("SPELL_PROXY_NO_APP") != "1":
+    app = create_app()

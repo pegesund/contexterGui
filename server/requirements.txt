@@ -1,0 +1,5 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+# Only needed for the service-account (Speech v2 / chirp_2) backend:
+google-cloud-speech==2.30.0
