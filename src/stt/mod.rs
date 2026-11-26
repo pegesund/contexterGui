@@ -21,6 +21,14 @@ static STREAMING_TOO_SLOW: AtomicBool = AtomicBool::new(false);
 
 /// Whisper thread count for a model: never more than the CPU has. A 2-core
 /// Pentium asked for 4 + 8 threads ran ~100x slower than realtime.
+static SKIP_LIVE_PARTIALS: AtomicBool = AtomicBool::new(false);
+
+/// Weak CPUs (see cpu_check.rs): don't run live partials at all — the whole
+/// recording is transcribed once at stop (by the cloud in cloud mode).
+pub fn set_skip_live_partials(skip: bool) {
+    SKIP_LIVE_PARTIALS.store(skip, Ordering::Release);
+}
+
 pub fn whisper_threads(want: usize) -> usize {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     want.min(cores).max(1)
@@ -422,6 +430,7 @@ pub fn start_recording(
             };
 
             if !STREAMING_TOO_SLOW.load(Ordering::Acquire)
+                && !SKIP_LIVE_PARTIALS.load(Ordering::Acquire)
                 && current_len >= next_threshold && current_len > last_transcribed_len {
                 let raw_audio = {
                     let buf = audio_buf.lock().unwrap();

@@ -10,6 +10,7 @@ pub mod logging;
 
 mod bert_worker;
 mod bridge;
+mod cpu_check;
 pub mod downloader;
 mod grammar_actor;
 mod latext_no;
@@ -97,6 +98,12 @@ struct UserSettings {
     /// to pupils. Used when non-empty and stt_cloud_url is empty.
     #[serde(default)]
     stt_google_api_key: String,
+    /// The one-time CPU speed check has run (see cpu_check.rs).
+    #[serde(default)]
+    cpu_checked: bool,
+    /// Result of that check: too slow for local speech recognition.
+    #[serde(default)]
+    weak_cpu: bool,
 }
 
 fn default_true() -> bool { true }
@@ -126,6 +133,8 @@ impl Default for UserSettings {
             stt_cloud_url: String::new(),
             stt_cloud_key: String::new(),
             stt_google_api_key: String::new(),
+            cpu_checked: false,
+            weak_cpu: false,
         }
     }
 }
@@ -142,6 +151,26 @@ fn settings_path() -> PathBuf {
     };
     let _ = std::fs::create_dir_all(&dir);
     dir.join("settings.json")
+}
+
+/// First startup only: measure the CPU. A weak machine (too slow for local
+/// Whisper) is switched to cloud transcription when a cloud server is
+/// configured and the user still has the default speech mode. Stored in
+/// settings so it runs once; users can still change the mode in Settings.
+fn apply_first_run_cpu_check(mut s: UserSettings) -> UserSettings {
+    if s.cpu_checked {
+        return s;
+    }
+    let check = cpu_check::run();
+    log!("CPU check: {}", check.detail);
+    s.cpu_checked = true;
+    s.weak_cpu = check.weak;
+    if check.weak && s.whisper_mode == 1 && load_stt_cloud_config().is_configured() {
+        s.whisper_mode = 2;
+        log!("CPU check: weak CPU — speech recognition switched to cloud mode");
+    }
+    save_settings(&s);
+    s
 }
 
 fn load_settings() -> UserSettings {
@@ -4288,6 +4317,8 @@ impl ContextApp {
         saved_settings: UserSettings,
         paths: ResolvedPaths,
     ) -> Self {
+        let saved_settings = apply_first_run_cpu_check(saved_settings);
+        stt::set_skip_live_partials(saved_settings.weak_cpu);
         let platform = platform::create_platform();
         platform.init_runtime();
 
