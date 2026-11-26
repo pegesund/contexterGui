@@ -19,6 +19,18 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 option(SPELL_WHISPER_NATIVE "Build ggml with native CPU optimizations" OFF)
 set(GGML_NATIVE ${SPELL_WHISPER_NATIVE} CACHE BOOL "" FORCE)
 
+# GGML_NATIVE=OFF alone is not portable: ggml then turns AVX, AVX2, FMA, F16C
+# and BMI2 ON by default, and the DLL dies with STATUS_ILLEGAL_INSTRUCTION
+# (0xc000001d) on CPUs without them — e.g. Pentium/Celeron school laptops.
+# Keep the portable build at SSE4.2, which every x86-64 PC we support has.
+if(NOT SPELL_WHISPER_NATIVE)
+    foreach(isa GGML_AVX GGML_AVX2 GGML_AVX_VNNI GGML_FMA GGML_F16C GGML_BMI2
+                GGML_AVX512 GGML_AVX512_VBMI GGML_AVX512_VNNI GGML_AVX512_BF16)
+        set(${isa} OFF CACHE BOOL "" FORCE)
+    endforeach()
+    set(GGML_SSE42 ON CACHE BOOL "" FORCE)
+endif()
+
 add_subdirectory("${WHISPER_CPP_DIR}" "${CMAKE_BINARY_DIR}/whisper.cpp" EXCLUDE_FROM_ALL)
 
 add_library(spell_whisper SHARED spell_whisper.cpp)
