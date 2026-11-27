@@ -11594,7 +11594,7 @@ impl eframe::App for ContextApp {
 
         // Width: wider when the pencil panel is showing (its rows have an
         // action-button cluster that needs the room). Otherwise compact.
-        let win_w = s * if pencil_visible && !slack_layout { 420.0 } else { 320.0 };
+        let win_w = s * if pencil_visible && !slack_layout { 420.0 } else { 380.0 };
 
         let mut content_rows = 0.0_f32;
         if bulb_visible {
@@ -11932,6 +11932,7 @@ impl eframe::App for ContextApp {
         // Toolbar at bottom
         let tts_speaking = tts::is_speaking();
         let ocr_is_busy = self.ocr_receiver.is_some();
+        let icon_size = 20.0 * s;
         egui::TopBottomPanel::top("toolbar").frame(toolbar_frame).show(ctx, |ui| {
             let header_resp = ui.horizontal(|ui| {
                 // Same gap between every toolbar icon.
@@ -11948,7 +11949,7 @@ impl eframe::App for ContextApp {
                 // 💡 Forslag — toggle word/next-word suggestions panel
                 let bulb_color = if self.show_completions && self.selected_tab == 0 { active } else { inactive };
                 let bulb_resp = ax_icon(ui,
-                    "\u{1F4A1}", 16.0 * s, bulb_color,
+                    "\u{1F4A1}", icon_size, bulb_color,
                     self.ui_language.ui_suggestions(),
                 );
                 if toolbar_clicked(ui, &bulb_resp, toolbar_mouse_down_click) {
@@ -11984,7 +11985,7 @@ impl eframe::App for ContextApp {
                     active
                 };
                 let pen_resp = ax_icon(ui,
-                    "\u{270F}", 16.0 * s, pen_color,
+                    "\u{270F}", icon_size, pen_color,
                     self.ui_language.ui_grammar(),
                 );
                 if toolbar_clicked(ui, &pen_resp, toolbar_mouse_down_click) {
@@ -12015,7 +12016,7 @@ impl eframe::App for ContextApp {
                         let stop_resp = ui.add(egui::Button::new(
                             egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                         ).fill(egui::Color32::from_rgb(200, 40, 40))
-                         .min_size(egui::vec2(22.0, 16.0))
+                         .min_size(egui::vec2(28.0 * s, 28.0 * s))
                         ).on_hover_text(self.ui_language.ui_stop_recording());
                         if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                             if let Some(handle) = &self.mic_handle {
@@ -12034,7 +12035,7 @@ impl eframe::App for ContextApp {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     let mic_resp = ax_icon(ui,
-                        "\u{1F3A4}", 16.0 * s, mic_color,
+                        "\u{1F3A4}", icon_size, mic_color,
                         self.ui_language.ui_speech_recognition(),
                     );
                     if toolbar_clicked(ui, &mic_resp, toolbar_mouse_down_click) {
@@ -12068,7 +12069,7 @@ impl eframe::App for ContextApp {
                     let stop_resp = ui.add(egui::Button::new(
                         egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
-                     .min_size(egui::vec2(22.0, 16.0))
+                     .min_size(egui::vec2(28.0 * s, 28.0 * s))
                     ).on_hover_text(self.ui_language.ui_stop_reading());
                     if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                         tts::stop_speaking();
@@ -12076,7 +12077,7 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     let speak_resp = ax_icon(ui,
-                        "▶", 16.0 * s, inactive,
+                        "▶", icon_size, inactive,
                         self.ui_language.ui_read_selected_text(),
                     );
                     if toolbar_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
@@ -12120,11 +12121,11 @@ impl eframe::App for ContextApp {
                         .count();
                     if err_count > 0 {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(self.ui_language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(self.ui_language.ui_tip()).size(11.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                         if !self.llm_waiting {
                             let fix_all_resp = ax_icon(ui,
-                                "✨", 14.0 * s, egui::Color32::from_rgb(0, 120, 220),
+                                "✨", 18.0 * s, egui::Color32::from_rgb(0, 120, 220),
                                 self.ui_language.ui_ai_fix_all(),
                             );
                             if toolbar_clicked(ui, &fix_all_resp, toolbar_mouse_down_click) {
@@ -12144,10 +12145,11 @@ impl eframe::App for ContextApp {
 
                 // --- Right side: drag area, 📌 ⚙ – ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = (112.0 * s).max(100.0); // 📌 + ⚙ + – + ✕ + right padding
+                // Reserve the four trailing controls and their gaps before allocating the drag area.
+                let right_w = 4.0 * (toolbar_button_side(icon_size) + ui.spacing().item_spacing.x) + 5.0 * s;
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
-                    egui::pos2(remaining.max.x - right_w, remaining.max.y),
+                    egui::pos2((remaining.max.x - right_w).max(remaining.min.x), remaining.max.y),
                 );
                 let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
@@ -12164,7 +12166,7 @@ impl eframe::App for ContextApp {
                     self.ui_language.ui_pin_cursor_off()
                 };
                 let pin_resp = ax_icon(ui,
-                    "\u{1F4CC}", 16.0 * s, pin_color,
+                    "\u{1F4CC}", icon_size, pin_color,
                     pin_tooltip,
                 );
                 if toolbar_clicked(ui, &pin_resp, toolbar_mouse_down_click) {
@@ -12183,7 +12185,7 @@ impl eframe::App for ContextApp {
                 );
                 let gear_resp = ax_icon(
                     ui,
-                    "\u{2699}", 16.0 * s, settings_color,
+                    "\u{2699}", icon_size, settings_color,
                     self.ui_language.ui_settings(),
                 );
                 if update_available {
@@ -12209,7 +12211,7 @@ impl eframe::App for ContextApp {
 
                 // ▁ Minimize
                 let minimize_resp = ax_icon(ui,
-                    "–", 16.0 * s, inactive,
+                    "–", icon_size, inactive,
                     self.ui_language.ui_minimize(),
                 );
                 // OS window state must use a completed click. The mouse-down
@@ -12232,7 +12234,7 @@ impl eframe::App for ContextApp {
 
                 // ✕ Close
                 let close_resp = ax_close_icon(ui,
-                    16.0 * s, egui::Color32::from_rgb(120, 120, 120),
+                    icon_size, egui::Color32::from_rgb(120, 120, 120),
                     self.ui_language.ui_close(),
                 );
                 if toolbar_clicked(ui, &close_resp, toolbar_mouse_down_click) {
@@ -15099,6 +15101,10 @@ fn tint_bg(base: egui::Color32, accent: egui::Color32, amount: f32) -> egui::Col
     )
 }
 
+fn toolbar_button_side(icon_size: f32) -> f32 {
+    (icon_size + 7.0).max(18.0)
+}
+
 /// Clickable toolbar icon with a proper accessibility name and stable hitbox.
 fn ax_icon(
     ui: &mut egui::Ui,
@@ -15107,7 +15113,7 @@ fn ax_icon(
     color: egui::Color32,
     label: &str,
 ) -> egui::Response {
-    let side = (icon_size + 7.0).max(18.0);
+    let side = toolbar_button_side(icon_size);
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(side, side),
         egui::Sense::click() | egui::Sense::hover(),
@@ -15135,7 +15141,7 @@ fn ax_close_icon(
     color: egui::Color32,
     label: &str,
 ) -> egui::Response {
-    let side = (icon_size + 7.0).max(18.0);
+    let side = toolbar_button_side(icon_size);
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(side, side),
         egui::Sense::click() | egui::Sense::hover(),
