@@ -10930,15 +10930,9 @@ impl eframe::App for ContextApp {
                 if !new_ctx.word.is_empty() || !new_ctx.sentence.is_empty() || new_ctx.masked_sentence.is_some() {
                     // Save the foreground HWND only when we got useful context
                     // (prevents saving Slack/terminal HWND when just switching windows)
-                    if fg.handle != 0 {
-                        let our_title = "Spell";
-                        if !fg.title.contains(our_title)
-                            && !fg.title.starts_with("Forslag")
-                            && !fg.title.starts_with("Regelinfo")
-                        {
-                            self.app_handle = Some(fg.handle);
-                            self.manager.set_target_hwnd(fg.handle);
-                        }
+                    if fg.handle != 0 && fg.pid != 0 && fg.pid != std::process::id() {
+                        self.app_handle = Some(fg.handle);
+                        self.manager.set_target_hwnd(fg.handle);
                     }
                     // Cursor moved or word changed — clear stale suggestions and queues
                     if new_ctx.masked_sentence != self.context.masked_sentence

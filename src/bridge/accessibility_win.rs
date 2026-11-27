@@ -872,6 +872,20 @@ impl TextBridge for AccessibilityBridge {
         self.find_replace_via_uia(find, replace, context)
     }
 
+    fn find_and_replace_in_context_at(&self, find: &str, replace: &str, context: &str, offset: usize) -> bool {
+        use crate::platform::windows::notepad;
+        bridge_log(&format!("Classic edit target: last={} target={} foreground={:?}",self.fg_hwnd.get(),self.target_hwnd.get(),unsafe{GetForegroundWindow()}));
+        if let Some(edit) = notepad::correction_editor(HWND(self.fg_hwnd.get() as *mut _)) {
+            bridge_log(&format!("Classic edit matched {:?} offset={} context length={}",edit,offset,context.len()));
+            let changed = notepad::correct(edit, find, replace, context, offset).unwrap_or(false);
+            if changed {
+                self.activate_replace_freeze(find);
+            }
+            return changed;
+        }
+        self.find_replace_via_uia(find, replace, context)
+    }
+
     fn read_document_context(&self) -> Option<String> {
         self.read_context_via_uia()
     }
