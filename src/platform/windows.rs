@@ -1,3 +1,5 @@
+#[path = "windows_notepad.rs"]
+pub(crate) mod notepad;
 use super::{AppKind, ForegroundApp, PlatformServices};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -498,6 +500,9 @@ fn poll_uia_selected_text() -> SelectionPoll {
             return SelectionPoll::SpellFocused;
         }
 
+        if let Some(edit) = notepad::editor(fg) {
+            return SelectionPoll::External(notepad::selected_text(edit));
+        }
         let Some(uia) = cached_uia() else {
             return SelectionPoll::External(None);
         };
