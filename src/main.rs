@@ -1279,7 +1279,7 @@ mod cross_language_barrier_tests {
         error_paragraph_matches_surface,
         find_word_doc_range_at_position, has_mixed_non_titlecase,
         browser_route_key, route_key_for_context, known_word_spelling_variants_for_analyzer,
-        paragraph_id_matches_bridge,
+        paragraph_id_matches_bridge, is_word_scoped_paragraph_id,
         async_response_matches_active_route,
         grammar_response_sentence_hash, rescore_spelling_response,
         sentence_cache_entry_replayable, sentence_cache_key_for_language,
@@ -9801,6 +9801,16 @@ fn rule_color(rule_name: &str) -> egui::Color32 {
 }
 
 impl eframe::App for ContextApp {
+    #[cfg(target_os = "macos")]
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe skips update when Settings completely covers the toolbar.
+        // Submit only the independent native child pass here. An embedded
+        // window would paint into the hidden parent and must wait for update.
+        if !ctx.embed_viewports() && ctx.input(|i| i.viewport().visible() == Some(false)) {
+            self.render_settings_window(ctx);
+        }
+    }
+
     // eframe 0.34 requires `ui` but still calls the deprecated `update`
     // right before it — all rendering stays in `update` (Context-based
     // panels). Migrating to the root-Ui API is 0.35 work.
@@ -11588,7 +11598,7 @@ impl eframe::App for ContextApp {
 
         // Width: wider when the pencil panel is showing (its rows have an
         // action-button cluster that needs the room). Otherwise compact.
-        let win_w = s * if pencil_visible && !slack_layout { 420.0 } else { 320.0 };
+        let win_w = s * if pencil_visible && !slack_layout { 420.0 } else { 380.0 };
 
         let mut content_rows = 0.0_f32;
         if bulb_visible {
@@ -11926,6 +11936,7 @@ impl eframe::App for ContextApp {
         // Toolbar at bottom
         let tts_speaking = tts::is_speaking();
         let ocr_is_busy = self.ocr_receiver.is_some();
+        let icon_size = 20.0 * s;
         egui::TopBottomPanel::top("toolbar").frame(toolbar_frame).show(ctx, |ui| {
             let header_resp = ui.horizontal(|ui| {
                 // Same gap between every toolbar icon.
@@ -11942,7 +11953,7 @@ impl eframe::App for ContextApp {
                 // 💡 Forslag — toggle word/next-word suggestions panel
                 let bulb_color = if self.show_completions && self.selected_tab == 0 { active } else { inactive };
                 let bulb_resp = ax_icon(ui,
-                    "\u{1F4A1}", 16.0 * s, bulb_color,
+                    "\u{1F4A1}", icon_size, bulb_color,
                     self.ui_language.ui_suggestions(),
                 );
                 if toolbar_clicked(ui, &bulb_resp, toolbar_mouse_down_click) {
@@ -11978,7 +11989,7 @@ impl eframe::App for ContextApp {
                     active
                 };
                 let pen_resp = ax_icon(ui,
-                    "\u{270F}", 16.0 * s, pen_color,
+                    "\u{270F}", icon_size, pen_color,
                     self.ui_language.ui_grammar(),
                 );
                 if toolbar_clicked(ui, &pen_resp, toolbar_mouse_down_click) {
@@ -12009,7 +12020,7 @@ impl eframe::App for ContextApp {
                         let stop_resp = ui.add(egui::Button::new(
                             egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                         ).fill(egui::Color32::from_rgb(200, 40, 40))
-                         .min_size(egui::vec2(22.0, 16.0))
+                         .min_size(egui::vec2(28.0 * s, 28.0 * s))
                         ).on_hover_text(self.ui_language.ui_stop_recording());
                         if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                             if let Some(handle) = &self.mic_handle {
@@ -12028,7 +12039,7 @@ impl eframe::App for ContextApp {
                     let mic_color = inactive;
                     let whisper_ready = self.whisper_engine.is_some();
                     let mic_resp = ax_icon(ui,
-                        "\u{1F3A4}", 16.0 * s, mic_color,
+                        "\u{1F3A4}", icon_size, mic_color,
                         self.ui_language.ui_speech_recognition(),
                     );
                     if toolbar_clicked(ui, &mic_resp, toolbar_mouse_down_click) {
@@ -12062,7 +12073,7 @@ impl eframe::App for ContextApp {
                     let stop_resp = ui.add(egui::Button::new(
                         egui::RichText::new("■").size(12.0 * s).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 40, 40))
-                     .min_size(egui::vec2(22.0, 16.0))
+                     .min_size(egui::vec2(28.0 * s, 28.0 * s))
                     ).on_hover_text(self.ui_language.ui_stop_reading());
                     if response_clicked(ui, &stop_resp, toolbar_mouse_down_click) {
                         tts::stop_speaking();
@@ -12070,7 +12081,7 @@ impl eframe::App for ContextApp {
                     }
                 } else {
                     let speak_resp = ax_icon(ui,
-                        "▶", 16.0 * s, inactive,
+                        "▶", icon_size, inactive,
                         self.ui_language.ui_read_selected_text(),
                     );
                     if toolbar_clicked(ui, &speak_resp, toolbar_mouse_down_click) {
@@ -12114,11 +12125,11 @@ impl eframe::App for ContextApp {
                         .count();
                     if err_count > 0 {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(self.ui_language.ui_tip()).size(9.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(self.ui_language.ui_tip()).size(11.0 * s).color(egui::Color32::from_rgb(120, 120, 120)));
                         ui.label(egui::RichText::new(format!("{}", err_count)).size(12.0 * s).strong().color(egui::Color32::from_rgb(180, 60, 60)));
                         if !self.llm_waiting {
                             let fix_all_resp = ax_icon(ui,
-                                "✨", 14.0 * s, egui::Color32::from_rgb(0, 120, 220),
+                                "✨", 18.0 * s, egui::Color32::from_rgb(0, 120, 220),
                                 self.ui_language.ui_ai_fix_all(),
                             );
                             if toolbar_clicked(ui, &fix_all_resp, toolbar_mouse_down_click) {
@@ -12138,10 +12149,11 @@ impl eframe::App for ContextApp {
 
                 // --- Right side: drag area, 📌 ⚙ – ✕ ---
                 let remaining = ui.available_rect_before_wrap();
-                let right_w = (112.0 * s).max(100.0); // 📌 + ⚙ + – + ✕ + right padding
+                // Reserve the four trailing controls and their gaps before allocating the drag area.
+                let right_w = 4.0 * (toolbar_button_side(icon_size) + ui.spacing().item_spacing.x) + 5.0 * s;
                 let drag_rect = egui::Rect::from_min_max(
                     remaining.min,
-                    egui::pos2(remaining.max.x - right_w, remaining.max.y),
+                    egui::pos2((remaining.max.x - right_w).max(remaining.min.x), remaining.max.y),
                 );
                 let drag_resp = ui.allocate_rect(drag_rect, egui::Sense::drag());
                 if drag_resp.drag_started() && !self.follow_cursor {
@@ -12158,7 +12170,7 @@ impl eframe::App for ContextApp {
                     self.ui_language.ui_pin_cursor_off()
                 };
                 let pin_resp = ax_icon(ui,
-                    "\u{1F4CC}", 16.0 * s, pin_color,
+                    "\u{1F4CC}", icon_size, pin_color,
                     pin_tooltip,
                 );
                 if toolbar_clicked(ui, &pin_resp, toolbar_mouse_down_click) {
@@ -12177,7 +12189,7 @@ impl eframe::App for ContextApp {
                 );
                 let gear_resp = ax_icon(
                     ui,
-                    "\u{2699}", 16.0 * s, settings_color,
+                    "\u{2699}", icon_size, settings_color,
                     self.ui_language.ui_settings(),
                 );
                 if update_available {
@@ -12203,7 +12215,7 @@ impl eframe::App for ContextApp {
 
                 // ▁ Minimize
                 let minimize_resp = ax_icon(ui,
-                    "–", 16.0 * s, inactive,
+                    "–", icon_size, inactive,
                     self.ui_language.ui_minimize(),
                 );
                 // OS window state must use a completed click. The mouse-down
@@ -12226,7 +12238,7 @@ impl eframe::App for ContextApp {
 
                 // ✕ Close
                 let close_resp = ax_close_icon(ui,
-                    16.0 * s, egui::Color32::from_rgb(120, 120, 120),
+                    icon_size, egui::Color32::from_rgb(120, 120, 120),
                     self.ui_language.ui_close(),
                 );
                 if toolbar_clicked(ui, &close_resp, toolbar_mouse_down_click) {
@@ -13914,6 +13926,245 @@ impl eframe::App for ContextApp {
             }
         });
 
+        self.render_settings_window(ctx);
+
+        // User dictionary editor window (separate OS window)
+        if self.show_userdict_window {
+            let mut word_to_remove: Option<String> = None;
+            let mut word_to_add: Option<String> = None;
+            let mut do_close = false;
+            let mut words: Vec<String> = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
+            words.sort();
+            let mut new_word_buf = self.userdict_new_word.clone();
+            let scale = self.ui_scale;
+            let lang_for_dict = self.ui_language.clone();
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("userdict_editor"),
+                spell_viewport_builder()
+                    .with_title(lang_for_dict.ui_user_dict())
+                    .with_inner_size([350.0 * scale, 400.0 * scale])
+                    .with_decorations(true),
+                |vp_ctx, _class| {
+                    vp_ctx.set_visuals(egui::Visuals::light());
+                    vp_ctx.set_pixels_per_point(scale);
+
+                    if vp_ctx.input(|i| i.viewport().close_requested()) {
+                        do_close = true;
+                    }
+
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(12.0))
+                        .show(vp_ctx, |ui| {
+                            ui.label(egui::RichText::new(lang_for_dict.ui_words_you_added())
+                                .size(14.0 * s).color(egui::Color32::from_rgb(30, 30, 30)));
+                            ui.add_space(4.0);
+
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut new_word_buf)
+                                        .hint_text(lang_for_dict.ui_new_word_hint())
+                                        .desired_width(220.0)
+                                );
+                                if ui.button(lang_for_dict.ui_add()).clicked()
+                                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                {
+                                    let trimmed = new_word_buf.trim().to_string();
+                                    if !trimmed.is_empty() {
+                                        word_to_add = Some(trimmed);
+                                        new_word_buf.clear();
+                                    }
+                                }
+                            });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                if words.is_empty() {
+                                    ui.label(egui::RichText::new(lang_for_dict.ui_no_words_added()).size(11.0 * s)
+                                        .color(egui::Color32::from_rgb(140, 140, 140)));
+                                }
+                                for w in &words {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(w).size(13.0 * s));
+                                        if ui.small_button(lang_for_dict.ui_remove()).clicked() {
+                                            word_to_remove = Some(w.clone());
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                },
+            );
+
+            self.userdict_new_word = new_word_buf;
+
+            if let Some(w) = word_to_add {
+                if let Some(ud) = &self.user_dict {
+                    if let Err(e) = ud.add_word(&w) {
+                        eprintln!("Failed to add word: {}", e);
+                    } else {
+                        log!("User dict: added '{}'", w);
+                    }
+                }
+                self.userdict_new_word.clear();
+                let lower = w.to_lowercase();
+                self.writing_errors.retain(|e| {
+                    !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == lower)
+                });
+                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
+                self.last_doc_hash = 0;
+            }
+            if let Some(w) = word_to_remove {
+                if let Some(ud) = &self.user_dict {
+                    if let Err(e) = ud.remove_word(&w) {
+                        eprintln!("Failed to remove word: {}", e);
+                    } else {
+                        log!("User dict: removed '{}'", w);
+                    }
+                }
+                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
+                self.last_doc_hash = 0;
+            }
+            if do_close {
+                self.show_userdict_window = false;
+            }
+        }
+
+        // OCR: screenshot detected prompt (separate OS window)
+        let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
+        let ocr_is_busy = self.ocr_receiver.is_some() || self.math_receiver.is_some();
+        if ocr_has_pending && !ocr_is_busy {
+            let mut do_read = false;
+            let mut do_copy = false;
+            let mut do_math = false;
+            let mut do_dismiss = false;
+
+            let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
+            let win_w: f32 = 320.0;
+            let win_h: f32 = 100.0;
+            let screen_center = egui::pos2(
+                (monitor.x - win_w) / 2.0,
+                (monitor.y - win_h) / 2.0,
+            );
+
+            let lang_for_ocr = self.ui_language.clone();
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("ocr_prompt"),
+                spell_viewport_builder()
+                    .with_title(lang_for_ocr.ui_screenshot_detected())
+                    .with_inner_size([win_w, win_h])
+                    .with_position(screen_center)
+                    .with_always_on_top()
+                    .with_active(true)
+                    .with_decorations(true),
+                |vp_ctx, _class| {
+                    vp_ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+                    if vp_ctx.input(|i| i.viewport().close_requested()) {
+                        do_dismiss = true;
+                    }
+
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(16.0))
+                        .show(vp_ctx, |ui| {
+                            let prompt_button = |ui: &mut egui::Ui, text: &str| {
+                                ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(text)
+                                            .size(13.0 * s)
+                                            .color(egui::Color32::from_rgb(45, 45, 45)),
+                                    )
+                                    .fill(egui::Color32::from_rgb(232, 232, 232))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgb(210, 210, 210),
+                                    )),
+                                )
+                            };
+                            ui.label(
+                                egui::RichText::new(lang_for_ocr.ui_text_found_in_screenshot())
+                                    .size(14.0 * s)
+                                    .color(egui::Color32::from_rgb(30, 30, 30))
+                            );
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if prompt_button(ui, lang_for_ocr.ui_read_text()).clicked() {
+                                    do_read = true;
+                                }
+                                if prompt_button(ui, lang_for_ocr.ui_copy_text()).clicked() {
+                                    do_copy = true;
+                                }
+                                if prompt_button(ui, lang_for_ocr.ui_math()).clicked() {
+                                    do_math = true;
+                                }
+                                if prompt_button(ui, lang_for_ocr.ui_cancel()).clicked() {
+                                    do_dismiss = true;
+                                }
+                            });
+                        });
+                },
+            );
+
+            if do_read || do_copy {
+                self.ocr_copy_mode = do_copy;
+                if let Some(ocr) = &mut self.ocr {
+                    if let Some(rx) = ocr.start_ocr() {
+                        self.ocr_receiver = Some(rx);
+                    }
+                }
+            }
+            if do_math {
+                // Save clipboard image to temp file, then start math OCR
+                if let Some(ocr) = &mut self.ocr {
+                    let tmp_path = std::env::temp_dir().join("math_ocr_input.png");
+                    if ocr.save_image_to(&tmp_path) {
+                        let rx = math_ocr::start_math_ocr(tmp_path.to_string_lossy().to_string());
+                        self.math_receiver = Some(rx);
+                    } else {
+                        log!("Math OCR: failed to save clipboard image");
+                    }
+                }
+            }
+            if do_dismiss {
+                if let Some(ocr) = &mut self.ocr {
+                    ocr.dismiss();
+                }
+            }
+        }
+    }
+}
+
+// ── Language definitions for picker UI ──
+
+struct LangOption {
+    code: &'static str,
+    name: &'static str,
+}
+
+const AVAILABLE_LANGUAGES: &[LangOption] = &[
+    LangOption { code: "nb", name: "Bokmål" },
+    LangOption { code: "nn", name: "Nynorsk" },
+    LangOption { code: "en", name: "English" },
+];
+
+#[derive(Clone, Copy)]
+struct InterfaceLanguageOption {
+    setting: &'static str,
+    code: Option<&'static str>,
+}
+
+const INTERFACE_LANGUAGES: &[InterfaceLanguageOption] = &[
+    InterfaceLanguageOption { setting: "auto", code: None },
+    InterfaceLanguageOption { setting: "nb", code: Some("nb") },
+    InterfaceLanguageOption { setting: "nn", code: Some("nn") },
+    InterfaceLanguageOption { setting: "en", code: Some("en") },
+];
+
+impl ContextApp {
+    fn render_settings_window(&mut self, ctx: &egui::Context) {
+        let s = self.ui_scale;
         // Settings window (separate OS window, dyslexia-friendly large fonts)
         if self.show_settings_window {
             let mut do_close = false;
@@ -14583,240 +14834,8 @@ impl eframe::App for ContextApp {
                 self.show_settings_window = false;
             }
         }
-
-        // User dictionary editor window (separate OS window)
-        if self.show_userdict_window {
-            let mut word_to_remove: Option<String> = None;
-            let mut word_to_add: Option<String> = None;
-            let mut do_close = false;
-            let mut words: Vec<String> = self.user_dict.as_ref().map_or(vec![], |ud| ud.list_words());
-            words.sort();
-            let mut new_word_buf = self.userdict_new_word.clone();
-            let scale = self.ui_scale;
-            let lang_for_dict = self.ui_language.clone();
-
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("userdict_editor"),
-                spell_viewport_builder()
-                    .with_title(lang_for_dict.ui_user_dict())
-                    .with_inner_size([350.0 * scale, 400.0 * scale])
-                    .with_decorations(true),
-                |vp_ctx, _class| {
-                    vp_ctx.set_visuals(egui::Visuals::light());
-                    vp_ctx.set_pixels_per_point(scale);
-
-                    if vp_ctx.input(|i| i.viewport().close_requested()) {
-                        do_close = true;
-                    }
-
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(12.0))
-                        .show(vp_ctx, |ui| {
-                            ui.label(egui::RichText::new(lang_for_dict.ui_words_you_added())
-                                .size(14.0 * s).color(egui::Color32::from_rgb(30, 30, 30)));
-                            ui.add_space(4.0);
-
-                            ui.horizontal(|ui| {
-                                let response = ui.add(
-                                    egui::TextEdit::singleline(&mut new_word_buf)
-                                        .hint_text(lang_for_dict.ui_new_word_hint())
-                                        .desired_width(220.0)
-                                );
-                                if ui.button(lang_for_dict.ui_add()).clicked()
-                                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                                {
-                                    let trimmed = new_word_buf.trim().to_string();
-                                    if !trimmed.is_empty() {
-                                        word_to_add = Some(trimmed);
-                                        new_word_buf.clear();
-                                    }
-                                }
-                            });
-
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.add_space(4.0);
-
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                if words.is_empty() {
-                                    ui.label(egui::RichText::new(lang_for_dict.ui_no_words_added()).size(11.0 * s)
-                                        .color(egui::Color32::from_rgb(140, 140, 140)));
-                                }
-                                for w in &words {
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(w).size(13.0 * s));
-                                        if ui.small_button(lang_for_dict.ui_remove()).clicked() {
-                                            word_to_remove = Some(w.clone());
-                                        }
-                                    });
-                                }
-                            });
-                        });
-                },
-            );
-
-            self.userdict_new_word = new_word_buf;
-
-            if let Some(w) = word_to_add {
-                if let Some(ud) = &self.user_dict {
-                    if let Err(e) = ud.add_word(&w) {
-                        eprintln!("Failed to add word: {}", e);
-                    } else {
-                        log!("User dict: added '{}'", w);
-                    }
-                }
-                self.userdict_new_word.clear();
-                let lower = w.to_lowercase();
-                self.writing_errors.retain(|e| {
-                    !(matches!(e.category, ErrorCategory::Spelling) && e.word.to_lowercase() == lower)
-                });
-                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
-                self.last_doc_hash = 0;
-            }
-            if let Some(w) = word_to_remove {
-                if let Some(ud) = &self.user_dict {
-                    if let Err(e) = ud.remove_word(&w) {
-                        eprintln!("Failed to remove word: {}", e);
-                    } else {
-                        log!("User dict: removed '{}'", w);
-                    }
-                }
-                // processed_sentence_hashes NOT cleared — only invalidate changed sentence
-                self.last_doc_hash = 0;
-            }
-            if do_close {
-                self.show_userdict_window = false;
-            }
-        }
-
-        // OCR: screenshot detected prompt (separate OS window)
-        let ocr_has_pending = self.ocr.as_ref().map_or(false, |o| o.has_pending_image());
-        let ocr_is_busy = self.ocr_receiver.is_some() || self.math_receiver.is_some();
-        if ocr_has_pending && !ocr_is_busy {
-            let mut do_read = false;
-            let mut do_copy = false;
-            let mut do_math = false;
-            let mut do_dismiss = false;
-
-            let monitor = ctx.input(|i| i.viewport().monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0)));
-            let win_w: f32 = 320.0;
-            let win_h: f32 = 100.0;
-            let screen_center = egui::pos2(
-                (monitor.x - win_w) / 2.0,
-                (monitor.y - win_h) / 2.0,
-            );
-
-            let lang_for_ocr = self.ui_language.clone();
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("ocr_prompt"),
-                spell_viewport_builder()
-                    .with_title(lang_for_ocr.ui_screenshot_detected())
-                    .with_inner_size([win_w, win_h])
-                    .with_position(screen_center)
-                    .with_always_on_top()
-                    .with_active(true)
-                    .with_decorations(true),
-                |vp_ctx, _class| {
-                    vp_ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                    if vp_ctx.input(|i| i.viewport().close_requested()) {
-                        do_dismiss = true;
-                    }
-
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(16.0))
-                        .show(vp_ctx, |ui| {
-                            let prompt_button = |ui: &mut egui::Ui, text: &str| {
-                                ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new(text)
-                                            .size(13.0 * s)
-                                            .color(egui::Color32::from_rgb(45, 45, 45)),
-                                    )
-                                    .fill(egui::Color32::from_rgb(232, 232, 232))
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        egui::Color32::from_rgb(210, 210, 210),
-                                    )),
-                                )
-                            };
-                            ui.label(
-                                egui::RichText::new(lang_for_ocr.ui_text_found_in_screenshot())
-                                    .size(14.0 * s)
-                                    .color(egui::Color32::from_rgb(30, 30, 30))
-                            );
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                if prompt_button(ui, lang_for_ocr.ui_read_text()).clicked() {
-                                    do_read = true;
-                                }
-                                if prompt_button(ui, lang_for_ocr.ui_copy_text()).clicked() {
-                                    do_copy = true;
-                                }
-                                if prompt_button(ui, lang_for_ocr.ui_math()).clicked() {
-                                    do_math = true;
-                                }
-                                if prompt_button(ui, lang_for_ocr.ui_cancel()).clicked() {
-                                    do_dismiss = true;
-                                }
-                            });
-                        });
-                },
-            );
-
-            if do_read || do_copy {
-                self.ocr_copy_mode = do_copy;
-                if let Some(ocr) = &mut self.ocr {
-                    if let Some(rx) = ocr.start_ocr() {
-                        self.ocr_receiver = Some(rx);
-                    }
-                }
-            }
-            if do_math {
-                // Save clipboard image to temp file, then start math OCR
-                if let Some(ocr) = &mut self.ocr {
-                    let tmp_path = std::env::temp_dir().join("math_ocr_input.png");
-                    if ocr.save_image_to(&tmp_path) {
-                        let rx = math_ocr::start_math_ocr(tmp_path.to_string_lossy().to_string());
-                        self.math_receiver = Some(rx);
-                    } else {
-                        log!("Math OCR: failed to save clipboard image");
-                    }
-                }
-            }
-            if do_dismiss {
-                if let Some(ocr) = &mut self.ocr {
-                    ocr.dismiss();
-                }
-            }
-        }
     }
 }
-
-// ── Language definitions for picker UI ──
-
-struct LangOption {
-    code: &'static str,
-    name: &'static str,
-}
-
-const AVAILABLE_LANGUAGES: &[LangOption] = &[
-    LangOption { code: "nb", name: "Bokmål" },
-    LangOption { code: "nn", name: "Nynorsk" },
-    LangOption { code: "en", name: "English" },
-];
-
-#[derive(Clone, Copy)]
-struct InterfaceLanguageOption {
-    setting: &'static str,
-    code: Option<&'static str>,
-}
-
-const INTERFACE_LANGUAGES: &[InterfaceLanguageOption] = &[
-    InterfaceLanguageOption { setting: "auto", code: None },
-    InterfaceLanguageOption { setting: "nb", code: Some("nb") },
-    InterfaceLanguageOption { setting: "nn", code: Some("nn") },
-    InterfaceLanguageOption { setting: "en", code: Some("en") },
-];
 
 fn normalize_language_code(code: &str) -> &'static str {
     match code {
@@ -15093,6 +15112,10 @@ fn tint_bg(base: egui::Color32, accent: egui::Color32, amount: f32) -> egui::Col
     )
 }
 
+fn toolbar_button_side(icon_size: f32) -> f32 {
+    (icon_size + 7.0).max(18.0)
+}
+
 /// Clickable toolbar icon with a proper accessibility name and stable hitbox.
 fn ax_icon(
     ui: &mut egui::Ui,
@@ -15101,7 +15124,7 @@ fn ax_icon(
     color: egui::Color32,
     label: &str,
 ) -> egui::Response {
-    let side = (icon_size + 7.0).max(18.0);
+    let side = toolbar_button_side(icon_size);
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(side, side),
         egui::Sense::click() | egui::Sense::hover(),
@@ -15129,7 +15152,7 @@ fn ax_close_icon(
     color: egui::Color32,
     label: &str,
 ) -> egui::Response {
-    let side = (icon_size + 7.0).max(18.0);
+    let side = toolbar_button_side(icon_size);
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(side, side),
         egui::Sense::click() | egui::Sense::hover(),
